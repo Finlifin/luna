@@ -122,7 +122,15 @@ impl Interpreter<'_> {
             .formation(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         let signature = self.formed_function_signature(formation, arguments, source)?;
-        if !self.observe_same_type(&signature, output, source)? {
+        let expected_signature = match &signature {
+            Term::PureFunction(inner)
+                if !output.is_pure_callable() && !output.is_unsafe_callable() =>
+            {
+                inner.as_ref()
+            }
+            _ => &signature,
+        };
+        if !self.observe_same_type(expected_signature, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         // A named value carries identity and checked inputs, never executable

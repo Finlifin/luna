@@ -233,7 +233,8 @@ impl Checker<'_, '_> {
                         .map_err(|e| error(expr.span, e.to_string()))?,
                 ),
             }
-            .with_comptime_phase(comptime);
+            .with_comptime_phase(comptime)
+            .with_pure_qualifier(expected_signature.is_some_and(Term::is_pure_callable));
             let build_closure_ty = |captures: &[n::Capture], signature: &Term| {
                 if captures.is_empty() {
                     signature.clone()

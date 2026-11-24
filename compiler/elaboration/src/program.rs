@@ -2155,21 +2155,23 @@ fn elaborate_candidate<'a, 'h>(
     }
     // Ordinary behavior witnesses cover all inline branches but are not
     // executable artifacts: their comptime inputs remain abstract.
-    purity::with_definition_bodies(
-        &mut output,
-        &mut checker.ordinary_behavior_functions,
-        |output| {
-            if verified_upstream.functions.is_empty() {
-                purity::validate_runtime_promises(output, &checker.protocols)
-            } else {
-                purity::validate_runtime_promises_incremental(
-                    output,
-                    &checker.protocols,
-                    &verified_upstream,
-                )
-            }
-        },
-    )?;
+    if !inspect_attributes {
+        purity::with_definition_bodies(
+            &mut output,
+            &mut checker.ordinary_behavior_functions,
+            |output| {
+                if verified_upstream.functions.is_empty() {
+                    purity::validate_runtime_promises(output, &checker.protocols)
+                } else {
+                    purity::validate_runtime_promises_incremental(
+                        output,
+                        &checker.protocols,
+                        &verified_upstream,
+                    )
+                }
+            },
+        )?;
+    }
     let flow_result = match incremental.jobs {
         Some(jobs) => crate::verification::flow::validate_machine_operations_with_jobs(
             &output,
@@ -3120,7 +3122,8 @@ fn push_default_strategy_term_step<'a>(
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
-        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => {
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b))
+        | (Term::PureFunction(a), Term::PureFunction(b)) => {
             obligations.push(DefaultStrategyMatch::Term(a, b, next_depth));
             Ok(true)
         }
@@ -4746,7 +4749,7 @@ impl Checker<'_, '_> {
                 };
                 if is_contextual_quote
                     && (ty == p(P::Type)
-                        || matches!(ty, Term::ComptimeFunction(_))
+                        || ty.is_comptime_callable()
                         || ty.is_normal_form_callable()
                         || matches!(ty, Term::Primitive(P::Integer | P::Float)))
                 {
@@ -6122,6 +6125,7 @@ impl Checker<'_, '_> {
                     Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                         | Term::TraitObject { .. }
                 ) {
                     return Err(error(
@@ -6887,13 +6891,33 @@ impl Checker<'_, '_> {
         })
     }
 
+    fn widened_pure_callable(&self, actual: &Term, expected: &Term, span: Span) -> Option<Term> {
+        let widened = strip_pure_callable_qualifier(actual)?;
+        if self.require_type_identity(actual, expected, span).is_ok() {
+            return None;
+        }
+        self.require_type_identity(&widened, expected, span)
+            .is_ok()
+            .then_some(widened)
+    }
+
     fn require(&self, actual: &Term, expected: &Term, span: Span) -> Result<(), Error> {
         // Diverging control flow is admissible at a result position; this does
         // not assert the false type equation Never = expected.
         if is_never(actual) {
             return Ok(());
         }
-        self.require_type_identity(actual, expected, span)
+        match self.require_type_identity(actual, expected, span) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if let Some(widened) = strip_pure_callable_qualifier(actual)
+                    && self.require_type_identity(&widened, expected, span).is_ok()
+                {
+                    return Ok(());
+                }
+                Err(err)
+            }
+        }
     }
 
     fn require_type_identity(
@@ -7012,9 +7036,14 @@ impl Checker<'_, '_> {
             matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                 if sig.modifiers.is_unsafe)
         });
+        let is_pure = self.package.item(owner).is_some_and(|item| {
+            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_pure && !sig.modifiers.is_unsafe && !sig.modifiers.is_normal_form_head)
+        });
         signature
             .with_comptime_phase(comptime)
             .with_unsafe_call_requirement(is_unsafe)
+            .with_pure_qualifier(is_pure)
     }
 
     fn function_instance(
@@ -7200,7 +7229,7 @@ impl Checker<'_, '_> {
         }
         if let Some(partial) = partial {
             let phase_type = self.callable_type(owner, original.clone());
-            if matches!(phase_type, Term::ComptimeFunction(_)) != partial.comptime {
+            if phase_type.is_comptime_callable() != partial.comptime {
                 return Err(error(
                     expr.span,
                     "function context requires a different execution phase",
@@ -8995,11 +9024,17 @@ impl Checker<'_, '_> {
         {
             self.invalidate_staged_storage(&value, expr.span)?;
         }
-        if preserve_effect_value {
-            Ok(value)
+        let mut value = if preserve_effect_value {
+            value
         } else {
-            self.run_computation(value, expected, expr.span)
+            self.run_computation(value, expected, expr.span)?
+        };
+        if let Some(expected) = expected
+            && let Some(widened) = self.widened_pure_callable(&value.ty, expected, expr.span)
+        {
+            value.ty = widened;
         }
+        Ok(value)
     }
 
     #[inline(never)]
@@ -9686,4 +9721,18 @@ fn is_float_literal(expr: &Expr<'_>) -> bool {
             ..
         })
     )
+}
+
+fn strip_pure_callable_qualifier(ty: &Term) -> Option<Term> {
+    match ty {
+        Term::PureFunction(inner) => Some((**inner).clone()),
+        Term::Closure {
+            environment,
+            signature,
+        } => strip_pure_callable_qualifier(signature).map(|signature| Term::Closure {
+            environment: environment.clone(),
+            signature: Box::new(signature),
+        }),
+        _ => None,
+    }
 }

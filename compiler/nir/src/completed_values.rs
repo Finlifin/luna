@@ -30,7 +30,9 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 })
             }
             Term::AssociatedType { arguments, .. } => arguments.len().saturating_add(1),
-            Term::ClosureValue { ty: _, captures, .. } => captures.len().saturating_add(1),
+            Term::ClosureValue {
+                ty: _, captures, ..
+            } => captures.len().saturating_add(1),
             Term::Nominal { arguments, .. }
             | Term::TraitObject { arguments, .. }
             | Term::ClosureSnapshot { arguments, .. }
@@ -53,7 +55,8 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             | Term::Lift(_)
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_) => 1,
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_) => 1,
             _ => 0,
         };
         charge(fuel, width)?;
@@ -76,7 +79,11 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 children.push(subject.as_ref());
                 children.extend(arguments);
             }
-            Term::ClosureValue { ty: inner, captures, .. } => {
+            Term::ClosureValue {
+                ty: inner,
+                captures,
+                ..
+            } => {
                 children.push(inner);
                 children.extend(captures);
             }
@@ -104,7 +111,8 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             | Term::Lift(inner)
             | Term::ComptimeFunction(inner)
             | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => children.push(inner),
+            | Term::UnsafeFunction(inner)
+            | Term::PureFunction(inner) => children.push(inner),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| &p.ty));
                 children.push(result);
@@ -776,7 +784,7 @@ fn value_in<'a, 'd>(
                 || !parameter_bindings.is_empty()
                 || !parameters.is_empty()
                 || !captures.is_empty()
-                || !matches!(callee.ty, Term::ComptimeFunction(_))
+                || !callee.ty.is_comptime_callable()
             {
                 return Err("invalid completed value reconstruction call".into());
             }

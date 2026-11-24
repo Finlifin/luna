@@ -22,10 +22,10 @@ impl Checker<'_, '_> {
             };
             let name = item.ident.name.as_str().to_string();
             let ty = this.type_expr(annotation)?;
-            if matches!(
-                ty,
-                Term::Primitive(P::Type) | Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
-            ) {
+            if ty == Term::Primitive(P::Type)
+                || ty.is_comptime_callable()
+                || matches!(ty, Term::NormalFormFunction(..))
+            {
                 return Err(error(
                     annotation.span,
                     "static declaration requires a runtime value type",

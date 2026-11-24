@@ -531,7 +531,8 @@ pub(super) fn validate(
                 | Term::Lift(t)
                 | Term::ComptimeFunction(t)
                 | Term::NormalFormFunction(t, _)
-                | Term::UnsafeFunction(t),
+                | Term::UnsafeFunction(t)
+                | Term::PureFunction(t),
             ) => pending.push((Work::Term(t), depth + 1)),
             Work::Term(Term::Symbol(name) | Term::String(name)) => {
                 fuel = fuel

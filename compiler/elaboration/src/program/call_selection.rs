@@ -225,6 +225,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             )
         {
             return Ok(Ok(instantiated));

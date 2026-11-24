@@ -74,6 +74,17 @@ struct BodySummary {
     callsites: Vec<CallsiteBehavior>,
 }
 
+pub(crate) fn integer_op_may_trap(op: IntegerOp) -> bool {
+    matches!(
+        op,
+        IntegerOp::Add
+            | IntegerOp::Subtract
+            | IntegerOp::Multiply
+            | IntegerOp::DivideTrunc
+            | IntegerOp::RemainderTrunc
+    )
+}
+
 struct GraphIndex<'a> {
     graph: &'a iir::Package,
     schedule: Option<&'a iir::cleanup::Schedule>,
@@ -493,6 +504,7 @@ fn type_may_contain_pointer(graph: &iir::Package, ty: &Term, fuel: &mut usize) -
             | Term::TraitObject { .. }
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
             | Term::Closure { .. } => return true,
             Term::Primitive(_) => {}
             Term::Tuple(items) => pending.extend(items.iter()),
@@ -1178,21 +1190,9 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             K::IntegerBinary { op, left, right } => {
                 let _ = self.visit_expr(left, next)?;
                 let _ = self.visit_expr(right, next)?;
-                match op {
-                    IntegerOp::Add
-                    | IntegerOp::Subtract
-                    | IntegerOp::Multiply
-                    | IntegerOp::DivideTrunc
-                    | IntegerOp::RemainderTrunc => {
-                        // Overflow / div-by-zero checks emit `self.guard`.
-                        self.mark_trap();
-                    }
-                    IntegerOp::Equal
-                    | IntegerOp::NotEqual
-                    | IntegerOp::Less
-                    | IntegerOp::LessEqual
-                    | IntegerOp::Greater
-                    | IntegerOp::GreaterEqual => {}
+                if integer_op_may_trap(*op) {
+                    // Overflow / div-by-zero checks emit `self.guard`.
+                    self.mark_trap();
                 }
                 Some(PtrOrigin::default())
             }

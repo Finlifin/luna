@@ -23,6 +23,7 @@ pub struct Formation<'a> {
     pub capabilities: &'a [TraitRequirement],
     pub phase: FunctionPhase,
     unsafe_qualifier: bool,
+    pure_qualifier: bool,
 }
 
 impl<'a> From<&'a FunctionDeclaration> for Formation<'a> {
@@ -34,6 +35,7 @@ impl<'a> From<&'a FunctionDeclaration> for Formation<'a> {
             capabilities: &f.capabilities,
             phase: f.phase,
             unsafe_qualifier: f.is_unsafe,
+            pure_qualifier: f.pure && !f.is_unsafe && f.phase != FunctionPhase::NormalForm,
         }
     }
 }
@@ -47,6 +49,7 @@ impl<'a> From<&'a RuntimeFunctionIdentity> for Formation<'a> {
             capabilities: &f.capabilities,
             phase: FunctionPhase::Runtime,
             unsafe_qualifier: false,
+            pure_qualifier: f.signature.is_pure_callable(),
         }
     }
 }
@@ -56,6 +59,7 @@ impl Formation<'_> {
         signature
             .with_comptime_phase(self.phase == FunctionPhase::Comptime)
             .with_unsafe_call_requirement(self.unsafe_qualifier)
+            .with_pure_qualifier(self.pure_qualifier)
     }
 }
 

@@ -360,6 +360,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     | Term::Pointer(_)
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             )
         {
             return Ok(());

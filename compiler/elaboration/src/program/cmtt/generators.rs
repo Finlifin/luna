@@ -2463,7 +2463,10 @@ impl Checker<'_, '_> {
                 }
                 Term::AnyType => {}
                 Term::Optional(inner) | Term::Lift(inner) => pending.push((inner, depth + 1)),
-                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
+                Term::Function { .. }
+                | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_) => {}
                 Term::Closure {
                     environment,
                     signature,

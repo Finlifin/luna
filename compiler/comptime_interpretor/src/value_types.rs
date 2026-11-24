@@ -112,6 +112,14 @@ impl ValueChecks<'_> {
         if self.failure.is_some() {
             return false;
         }
+        let signature = match signature {
+            Term::PureFunction(inner)
+                if !expected.is_pure_callable() && !expected.is_unsafe_callable() =>
+            {
+                inner.as_ref()
+            }
+            _ => signature,
+        };
         // Retained evidence settles ordinary signatures without allocating a
         // pending task. Only a missing associated view needs active observation;
         // budget failures and known mismatches must not trigger a second query.
@@ -725,7 +733,10 @@ impl Interpreter<'_> {
                 }),
             (
                 Value::Function(id),
-                ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)),
+                ty @ (Term::Function { .. }
+                | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)),
             ) => self.functions.declaration(id).is_some_and(|f| {
                 f.type_parameters.is_empty()
                     && f.phase != nir::program::FunctionPhase::NormalForm
@@ -734,6 +745,7 @@ impl Interpreter<'_> {
                     && (f.phase == nir::program::FunctionPhase::Comptime)
                         == ty.is_comptime_callable()
                     && f.is_unsafe == ty.is_unsafe_callable()
+                    && (!ty.is_pure_callable() || f.pure)
                     && checks.callable_matches(
                         &f.signature,
                         ty.callable_signature(),

@@ -83,6 +83,7 @@ impl<'a> InspectionFrame<'a> {
                 Term::ComptimeFunction(inner)
                 | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner)
+                | Term::PureFunction(inner)
                 | Term::Closure {
                     signature: inner, ..
                 }

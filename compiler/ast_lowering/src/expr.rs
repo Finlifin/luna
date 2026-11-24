@@ -3230,7 +3230,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let supported = if normal_form {
             ast::FN_MOD_NORMAL_FORM | ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME
         } else {
-            ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE
+            ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE | ast::FN_MOD_PURE
         };
         if flags & !supported != 0 {
             self.package

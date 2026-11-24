@@ -245,6 +245,7 @@ impl Engine<'_> {
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
                 | Term::Closure { .. }
                 | Term::Pointer { .. }
                 | Term::Lift(_)

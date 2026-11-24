@@ -273,7 +273,8 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
-        | Term::UnsafeFunction(inner) => charge(inner, fuel, depth - 1),
+        | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner) => charge(inner, fuel, depth - 1),
         Term::Function { parameters, result } => {
             if parameters.len() > *fuel {
                 return Err(Error::BudgetExhausted);

@@ -2534,7 +2534,8 @@ fn is_safe_memo_key_term(term: &Term, depth: usize) -> bool {
         | Term::Pointer(inner)
         | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
-        | Term::UnsafeFunction(inner) => is_safe_memo_key_term(inner, depth + 1),
+        | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner) => is_safe_memo_key_term(inner, depth + 1),
         Term::NormalFormFunction(inner, _) => is_safe_memo_key_term(inner, depth + 1),
         Term::Record(fields) => fields
             .iter()

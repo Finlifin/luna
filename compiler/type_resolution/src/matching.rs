@@ -299,6 +299,7 @@ fn decompose(
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
         ) =>
         {
             let (fields, body) = match actual {
@@ -353,6 +354,7 @@ fn decompose(
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
         ) =>
         {
             let (fields, body) = match template {
@@ -514,7 +516,8 @@ fn decompose(
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
-        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => decompose(
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b))
+        | (Term::PureFunction(a), Term::PureFunction(b)) => decompose(
             a,
             b,
             arguments,

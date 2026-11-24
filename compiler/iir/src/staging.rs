@@ -3201,7 +3201,10 @@ fn constant_with_locals<'layout>(
         (K::Function(declaration), ty)
             if matches!(
                 ty,
-                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                Term::Function { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             ) =>
         {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;
@@ -3218,7 +3221,10 @@ fn constant_with_locals<'layout>(
             ty,
         ) if matches!(
             ty,
-            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+            Term::Function { .. }
+                | Term::ComptimeFunction(_)
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
         ) =>
         {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;

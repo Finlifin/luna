@@ -16,7 +16,7 @@ pub(super) fn closed_type(term: &Term, nominal: &NominalConstructors) -> bool {
                 if parameters.iter().all(|parameter| parameter.sort != Sort::Runtime)
                     && collector.is_none_or(|index| index.checked_add(1) == Some(parameters.len())))
         }
-        Term::UnsafeFunction(signature) => matches!(
+        Term::UnsafeFunction(signature) | Term::PureFunction(signature) => matches!(
             signature.as_ref(),
             Term::Function { .. } | Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
         ),
@@ -32,6 +32,7 @@ pub(super) fn closed_type(term: &Term, nominal: &NominalConstructors) -> bool {
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                 )
         }
         _ => true,

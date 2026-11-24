@@ -13,6 +13,7 @@ pub enum Error {
     Unresolved(String),
     Invalid(String),
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -22,17 +23,21 @@ impl std::fmt::Display for Error {
         }
     }
 }
+
 impl std::error::Error for Error {}
+
 impl From<&str> for Error {
     fn from(message: &str) -> Self {
         Self::Invalid(message.into())
     }
 }
+
 impl From<String> for Error {
     fn from(message: String) -> Self {
         Self::Invalid(message)
     }
 }
+
 impl From<crate::type_computations::Error> for Error {
     fn from(error: crate::type_computations::Error) -> Self {
         match error {
@@ -41,6 +46,7 @@ impl From<crate::type_computations::Error> for Error {
         }
     }
 }
+
 impl From<crate::visit::Error> for Error {
     fn from(error: crate::visit::Error) -> Self {
         match error {
@@ -49,6 +55,7 @@ impl From<crate::visit::Error> for Error {
         }
     }
 }
+
 impl From<crate::comptime_values::Error> for Error {
     fn from(error: crate::comptime_values::Error) -> Self {
         match error {
@@ -57,6 +64,7 @@ impl From<crate::comptime_values::Error> for Error {
         }
     }
 }
+
 impl From<Error> for String {
     fn from(error: Error) -> Self {
         error.to_string()
@@ -157,6 +165,7 @@ fn validate_value(
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
         ) {
             return Err("callable value requires a callable domain".into());
         }

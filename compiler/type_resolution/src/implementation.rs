@@ -44,6 +44,7 @@ pub enum Head {
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
+    PureFunction,
     Function(Vec<Sort>),
 }
 
@@ -81,6 +82,7 @@ enum KeyDiscriminant {
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
+    PureFunction,
 }
 
 impl Key {
@@ -98,6 +100,7 @@ impl Key {
                 Some(KeyDiscriminant::NormalFormFunction(*collector))
             }
             Self::Node(Head::UnsafeFunction, _) => Some(KeyDiscriminant::UnsafeFunction),
+            Self::Node(Head::PureFunction, _) => Some(KeyDiscriminant::PureFunction),
             _ => None,
         }
     }
@@ -184,6 +187,7 @@ impl Key {
                     (Head::NormalFormFunction(*collector), vec![inner])
                 }
                 Term::UnsafeFunction(inner) => (Head::UnsafeFunction, vec![inner]),
+                Term::PureFunction(inner) => (Head::PureFunction, vec![inner]),
                 Term::Function { parameters, result } => (
                     Head::Function(parameters.iter().map(|p| p.sort).collect()),
                     parameters
@@ -286,7 +290,8 @@ impl Key {
                             | Term::Lift(t)
                             | Term::ComptimeFunction(t)
                             | Term::NormalFormFunction(t, _)
-                            | Term::UnsafeFunction(t) => work.push((t, d + 1)),
+                            | Term::UnsafeFunction(t)
+                            | Term::PureFunction(t) => work.push((t, d + 1)),
                             // Dependent function/closure structure is not an
                             // implementation index contract yet. Do not prune it.
                             Term::Function { .. }
@@ -1103,6 +1108,7 @@ impl fmt::Display for Key {
                         f.write_str(")")?
                     }
                     Head::UnsafeFunction => f.write_str("unsafe-function")?,
+                    Head::PureFunction => f.write_str("pure-fn")?,
                     Head::Function(sorts) => {
                         f.write_str("(function")?;
                         for sort in sorts {

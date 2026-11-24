@@ -276,7 +276,8 @@ impl TypeKind {
             Term::Function { .. }
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_) => Self::Function,
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_) => Self::Function,
             // Closure qualification and nominal/newtype descriptors are not
             // inferred by peeking through an environment or representation.
             _ => return None,
@@ -559,6 +560,9 @@ pub enum Term {
     /// Caller responsibility, independent of phase. Canonically wraps an ordinary
     /// Function, ComptimeFunction or NormalFormFunction; environments remain outside it.
     UnsafeFunction(Box<Term>),
+    /// Pure runtime/comptime callable (`pure fn(...) -> R`). Canonically wraps an
+    /// ordinary Function, ComptimeFunction or NormalFormFunction; cannot combine with UnsafeFunction.
+    PureFunction(Box<Term>),
     Function {
         parameters: Vec<Parameter>,
         result: Box<Term>,
@@ -863,7 +867,8 @@ impl Term {
                 | Self::Lift(inner)
                 | Self::ComptimeFunction(inner)
                 | Self::NormalFormFunction(inner, _)
-                | Self::UnsafeFunction(inner) => pending.push(*inner),
+                | Self::UnsafeFunction(inner)
+                | Self::PureFunction(inner) => pending.push(*inner),
                 Self::Function { parameters, result } => {
                     pending.push(*result);
                     pending.extend(parameters.into_iter().map(|parameter| parameter.ty));
@@ -1029,7 +1034,8 @@ impl Term {
         match self {
             Self::ComptimeFunction(signature)
             | Self::NormalFormFunction(signature, _)
-            | Self::UnsafeFunction(signature) => signature.callable_signature(),
+            | Self::UnsafeFunction(signature)
+            | Self::PureFunction(signature) => signature.callable_signature(),
             Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
                 signature.callable_signature()
             }
@@ -1045,6 +1051,7 @@ impl Term {
                 Self::ComptimeFunction(signature)
                 | Self::NormalFormFunction(signature, _)
                 | Self::UnsafeFunction(signature)
+                | Self::PureFunction(signature)
                 | Self::Closure { signature, .. }
                 | Self::ContextualClosure { signature, .. } => *signature,
                 signature => return signature,
@@ -1055,7 +1062,9 @@ impl Term {
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::ComptimeFunction(_) | Self::NormalFormFunction(..) => true,
-            Self::UnsafeFunction(signature) => signature.is_comptime_callable(),
+            Self::UnsafeFunction(signature) | Self::PureFunction(signature) => {
+                signature.is_comptime_callable()
+            }
             Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
                 signature.is_comptime_callable()
             }
@@ -1067,6 +1076,7 @@ impl Term {
         match self {
             Self::NormalFormFunction(..) => true,
             Self::UnsafeFunction(signature)
+            | Self::PureFunction(signature)
             | Self::Closure { signature, .. }
             | Self::ContextualClosure { signature, .. } => signature.is_normal_form_callable(),
             _ => false,
@@ -1083,9 +1093,22 @@ impl Term {
         }
     }
 
+    pub fn is_pure_callable(&self) -> bool {
+        match self {
+            Self::PureFunction(_) => true,
+            Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
+                signature.is_pure_callable()
+            }
+            _ => false,
+        }
+    }
+
     pub fn with_comptime_phase(self, comptime: bool) -> Term {
         if let Self::UnsafeFunction(signature) = self {
             return Self::UnsafeFunction(Box::new(signature.with_comptime_phase(comptime)));
+        }
+        if let Self::PureFunction(signature) = self {
+            return Self::PureFunction(Box::new(signature.with_comptime_phase(comptime)));
         }
         if matches!(self, Self::NormalFormFunction(..)) {
             return self;
@@ -1100,8 +1123,18 @@ impl Term {
     /// Add caller responsibility after phase qualification. A false request
     /// never strips an existing responsibility from an already formed type.
     pub fn with_unsafe_call_requirement(self, required: bool) -> Term {
-        if required && !matches!(self, Self::UnsafeFunction(_)) {
+        if required && !matches!(self, Self::UnsafeFunction(_) | Self::PureFunction(_)) {
             Self::UnsafeFunction(Box::new(self))
+        } else {
+            self
+        }
+    }
+
+    /// Add runtime/comptime purity qualifier after phase qualification. A false request
+    /// never strips an existing purity qualifier; unsafe callables are never wrapped.
+    pub fn with_pure_qualifier(self, required: bool) -> Term {
+        if required && !matches!(self, Self::PureFunction(_) | Self::UnsafeFunction(_)) {
+            Self::PureFunction(Box::new(self))
         } else {
             self
         }
@@ -1123,7 +1156,8 @@ impl Term {
                 | Self::ContextualClosure { signature, .. }
                 | Self::ComptimeFunction(signature)
                 | Self::NormalFormFunction(signature, _)
-                | Self::UnsafeFunction(signature) => {
+                | Self::UnsafeFunction(signature)
+                | Self::PureFunction(signature) => {
                     current = signature;
                 }
                 _ => return None,
@@ -1258,6 +1292,7 @@ impl Term {
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
                 | Term::TraitObject { .. }
         ) {
             return Err(TypeError::InvalidClosureSignature);
@@ -1822,6 +1857,9 @@ impl Term {
             Self::UnsafeFunction(inner) => {
                 Self::UnsafeFunction(Box::new(inner.rewrite(nesting, leaf)?))
             }
+            Self::PureFunction(inner) => {
+                Self::PureFunction(Box::new(inner.rewrite(nesting, leaf)?))
+            }
             Self::Optional(inner) => Self::Optional(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::RuntimeField { base, index } => Self::RuntimeField {
                 base: Box::new(base.rewrite(nesting, leaf)?),
@@ -1904,6 +1942,7 @@ pub enum TypeError {
     InvalidComptimeFunctionSignature,
     InvalidNormalFormFunctionSignature,
     InvalidUnsafeFunctionSignature,
+    InvalidPureFunctionSignature,
     InvalidFunctionSignature,
     InvalidListComponent,
     InvalidIntegerTerm,
@@ -1953,6 +1992,7 @@ impl fmt::Display for TypeError {
             Self::BinderDepthOverflow => f.write_str("binder depth overflow"),
             Self::InvalidFunctionSignature => f.write_str("expected a function signature"),
             Self::InvalidUnsafeFunctionSignature => write!(f, "unsafe function requires an ordinary or comptime function signature"),
+            Self::InvalidPureFunctionSignature => write!(f, "pure function requires an ordinary or comptime function signature"),
             Self::InvalidNormalFormFunctionSignature => {
                 f.write_str("normal-form callable requires comptime inputs and at most one final collector")
             }
@@ -2444,6 +2484,15 @@ fn validate<'term>(
             }
             validate(signature, holes, frames, allow_free, core)?;
         }
+        Term::PureFunction(signature) => {
+            if !matches!(
+                signature.as_ref(),
+                Term::Function { .. } | Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
+            ) {
+                return Err(TypeError::InvalidPureFunctionSignature);
+            }
+            validate(signature, holes, frames, allow_free, core)?;
+        }
         Term::NormalFormFunction(signature, variadic) => {
             let Term::Function { parameters, .. } = signature.as_ref() else {
                 return Err(TypeError::InvalidNormalFormFunctionSignature);
@@ -2493,6 +2542,7 @@ fn validate<'term>(
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::TraitObject { .. }
             ) {
                 return Err(TypeError::InvalidClosureSignature);
@@ -2532,6 +2582,7 @@ fn validate<'term>(
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::TraitObject { .. }
             ) {
                 return Err(TypeError::InvalidClosureSignature);
@@ -2964,6 +3015,7 @@ impl fmt::Display for Term {
                 write!(f, ") (signature {inner}))")
             }
             Self::UnsafeFunction(inner) => write!(f, "(unsafe-function {inner})"),
+            Self::PureFunction(inner) => write!(f, "(pure-fn {inner})"),
             Self::Optional(inner) => write!(f, "(optional {inner})"),
             Self::TraitObject {
                 interface,

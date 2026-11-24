@@ -1472,7 +1472,7 @@ impl Checker<'_, '_> {
                     Err(_) => {}
                 }
             }
-            Term::Optional(inner) | Term::UnsafeFunction(inner) => {
+            Term::Optional(inner) | Term::UnsafeFunction(inner) | Term::PureFunction(inner) => {
                 self.admit_not_sized_nominals_in_term(inner, context, checked, span, depth + 1)?;
             }
             Term::Tuple(elements) => {

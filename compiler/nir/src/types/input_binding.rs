@@ -78,6 +78,7 @@ impl<'a> FunctionInputBuilder<'a> {
             next: None,
         })
     }
+
     fn prepare_next(&mut self) -> Result<(), TypeError> {
         let index = self.replacements.len();
         let parameter = self.parameters.get(index).ok_or(TypeError::ArgumentCount {
@@ -94,12 +95,14 @@ impl<'a> FunctionInputBuilder<'a> {
         }
         Ok(())
     }
+
     /// The next declared domain after binding the completed prefix. Missing
     /// inputs retain their telescope indices rather than becoming dummy types.
     pub fn next_type(&mut self) -> Result<&Term, TypeError> {
         self.prepare_next()?;
         Ok(self.next.as_ref().unwrap())
     }
+
     pub fn next_type_bounded(
         &mut self,
         fuel: &mut usize,
@@ -135,6 +138,7 @@ impl<'a> FunctionInputBuilder<'a> {
         let ty = self.next.take().unwrap();
         self.push_domain(input, ty)
     }
+
     fn push_domain(&mut self, input: Option<Term>, ty: Term) -> Result<(), TypeError> {
         let index = self.replacements.len();
         let parameter = &self.parameters[index];
@@ -163,6 +167,7 @@ impl<'a> FunctionInputBuilder<'a> {
         }
         Ok(())
     }
+
     pub fn finish_bounded(
         self,
         fuel: &mut usize,
@@ -228,6 +233,9 @@ fn wrap_signature(original: &Term, specialized: Term, supplied: &[bool]) -> Term
         Term::UnsafeFunction(inner) => {
             Term::UnsafeFunction(Box::new(wrap_signature(inner, specialized, supplied)))
         }
+        Term::PureFunction(inner) => {
+            Term::PureFunction(Box::new(wrap_signature(inner, specialized, supplied)))
+        }
         _ => specialized,
     }
 }
@@ -271,6 +279,7 @@ impl FunctionInputBinding {
         }
         builder.finish()
     }
+
     pub(super) fn with_type_view<E: From<TypeError>>(
         signature: &Term,
         inputs: &[Option<Term>],
@@ -290,6 +299,7 @@ impl FunctionInputBinding {
     pub fn signature(&self) -> &Term {
         &self.signature
     }
+
     pub fn into_signature(self) -> Term {
         self.signature
     }

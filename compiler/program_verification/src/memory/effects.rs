@@ -117,6 +117,7 @@ pub(crate) fn effect_transfer_layout(
             | Term::Optional(_)
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
             | Term::Closure { .. }
             | Term::Record(_)
             | Term::Nominal { .. }
@@ -202,7 +203,11 @@ fn effect_storage_layout(
     if scalar(ty)
         || (text_provenance == TextProvenance::VerifiedByRegionAnalysis
             && *ty == Term::Primitive(Primitive::Str))
-        || (allow_code && matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)))
+        || (allow_code
+            && matches!(
+                ty,
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+            ))
     {
         return Ok(true);
     }
@@ -571,7 +576,10 @@ impl<'a> Infer<'a, '_> {
                         &BTreeMap::new(),
                         depth + 1,
                     )
-                } else if matches!(computed_ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+                } else if matches!(
+                    computed_ty,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+                ) {
                     let named = self.value_callees(value)?;
                     let code = self.local_fields_for(value)?;
                     self.bind_owned_callees(next, &computed_ty, &named, &code, depth + 1)

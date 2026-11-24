@@ -412,6 +412,7 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
         | Term::TraitObject { .. }
         | Term::Function { .. }
         | Term::UnsafeFunction(_)
+        | Term::PureFunction(_)
         | Term::ComptimeFunction(_)
         | Term::NormalFormFunction(..) => Ok(Layout::Atomic),
         _ => Err("cleanup layout is not established; opaque heads are not unfolded".into()),

@@ -399,7 +399,8 @@ pub fn supported_input_type_in_scope(
             Term::Function { .. }
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_) => {
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_) => {
                 // Runtime callable identities are ordinary comptime data too.
                 // Their signature may describe runtime-only argument domains;
                 // admitting the identity does not execute the function.

@@ -52,6 +52,7 @@ impl<'a> Interpreter<'a> {
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
             | Term::Closure { .. } => return Ok(None),
             _ => return Err(self.failure(ErrorKind::TypeContractUnresolved, None)),
         }))

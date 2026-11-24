@@ -125,7 +125,10 @@ impl FunctionDeclaration {
     }
 
     pub fn callable_type_view(&self) -> std::borrow::Cow<'_, Term> {
-        if self.phase == FunctionPhase::Comptime || self.is_unsafe {
+        if self.phase == FunctionPhase::Comptime
+            || self.is_unsafe
+            || (self.pure && self.phase != FunctionPhase::NormalForm)
+        {
             std::borrow::Cow::Owned(
                 crate::callable_source::Formation::from(self).qualify(self.signature.clone()),
             )

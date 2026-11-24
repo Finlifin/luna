@@ -115,13 +115,18 @@ impl<'a> Interfaces<'a> {
             .or_else(|| self.imports?.get(id))
     }
 
-    pub(super) fn phase(&self, id: &crate::DeclarationId) -> Option<(Phase, bool, bool)> {
+    pub(super) fn phase(&self, id: &crate::DeclarationId) -> Option<(Phase, bool, bool, bool)> {
         if let Some(f) = self.method_definition(id) {
-            Some((f.phase, !f.preconditions.is_empty(), f.is_unsafe))
+            Some((f.phase, !f.preconditions.is_empty(), f.is_unsafe, f.pure))
         } else {
-            self.source
-                .runtime_identity(id)
-                .map(|f| (Phase::Runtime, false, f.signature.is_unsafe_callable()))
+            self.source.runtime_identity(id).map(|f| {
+                (
+                    Phase::Runtime,
+                    false,
+                    f.signature.is_unsafe_callable(),
+                    f.signature.is_pure_callable(),
+                )
+            })
         }
     }
 }

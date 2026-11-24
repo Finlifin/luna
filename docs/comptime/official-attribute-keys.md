@@ -22,6 +22,7 @@
 | `__flurry_packed_mode` | `attrs.packed.byte`、`attrs.packed.bit`（保留 `attrs.layout` 过渡） | `Symbol`（`.byte` \| `.bit`） | 结构体紧凑布局：`byte` 为 `align = 1` 任意 runtime 字段（禁对齐字段指针）；`bit` 为 POD 位打包直降 `BitVec<W>`（`W > 256` 警告；`attrs` 构造器已落地，消费者待接通至 `PackedLayoutMode`） |
 | `__flurry_direct_passing` | `attrs.effects.direct_passing` | `bool` | 零参非 `async` 直接传递效应检查（当前源码仍使用旧键 `direct_passing`，待统一迁移） |
 | `__flurry_abi` | `attrs.abi(name: Symbol)`（`attrs.prelude`） | `Symbol` | 函数调用约定（已接通 `^attrs.abi(.c)` 与 LLVM C wrapper/trampoline 降码，`fa4cd077`） |
+| `__flurry_purity` | `attrs.purity.{p0, p1, p2, p3, p4, p5}` | `Symbol`（`.p0` \| `.p1` \| `.p2` \| `.p3` \| `.p4` \| `.p5`） | 运行时函数纯度层级约束（已接通 P0–P5 编译期纯度与终止／无 trap 检查） |
 | `__flurry_metadata` | `attrs.metadata(data: Object)`（`attrs.prelude`） | `Object` | 用户自定义元数据包装（当前源码仍使用旧键 `metadata`，待统一迁移） |
 | `__flurry_derivation_default` | `attrs.derivation`（`default` 成员导出待语法放行） | `bool` | 默认派生策略标记（当前源码仍使用旧键 `derivation_default`，待统一迁移） |
 | `__flurry_volatile` | `attrs.mem.volatile`（或 `attrs.volatile` 包装，禁止裸附） | `bool` | 易失内存／MMIO 访问控制（已端到端接通 `struct`/`newtype`/字段级 `load volatile`/`store volatile` 与纯度 P0 降级，`ef1eac47`） |

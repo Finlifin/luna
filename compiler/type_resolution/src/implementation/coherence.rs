@@ -380,7 +380,8 @@ fn separation_goal(
                 | Term::Lift(inner)
                 | Term::ComptimeFunction(inner)
                 | Term::NormalFormFunction(inner, _)
-                | Term::UnsafeFunction(inner) => terms.push(inner),
+                | Term::UnsafeFunction(inner)
+                | Term::PureFunction(inner) => terms.push(inner),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
                     terms.push(result);

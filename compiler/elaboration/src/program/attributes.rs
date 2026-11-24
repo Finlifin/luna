@@ -15,6 +15,7 @@ mod macros;
 mod merge;
 mod metadata;
 mod phases;
+mod purity;
 mod quote_fn_template;
 mod stability;
 mod volatile;
@@ -27,6 +28,7 @@ pub use macros::{MacroHandlerAttr, MacroKindTag, macro_handlers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
 pub use phases::{MemberPhase, member_phases};
+pub use purity::{PurityEntry, PurityTier, purity_annotations};
 pub use quote_fn_template::{QuoteFnTemplateFlags, quote_fn_template_flags};
 pub use stability::{StableSinceEntry, is_valid_semver, stable_since_versions};
 pub use volatile::{VolatileTarget, volatile_targets};
@@ -124,6 +126,7 @@ impl Checker<'_, '_> {
             let _metadata = metadata_entries(self.package, &selected, &mut budget)?;
             let _defaults = default_strategy_markers(self.package, &selected, &mut budget)?;
             let _abi = calling_conventions(self.package, &selected, &mut budget)?;
+            let _purity = purity_annotations(self.package, &selected, &mut budget)?;
             let _stability = stable_since_versions(self.package, &selected, &mut budget)?;
             let _macros = macro_handlers(self.package, &selected, &mut budget)?;
             let quote_templates = quote_fn_template_flags(self.package, &selected, &mut budget)?;
@@ -138,6 +141,7 @@ impl Checker<'_, '_> {
                                 | "__flurry_packed_mode"
                                 | "__flurry_volatile"
                                 | "__flurry_abi"
+                                | "__flurry_purity"
                                 | "__flurry_stable_since"
                                 | "__flurry_macro_kind"
                                 | "__flurry_macro_variadic"

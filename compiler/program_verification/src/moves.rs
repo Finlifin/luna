@@ -9015,8 +9015,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 || (self.text_provenance
                     == super::memory::TextProvenance::VerifiedByRegionAnalysis
                     && *ty == Term::Primitive(nir::Primitive::Str))
-                || matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
-                    && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy,
+                || matches!(
+                    ty,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+                ) && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy,
         )
     }
 
@@ -9586,7 +9588,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         "guard consumption requires tentative binding and failure-path transfer",
                     ));
                 }
-                if matches!(expr.ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+                if matches!(
+                    expr.ty,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+                ) {
                     result_code = callable_source(expr, flow, &mut self.fuel)?;
                 }
             }
@@ -12389,8 +12394,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok((result, origins, guards));
         };
         flow.value_callable = if flow.live
-            && matches!(expr.ty, Term::Function { .. } | Term::UnsafeFunction(_))
-        {
+            && matches!(
+                expr.ty,
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+            ) {
             let definitions = match &summary.callable_result {
                 super::memory::CallableResult::Known(key) => std::slice::from_ref(key),
                 super::memory::CallableResult::Candidates(keys) => keys.as_slice(),
@@ -13436,6 +13443,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         | Term::Pointer(_)
                         | Term::Function { .. }
                         | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                 ) && !matches!((self.delivery)(&ty), Ok(Delivery::Copy))
                 {
                     if !self.type_cleanup_is_trivial(&ty, source)? {
@@ -14874,7 +14882,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if !flow.live
             || !matches!(
                 completion_type(&expr.ty).callable_signature(),
-                Term::Function { .. } | Term::UnsafeFunction(_)
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
             )
         {
             flow.value_callable = None;
@@ -15454,8 +15462,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 checked?;
             }
             if let K::Let { value, .. } | K::LetPattern { value, .. } = &expr.kind {
-                if matches!(value.ty, Term::Function { .. } | Term::UnsafeFunction(_))
-                    && !self.observation_value_type(&value.ty, expr.source)?
+                if matches!(
+                    value.ty,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+                ) && !self.observation_value_type(&value.ty, expr.source)?
                 {
                     return Err(error(
                         expr.source,
@@ -15506,7 +15516,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.value_callable = None;
         let callable_type = matches!(
             completion_type(&expr.ty).callable_signature(),
-            Term::Function { .. } | Term::UnsafeFunction(_)
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
         );
         let known = if flow.live && callable_type && !matches!(expr.kind, K::Closure { .. }) {
             callable_source(expr, flow, &mut self.fuel)?
@@ -18334,7 +18344,10 @@ fn callable_value_paths(
     *fuel -= 1;
     if matches!(
         ty,
-        Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+        Term::Function { .. }
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
+            | Term::Closure { .. }
     ) {
         return Ok(vec![vec![]]);
     }
@@ -18464,7 +18477,10 @@ fn recoverable_return_capture_layout(
     if matches!(ty, Term::Pointer(_)) {
         return Ok(pointer_contract);
     }
-    if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+    if matches!(
+        ty,
+        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+    ) {
         return Ok(true);
     }
     let fields = if let Some(fields) = nir::normal_forms::tuple_fields(package, ty) {
@@ -18670,7 +18686,10 @@ fn contains_return_evidence_kind(
             }
             return Ok(false);
         }
-        Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. } => {
+        Term::Function { .. }
+        | Term::UnsafeFunction(_)
+        | Term::PureFunction(_)
+        | Term::Closure { .. } => {
             return Ok(!pointers_only);
         }
         Term::Tuple(fields) => {
@@ -18869,9 +18888,16 @@ fn validate_callable_input(
         let signature = substitution
             .instantiate_bounded(&function.signature, fuel)
             .map_err(|e| error(expr.source, format!("callable input signature: {e}")))?;
-        let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
+        let signature = signature
+            .with_unsafe_call_requirement(function.is_unsafe)
+            .with_pure_qualifier(
+                expr.ty.is_pure_callable() && function.pure && !function.is_unsafe,
+            );
         if signature != expr.ty
-            || !matches!(signature, Term::Function { .. } | Term::UnsafeFunction(_))
+            || !matches!(
+                signature,
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+            )
         {
             return Err(error(
                 expr.source,
@@ -18896,7 +18922,9 @@ fn validate_callable_input(
             environment,
             signature,
         } => (environment.as_slice(), signature.as_ref()),
-        Term::Function { .. } | Term::UnsafeFunction(_) => (&[][..], &expr.ty),
+        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_) => {
+            (&[][..], &expr.ty)
+        }
         _ => {
             return Err(error(
                 expr.source,
@@ -18906,7 +18934,7 @@ fn validate_callable_input(
     };
     let Term::Function {
         parameters: types, ..
-    } = signature
+    } = signature.callable_signature()
     else {
         return Err(error(
             expr.source,

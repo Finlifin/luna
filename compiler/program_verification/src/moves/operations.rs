@@ -319,7 +319,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 }
                 let expected_captures = match &expr.ty {
                     Term::Closure { environment, .. } => environment.as_slice(),
-                    Term::Function { .. } | Term::UnsafeFunction(_) => &[],
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_) => &[],
                     _ => return Err(error(source, "unsupported closure phase")),
                 };
                 if expected_captures.len() != captures.len() {
@@ -823,6 +823,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                             argument.ty,
                             Term::Function { .. }
                                 | Term::UnsafeFunction(_)
+                                | Term::PureFunction(_)
                                 | Term::Closure { .. }
                                 | Term::Rigid { .. }
                                 | Term::Bound { .. }
@@ -911,7 +912,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     && matches!(callee.kind, K::Local(_))
                     && matches!(
                         callee.ty.callable_signature(),
-                        Term::Function { .. } | Term::UnsafeFunction(_)
+                        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
                     )
                 {
                     // Construction does not execute this body. Defer the unknown
@@ -1373,7 +1374,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 if self.captured_roots.contains(&root(target.root))
                     && !matches!(
                         value.ty,
-                        Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                        Term::Function { .. }
+                            | Term::UnsafeFunction(_)
+                            | Term::PureFunction(_)
+                            | Term::Closure { .. }
                     )
                     && !crate::memory::capture_pointer_replacement_layout_for(
                         self.package,

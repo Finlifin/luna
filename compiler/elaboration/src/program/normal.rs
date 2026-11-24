@@ -1402,7 +1402,10 @@ impl Checker<'_, '_> {
                 } else {
                     if !matches!(
                         signature,
-                        Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                        Term::Function { .. }
+                            | Term::ComptimeFunction(_)
+                            | Term::UnsafeFunction(_)
+                            | Term::PureFunction(_)
                     ) {
                         return Err(Failure::Unavailable);
                     }

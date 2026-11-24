@@ -93,7 +93,8 @@ macro_rules! visit_children {
             | Self::Lift(inner)
             | Self::ComptimeFunction(inner)
             | Self::NormalFormFunction(inner, _)
-            | Self::UnsafeFunction(inner) => $visit(inner)?,
+            | Self::UnsafeFunction(inner)
+            | Self::PureFunction(inner) => $visit(inner)?,
             Self::Function { parameters, result } => {
                 for parameter in parameters {
                     $visit(& $($borrow)? parameter.ty)?;

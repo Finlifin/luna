@@ -1,6 +1,7 @@
 //! Extended application shares ordinary positional routing, while colon
 //! properties remain a distinct input protocol from named whole-value supply.
 use super::*;
+
 pub(super) mod layout;
 
 impl Checker<'_, '_> {
@@ -36,7 +37,13 @@ impl Checker<'_, '_> {
                 let owner = self.associated_reference_owner(head).unwrap();
                 let value = self.lexical_associated_value(owner, callee.span)?;
                 let ty = self.structural_type(&value.ty, callee.span)?;
-                matches!(ty, Term::Function { .. } | Term::Closure { .. } | Term::ComptimeFunction(_))
+                matches!(
+                    ty,
+                    Term::Function { .. }
+                        | Term::Closure { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::PureFunction(_)
+                )
             }
             H::ResolvedDef { def_id, .. } => self.package.definition_owner(*def_id)
                 .and_then(|owner| self.package.item(owner))
@@ -44,7 +51,13 @@ impl Checker<'_, '_> {
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
                 if let Some(ty) = self.locals.get(&local(*id)) {
                     let ty = self.structural_type(ty, callee.span)?;
-                    matches!(ty, Term::Function { .. } | Term::Closure { .. } | Term::ComptimeFunction(_))
+                    matches!(
+                    ty,
+                    Term::Function { .. }
+                        | Term::Closure { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::PureFunction(_)
+                )
                 } else { false }
             }
             H::Closure(..) => true,
@@ -197,6 +210,7 @@ impl Checker<'_, '_> {
         }
         self.call(expr, callee, args, expected, partial).map(Some)
     }
+
     fn collect_properties(
         &mut self,
         expr: &Expr<'_>,

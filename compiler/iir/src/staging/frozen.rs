@@ -53,6 +53,7 @@ fn decode(
                     | Term::Function { .. }
                     | Term::ComptimeFunction(_)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             ) =>
             {
                 if arguments.is_empty() {
@@ -70,7 +71,10 @@ fn decode(
             Term::MethodValue(method)
                 if matches!(
                     ty,
-                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                    Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                 ) =>
             {
                 crate::completed_type(&method.subject, &std::collections::BTreeSet::new(), fuel)?;

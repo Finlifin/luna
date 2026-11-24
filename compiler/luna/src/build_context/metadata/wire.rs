@@ -343,6 +343,10 @@ impl Writer {
                 self.byte(25)?;
                 self.term(value, d)?;
             }
+            T::PureFunction(value) => {
+                self.byte(43)?;
+                self.term(value, d)?;
+            }
             T::Function { parameters, result } => {
                 self.byte(26)?;
                 self.number(parameters.len() as u64)?;
@@ -650,6 +654,7 @@ impl<'a> Reader<'a> {
             }
             24 => T::ComptimeFunction(Box::new(self.term(d)?)),
             25 => T::UnsafeFunction(Box::new(self.term(d)?)),
+            43 => T::PureFunction(Box::new(self.term(d)?)),
             26 => {
                 let count = self.count()?;
                 let mut parameters = Vec::new();

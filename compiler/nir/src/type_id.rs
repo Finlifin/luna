@@ -940,6 +940,12 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                 min_escape = min_escape.min(esc);
                 digest.digest32(&inner_d);
             }
+            Term::PureFunction(inner) => {
+                digest.tag(b"pure_fn");
+                let (inner_d, esc) = self.type_digest(inner, binder_depth)?;
+                min_escape = min_escape.min(esc);
+                digest.digest32(&inner_d);
+            }
             Term::Computation { effects, result } => {
                 digest.tag(b"computation");
                 digest.usize(effects.len());
@@ -1600,6 +1606,10 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                 digest.u8(12);
                 self.hash_comptime_domain(digest, inner)?;
             }
+            Term::PureFunction(inner) => {
+                digest.u8(14);
+                self.hash_comptime_domain(digest, inner)?;
+            }
             Term::Bound { depth, index, sort } => {
                 digest.u8(13);
                 digest.u32(*depth);
@@ -1689,6 +1699,7 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                     | Term::NormalFormFunction(..)
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             )
         {
             digest.u8(1);

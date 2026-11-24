@@ -305,7 +305,7 @@ pub(super) fn validate(
                     }
                     if !matches!(
                         projection.ty,
-                        Term::Function { .. } | Term::UnsafeFunction(_)
+                        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
                     ) {
                         return Err("borrowed code absence must select a function leaf".into());
                     }

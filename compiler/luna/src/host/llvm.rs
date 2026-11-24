@@ -787,7 +787,9 @@ fn repr_at(
                 _ => Err("host captured closure requires a runtime signature".into()),
             }
         }
-        Term::UnsafeFunction(signature) => repr_at(graph, signature, depth + 1, checked, remaining),
+        Term::UnsafeFunction(signature) | Term::PureFunction(signature) => {
+            repr_at(graph, signature, depth + 1, checked, remaining)
+        }
         Term::Function { parameters, .. } => {
             if parameters
                 .iter()

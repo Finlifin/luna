@@ -108,7 +108,10 @@ fn value(ty: &Term, package: &Package, fuel: &mut usize) -> Result<bool, String>
         )
         || matches!(
             ty,
-            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Pointer(_)
+            Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
+                | Term::Pointer(_)
         )
         || packet(ty, package)
     {

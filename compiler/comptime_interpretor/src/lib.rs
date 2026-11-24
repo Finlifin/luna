@@ -1106,7 +1106,10 @@ impl<'a> Interpreter<'a> {
             for member in &interface.methods {
                 if !matches!(
                     member.signature.ordinary(),
-                    Ok(Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))
+                    Ok(Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_))
                 ) {
                     return Err(invalid());
                 }
@@ -3636,7 +3639,10 @@ impl<'a> Interpreter<'a> {
     ) -> Result<&'t [Term], Error> {
         let capture_types: &[Term] = match ty {
             Term::Closure { environment, .. } => environment,
-            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => &[],
+            Term::Function { .. }
+            | Term::ComptimeFunction(_)
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_) => &[],
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),
         };
         let Term::Function {

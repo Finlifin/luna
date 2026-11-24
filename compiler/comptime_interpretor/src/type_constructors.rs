@@ -113,6 +113,7 @@ impl Interpreter<'_> {
                 Term::Function { .. }
                     | Term::ComptimeFunction(_)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::TraitObject { .. }
             ),
             Kind::Pointer => !matches!(

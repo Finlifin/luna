@@ -21,6 +21,10 @@ pub mod effects {
     pub use .effects_impl.strategy.direct_passing;
 }
 
+pub mod purity {
+    pub use .purity_impl.tiers.{p0, p1, p2, p3, p4, p5};
+}
+
 pub mod quote_fn_template {
     pub const for_match_arms = { __flurry_quote_fn_template_for_match_arms: true }
     pub const allow_non_exhaustive_instance = {

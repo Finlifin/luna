@@ -13,7 +13,10 @@ pub(super) struct ClosureRegistry {
 }
 
 impl ClosureRegistry {
-    pub(super) fn intern(&mut self, closure: &std::sync::Arc<comptime_interpretor::Closure>) -> usize {
+    pub(super) fn intern(
+        &mut self,
+        closure: &std::sync::Arc<comptime_interpretor::Closure>,
+    ) -> usize {
         let identity = ClosureIdentity::new(closure);
         let digest = closure_digest(closure);
         let bucket = self.buckets.entry(digest).or_default();
@@ -929,7 +932,7 @@ impl Checker<'_, '_> {
                 }
                 let types: &[Term] = match &ty {
                     Term::Closure { environment, .. } => environment,
-                    Term::ComptimeFunction(_) => &[],
+                    _ if ty.is_comptime_callable() => &[],
                     _ => {
                         return Err(error(
                             span,

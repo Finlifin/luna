@@ -69,7 +69,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // A callable signature is not a data alias. Captured environments must
         // remain data-only here: code/pointer environment transitions require
         // a separate request-time writeback contract.
-        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+        if matches!(
+            ty,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+        ) {
             return Ok(());
         }
         if let Term::Closure { environment, .. } = ty {

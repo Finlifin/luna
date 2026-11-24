@@ -161,6 +161,8 @@ mod tests {
         }
         if function.is_unsafe {
             ty = Term::UnsafeFunction(Box::new(ty));
+        } else if function.pure {
+            ty = Term::PureFunction(Box::new(ty));
         }
         Expr {
             kind: K::Call {

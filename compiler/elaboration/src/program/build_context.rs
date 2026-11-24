@@ -9,6 +9,7 @@ pub struct Target {
     pub layout: nir::target::TargetData,
     pub features: BTreeMap<String, bool>,
 }
+
 impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -256,10 +257,10 @@ impl Checker<'_, '_> {
                 "package metadata requires comptime fn(str) -> PackageMetadata { features: MetadataFeatures { entries: Object } }",
             )
         };
-        let Term::ComptimeFunction(signature) = ty else {
+        if !ty.is_comptime_callable() || ty.is_unsafe_callable() {
             return Err(invalid());
-        };
-        let Term::Function { parameters, result } = signature.as_ref() else {
+        }
+        let Term::Function { parameters, result } = ty.callable_signature() else {
             return Err(invalid());
         };
         if parameters.len() != 1 || parameters[0].ty != p(P::Str) {

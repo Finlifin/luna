@@ -466,6 +466,7 @@ fn mutable_capture_paths(
             Term::Primitive(_)
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..) => Ok(false),
             Term::Record(fields) => {
@@ -5007,7 +5008,10 @@ impl Walker<'_> {
             && state.facts.is_reachable()
             && !matches!(
                 delivered,
-                Term::Primitive(_) | Term::Function { .. } | Term::UnsafeFunction(_)
+                Term::Primitive(_)
+                    | Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             )
         {
             let probe_allowance = (self.limits.arithmetic.steps / 16).min(1024);

@@ -1603,6 +1603,7 @@ impl Checker<'_, '_> {
                     Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                         | Term::TraitObject { .. }
                 ) {
                     return Ok(None);

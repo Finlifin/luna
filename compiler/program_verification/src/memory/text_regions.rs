@@ -181,6 +181,7 @@ pub(super) fn type_may_hold_text_or_callable(
             Term::Primitive(Primitive::Str | Primitive::Type | Primitive::Object)
                 | Term::Function { .. }
                 | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
                 | Term::Closure { .. }
         ) {
             return Ok((true, false));

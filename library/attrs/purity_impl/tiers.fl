@@ -1,0 +1,7 @@
+{- Official runtime purity tier attributes (`__flurry_purity: Symbol`). -}
+pub const p0 = { __flurry_purity: .p0 }
+pub const p1 = { __flurry_purity: .p1 }
+pub const p2 = { __flurry_purity: .p2 }
+pub const p3 = { __flurry_purity: .p3 }
+pub const p4 = { __flurry_purity: .p4 }
+pub const p5 = { __flurry_purity: .p5 }

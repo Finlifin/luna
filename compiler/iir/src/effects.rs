@@ -40,6 +40,7 @@ pub fn data_passing_signature(
     }
     passing_data(package, result, fuel, 0)
 }
+
 fn passing_data(
     package: &Package,
     ty: &Term,
@@ -140,9 +141,11 @@ fn spend(fuel: &mut usize) -> Result<(), String> {
         .ok_or("IIR effect validation budget exhausted")?;
     Ok(())
 }
+
 fn compatible(actual: &Term, expected: &Term) -> bool {
     actual == expected || *actual == Term::Primitive(Primitive::Never)
 }
+
 fn row_result(ty: &Term) -> (&[Operation], &Term) {
     if let Term::Computation { effects, result } = ty {
         (effects, result)
@@ -150,6 +153,7 @@ fn row_result(ty: &Term) -> (&[Operation], &Term) {
         (&[], ty)
     }
 }
+
 // Function values may advertise an effectful result. A computation is not yet
 // a storable data value in the executable reference representation.
 fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Result<(), String> {
@@ -171,6 +175,7 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner)
         | Term::Pointer(inner)
         | Term::Lift(inner) => data_type(package, inner, fuel, depth + 1)?,
         Term::Tuple(_) | Term::Record(_) => {
@@ -249,6 +254,7 @@ pub(crate) fn validate(
     }
     Ok(())
 }
+
 fn operation(
     package: &Package,
     links: &TypeLinks<'_>,
@@ -281,6 +287,7 @@ fn operation(
         .map_err(|_| "IIR dependent effect result requires identity lowering")?;
     data_type(package, result, fuel, 0)
 }
+
 fn pattern(
     package: &Package,
     links: &TypeLinks<'_>,
@@ -353,6 +360,7 @@ fn pattern(
     }
     Ok(())
 }
+
 fn expression(
     package: &Package,
     links: &TypeLinks<'_>,
@@ -620,6 +628,7 @@ fn expression(
         }
     })
 }
+
 fn mapped(
     package: &Package,
     links: &TypeLinks<'_>,
@@ -843,6 +852,7 @@ pub struct Contract {
     pub abi: Abi,
     pub signature: Term,
 }
+
 impl std::fmt::Display for Contract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -861,6 +871,7 @@ pub struct Contracts<'a> {
     links: TypeLinks<'a>,
     entries: Vec<Contract>,
 }
+
 impl<'a> Contracts<'a> {
     pub fn acquire(graph: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         graph.validate(fuel)?;
@@ -906,6 +917,7 @@ impl<'a> Contracts<'a> {
             .collect()
     }
 }
+
 impl std::fmt::Display for Contracts<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(effect-contracts")?;

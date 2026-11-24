@@ -238,7 +238,8 @@ impl Interpreter<'_> {
             | Term::Pointer(ty)
             | Term::ComptimeFunction(ty)
             | Term::NormalFormFunction(ty, _)
-            | Term::UnsafeFunction(ty) => self.admit_in_telescope(ty, depth + 1, frames)?,
+            | Term::UnsafeFunction(ty)
+            | Term::PureFunction(ty) => self.admit_in_telescope(ty, depth + 1, frames)?,
             Term::Function { parameters, result } => {
                 frames.enter();
                 for (index, p) in parameters.iter().enumerate() {

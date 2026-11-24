@@ -989,7 +989,10 @@ mod tests {
                         calls += 1;
                         assert!(matches!(
                             ty,
-                            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                            Term::Function { .. }
+                                | Term::UnsafeFunction(_)
+                                | Term::PureFunction(_)
+                                | Term::Closure { .. }
                         ));
                         Ok(matches!(ty, Term::Closure { .. }))
                     },

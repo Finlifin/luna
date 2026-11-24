@@ -1153,6 +1153,11 @@ impl<'a> PhaseContext<'a> {
                                     "function value type does not preserve its declaration responsibility",
                                 ));
                             }
+                            if expr.ty.is_pure_callable() && (!target.3 || target.2) {
+                                return Err(error(
+                                    "function value type claims purity not guaranteed by its declaration",
+                                ));
+                            }
                             if target.1 {
                                 arithmetic = true;
                                 // Runtime staged identities are specialized back
@@ -1542,6 +1547,7 @@ impl<'a> PhaseContext<'a> {
                                     | Term::ComptimeFunction(_)
                                     | Term::NormalFormFunction(..)
                                     | Term::UnsafeFunction(_)
+                                    | Term::PureFunction(_)
                             ) && !captures.is_empty()
                             {
                                 return Err(error(
@@ -1957,6 +1963,7 @@ impl<'a> PhaseContext<'a> {
                                     },
                                     !member.program.preconditions.is_empty(),
                                     member.is_unsafe,
+                                    signature.is_pure_callable(),
                                 )
                             } else {
                                 callables
@@ -1972,6 +1979,11 @@ impl<'a> PhaseContext<'a> {
                             if expr.ty.is_unsafe_callable() != target.2 {
                                 return Err(error(
                                     "function value type does not preserve its declaration responsibility",
+                                ));
+                            }
+                            if expr.ty.is_pure_callable() && (!target.3 || target.2) {
+                                return Err(error(
+                                    "function value type claims purity not guaranteed by its declaration",
                                 ));
                             }
                             if target.1 {

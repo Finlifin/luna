@@ -111,7 +111,8 @@ impl Payloads<'_> {
             Term::Computation { result, .. }
             | Term::Optional(result)
             | Term::Pointer(result)
-            | Term::UnsafeFunction(result) => self.check(result, frames, next, fuel),
+            | Term::UnsafeFunction(result)
+            | Term::PureFunction(result) => self.check(result, frames, next, fuel),
             Term::TraitObject { .. } => Ok(()),
             Term::Tuple(items) => self.fields(items, frames, next, fuel),
             Term::Record(fields) => {

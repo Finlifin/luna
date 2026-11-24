@@ -86,6 +86,7 @@ pub(super) fn eligible_shape(context: &Context, ty: &Term) -> bool {
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
     ) || context.is_tuple_type(ty)
         || context.is_list_type(ty)
 }

@@ -465,7 +465,7 @@ fn bit_width_at(
                 .ok_or(LayoutError::TargetRequired)?
                 .pointer_bits(),
         )),
-        Term::UnsafeFunction(signature) => {
+        Term::UnsafeFunction(signature) | Term::PureFunction(signature) => {
             bit_width_at(world, signature, depth + 1, visiting, fuel)
         }
         Term::Function { parameters, .. } => {
@@ -638,7 +638,7 @@ fn evaluate_not_sized_at(
                 Ok(Some(false))
             }
         }
-        Term::UnsafeFunction(inner) => {
+        Term::UnsafeFunction(inner) | Term::PureFunction(inner) => {
             evaluate_not_sized_at(world, inner, depth + 1, visiting, fuel)
         }
         Term::Closure {
@@ -1013,7 +1013,7 @@ fn layout_with_niche_at(
             let ptr = pointer_layout(world, ty)?;
             Ok(no_niche(struct_layout(&[ptr, ptr])?))
         }
-        Term::UnsafeFunction(signature) => {
+        Term::UnsafeFunction(signature) | Term::PureFunction(signature) => {
             layout_with_niche_at(world, signature, depth + 1, visiting, fuel)
         }
         Term::Function { parameters, .. } => {
@@ -1436,6 +1436,7 @@ fn bit_packed_field_info_at(
         | Term::TraitObject { .. }
         | Term::Function { .. }
         | Term::UnsafeFunction(_)
+        | Term::PureFunction(_)
         | Term::Closure { .. } => Err(unsupported(
             "pointer, trait-object, and callable types are not allowed in an attrs.packed.bit struct",
         )),
@@ -1663,7 +1664,9 @@ fn closure_field_state_count(
         Term::Closure { environment, .. } => {
             closure_env_state_count(world, environment, depth + 1, fuel)
         }
-        Term::UnsafeFunction(inner) => closure_field_state_count(world, inner, depth + 1, fuel),
+        Term::UnsafeFunction(inner) | Term::PureFunction(inner) => {
+            closure_field_state_count(world, inner, depth + 1, fuel)
+        }
         _ => Ok(1),
     }
 }

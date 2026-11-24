@@ -1226,9 +1226,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
     match term {
         Term::MethodValue(method) => method.terms().collect(),
         Term::FunctionValue { arguments, .. } => arguments.iter().collect(),
-        Term::ClosureValue { ty, captures, .. } => {
-            std::iter::once(ty.as_ref()).chain(captures.iter()).collect()
-        }
+        Term::ClosureValue { ty, captures, .. } => std::iter::once(ty.as_ref())
+            .chain(captures.iter())
+            .collect(),
         // Rows do not introduce binders: labels and residuals inhabit the
         // surrounding scope. Callable-local binders remain opaque below.
         Term::ErrorResult { errors, result } => errors
@@ -1276,7 +1276,8 @@ fn subterms(term: &Term) -> Vec<&Term> {
         | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
-        | Term::UnsafeFunction(inner) => {
+        | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner) => {
             vec![inner]
         }
         Term::Function { parameters, result } if !has_bound(term) => parameters
@@ -1306,9 +1307,7 @@ fn has_bound(term: &Term) -> bool {
         Term::FunctionValue { arguments, .. } | Term::ClosureSnapshot { arguments, .. } => {
             arguments.iter().any(has_bound)
         }
-        Term::ClosureValue { ty, captures, .. } => {
-            has_bound(ty) || captures.iter().any(has_bound)
-        }
+        Term::ClosureValue { ty, captures, .. } => has_bound(ty) || captures.iter().any(has_bound),
         Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
         Term::Computation { effects, result } => {
             has_bound(result)
@@ -1361,7 +1360,8 @@ fn has_bound(term: &Term) -> bool {
         | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
-        | Term::UnsafeFunction(inner) => has_bound(inner),
+        | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner) => has_bound(inner),
         _ => false,
     }
 }
@@ -1698,6 +1698,7 @@ enum Head {
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
+    PureFunction,
     Tuple(usize),
     Function(Vec<Sort>),
     Closure(usize),
@@ -1714,6 +1715,7 @@ fn constructor(term: &Term) -> Option<Head> {
         Term::ComptimeFunction(_) => Some(Head::ComptimeFunction),
         Term::NormalFormFunction(_, collector) => Some(Head::NormalFormFunction(*collector)),
         Term::UnsafeFunction(_) => Some(Head::UnsafeFunction),
+        Term::PureFunction(_) => Some(Head::PureFunction),
         Term::Tuple(items) => Some(Head::Tuple(items.len())),
         Term::Function { parameters, .. } if !has_bound(term) => {
             Some(Head::Function(parameters.iter().map(|p| p.sort).collect()))
@@ -1744,6 +1746,7 @@ pub fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
         | Term::ComptimeFunction(_)
         | Term::NormalFormFunction(..)
         | Term::UnsafeFunction(_)
+        | Term::PureFunction(_)
         | Term::Tuple(_)
         | Term::Nominal { .. }
         | Term::TraitObject { .. } => constructor(term),
@@ -2452,6 +2455,7 @@ fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize
         | Term::ComptimeFunction(_)
         | Term::NormalFormFunction(_, _)
         | Term::UnsafeFunction(_)
+        | Term::PureFunction(_)
         | Term::Tuple(_)
         | Term::Record(_) => children,
         Term::Function { .. } if !has_bound(term) => children,
@@ -2894,6 +2898,7 @@ fn rebuild(
             Some(Term::NormalFormFunction(Box::new(child(t)?), *collector))
         }
         Term::UnsafeFunction(t) => Some(Term::UnsafeFunction(Box::new(child(t)?))),
+        Term::PureFunction(t) => Some(Term::PureFunction(Box::new(child(t)?))),
         Term::Tuple(items) => Some(Term::Tuple(
             items.iter().map(&mut *child).collect::<Option<_>>()?,
         )),

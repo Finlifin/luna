@@ -125,6 +125,7 @@ where
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::Closure { .. } => return Ok(false),
                     _ => return Err(Failure::Unavailable),
                 };
@@ -260,6 +261,7 @@ where
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
                         | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
                         | Term::Closure { .. },
                     ) => return Ok(false),
                     _ => return Err(Failure::Unavailable),
@@ -360,6 +362,7 @@ where
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::Closure { .. } => return Ok(false),
                     // Bound/hole/rigid/associated subjects do not yet establish
                     // a head. Unknown must not allow a later arm to win.

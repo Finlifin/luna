@@ -18,11 +18,13 @@ pub struct Evidence {
     components: Vec<(Term, Classification)>,
     cleanup: super::drop::AcquiredCleanup,
 }
+
 impl Evidence {
     pub fn ty(&self) -> &Term {
         self.cleanup.ty()
     }
 }
+
 impl fmt::Display for Evidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(copy-evidence (components")?;
@@ -75,7 +77,10 @@ pub fn acquire(
         match &classification {
             Classification::Intrinsic | Classification::Declared { .. } => {}
             Classification::Assumed(_)
-                if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) => {}
+                if matches!(
+                    ty,
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+                ) => {}
             Classification::Assumed(_) => {
                 return Err("Copy representation requires concrete capability evidence".into());
             }
@@ -101,6 +106,7 @@ pub fn acquire(
                     | Term::Record(_)
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::Closure { .. }
@@ -128,6 +134,7 @@ pub enum Classification {
     Affine,
     Pending(String),
 }
+
 impl fmt::Display for Classification {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -157,6 +164,7 @@ impl fmt::Display for Classification {
         }
     }
 }
+
 /// Query only the named protocol in this immutable world. No decision is cached
 /// across changes to implementations or assumptions. Nominal field shape never
 /// creates an implicit Copy declaration.

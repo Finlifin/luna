@@ -137,6 +137,7 @@ fn term_rank(term: &Term) -> u8 {
         Term::Integer(_) => 49,
         Term::Float(_) => 50,
         Term::Value { .. } => 51,
+        Term::PureFunction(_) => 52,
     }
 }
 
@@ -293,7 +294,8 @@ pub(super) fn cmp_term(a: &Term, b: &Term) -> Ordering {
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
-        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => cmp_term(a, b),
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b))
+        | (Term::PureFunction(a), Term::PureFunction(b)) => cmp_term(a, b),
         (Term::NormalFormFunction(a, ai), Term::NormalFormFunction(b, bi)) => {
             cmp_term(a, b).then_with(|| ai.cmp(bi))
         }

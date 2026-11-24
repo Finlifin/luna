@@ -311,6 +311,7 @@ pub fn borrowed_input_layout(
                 ty.as_ref(),
                 Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
                     | Term::ClosureContextType
                     | Term::EffectRowType
                     | Term::ErrorRowType

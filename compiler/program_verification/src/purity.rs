@@ -685,7 +685,470 @@ fn package_preparation_fuel(package: &n::Package) -> usize {
         .saturating_add(package.newtypes.len().saturating_mul(128))
         .saturating_add(package.alias_contracts.len().saturating_mul(128))
         .saturating_add(package.normal_forms.len().saturating_mul(128))
+        .saturating_add(package.statics.len().saturating_mul(128))
         .min(MAX_PREPARATION_FUEL)
+}
+
+impl<'a> Analysis<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn check_opaque_pure_call(
+        &mut self,
+        arguments: &[n::CallArgument],
+        env_arguments: &[n::Expr],
+        value: &n::Expr,
+        private: &mut BTreeSet<n::LocalId>,
+        returns: bool,
+        depth: usize,
+    ) -> bool {
+        if self.type_is_volatile(&value.ty) {
+            return false;
+        }
+        let mut arg_addresses = Vec::new();
+        for arg in arguments {
+            if !self.expression(&arg.value, private, returns, depth + 1) {
+                return false;
+            }
+            let _ = self.take_code_fields();
+            if let Some(addrs) = self.result_addresses.take() {
+                arg_addresses.extend(addrs);
+            }
+        }
+        for env_arg in env_arguments {
+            if !self.expression(env_arg, private, returns, depth + 1) {
+                return false;
+            }
+            let _ = self.take_code_fields();
+            if let Some(addrs) = self.result_addresses.take() {
+                arg_addresses.extend(addrs);
+            }
+        }
+        self.result_addresses =
+            if !arg_addresses.is_empty() && !self.trivial_internal_packet(&value.ty, 0) {
+                Some(arg_addresses)
+            } else {
+                None
+            };
+        self.set_code_fields(BTreeMap::new());
+        self.result_code = None;
+        true
+    }
+
+    fn verify_p5_behavior(
+        &mut self,
+        function: &n::Function,
+        visited: &mut BTreeSet<DeclarationId>,
+        active: &mut BTreeSet<DeclarationId>,
+    ) -> Result<(), String> {
+        self.verify_p5_function(function, visited, active, 0)
+    }
+
+    fn verify_p5_function(
+        &mut self,
+        function: &n::Function,
+        visited: &mut BTreeSet<DeclarationId>,
+        active: &mut BTreeSet<DeclarationId>,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth >= 128 {
+            return Err("P5 verification recursion depth exceeded".into());
+        }
+        if function.phase != n::FunctionPhase::Runtime {
+            return Err("P5 verification requires a runtime function".into());
+        }
+        if !function.preconditions.is_empty() || !function.postconditions.is_empty() {
+            return Err("preconditions or postconditions may trap".into());
+        }
+        if signature_has_unclosed_effects(&function.signature) {
+            return Err("unclosed algebraic effects are forbidden in P5".into());
+        }
+        if visited.contains(&function.declaration) {
+            return Ok(());
+        }
+        if !active.insert(function.declaration) {
+            return Err("recursive calls are not guaranteed to terminate".into());
+        }
+        let result = self.verify_p5_expr(&function.body, visited, active, depth);
+        active.remove(&function.declaration);
+        result?;
+        visited.insert(function.declaration);
+        Ok(())
+    }
+
+    fn verify_p5_expr(
+        &mut self,
+        expr: &n::Expr,
+        visited: &mut BTreeSet<DeclarationId>,
+        active: &mut BTreeSet<DeclarationId>,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth >= 128 {
+            return Err("P5 verification recursion depth exceeded".into());
+        }
+        let mut local_closures: BTreeMap<n::LocalId, &n::Expr> = BTreeMap::new();
+        let mut closure_callees = Vec::new();
+        let mut fn_callees: Vec<(DeclarationId, Vec<Term>)> = Vec::new();
+        let mut trait_callees: Vec<&n::Expr> = Vec::new();
+        let mut failure: Option<String> = None;
+        let visit_res = nir::visit::expression_in_scope(expr, &mut self.fuel, |node, _| {
+            if failure.is_some() {
+                return Ok(());
+            }
+            if is_never(&node.ty) {
+                failure = Some("diverging expression is forbidden in P5".into());
+                return Ok(());
+            }
+            match &node.kind {
+                K::Let { binding, value } => {
+                    if let K::Closure { .. } = &unwrap_unsafe_scope(value).kind {
+                        local_closures.insert(*binding, unwrap_unsafe_scope(value));
+                    }
+                }
+                K::Assign { place, .. } => {
+                    local_closures.remove(&place.root);
+                }
+                K::Loop { .. } => {
+                    failure = Some("loops are forbidden in P5".into());
+                }
+                K::IntegerBinary { op, .. } if crate::behavior::integer_op_may_trap(*op) => {
+                    failure = Some("trapping integer arithmetic is forbidden in P5".into());
+                }
+                K::IntegerNegate(_) => {
+                    failure = Some("trapping integer negation is forbidden in P5".into());
+                }
+                K::CheckPredicate(_) | K::RequirePredicate(_) | K::EnsurePredicate(_) => {
+                    failure = Some("runtime predicate check may trap in P5".into());
+                }
+                K::BitIndex(..)
+                | K::BitWindow { .. }
+                | K::BitUpdate { .. }
+                | K::BitWritePointer { .. }
+                | K::BitAssign { .. } => {
+                    failure = Some("trapping bit operation is forbidden in P5".into());
+                }
+                K::EffectRequest { .. }
+                | K::EffectComputation { .. }
+                | K::EffectHandle { .. }
+                | K::EffectResume(_)
+                | K::EffectRun { .. } => {
+                    failure = Some("algebraic effects are forbidden in P5".into());
+                }
+                K::DynCall(_) => {
+                    failure =
+                        Some("dynamic trait call lacks P5 termination/no-trap guarantee".into());
+                }
+                K::DynCast(cast) if !cast.by_pointer => {
+                    failure = Some("dynamic cast by value may trap in P5".into());
+                }
+                K::Match { arms, .. } if arms.iter().any(|arm| arm.guard.is_some()) => {
+                    failure = Some("guarded match may trap in P5".into());
+                }
+                K::Intrinsic { .. } => match nir::intrinsics::checked(node) {
+                    Ok(checked) if !checked.operation().is_runtime_only() => {}
+                    _ => {
+                        failure =
+                            Some("non-total or runtime-only intrinsic is forbidden in P5".into());
+                    }
+                },
+                K::Call { callee, .. } => match &unwrap_unsafe_scope(callee).kind {
+                    K::Function(id) => fn_callees.push((*id, Vec::new())),
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } => fn_callees.push((*declaration, arguments.clone())),
+                    K::Closure { body, .. } => closure_callees.push(body.as_ref()),
+                    K::TraitMethod { .. } => trait_callees.push(unwrap_unsafe_scope(callee)),
+                    K::Local(binding) => {
+                        if let Some(target) = local_closures.get(binding)
+                            && let K::Closure { body, .. } = &target.kind
+                        {
+                            closure_callees.push(body.as_ref());
+                        } else {
+                            failure = Some(
+                                "indirect or dynamic call lacks P5 termination/no-trap proof"
+                                    .into(),
+                            );
+                        }
+                    }
+                    _ => {
+                        failure = Some(
+                            "indirect or dynamic call lacks P5 termination/no-trap proof".into(),
+                        );
+                    }
+                },
+                _ => {}
+            }
+            Ok(())
+        });
+        visit_res.map_err(|e| format!("P5 verification budget exhausted: {e:?}"))?;
+        if let Some(msg) = failure {
+            return Err(msg);
+        }
+        for body in closure_callees {
+            self.verify_p5_expr(body, visited, active, depth + 1)?;
+        }
+        for trait_callee in trait_callees {
+            let method = self
+                .method_callees
+                .select_behavior(self.package, trait_callee, &mut self.fuel)
+                .map_err(|_| "trait method call lacks P5 termination/no-trap proof".to_string())?;
+            let K::FunctionInstance {
+                declaration,
+                arguments,
+            } = method.kind
+            else {
+                return Err("trait method call lacks P5 termination/no-trap proof".into());
+            };
+            fn_callees.push((declaration, arguments));
+        }
+        for (id, args) in fn_callees {
+            if let Some((callee_fn, _)) = self.package.runtime_body(id, &args) {
+                self.verify_p5_function(callee_fn, visited, active, depth + 1)?;
+            } else if declared_purity_tier(self.package, id)? != Some(PurityTier::P5) {
+                return Err("calls external function lacking P5 guarantee".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_tier_footprint(
+        &mut self,
+        function: &n::Function,
+        tier: PurityTier,
+        visited: &mut BTreeSet<DeclarationId>,
+    ) -> Result<(), String> {
+        self.verify_tier_function(function, tier, visited, 0)
+    }
+
+    fn verify_tier_function(
+        &mut self,
+        function: &n::Function,
+        tier: PurityTier,
+        visited: &mut BTreeSet<DeclarationId>,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth >= 128 {
+            return Err("purity verification recursion depth exceeded".into());
+        }
+        if function.phase != n::FunctionPhase::Runtime {
+            return Err("purity tier requires a runtime function".into());
+        }
+        if signature_has_unclosed_effects(&function.signature) {
+            return Err("unclosed algebraic effects are forbidden".into());
+        }
+        if !visited.insert(function.declaration) {
+            return Ok(());
+        }
+        self.verify_tier_expr(&function.body, tier, visited, depth)
+    }
+
+    fn verify_tier_expr(
+        &mut self,
+        expr: &n::Expr,
+        tier: PurityTier,
+        visited: &mut BTreeSet<DeclarationId>,
+        depth: usize,
+    ) -> Result<(), String> {
+        use nir::intrinsics::Operation as Op;
+        if depth >= 128 {
+            return Err("purity verification recursion depth exceeded".into());
+        }
+        let mut local_declared = BTreeSet::new();
+        let mut address_taken = BTreeSet::new();
+        let mut pointer_steps: Vec<(bool, n::LocalId, &n::Expr)> = Vec::new();
+        let mut local_closures: BTreeMap<n::LocalId, &n::Expr> = BTreeMap::new();
+        let mut closure_callees = Vec::new();
+        let mut fn_callees: Vec<(DeclarationId, Vec<Term>, &Term)> = Vec::new();
+        let mut trait_callees: Vec<&n::Expr> = Vec::new();
+        let mut failure: Option<String> = None;
+
+        // First collect local bindings, address-taken locals, and pointer updates.
+        let pre_res = nir::visit::expression_in_scope(expr, &mut self.fuel, |node, _| {
+            match &node.kind {
+                K::Let { binding, value } => {
+                    local_declared.insert(*binding);
+                    pointer_steps.push((true, *binding, value));
+                    if let K::Closure { .. } = &unwrap_unsafe_scope(value).kind {
+                        local_closures.insert(*binding, unwrap_unsafe_scope(value));
+                    }
+                }
+                K::Assign { place, value } => {
+                    if place.fields.is_empty() {
+                        pointer_steps.push((false, place.root, value));
+                    }
+                    local_closures.remove(&place.root);
+                }
+                K::AddressOf(target) => {
+                    if let Some(root) = local_place_root(target) {
+                        address_taken.insert(root);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+        pre_res.map_err(|e| format!("purity verification budget exhausted: {e:?}"))?;
+
+        let mut private_ptrs = BTreeSet::new();
+        for (is_let, binding, value) in pointer_steps {
+            if is_let {
+                if !address_taken.contains(&binding)
+                    && is_private_local_pointer(value, &private_ptrs, &local_declared)
+                {
+                    private_ptrs.insert(binding);
+                }
+            } else if !is_private_local_pointer(value, &private_ptrs, &local_declared) {
+                private_ptrs.remove(&binding);
+            }
+        }
+
+        let mut volatile_checks: Vec<(Option<n::Place>, Option<(&n::Expr, &Term)>, Option<&Term>)> =
+            Vec::new();
+        let visit_res = nir::visit::expression_in_scope(expr, &mut self.fuel, |node, _| {
+            if failure.is_some() {
+                return Ok(());
+            }
+            match &node.kind {
+                K::ReadPointer(pointer) => {
+                    volatile_checks.push((None, Some((pointer, &node.ty)), None));
+                }
+                K::WritePointer { pointer, value } | K::BitWritePointer { pointer, value, .. } => {
+                    volatile_checks.push((None, Some((pointer, &value.ty)), None));
+                    if tier >= PurityTier::P2
+                        && !is_private_local_pointer(pointer, &private_ptrs, &local_declared)
+                    {
+                        failure = Some("external pointer write is forbidden in P2/P3".into());
+                    }
+                }
+                K::Assign { place, .. } | K::BitAssign { place, .. } => {
+                    volatile_checks.push((Some(place.clone()), None, None));
+                }
+                K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. } => {
+                    volatile_checks.push((None, Some((pointer, &node.ty)), None));
+                }
+                K::StaticAddress(_) => {
+                    volatile_checks.push((None, None, Some(&node.ty)));
+                    if tier >= PurityTier::P3 {
+                        failure = Some("mutable static storage access is forbidden in P3".into());
+                    }
+                }
+                K::DynCall(_) | K::DynCast(_) => {
+                    failure = Some("dynamic trait dispatch is forbidden".into());
+                }
+                K::Intrinsic { .. } => match nir::intrinsics::checked(node) {
+                    Ok(checked) => {
+                        let op = checked.operation();
+                        if op.is_platform() {
+                            failure = Some("platform syscall intrinsic is forbidden".into());
+                        } else if tier >= PurityTier::P2
+                            && matches!(
+                                op,
+                                Op::MemRawWrite
+                                    | Op::MemCopy
+                                    | Op::MemCopyNonOverlapping
+                                    | Op::MemSetBytes
+                            )
+                        {
+                            failure = Some("memory write intrinsic is forbidden in P2/P3".into());
+                        }
+                    }
+                    Err(_) => {
+                        failure = Some("unchecked intrinsic is forbidden".into());
+                    }
+                },
+                K::Call { callee, .. } => match &unwrap_unsafe_scope(callee).kind {
+                    K::Function(id) => fn_callees.push((*id, Vec::new(), &callee.ty)),
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } => fn_callees.push((*declaration, arguments.clone(), &callee.ty)),
+                    K::Closure { body, .. } => closure_callees.push(body.as_ref()),
+                    K::TraitMethod { .. } => trait_callees.push(unwrap_unsafe_scope(callee)),
+                    K::Local(binding) => {
+                        if let Some(target) = local_closures.get(binding)
+                            && let K::Closure { body, .. } = &target.kind
+                        {
+                            closure_callees.push(body.as_ref());
+                        } else if !is_pure_indirect_callee(&callee.ty) {
+                            failure =
+                                Some("indirect call to non-pure function is forbidden".into());
+                        }
+                    }
+                    _ => {
+                        if !is_pure_indirect_callee(&callee.ty) {
+                            failure =
+                                Some("indirect call to non-pure function is forbidden".into());
+                        }
+                    }
+                },
+                _ => {}
+            }
+            Ok(())
+        });
+        visit_res.map_err(|e| format!("purity verification budget exhausted: {e:?}"))?;
+        if let Some(msg) = failure {
+            return Err(msg);
+        }
+        for (place, ptr_access, ty) in volatile_checks {
+            if let Some(place) = place
+                && self.place_is_volatile(&place)
+            {
+                return Err("volatile storage access is forbidden".into());
+            }
+            if let Some((ptr, pointee_ty)) = ptr_access
+                && self.pointer_access_is_volatile(ptr, pointee_ty)
+            {
+                return Err("volatile pointer access is forbidden".into());
+            }
+            if let Some(ty) = ty
+                && self.type_is_volatile(ty)
+            {
+                return Err("volatile storage access is forbidden".into());
+            }
+        }
+        for body in closure_callees {
+            self.verify_tier_expr(body, tier, visited, depth + 1)?;
+        }
+        for trait_callee in trait_callees {
+            if let Ok(method) =
+                self.method_callees
+                    .select_behavior(self.package, trait_callee, &mut self.fuel)
+                && let K::FunctionInstance {
+                    declaration,
+                    arguments,
+                } = method.kind
+            {
+                if let Some((callee_fn, _)) = self.package.runtime_body(declaration, &arguments) {
+                    self.verify_tier_function(callee_fn, tier, visited, depth + 1)?;
+                } else if !trait_callee.ty.is_pure_callable()
+                    && declared_purity_tier(self.package, declaration)?.is_none_or(|t| t < tier)
+                {
+                    return Err("calls trait method below required purity tier".into());
+                }
+            } else if !is_pure_indirect_callee(&trait_callee.ty) {
+                let promised = matches!(
+                    trait_callee.kind,
+                    K::TraitMethod { interface, member, .. }
+                        if self.package.traits.iter()
+                            .find(|t| t.declaration == interface)
+                            .and_then(|t| t.methods.iter().find(|m| m.declaration == member))
+                            .is_some_and(|m| m.pure && !m.signature.is_comptime_callable())
+                );
+                if !promised {
+                    return Err("trait method call below required purity tier".into());
+                }
+            }
+        }
+        for (id, args, callee_ty) in fn_callees {
+            if let Some((callee_fn, _)) = self.package.runtime_body(id, &args) {
+                self.verify_tier_function(callee_fn, tier, visited, depth + 1)?;
+            } else if !callee_ty.is_pure_callable()
+                && declared_purity_tier(self.package, id)?.is_none_or(|t| t < tier)
+            {
+                return Err("calls external function below required purity tier".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) -> Result<(), Error> {
@@ -696,6 +1159,215 @@ pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) ->
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PurityTier {
+    P0,
+    P1,
+    P2,
+    P3,
+    P4,
+    P5,
+}
+
+impl PurityTier {
+    fn from_symbol(symbol: &str) -> Option<Self> {
+        match symbol {
+            "p0" => Some(Self::P0),
+            "p1" => Some(Self::P1),
+            "p2" => Some(Self::P2),
+            "p3" => Some(Self::P3),
+            "p4" => Some(Self::P4),
+            "p5" => Some(Self::P5),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+            Self::P3 => "p3",
+            Self::P4 => "p4",
+            Self::P5 => "p5",
+        }
+    }
+}
+
+impl std::fmt::Display for PurityTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(purity-tier {})", self.as_str())
+    }
+}
+
+fn declared_purity_tier(
+    package: &n::Package,
+    declaration: DeclarationId,
+) -> Result<Option<PurityTier>, String> {
+    let attrs = package
+        .definition_attributes
+        .lookup(declaration)
+        .map_err(|_| "pending definition attributes prevent purity verification".to_string())?;
+    let Some(Term::NominalValue { fields, .. }) = attrs else {
+        return Ok(None);
+    };
+    for entry in fields.iter().rev() {
+        if let Some((Some("__flurry_purity"), _, value)) = nir::objects::entry_parts(entry) {
+            let Term::Symbol(symbol) = value else {
+                return Err("__flurry_purity attribute value must be a Symbol".into());
+            };
+            let tier = PurityTier::from_symbol(symbol.as_ref()).ok_or_else(|| {
+                format!("unsupported __flurry_purity tier `{symbol}`; expected p0..p5")
+            })?;
+            return Ok(Some(tier));
+        }
+    }
+    Ok(None)
+}
+
+fn is_pure_closure_type(ty: &Term) -> bool {
+    ty.is_pure_callable()
+        || matches!(ty, Term::Closure { signature, .. } if signature.is_pure_callable())
+}
+
+fn is_pure_indirect_callee(ty: &Term) -> bool {
+    ty.is_pure_callable()
+        && matches!(
+            ty.callable_signature(),
+            Term::Function { result, .. }
+                if !matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty())
+        )
+}
+
+fn body_contains_pure_closure(body: &n::Expr, mut fuel: usize) -> Result<bool, String> {
+    let mut found = false;
+    nir::visit::expression(body, &mut fuel, |node, _| {
+        if matches!(node.kind, K::Closure { .. }) && is_pure_closure_type(&node.ty) {
+            found = true;
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("purity closure scan budget exhausted: {e:?}"))?;
+    Ok(found)
+}
+
+fn collect_pure_closures<'a>(
+    expr: &'a n::Expr,
+    fuel: &mut usize,
+    out: &mut Vec<&'a n::Expr>,
+) -> Result<(), String> {
+    nir::visit::expression(expr, fuel, |node, _| {
+        if matches!(node.kind, K::Closure { .. }) && is_pure_closure_type(&node.ty) {
+            out.push(node);
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("purity closure scan budget exhausted: {e:?}"))
+}
+
+fn unwrap_unsafe_scope(mut expr: &n::Expr) -> &n::Expr {
+    while let K::UnsafeScope(inner) = &expr.kind {
+        expr = inner;
+    }
+    expr
+}
+
+fn local_place_root(mut expr: &n::Expr) -> Option<n::LocalId> {
+    let mut remaining = 64usize;
+    while remaining > 0 {
+        remaining -= 1;
+        match &expr.kind {
+            K::UnsafeScope(inner)
+            | K::Field { value: inner, .. }
+            | K::AnonymousField { value: inner, .. }
+            | K::NewtypeConvert(inner) => expr = inner,
+            K::Local(binding) => return Some(*binding),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn is_local_place_expr(expr: &n::Expr, local_declared: &BTreeSet<n::LocalId>) -> bool {
+    local_place_root(expr).is_some_and(|binding| local_declared.contains(&binding))
+}
+
+fn is_private_local_pointer(
+    mut expr: &n::Expr,
+    private_ptrs: &BTreeSet<n::LocalId>,
+    local_declared: &BTreeSet<n::LocalId>,
+) -> bool {
+    let mut remaining = 64usize;
+    while remaining > 0 {
+        remaining -= 1;
+        match &expr.kind {
+            K::UnsafeScope(inner)
+            | K::PointerField { pointer: inner, .. }
+            | K::PointerAnonymousField { pointer: inner, .. }
+            | K::NewtypeConvert(inner) => expr = inner,
+            K::AddressOf(target) => return is_local_place_expr(target, local_declared),
+            K::Local(binding) => return private_ptrs.contains(binding),
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn signature_has_unclosed_effects(signature: &Term) -> bool {
+    matches!(
+        signature.callable_signature(),
+        Term::Function { result, .. }
+            if matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty())
+    )
+}
+
+fn verify_pure_closures_in_expr(
+    analysis: &mut Analysis<'_>,
+    package: &n::Package,
+    expr: &n::Expr,
+    owner_label: &str,
+    scan_fuel: usize,
+    fallback_source: n::SourceRange,
+) -> Result<(), Error> {
+    let mut closures = Vec::new();
+    let mut fuel = scan_fuel.max(PER_FUNCTION_FUEL);
+    collect_pure_closures(expr, &mut fuel, &mut closures)
+        .map_err(|msg| error(fallback_source, msg))?;
+    for closure_expr in closures {
+        analysis.fuel = PER_FUNCTION_FUEL;
+        let closure_source = closure_expr
+            .source
+            .original(&package.expansion_sources)
+            .unwrap_or(closure_expr.source);
+        let mut snapshot = BehaviorCode::plain(closure_expr.clone());
+        if let K::Closure { captures, .. } = &closure_expr.kind {
+            for capture in captures {
+                if let Some(init) = &capture.value
+                    && matches!(
+                        unwrap_unsafe_scope(init).kind,
+                        K::Function(_) | K::FunctionInstance { .. }
+                    )
+                    && let Some(key) =
+                        analysis.code_key(&BehaviorCode::plain(unwrap_unsafe_scope(init).clone()))
+                {
+                    snapshot
+                        .captures
+                        .insert(code_root(capture.binding), vec![key]);
+                }
+            }
+        }
+        if !analysis.closure(&snapshot, &BTreeMap::new(), 0) {
+            return Err(Error {
+                source: closure_source,
+                message: format!(
+                    "pure closure in `{owner_label}` lacks P4 evidence for its calls, storage or resource behavior"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Incremental version of [`validate_runtime_promises`] that skips re-checking
 /// bodies of functions already in `verified.functions` while keeping all
 /// declarations and signatures visible to downstream callers.
@@ -704,23 +1376,52 @@ pub fn validate_runtime_promises_incremental(
     protocols: &Protocols,
     verified: &crate::flow::VerifiedUpstream,
 ) -> Result<(), Error> {
-    let Some(first_unverified) = package.functions.iter().find(|function| {
-        function.phase == n::FunctionPhase::Runtime
-            && function.pure
-            && !verified.functions.contains(&function.declaration)
-    }) else {
-        return Ok(());
-    };
-    let mut analysis = Analysis::with_fuel(package, false, package_preparation_fuel(package));
-    analysis.protocols = protocols.clone();
-    let Some(parameter_sorts) = analysis.parameter_sorts.clone() else {
-        let source = first_unverified
+    let prep_fuel = package_preparation_fuel(package);
+    let mut targets = Vec::new();
+    for function in &package.functions {
+        if function.phase != n::FunctionPhase::Runtime
+            || verified.functions.contains(&function.declaration)
+        {
+            continue;
+        }
+        let source = function
             .body
             .source
             .original(&package.expansion_sources)
-            .unwrap_or(first_unverified.body.source);
+            .unwrap_or(function.body.source);
+        let declared_tier = declared_purity_tier(package, function.declaration)
+            .map_err(|msg| error(source, msg))?;
+        let has_pure_closures = body_contains_pure_closure(&function.body, prep_fuel)
+            .map_err(|msg| error(source, msg))?;
+        if function.pure || declared_tier.is_some() || has_pure_closures {
+            targets.push((function, declared_tier, has_pure_closures, source));
+        }
+    }
+    let mut static_targets = Vec::new();
+    for static_item in &package.statics {
+        let Some(init) = &static_item.initializer else {
+            continue;
+        };
+        let source = init
+            .source
+            .original(&package.expansion_sources)
+            .unwrap_or(init.source);
+        if body_contains_pure_closure(init, prep_fuel).map_err(|msg| error(source, msg))? {
+            static_targets.push((static_item, init, source));
+        }
+    }
+    let Some(first_source) = targets
+        .first()
+        .map(|(_, _, _, source)| *source)
+        .or_else(|| static_targets.first().map(|(_, _, source)| *source))
+    else {
+        return Ok(());
+    };
+    let mut analysis = Analysis::with_fuel(package, false, prep_fuel);
+    analysis.protocols = protocols.clone();
+    let Some(parameter_sorts) = analysis.parameter_sorts.clone() else {
         return Err(error(
-            source,
+            first_source,
             "invalid declaration parameter sorts in purity analysis",
         ));
     };
@@ -729,47 +1430,97 @@ pub fn validate_runtime_promises_incremental(
         // before assigning an independent budget to each runtime pure function.
         let _ = analysis.resource_world_parts();
     }
-    for function in &package.functions {
-        if function.phase != n::FunctionPhase::Runtime
-            || !function.pure
-            || verified.functions.contains(&function.declaration)
-        {
-            continue;
+    for (static_item, init, source) in static_targets {
+        verify_pure_closures_in_expr(
+            &mut analysis,
+            package,
+            init,
+            &static_item.name,
+            prep_fuel,
+            source,
+        )?;
+    }
+    let mut visited_p5 = BTreeSet::new();
+    let mut active_p5 = BTreeSet::new();
+    let mut visited_tiers: BTreeMap<PurityTier, BTreeSet<DeclarationId>> = BTreeMap::new();
+    for (function, declared_tier, has_pure_closures, source) in targets {
+        if has_pure_closures {
+            verify_pure_closures_in_expr(
+                &mut analysis,
+                package,
+                &function.body,
+                &function.name,
+                prep_fuel,
+                source,
+            )?;
         }
-        analysis.fuel = PER_FUNCTION_FUEL;
-        let types = function
-            .type_parameters
-            .iter()
-            .map(|declaration| Term::Rigid {
-                declaration: *declaration,
-                sort: parameter_sorts
-                    .get(declaration)
-                    .copied()
-                    .unwrap_or(Sort::Type),
-            })
-            .collect::<Vec<_>>();
-        let cases = type_domains::cases(function, &types, &mut analysis.fuel);
-        let valid = if let Some(cases) = cases {
-            cases.iter().all(|types| {
-                analysis.fuel = PER_FUNCTION_FUEL;
-                analysis.function(function.declaration, types, 0)
-            })
-        } else {
+        let requires_p4 = function.pure || declared_tier.is_some_and(|tier| tier >= PurityTier::P4);
+        if requires_p4 {
             analysis.fuel = PER_FUNCTION_FUEL;
-            analysis.function(function.declaration, &types, 0)
-        };
-        if !valid {
-            return Err(Error {
-                source: function
-                    .body
-                    .source
-                    .original(&package.expansion_sources)
-                    .unwrap_or(function.body.source),
-                message: format!(
-                    "runtime pure function `{}` lacks P4 evidence for its calls, storage or resource behavior",
-                    function.name
-                ),
-            });
+            let types = function
+                .type_parameters
+                .iter()
+                .map(|declaration| Term::Rigid {
+                    declaration: *declaration,
+                    sort: parameter_sorts
+                        .get(declaration)
+                        .copied()
+                        .unwrap_or(Sort::Type),
+                })
+                .collect::<Vec<_>>();
+            let cases = type_domains::cases(function, &types, &mut analysis.fuel);
+            let valid = if let Some(cases) = cases {
+                cases.iter().all(|types| {
+                    analysis.fuel = PER_FUNCTION_FUEL;
+                    analysis.function(function.declaration, types, 0)
+                })
+            } else {
+                analysis.fuel = PER_FUNCTION_FUEL;
+                analysis.function(function.declaration, &types, 0)
+            };
+            if !valid {
+                let message = match declared_tier {
+                    Some(tier) if tier >= PurityTier::P4 && !function.pure => format!(
+                        "function `{}` violates `^attrs.purity.{}` (lacks P4 evidence for its calls, storage or resource behavior)",
+                        function.name,
+                        tier.as_str()
+                    ),
+                    _ => format!(
+                        "runtime pure function `{}` lacks P4 evidence for its calls, storage or resource behavior",
+                        function.name
+                    ),
+                };
+                return Err(Error { source, message });
+            }
+        }
+        if declared_tier == Some(PurityTier::P5) {
+            analysis.fuel = PER_FUNCTION_FUEL;
+            if let Err(reason) =
+                analysis.verify_p5_behavior(function, &mut visited_p5, &mut active_p5)
+            {
+                return Err(Error {
+                    source,
+                    message: format!(
+                        "function `{}` violates `^attrs.purity.p5` ({reason})",
+                        function.name
+                    ),
+                });
+            }
+        } else if let Some(tier @ (PurityTier::P1 | PurityTier::P2 | PurityTier::P3)) =
+            declared_tier
+        {
+            let visited = visited_tiers.entry(tier).or_default();
+            analysis.fuel = PER_FUNCTION_FUEL;
+            if let Err(reason) = analysis.verify_tier_footprint(function, tier, visited) {
+                return Err(Error {
+                    source,
+                    message: format!(
+                        "function `{}` violates `^attrs.purity.{}` ({reason})",
+                        function.name,
+                        tier.as_str()
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -2416,6 +3167,16 @@ impl<'a> Analysis<'a> {
                         return false;
                     }
                     let Some(candidates) = self.result_code.take() else {
+                        if !self.finite && is_pure_indirect_callee(&callee.ty) {
+                            return self.check_opaque_pure_call(
+                                arguments,
+                                env_arguments,
+                                value,
+                                private,
+                                returns,
+                                depth,
+                            );
+                        }
                         return false;
                     };
                     candidates

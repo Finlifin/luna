@@ -54,7 +54,7 @@ impl Checker<'_, '_> {
                     source: origin,
                     declaration: identity,
                     name: format!("<compiler-operation.{}>", name.as_str()),
-                    phase: if matches!(ty, Term::ComptimeFunction(_)) {
+                    phase: if ty.is_comptime_callable() {
                         n::FunctionPhase::Comptime
                     } else {
                         n::FunctionPhase::Runtime

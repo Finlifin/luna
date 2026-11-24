@@ -159,6 +159,7 @@ fn validate_closure_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
     ) {
         return Err("staged closure requires a completed callable or closure type".into());
     }

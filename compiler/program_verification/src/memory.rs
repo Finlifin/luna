@@ -1374,8 +1374,10 @@ fn owned_callable_bottom(
         if path.len() >= 64 {
             return Err("memory callable result layout depth exhausted".into());
         }
-        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
-            || include_closures && matches!(ty, Term::Closure { .. })
+        if matches!(
+            ty,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+        ) || include_closures && matches!(ty, Term::Closure { .. })
         {
             leaves.insert(path, CallableResult::NoReturn);
             continue;
@@ -2064,7 +2066,10 @@ fn storage_representation(
             }
             return Ok(true);
         }
-        if matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)) {
+        if matches!(
+            ty,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+        ) {
             return Ok(code);
         }
         let fields = match ty {
@@ -2181,6 +2186,7 @@ pub(crate) fn require_pointer_free_owned_for(
         ty,
         Term::Function { .. }
             | Term::UnsafeFunction(_)
+            | Term::PureFunction(_)
             | Term::Primitive(Primitive::Void | Primitive::Never)
     ) || intrinsic_pointer_value(ty) && !matches!(ty, Term::Pointer(_))
         || (provenance == TextProvenance::VerifiedByRegionAnalysis
@@ -2480,7 +2486,10 @@ impl<'a> Infer<'a, '_> {
                 owned_path_type(self.package, &parameter.ty, &input.fields, self.fuel)?;
             if !matches!(
                 expected,
-                Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                Term::Function { .. }
+                    | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
+                    | Term::Closure { .. }
             ) {
                 return Err("prepared code field is not callable".into());
             }
@@ -3646,7 +3655,10 @@ impl<'a> Infer<'a, '_> {
     fn local_fields_for(&mut self, expr: &Expr) -> Result<LocalCodeFields, String> {
         if matches!(
             self.ty(&expr.ty)?,
-            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+            Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
+                | Term::Closure { .. }
         ) {
             return Ok(self
                 .local_candidates_for(expr)?
@@ -3930,7 +3942,7 @@ impl<'a> Infer<'a, '_> {
         }
         if matches!(
             self.ty(&expr.ty)?,
-            Term::Function { .. } | Term::UnsafeFunction(_)
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
         ) {
             return Ok(BTreeMap::from([(vec![], self.callee_key(expr)?)]));
         }
@@ -4041,6 +4053,7 @@ impl<'a> Infer<'a, '_> {
                                 leaf,
                                 Term::Function { .. }
                                     | Term::UnsafeFunction(_)
+                                    | Term::PureFunction(_)
                                     | Term::Closure { .. }
                             )
                         {
@@ -5194,7 +5207,11 @@ impl<'a> Infer<'a, '_> {
         }
         if matches!(
             ty,
-            Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. } | Term::UnsafeFunction(_)
+            Term::Primitive(_)
+                | Term::Pointer(_)
+                | Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
         ) {
             return Ok(());
         }
@@ -5484,7 +5501,10 @@ impl<'a> Infer<'a, '_> {
         provenance: TextProvenance,
     ) -> bool {
         nir::program::scalar_observation_shape_in_package(package, ty)
-            || matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
+            || matches!(
+                ty,
+                Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+            )
             || (provenance == TextProvenance::VerifiedByRegionAnalysis
                 && *ty == Term::Primitive(Primitive::Str))
     }
@@ -5883,7 +5903,10 @@ impl<'a> Infer<'a, '_> {
         let pointer_result = self.local_pointer_value(&expr.ty)?;
         let callable_result = matches!(
             self.ty(&expr.ty)?,
-            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+            Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
+                | Term::Closure { .. }
         );
         let mut callable = CallableResult::NoReturn;
         let mut closures = Some(BTreeSet::new());
@@ -6010,6 +6033,7 @@ impl<'a> Infer<'a, '_> {
                     | Term::Pointer(_)
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             )
         {
             return Ok(());
@@ -6055,6 +6079,7 @@ impl<'a> Infer<'a, '_> {
                     | Term::Pointer(_)
                     | Term::Function { .. }
                     | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             ) {
                 bound_type(&ty, self.fuel)?;
                 let key = OrderedTerm(ty.clone());
@@ -6357,7 +6382,7 @@ impl<'a> Infer<'a, '_> {
                     self.walk(result, depth + 1)?;
                     if matches!(
                         self.ty(&expr.ty)?,
-                        Term::Function { .. } | Term::UnsafeFunction(_)
+                        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
                     ) {
                         key = self.callee_key(result)?;
                     }
@@ -6385,7 +6410,10 @@ impl<'a> Infer<'a, '_> {
                 let pointer_result = self.local_pointer_value(&expr.ty)?;
                 let callable_result = matches!(
                     self.ty(&expr.ty)?,
-                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                    Term::Function { .. }
+                        | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
+                        | Term::Closure { .. }
                 );
                 let mut callable = CallableResult::NoReturn;
                 let mut closures = Some(BTreeSet::new());
@@ -6543,7 +6571,9 @@ impl<'a> Infer<'a, '_> {
                 let mut pointer_captures = BTreeMap::new();
                 let environment = match &ty {
                     Term::Closure { environment, .. } => environment.as_slice(),
-                    Term::Function { .. } | Term::UnsafeFunction(_) => &[][..],
+                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_) => {
+                        &[][..]
+                    }
                     _ => return Err("closure construction requires a callable type".into()),
                 };
                 if environment.len() != captures.len() {
@@ -7852,7 +7882,7 @@ impl<'a> Infer<'a, '_> {
                         self.merge_return(targets)?;
                     } else if matches!(
                         self.ty(&value.ty)?,
-                        Term::Function { .. } | Term::UnsafeFunction(_)
+                        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
                     ) {
                         let key = self.callee_key(value)?;
                         self.callable_returns.join(&key, self.fuel)?;
@@ -8326,6 +8356,7 @@ fn term_rank(term: &Term) -> u8 {
         Term::ComptimeFunction(_) => 26,
         Term::NormalFormFunction(_, _) => 27,
         Term::UnsafeFunction(_) => 28,
+        Term::PureFunction(_) => 52,
         Term::Function { .. } => 29,
         Term::Hole { .. } => 30,
         Term::Bound { .. } => 31,
@@ -8505,7 +8536,8 @@ pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
-        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => cmp_term(a, b),
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b))
+        | (Term::PureFunction(a), Term::PureFunction(b)) => cmp_term(a, b),
         (Term::NormalFormFunction(a, ai), Term::NormalFormFunction(b, bi)) => {
             cmp_term(a, b).then_with(|| ai.cmp(bi))
         }
@@ -10325,12 +10357,18 @@ fn validate_code_premise(
     if matches!(value, CallableResult::NoReturn)
         && matches!(
             expected,
-            Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+            Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::PureFunction(_)
+                | Term::Closure { .. }
         )
     {
         return Ok(());
     }
-    if !matches!(expected, Term::Function { .. } | Term::UnsafeFunction(_)) {
+    if !matches!(
+        expected,
+        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+    ) {
         return Err("memory callable premise path is not a function".into());
     }
     if !matches!(
@@ -10368,7 +10406,11 @@ fn validate_code_premise(
         let signature = substitution
             .instantiate_bounded(&function.signature, fuel)
             .map_err(|error| error.to_string())?;
-        let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
+        let signature = signature
+            .with_unsafe_call_requirement(function.is_unsafe)
+            .with_pure_qualifier(
+                expected.is_pure_callable() && function.pure && !function.is_unsafe,
+            );
         if &signature != expected {
             // A callable premise may retain an associated Item projection even
             // after its named body has a concrete signature. Compare completed
@@ -10620,12 +10662,15 @@ fn infer_body(
         let targets = infer.optional_target(&function.body, 0)?;
         infer.merge_return(targets)?;
     }
-    let callable_result = matches!(result_view, Term::Function { .. } | Term::UnsafeFunction(_));
+    let callable_result = matches!(
+        result_view,
+        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+    );
     if completes
         && callable_result
         && matches!(
             body_completion,
-            Term::Function { .. } | Term::UnsafeFunction(_)
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
         )
     {
         let key = infer.callee_key(&function.body)?;
@@ -10849,7 +10894,7 @@ pub(crate) fn infer_argument_full_context<'a>(
     if !intrinsic_pointer_value(&expression.ty)
         && !matches!(
             expression.ty,
-            Term::Function { .. } | Term::UnsafeFunction(_)
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
         )
         && expression.ty != Term::Primitive(Primitive::Void)
         && layout_cache
@@ -12060,12 +12105,13 @@ fn infer_closure_pass(
             .ok_or("closure memory callable premise names an unknown capture")?;
         let capture_ty = infer.ty(&capture.ty)?;
         let expected = owned_path_type(Some(package), &capture_ty, &place.fields, infer.fuel)?;
-        if !matches!(expected, Term::Function { .. } | Term::UnsafeFunction(_))
-            || !matches!(
-                callable,
-                CallableResult::Known(_) | CallableResult::Candidates(_)
-            )
-            || callable.keys().is_empty()
+        if !matches!(
+            expected,
+            Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+        ) || !matches!(
+            callable,
+            CallableResult::Known(_) | CallableResult::Candidates(_)
+        ) || callable.keys().is_empty()
         {
             return Err("closure memory callable premise requires named code identities".into());
         }
@@ -12099,7 +12145,11 @@ fn infer_closure_pass(
             let signature = substitution
                 .instantiate_bounded(&function.signature, infer.fuel)
                 .map_err(|error| error.to_string())?;
-            let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
+            let signature = signature
+                .with_unsafe_call_requirement(function.is_unsafe)
+                .with_pure_qualifier(
+                    expected.is_pure_callable() && function.pure && !function.is_unsafe,
+                );
             if signature != expected {
                 return Err("closure memory callable signature disagrees with capture".into());
             }
@@ -12120,7 +12170,10 @@ fn infer_closure_pass(
             if !place.fields.contains(&VARIANT_FIELD)
                 || !matches!(
                     leaf,
-                    Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
+                    Term::Function { .. }
+                        | Term::UnsafeFunction(_)
+                        | Term::PureFunction(_)
+                        | Term::Closure { .. }
                 )
             {
                 return Err(

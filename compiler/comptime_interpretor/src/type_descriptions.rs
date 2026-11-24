@@ -443,7 +443,8 @@ pub(super) fn inspect<'signature>(
             | Term::Lift(_)
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
-            | Term::UnsafeFunction(_) => 1,
+            | Term::UnsafeFunction(_)
+            | Term::PureFunction(_) => 1,
             _ => 0,
         };
         if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
@@ -659,7 +660,8 @@ pub(super) fn inspect<'signature>(
             | Term::Lift(inner)
             | Term::ComptimeFunction(inner)
             | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push(Work::Visit(inner, depth + 1)),
+            | Term::UnsafeFunction(inner)
+            | Term::PureFunction(inner) => pending.push(Work::Visit(inner, depth + 1)),
             Term::Function { parameters, result } => {
                 scope.enter();
                 pending.push(Work::Parameter {

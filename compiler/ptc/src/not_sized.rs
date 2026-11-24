@@ -73,7 +73,9 @@ fn evaluate_at(
                 NotSizedStatus::Known(false)
             }
         }
-        Term::UnsafeFunction(inner) => evaluate_at(inner, constructors, list_heads, depth + 1),
+        Term::UnsafeFunction(inner) | Term::PureFunction(inner) => {
+            evaluate_at(inner, constructors, list_heads, depth + 1)
+        }
         Term::Closure {
             environment,
             signature,

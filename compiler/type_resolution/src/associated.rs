@@ -1194,6 +1194,9 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
             Term::UnsafeFunction(inner) => {
                 Term::UnsafeFunction(Box::new(self.normalize(inner, depth + 1)?))
             }
+            Term::PureFunction(inner) => {
+                Term::PureFunction(Box::new(self.normalize(inner, depth + 1)?))
+            }
             Term::Function { parameters, result } => {
                 if parameters.len() > self.remaining {
                     return Err(QueryError::Budget);

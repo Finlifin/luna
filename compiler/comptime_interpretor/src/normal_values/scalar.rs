@@ -93,7 +93,10 @@ impl Interpreter<'_> {
                 ty,
             ) if matches!(
                 ty,
-                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                Term::Function { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::UnsafeFunction(_)
+                    | Term::PureFunction(_)
             ) =>
             {
                 if self.graph.is_some() {
@@ -113,6 +116,7 @@ impl Interpreter<'_> {
                         || (function.phase == nir::program::FunctionPhase::Comptime)
                             != ty.is_comptime_callable()
                         || function.is_unsafe != ty.is_unsafe_callable()
+                        || (!function.pure && ty.is_pure_callable())
                     {
                         return Err(self.failure(ErrorKind::Type, None));
                     }

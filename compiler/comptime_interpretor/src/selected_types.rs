@@ -361,6 +361,9 @@ fn walk<'p, L: Lookup<'p>>(
         Term::UnsafeFunction(inner) => {
             Term::UnsafeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
         }
+        Term::PureFunction(inner) => {
+            Term::PureFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
+        }
         Term::Closure {
             environment,
             signature,

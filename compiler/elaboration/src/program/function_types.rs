@@ -185,11 +185,14 @@ impl Checker<'_, '_> {
         output: Option<&Expr<'hir>>,
         span: Span,
     ) -> Result<Term, Error> {
-        if modifiers.is_pure || modifiers.is_inline || modifiers.is_spec || modifiers.is_verified {
+        if modifiers.is_inline || modifiers.is_spec || modifiers.is_verified {
             return Err(error(
                 span,
                 "modified function type admission and compatibility are not implemented",
             ));
+        }
+        if modifiers.is_pure && modifiers.is_unsafe {
+            return Err(error(span, "pure function type cannot be unsafe"));
         }
         let phase = if modifiers.is_comptime {
             n::FunctionPhase::Comptime
@@ -199,6 +202,8 @@ impl Checker<'_, '_> {
         let signature = self.form_callable_type(inputs, output, phase, span)?;
         Ok(if modifiers.is_unsafe {
             Term::UnsafeFunction(Box::new(signature))
+        } else if modifiers.is_pure {
+            Term::PureFunction(Box::new(signature))
         } else {
             signature
         })

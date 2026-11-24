@@ -872,8 +872,10 @@ fn ensure_nonpointer_env_copy(
     } else if !matches!(
         ty,
         Term::Primitive(p) if *p != nir::Primitive::Never
-    ) && !matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
-    {
+    ) && !matches!(
+        ty,
+        Term::Function { .. } | Term::UnsafeFunction(_) | Term::PureFunction(_)
+    ) {
         return Err(
             "Drop non-pointer runtime environment handle requires verified Copy permission".into(),
         );

@@ -238,7 +238,8 @@ impl Checker<'_, '_> {
         for entry in bindings {
             let ty = self.type_expr(entry.ty)?;
             if ty == p(P::Type)
-                || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
+                || ty.is_comptime_callable()
+                || matches!(ty, Term::NormalFormFunction(..))
             {
                 return Err(error(
                     entry.name.span,
@@ -257,10 +258,8 @@ impl Checker<'_, '_> {
         }
         let result = self.code_domain_or_any_type_expr(result)?;
         if result == p(P::Type)
-            || matches!(
-                result,
-                Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
-            )
+            || result.is_comptime_callable()
+            || matches!(result, Term::NormalFormFunction(..))
         {
             return Err(error(
                 annotation.span,
@@ -596,7 +595,8 @@ impl Checker<'_, '_> {
                 )
             })?;
             if *ty == p(P::Type)
-                || matches!(ty, Term::ComptimeFunction(_) | Term::NormalFormFunction(..))
+                || ty.is_comptime_callable()
+                || matches!(ty, Term::NormalFormFunction(..))
                 || self.input_facts.has_identity(&id)
             {
                 return Err(error(

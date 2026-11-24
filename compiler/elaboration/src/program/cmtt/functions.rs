@@ -177,7 +177,7 @@ impl Checker<'_, '_> {
             )
         })?;
         if ty == p(P::Type)
-            || matches!(ty, Term::ComptimeFunction(_))
+            || ty.is_comptime_callable()
             || ty.is_normal_form_callable()
             || matches!(ty, Term::Primitive(P::Integer | P::Float))
         {
