@@ -81,6 +81,10 @@ pub(super) fn closed_type(term: &Term, nominal: &NominalConstructors) -> bool {
                 .iter()
                 .all(|argument| model_applications::closed_argument(argument, nominal));
     }
+    if let Term::Record(fields) = term {
+        // Records with at most one field have no field-permutation ambiguity.
+        return fields.len() <= 1 && fields.iter().all(|(_, ty)| closed_type(ty, nominal));
+    }
     constructor(term).is_some()
         && !matches!(term, Term::Primitive(Primitive::Unit))
         && subterms(term)

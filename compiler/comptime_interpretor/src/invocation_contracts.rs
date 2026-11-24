@@ -126,12 +126,12 @@ impl Interpreter<'_> {
                     .map_err(|_| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
             };
         match predicate {
-            P::Bool(_) => Ok(()),
+            P::Bool(_) | P::IntLe(..) => Ok(()),
             P::Equal(a, b) => {
                 rebind(a)?;
                 rebind(b)
             }
-            P::Kind(ty, _) => rebind(ty),
+            P::Kind(ty, _) | P::NotSized(ty) => rebind(ty),
             P::Trait(requirement) => {
                 rebind(&mut requirement.subject)?;
                 requirement
@@ -156,10 +156,10 @@ pub(super) fn formation_capability_is_closed(requirement: &nir::program::TraitRe
 pub(super) fn formation_predicate_is_closed(predicate: &nir::program::TypePredicate) -> bool {
     use nir::program::TypePredicate as P;
     match predicate {
-        P::Bool(_) => true,
+        P::Bool(_) | P::IntLe(..) => true,
         P::Trait(requirement) => formation_capability_is_closed(requirement),
         P::Equal(left, right) => left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok(),
-        P::Kind(ty, _) => ty.check_scope(&[]).is_ok(),
+        P::Kind(ty, _) | P::NotSized(ty) => ty.check_scope(&[]).is_ok(),
         P::Not(inner) => formation_predicate_is_closed(inner),
         P::And(parts) | P::Or(parts) => parts.iter().all(formation_predicate_is_closed),
     }

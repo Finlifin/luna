@@ -18,7 +18,9 @@ impl Interpreter<'_> {
         }
         match predicate {
             P::Kind(ty, kind) => return Ok(self.published_kind(ty, *kind).map(P::Bool)),
-            P::Bool(_) | P::Equal(..) | P::Trait(_) => return Ok(None),
+            P::Bool(_) | P::Equal(..) | P::IntLe(..) | P::NotSized(_) | P::Trait(_) => {
+                return Ok(None);
+            }
             P::Not(_) | P::And(_) | P::Or(_) => {}
         }
         self.charge_copy_work(None, |fuel| {
@@ -38,7 +40,7 @@ impl Interpreter<'_> {
                         fold(vm, item);
                     }
                 }
-                P::Bool(_) | P::Equal(..) | P::Trait(_) => {}
+                P::Bool(_) | P::Equal(..) | P::IntLe(..) | P::NotSized(_) | P::Trait(_) => {}
             }
         }
         let mut local = predicate.clone();
@@ -101,6 +103,11 @@ impl Interpreter<'_> {
                     None => Unknown,
                 }
             }
+            P::IntLe(..) => match predicate.trivial_truth() {
+                Some(true) => Satisfied,
+                Some(false) => Rejected,
+                None => Unknown,
+            },
             P::Kind(ty, kind) => {
                 self.charge_copy_work(None, |fuel| {
                     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
@@ -111,6 +118,13 @@ impl Interpreter<'_> {
                     Some(false) => Rejected,
                     None => Unknown,
                 }
+            }
+            P::NotSized(ty) => {
+                self.charge_copy_work(None, |fuel| {
+                    nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
+                })
+                .map_err(|error| error.kind)?;
+                Unknown
             }
             P::Trait(requirement) => {
                 // A source declaration catalog is not a proof of applicability. Only

@@ -10,8 +10,11 @@ use std::fmt;
 use std::sync::Arc;
 
 mod parameter_substitution;
+
 pub(crate) use parameter_substitution::ParameterSubstitution;
+
 mod input_binding;
+
 pub use input_binding::{
     FunctionCallBinding, FunctionCallPreparation, FunctionInputBinding, FunctionInputBuilder,
 };
@@ -163,12 +166,16 @@ impl fmt::Display for NominalKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TypeKind {
     Boolean,
+    Char,
     Symbol,
     Integer,
     SignedInteger,
     UnsignedInteger,
     FloatingPoint,
     Nominal(NominalKind),
+    Record,
+    Union,
+    Module,
     Tuple,
     Pointer,
     Function,
@@ -225,6 +232,7 @@ impl TypeKind {
     pub fn evaluate(self, ty: &Term) -> Option<bool> {
         let actual = match ty {
             Term::Primitive(Primitive::Bool) => Self::Boolean,
+            Term::Primitive(Primitive::Char) => Self::Char,
             Term::Primitive(Primitive::Symbol) => Self::Symbol,
             Term::Primitive(
                 Primitive::I8
@@ -258,7 +266,8 @@ impl TypeKind {
             Term::Primitive(Primitive::Unit) => return None, // legacy representation
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
-            Term::Optional(_) | Term::Lift(_) | Term::ErrorResult { .. } | Term::Record(_) => {
+            Term::Record(_) => Self::Record,
+            Term::Optional(_) | Term::Lift(_) | Term::ErrorResult { .. } => {
                 return Some(false);
             }
             Term::Pointer(_) => Self::Pointer,
@@ -278,16 +287,94 @@ impl fmt::Display for TypeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Boolean => "boolean",
+            Self::Char => "char",
             Self::Symbol => "symbol",
             Self::Integer => "integer",
             Self::SignedInteger => "signed-integer",
             Self::UnsignedInteger => "unsigned-integer",
             Self::FloatingPoint => "floating-point",
             Self::Nominal(kind) => return kind.fmt(f),
+            Self::Record => "record",
+            Self::Union => "union",
+            Self::Module => "module",
             Self::Tuple => "tuple",
             Self::Pointer => "pointer",
             Self::Function => "function",
         })
+    }
+}
+
+/// Mathematical integer difference term (`variable + offset` or `offset`).
+/// `i128` is an implementation capacity, never a machine-integer truncation rule.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IntegerTerm {
+    pub variable: Option<DeclarationId>,
+    pub offset: i128,
+}
+
+impl IntegerTerm {
+    pub fn constant(value: i128) -> Self {
+        Self {
+            variable: None,
+            offset: value,
+        }
+    }
+
+    pub fn variable(variable: DeclarationId, offset: i128) -> Self {
+        Self {
+            variable: Some(variable),
+            offset,
+        }
+    }
+
+    pub fn evaluate(&self, values: &BTreeMap<DeclarationId, i128>) -> Option<i128> {
+        let base = match self.variable {
+            Some(id) => *values.get(&id)?,
+            None => 0,
+        };
+        base.checked_add(self.offset)
+    }
+
+    pub fn try_map_rigid<E>(
+        &self,
+        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+        unrepresentable: impl FnOnce() -> E,
+    ) -> Result<Self, E> {
+        let Some(declaration) = self.variable else {
+            return Ok(self.clone());
+        };
+        let mapped = transform(&Term::Rigid {
+            declaration,
+            sort: Sort::ComptimeValue,
+        })?;
+        match mapped {
+            Term::Rigid {
+                declaration,
+                sort: Sort::ComptimeValue,
+            } => Ok(Self {
+                variable: Some(declaration),
+                offset: self.offset,
+            }),
+            Term::Integer(value) => value
+                .to_i128()
+                .ok()
+                .and_then(|v| self.offset.checked_add(v))
+                .map(|offset| Self {
+                    variable: None,
+                    offset,
+                })
+                .ok_or_else(unrepresentable),
+            _ => Err(unrepresentable()),
+        }
+    }
+}
+
+impl fmt::Display for IntegerTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.variable {
+            Some(id) => write!(f, "(int-offset {id} {})", self.offset),
+            None => write!(f, "(integer {})", self.offset),
+        }
     }
 }
 
@@ -304,6 +391,7 @@ pub struct DeclarationParameter {
     pub declaration: DeclarationId,
     pub sort: Sort,
 }
+
 impl DeclarationParameter {
     /// The binder's declared sort precedes any substitution at a call site.
     pub fn comptime(declaration: DeclarationId, domain: &Term) -> Self {
@@ -323,6 +411,7 @@ impl fmt::Display for DeclarationParameter {
         )
     }
 }
+
 pub(crate) fn declaration_parameter_indices(
     parameters: impl IntoIterator<Item = DeclarationParameter>,
 ) -> Result<std::collections::BTreeMap<DeclarationId, (usize, Sort)>, TypeError> {
@@ -678,6 +767,7 @@ impl Term {
         collect_runtime_dependencies(self, &mut result);
         result
     }
+
     /// Release an owned IR tree without using the host call stack for children.
     /// Useful after rejecting untrusted/deep input. This is compiler-memory
     /// disposal, not execution of a source-language Drop implementation.
@@ -829,6 +919,7 @@ impl Term {
             }
         })
     }
+
     fn list_element_domain(&self) -> Option<&Term> {
         match self {
             Self::NormalForm {
@@ -842,6 +933,7 @@ impl Term {
             _ => None,
         }
     }
+
     fn is_list_component(&self, domain: &Term) -> bool {
         let Some(element) = domain.list_element_domain() else {
             return false;
@@ -878,6 +970,7 @@ impl Term {
             _ => false,
         }
     }
+
     /// Empty qualification disappears; adjacent effect prefixes concatenate.
     /// Do not deduplicate occurrences or reorder labels without evidence.
     pub fn computation(mut effects: Vec<crate::effects::Operation>, mut result: Term) -> Term {
@@ -898,6 +991,7 @@ impl Term {
             }
         }
     }
+
     /// The parameter/result binder, without erasing the identity of this type.
     pub fn callable_signature(&self) -> &Term {
         match self {
@@ -910,6 +1004,7 @@ impl Term {
             _ => self,
         }
     }
+
     /// Move the parameter/result telescope out of a selected callable view.
     /// Call formation retains the original callable separately for delivery.
     pub fn into_callable_signature(mut self) -> Self {
@@ -935,6 +1030,7 @@ impl Term {
             _ => false,
         }
     }
+
     pub fn is_normal_form_callable(&self) -> bool {
         match self {
             Self::NormalFormFunction(..) => true,
@@ -944,6 +1040,7 @@ impl Term {
             _ => false,
         }
     }
+
     pub fn is_unsafe_callable(&self) -> bool {
         match self {
             Self::UnsafeFunction(_) => true,
@@ -953,6 +1050,7 @@ impl Term {
             _ => false,
         }
     }
+
     pub fn with_comptime_phase(self, comptime: bool) -> Term {
         if let Self::UnsafeFunction(signature) = self {
             return Self::UnsafeFunction(Box::new(signature.with_comptime_phase(comptime)));
@@ -1446,6 +1544,7 @@ impl Term {
             .collect();
         self.abstract_parameters(&parameters)
     }
+
     /// Instantiate only the listed rigid Type parameters. Inputs are closed in
     /// the caller scope; unrelated rigid parameters and normal-form heads stay.
     pub fn instantiate_types(
@@ -1761,6 +1860,7 @@ pub enum TypeError {
     InvalidUnsafeFunctionSignature,
     InvalidFunctionSignature,
     InvalidListComponent,
+    InvalidIntegerTerm,
 }
 
 impl fmt::Display for TypeError {
@@ -1816,9 +1916,13 @@ impl fmt::Display for TypeError {
             Self::InvalidClosureSignature => {
                 f.write_str("closure signature must be a function type")
             }
+            Self::InvalidIntegerTerm => {
+                f.write_str("integer difference term cannot be represented in i128 after substitution")
+            }
         }
     }
 }
+
 impl std::error::Error for TypeError {}
 
 pub(crate) fn require_sort(term: &Term, expected: Sort) -> Result<(), TypeError> {
@@ -1842,6 +1946,7 @@ impl TypeCore {
     pub fn holes(&self) -> &[Parameter] {
         &self.holes
     }
+
     pub fn body(&self) -> &Term {
         &self.body
     }
@@ -1974,6 +2079,7 @@ impl TypeInterner {
     pub fn len(&self) -> usize {
         self.cores.len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.cores.is_empty()
     }
@@ -2027,6 +2133,7 @@ impl TypeRef {
     pub fn core(&self) -> &Arc<TypeCore> {
         &self.core
     }
+
     pub fn arguments(&self) -> &[Term] {
         &self.arguments
     }
@@ -2554,6 +2661,7 @@ impl fmt::Display for Sort {
         })
     }
 }
+
 impl fmt::Display for Primitive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -2588,6 +2696,7 @@ impl fmt::Display for Primitive {
         })
     }
 }
+
 impl fmt::Display for DeclarationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2597,6 +2706,7 @@ impl fmt::Display for DeclarationId {
         )
     }
 }
+
 impl fmt::Display for RuntimeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2606,6 +2716,7 @@ impl fmt::Display for RuntimeId {
         )
     }
 }
+
 fn list(f: &mut fmt::Formatter<'_>, items: &[impl fmt::Display]) -> fmt::Result {
     f.write_str("(")?;
     for (index, item) in items.iter().enumerate() {
@@ -2616,11 +2727,13 @@ fn list(f: &mut fmt::Formatter<'_>, items: &[impl fmt::Display]) -> fmt::Result 
     }
     f.write_str(")")
 }
+
 impl fmt::Display for Parameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(parameter (sort {}) (type {}))", self.sort, self.ty)
     }
 }
+
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2848,6 +2961,7 @@ impl fmt::Display for AssociatedTypeOrigin {
         )
     }
 }
+
 impl fmt::Display for TypeCore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(type-core (holes ")?;
@@ -2855,6 +2969,7 @@ impl fmt::Display for TypeCore {
         write!(f, ") (body {}))", self.body)
     }
 }
+
 impl fmt::Display for TypeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(type-ref (core {}) (substitution ", self.core)?;

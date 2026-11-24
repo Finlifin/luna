@@ -155,18 +155,22 @@ impl Checker<'_, '_> {
 
     fn parse_type_predicate_kind(name: &str) -> Option<nir::TypeKind> {
         Some(match name {
-            "is_boolean" => nir::TypeKind::Boolean,
+            "is_bool" | "is_boolean" => nir::TypeKind::Boolean,
+            "is_char" => nir::TypeKind::Char,
             "is_symbol" => nir::TypeKind::Symbol,
-            "is_integer" => nir::TypeKind::Integer,
-            "is_signed_integer" => nir::TypeKind::SignedInteger,
-            "is_unsigned_integer" => nir::TypeKind::UnsignedInteger,
-            "is_floating_point" => nir::TypeKind::FloatingPoint,
+            "is_int" | "is_integer" => nir::TypeKind::Integer,
+            "is_signed_int" | "is_signed_integer" => nir::TypeKind::SignedInteger,
+            "is_unsigned_int" | "is_unsigned_integer" => nir::TypeKind::UnsignedInteger,
+            "is_float" | "is_floating_point" => nir::TypeKind::FloatingPoint,
             "is_struct" => nir::TypeKind::Nominal(nir::NominalKind::Struct),
             "is_enum" => nir::TypeKind::Nominal(nir::NominalKind::Enum),
             "is_newtype" => nir::TypeKind::Nominal(nir::NominalKind::Newtype),
+            "is_record" => nir::TypeKind::Record,
+            "is_union" => nir::TypeKind::Union,
+            "is_module" => nir::TypeKind::Module,
             "is_tuple" => nir::TypeKind::Tuple,
             "is_pointer" => nir::TypeKind::Pointer,
-            "is_function" => nir::TypeKind::Function,
+            "is_fn" | "is_function" => nir::TypeKind::Function,
             _ => return None,
         })
     }
@@ -213,6 +217,9 @@ impl Checker<'_, '_> {
         if !self.is_metatype_namespace_receiver(base)? {
             return Ok(None);
         }
+        if pred_name.name.as_str() == "is_not_sized" {
+            return Ok(None);
+        }
         let Some(kind) = Self::parse_type_predicate_kind(pred_name.name.as_str()) else {
             return Err(error(
                 pred_name.span,
@@ -229,6 +236,155 @@ impl Checker<'_, '_> {
             ));
         };
         Ok(Some((kind, *arg)))
+    }
+
+    pub(super) fn syntactic_type_predicate_not_sized_with<'h>(
+        expr: &Expr<'h>,
+        is_metatype: &impl Fn(&Expr<'_>) -> bool,
+    ) -> Option<&'h Expr<'h>> {
+        let H::Application(callee, args) = &expr.kind else {
+            return None;
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return None;
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return None;
+        };
+        if namespace.name.as_str() != "predicates"
+            || pred_name.name.as_str() != "is_not_sized"
+            || !is_metatype(base)
+        {
+            return None;
+        }
+        let [Arg::Positional(arg)] = *args else {
+            return None;
+        };
+        Some(*arg)
+    }
+
+    pub(super) fn type_predicate_not_sized_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<&'h Expr<'h>>, Error> {
+        let H::Application(callee, args) = &expr.kind else {
+            return Ok(None);
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return Ok(None);
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return Ok(None);
+        };
+        if namespace.name.as_str() != "predicates" || pred_name.name.as_str() != "is_not_sized" {
+            return Ok(None);
+        }
+        if !self.is_metatype_namespace_receiver(base)? {
+            return Ok(None);
+        }
+        let [Arg::Positional(arg)] = *args else {
+            return Err(error(
+                expr.span,
+                "Type.predicates.is_not_sized requires exactly one positional Type argument",
+            ));
+        };
+        Ok(Some(*arg))
+    }
+
+    /// Parse a mathematical `Integer` difference term (`x + c` or `c`) for PTC A12 `IntLe`.
+    /// Machine integer parameters and runtime expressions are strictly excluded.
+    pub(super) fn parse_ptc_integer_term(
+        &self,
+        expr: &Expr<'_>,
+        depth: usize,
+    ) -> Option<nir::IntegerTerm> {
+        if depth >= 64 {
+            return None;
+        }
+        match &expr.kind {
+            H::Lit(hir::Lit {
+                kind: hir::LitKind::Integer(spelling),
+                ..
+            }) => {
+                let mut budget = comptime_runtime::Budget::default();
+                let value = comptime_runtime::Integer::parse_literal(spelling, &mut budget)
+                    .ok()?
+                    .to_i128()
+                    .ok()?;
+                Some(nir::IntegerTerm::constant(value))
+            }
+            H::Unary(UnOp::Neg, inner) => {
+                let inner = self.parse_ptc_integer_term(inner, depth + 1)?;
+                if inner.variable.is_some() {
+                    return None;
+                }
+                inner.offset.checked_neg().map(nir::IntegerTerm::constant)
+            }
+            H::ResolvedClauseParam(_, id) => {
+                let declaration = DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                };
+                if self.trait_input_domain(declaration) == Some(p(P::Integer)) {
+                    Some(nir::IntegerTerm::variable(declaration, 0))
+                } else {
+                    None
+                }
+            }
+            H::Binary(BinOp::Add, left, right) => {
+                let left = self.parse_ptc_integer_term(left, depth + 1)?;
+                let right = self.parse_ptc_integer_term(right, depth + 1)?;
+                let variable = match (left.variable, right.variable) {
+                    (None, None) => None,
+                    (Some(id), None) | (None, Some(id)) => Some(id),
+                    (Some(_), Some(_)) => return None,
+                };
+                let offset = left.offset.checked_add(right.offset)?;
+                Some(nir::IntegerTerm { variable, offset })
+            }
+            H::Binary(BinOp::Sub, left, right) => {
+                let left = self.parse_ptc_integer_term(left, depth + 1)?;
+                let right = self.parse_ptc_integer_term(right, depth + 1)?;
+                let variable = match (left.variable, right.variable) {
+                    (None, None) => None,
+                    (Some(id), None) => Some(id),
+                    (Some(a), Some(b)) if a == b => None,
+                    _ => return None,
+                };
+                let offset = left.offset.checked_sub(right.offset)?;
+                Some(nir::IntegerTerm { variable, offset })
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn ptc_integer_comparison(&self, expr: &Expr<'_>) -> Option<n::TypePredicate> {
+        let H::Binary(op, left, right) = &expr.kind else {
+            return None;
+        };
+        if !matches!(
+            op,
+            BinOp::Le | BinOp::Lt | BinOp::Ge | BinOp::Gt | BinOp::Eq | BinOp::Ne
+        ) {
+            return None;
+        }
+        let a = self.parse_ptc_integer_term(left, 0)?;
+        let b = self.parse_ptc_integer_term(right, 0)?;
+        Some(match op {
+            BinOp::Le => n::TypePredicate::IntLe(a, b),
+            BinOp::Ge => n::TypePredicate::IntLe(b, a),
+            BinOp::Lt => n::TypePredicate::Not(Box::new(n::TypePredicate::IntLe(b, a))),
+            BinOp::Gt => n::TypePredicate::Not(Box::new(n::TypePredicate::IntLe(a, b))),
+            BinOp::Eq => n::TypePredicate::And(vec![
+                n::TypePredicate::IntLe(a.clone(), b.clone()),
+                n::TypePredicate::IntLe(b, a),
+            ]),
+            BinOp::Ne => n::TypePredicate::Not(Box::new(n::TypePredicate::And(vec![
+                n::TypePredicate::IntLe(a.clone(), b.clone()),
+                n::TypePredicate::IntLe(b, a),
+            ]))),
+            _ => unreachable!(),
+        })
     }
 
     pub(super) fn type_layout_query_call<'h>(

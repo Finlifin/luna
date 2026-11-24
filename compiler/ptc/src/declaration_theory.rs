@@ -15,6 +15,8 @@ pub struct DeclarationTheory {
     pub(super) formed_nominals: nir::program::FormedNullaryNominals,
     /// Trusted List domain and candidate metadata; never a solver injectivity rule.
     pub(super) list_inference_heads: Arc<BTreeSet<DeclarationId>>,
+    /// Nullary nominal field summaries awaiting dependent sized-nominal promotion.
+    pending_sized_nominals: Arc<Vec<(DeclarationId, Vec<nir::Term>)>>,
 }
 
 /// Constructor rules used by proof search and replay. List inference hints
@@ -25,6 +27,10 @@ pub struct ConstructorContracts {
     pub nominal_constructors: Arc<NominalConstructors>,
     /// Trusted Tuple classification/layout contracts; never body equations.
     pub tuple_heads: Arc<BTreeSet<DeclarationId>>,
+    /// Unconditional nullary nominal declarations with verified fixed runtime size.
+    pub sized_nominals: Arc<BTreeSet<DeclarationId>>,
+    /// Unconditional nullary nominal declarations containing comptime-only fields.
+    pub comptime_only_nominals: Arc<BTreeSet<DeclarationId>>,
 }
 
 impl ConstructorContracts {
@@ -32,6 +38,11 @@ impl ConstructorContracts {
         for (current, recorded) in [
             (&self.congruence_heads, &recorded.congruence_heads),
             (&self.tuple_heads, &recorded.tuple_heads),
+            (&self.sized_nominals, &recorded.sized_nominals),
+            (
+                &self.comptime_only_nominals,
+                &recorded.comptime_only_nominals,
+            ),
         ] {
             if Arc::ptr_eq(current, recorded) {
                 continue;
@@ -113,6 +124,49 @@ impl DeclarationTheory {
                 .ok_or(nir::normal_forms::ValidationError::Budget)?;
             theory.admit_normal_form_head(head.declaration, head.role);
         }
+        // Compute fixed-point nullary sized nominals so nested structs/newtypes
+        // (e.g. `InstructionOperands` containing `RegisterId`) are recognized.
+        let declarations: Vec<D<'_>> = package
+            .structs
+            .iter()
+            .map(D::Struct)
+            .chain(package.enums.iter().map(D::Enum))
+            .chain(package.newtypes.iter().map(D::Newtype))
+            .filter(|def| def.is_unconditional_nullary())
+            .collect();
+        loop {
+            let mut changed = false;
+            for &definition in &declarations {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::normal_forms::ValidationError::Budget)?;
+                let (_, id) = definition.identity();
+                if theory.constructors.sized_nominals.contains(&id)
+                    || theory.constructors.comptime_only_nominals.contains(&id)
+                {
+                    continue;
+                }
+                match crate::not_sized::evaluate_definition(
+                    definition,
+                    &theory.constructors,
+                    &theory.list_inference_heads,
+                ) {
+                    crate::not_sized::NotSizedStatus::Known(false) => {
+                        Arc::make_mut(&mut theory.constructors.sized_nominals).insert(id);
+                        changed = true;
+                    }
+                    crate::not_sized::NotSizedStatus::InvalidRepresentation(_) => {
+                        Arc::make_mut(&mut theory.constructors.comptime_only_nominals).insert(id);
+                        changed = true;
+                    }
+                    crate::not_sized::NotSizedStatus::Known(true)
+                    | crate::not_sized::NotSizedStatus::Unknown => {}
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         Ok(theory)
     }
 
@@ -123,9 +177,60 @@ impl DeclarationTheory {
             Role::Opaque => {}
             Role::TypeList => {
                 Arc::make_mut(&mut self.list_inference_heads).insert(head);
+                self.promote_pending_sized_nominals();
             }
             Role::Tuple => {
                 Arc::make_mut(&mut self.constructors.tuple_heads).insert(head);
+                self.promote_pending_sized_nominals();
+            }
+        }
+    }
+
+    fn promote_pending_sized_nominals(&mut self) {
+        if self.pending_sized_nominals.is_empty() {
+            return;
+        }
+        loop {
+            let mut promoted = Vec::new();
+            for (index, (id, fields)) in self.pending_sized_nominals.iter().enumerate() {
+                if self.constructors.sized_nominals.contains(id)
+                    || self.constructors.comptime_only_nominals.contains(id)
+                {
+                    promoted.push((index, *id, None));
+                } else {
+                    match crate::not_sized::evaluate_fields(
+                        fields,
+                        &self.constructors,
+                        &self.list_inference_heads,
+                    ) {
+                        crate::not_sized::NotSizedStatus::Known(false) => {
+                            promoted.push((index, *id, Some(false)));
+                        }
+                        crate::not_sized::NotSizedStatus::InvalidRepresentation(_) => {
+                            promoted.push((index, *id, Some(true)));
+                        }
+                        crate::not_sized::NotSizedStatus::Known(true)
+                        | crate::not_sized::NotSizedStatus::Unknown => {}
+                    }
+                }
+            }
+            if promoted.is_empty() {
+                break;
+            }
+            for &(_, id, kind) in &promoted {
+                match kind {
+                    Some(false) => {
+                        Arc::make_mut(&mut self.constructors.sized_nominals).insert(id);
+                    }
+                    Some(true) => {
+                        Arc::make_mut(&mut self.constructors.comptime_only_nominals).insert(id);
+                    }
+                    None => {}
+                }
+            }
+            let pending = Arc::make_mut(&mut self.pending_sized_nominals);
+            for (index, _, _) in promoted.into_iter().rev() {
+                pending.swap_remove(index);
             }
         }
     }
@@ -148,6 +253,34 @@ impl Context {
         let (kind, id) = definition.identity();
         self.admit_nominal_kind(id, kind);
         self.theory.formed_nominals.admit_checked(definition);
+        match crate::not_sized::evaluate_definition(
+            definition,
+            &self.theory.constructors,
+            &self.theory.list_inference_heads,
+        ) {
+            crate::not_sized::NotSizedStatus::Known(false) => self.admit_nominal_sized(id),
+            crate::not_sized::NotSizedStatus::InvalidRepresentation(_) => {
+                self.admit_nominal_comptime_only(id)
+            }
+            crate::not_sized::NotSizedStatus::Known(true)
+            | crate::not_sized::NotSizedStatus::Unknown => {
+                if let Some(fields) = crate::not_sized::nullary_definition_fields(definition) {
+                    Arc::make_mut(&mut self.theory.pending_sized_nominals).push((id, fields));
+                }
+            }
+        }
+    }
+
+    /// Record that a nullary nominal declaration has a verified fixed runtime size.
+    pub fn admit_nominal_sized(&mut self, declaration: DeclarationId) {
+        Arc::make_mut(&mut self.theory.constructors.sized_nominals).insert(declaration);
+        self.theory.promote_pending_sized_nominals();
+    }
+
+    /// Record that a nullary nominal declaration is comptime-only and has no runtime layout.
+    pub fn admit_nominal_comptime_only(&mut self, declaration: DeclarationId) {
+        Arc::make_mut(&mut self.theory.constructors.comptime_only_nominals).insert(declaration);
+        self.theory.promote_pending_sized_nominals();
     }
 
     pub fn formed_nullary_nominals(&self) -> &nir::program::FormedNullaryNominals {
@@ -181,6 +314,7 @@ fn write_group(
     }
     f.write_str(")")
 }
+
 impl fmt::Display for ConstructorContracts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(constructor-contracts")?;
@@ -195,6 +329,8 @@ impl fmt::Display for ConstructorContracts {
         }
         f.write_str(")")?;
         write_group(f, "tuple-heads", &self.tuple_heads)?;
+        write_group(f, "sized-nominals", &self.sized_nominals)?;
+        write_group(f, "comptime-only-nominals", &self.comptime_only_nominals)?;
         f.write_str(")")
     }
 }

@@ -2,12 +2,16 @@
 //! demand missing selections through the frozen compiler world; normal-form
 //! heads remain opaque and initialized Type observations stay query-local.
 use super::*;
+
 #[cfg(test)]
 mod observation_tests;
+
 type Values<'a> = associated_catalog::Catalog<'a>;
 
 type Key = (InterfaceInstance, Term, DeclarationId);
+
 mod projection;
+
 use projection::{Lookup, Observation};
 
 impl Interpreter<'_> {
@@ -58,6 +62,7 @@ pub(super) fn same(
     }
     Ok(view(a, values, fuel)? == view(b, values, fuel)?)
 }
+
 /// Structural identity before selection, including the cost of traversing both terms.
 pub(super) fn identical(a: &Term, b: &Term, fuel: &mut usize) -> Result<bool, ErrorKind> {
     charge_copy(a, fuel)?;
@@ -68,12 +73,14 @@ pub(super) fn identical(a: &Term, b: &Term, fuel: &mut usize) -> Result<bool, Er
 pub(super) fn view(ty: &Term, values: &Values<'_>, fuel: &mut usize) -> Result<Term, ErrorKind> {
     normalize(ty, values, fuel, 0)
 }
+
 fn charge_copy(ty: &Term, fuel: &mut usize) -> Result<(), ErrorKind> {
     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel).map_err(|error| match error {
         nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
         nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
     })
 }
+
 pub(super) fn predicate(
     input: &nir::program::TypePredicate,
     values: &Values<'_>,
@@ -105,7 +112,9 @@ pub(super) fn predicate(
             normalize(a, values, fuel, depth + 1)?,
             normalize(b, values, fuel, depth + 1)?,
         ),
+        P::IntLe(a, b) => P::IntLe(a.clone(), b.clone()),
         P::Kind(ty, kind) => P::Kind(normalize(ty, values, fuel, depth + 1)?, *kind),
+        P::NotSized(ty) => P::NotSized(normalize(ty, values, fuel, depth + 1)?),
         P::Not(inner) => P::Not(Box::new(predicate(inner, values, fuel, depth + 1)?)),
         P::And(items) | P::Or(items) => {
             if items.len() > *fuel {
@@ -407,6 +416,7 @@ mod tests {
     fn view(ty: &Term, values: &Values<'_>) -> Result<Term, ErrorKind> {
         super::view(ty, values, &mut 100_000)
     }
+
     fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
         super::same(a, b, values, &mut 100_000).unwrap()
     }
@@ -521,6 +531,7 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::UnmaterializedDispatch);
         assert_eq!(error.source, Some(expression.source));
     }
+
     #[test]
     fn callable_value_inputs_resolve_selected_types_without_changing_identity() {
         let selected = value(Term::Primitive(Primitive::Bool));
@@ -576,9 +587,11 @@ mod tests {
             );
         }
     }
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 1, local }
     }
+
     fn projection(member: u32) -> Term {
         Term::AssociatedType {
             origin: Box::new(nir::AssociatedTypeOrigin {
@@ -589,6 +602,7 @@ mod tests {
             subject: Box::new(Term::Primitive(Primitive::Bool)),
         }
     }
+
     fn value(ty: Term) -> Expr {
         Expr {
             source: SourceRange { start: 0, end: 1 },
@@ -596,6 +610,7 @@ mod tests {
             kind: K::TypeValue(ty),
         }
     }
+
     fn key(member: u32) -> (InterfaceInstance, Term, DeclarationId) {
         (
             InterfaceInstance {
@@ -606,6 +621,7 @@ mod tests {
             id(member),
         )
     }
+
     #[test]
     fn nested_selected_views_keep_opaque_heads_and_function_sorts() {
         let bool_type = Term::Primitive(Primitive::Bool);
@@ -641,6 +657,7 @@ mod tests {
             &values
         ));
     }
+
     #[test]
     fn selected_views_reject_missing_wrong_sort_and_cyclic_entries() {
         assert_eq!(
@@ -672,6 +689,7 @@ mod tests {
             .join()
             .unwrap();
     }
+
     #[test]
     fn predicate_views_preserve_connectives_and_recover_after_budget_failure() {
         use nir::program::TypePredicate as P;
@@ -697,6 +715,7 @@ mod tests {
         assert!(fuel < 100);
         assert_eq!(input, before);
     }
+
     #[test]
     fn nominal_views_preserve_declaration_and_argument_identity() {
         let boolean = Term::Primitive(Primitive::Bool);

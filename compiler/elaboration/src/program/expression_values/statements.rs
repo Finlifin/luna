@@ -221,14 +221,9 @@ impl Checker<'_, '_> {
             H::Defer(_) => {
                 return Err(error(expr.span, "deferred value computation requires instantiation support, which is not yet implemented"));
             }
-            H::Assumes(condition)
-                if self.is_type_assumption(condition)
-                    && self
-                        .signature_owner
-                        .is_some_and(|owner| self.open_functions.contains_key(&owner)) =>
-            {
-                // Open bodies are emitted only after concrete input preparation.
-                // Discharge the type assumption now, before publishing the instance.
+            H::Assumes(condition) if self.is_type_assumption(condition) => {
+                // Discharge pure PTC type/integer assumptions directly without
+                // lowering them to runtime/VM program predicates.
                 let predicate = self.type_predicate(condition)?;
                 if !self.in_unselected_inline {
                     self.check_source_refinement(predicate.clone(), condition.span)?;

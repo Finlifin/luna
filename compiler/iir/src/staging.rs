@@ -274,13 +274,13 @@ fn specialize_bound_inputs<C>(
         charge(fuel, 1)?;
         use nir::program::TypePredicate as P;
         match predicate {
-            P::Bool(_) => {}
+            P::Bool(_) | P::IntLe(..) => {}
             P::Trait(requirement) => rebind_requirement(requirement, scope, fuel)?,
             P::Equal(left, right) => {
                 *left = scope.rebind(left).map_err(|e| e.to_string())?;
                 *right = scope.rebind(right).map_err(|e| e.to_string())?;
             }
-            P::Kind(ty, _) => {
+            P::Kind(ty, _) | P::NotSized(ty) => {
                 *ty = scope.rebind(ty).map_err(|e| e.to_string())?;
             }
             P::Not(value) => predicates.push(value),

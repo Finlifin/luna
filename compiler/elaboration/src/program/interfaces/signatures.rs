@@ -268,6 +268,7 @@ fn charge(fuel: &mut usize) -> Option<()> {
     *fuel = fuel.checked_sub(1)?;
     Some(())
 }
+
 fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
     charge(fuel)?;
     if depth > 64 {
@@ -289,6 +290,7 @@ fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
                 .collect::<Option<_>>()?,
         }),
         Formula::Kind(query) => Formula::kind(term(&query.ty)?, query.kind),
+        Formula::NotSized(query) => Formula::not_sized(term(&query.ty)?),
         Formula::Not(inner) => lift(inner, fuel, depth + 1)?.negate(),
         Formula::And(items) => Formula::And(
             items
@@ -305,6 +307,7 @@ fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
         Formula::True | Formula::False | Formula::IntLe(_) => formula.clone(),
     })
 }
+
 fn enter(context: &Context, sorts: Vec<Sort>, fuel: &mut usize) -> Option<Context> {
     let mut scope = context.scope().to_vec();
     scope.push(sorts);
@@ -314,6 +317,7 @@ fn enter(context: &Context, sorts: Vec<Sort>, fuel: &mut usize) -> Option<Contex
     }
     Some(nested)
 }
+
 fn equal(
     context: &Context,
     left: &Term,
@@ -377,6 +381,7 @@ fn equal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn bound(depth: u32, index: usize) -> Term {
         Term::Bound {
             depth,
@@ -384,6 +389,7 @@ mod tests {
             sort: Sort::Type,
         }
     }
+
     fn function(result: Term) -> Term {
         Term::Function {
             parameters: vec![nir::Parameter {
@@ -393,6 +399,7 @@ mod tests {
             result: Box::new(result),
         }
     }
+
     fn code_signature(owner: u32, ty: Term) -> nir::code_interfaces::CodeFunctionSignature {
         use nir::code_interfaces::{CodeFunctionSignature, CodeInput, ExpressionCodeInterface};
         use nir::program::LocalId;
@@ -422,6 +429,7 @@ mod tests {
             output,
         }
     }
+
     #[test]
     fn contextual_methods_alpha_align_ordinary_dependent_inputs() {
         use nir::code_interfaces::{CodeFunctionSignature, CodeInput, PatternCodeInterface};
@@ -565,6 +573,7 @@ mod tests {
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }
+
     #[test]
     fn pattern_signatures_preserve_output_names_types_and_input_categories() {
         use nir::code_interfaces::{CodeInput, PatternCodeInterface, PatternFunctionSignature};
@@ -734,6 +743,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn contextual_signatures_reject_category_and_interface_shape_mismatches() {
         use nir::code_interfaces::CodeInput;
@@ -775,6 +785,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn contextual_signatures_do_not_abstract_fixed_dependencies() {
         let mut expected = code_signature(1, boolean());
@@ -809,6 +820,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn contextual_signatures_preserve_shared_context_binding_identity() {
         use nir::code_interfaces::CodeInput;
@@ -837,6 +849,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn contextual_signatures_use_type_premises_without_unfolding_heads() {
         let a = nir::DeclarationId {
@@ -887,6 +900,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn contextual_signature_budget_failure_does_not_affect_later_comparison() {
         let expected = code_signature(1, boolean());
@@ -924,6 +938,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn nested_signature_equalities_lift_only_outer_bindings() {
         let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
@@ -952,6 +967,7 @@ mod tests {
             Budget::default()
         ));
     }
+
     #[test]
     fn nested_callbacks_use_only_admitted_forward_congruence() {
         let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);

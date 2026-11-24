@@ -285,6 +285,18 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn contract_parameter_is_ptc_integer(&self, value: &Expr<'_>) -> bool {
+        match value.kind {
+            H::ResolvedClauseParam(_, id) => {
+                self.trait_input_domain(DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                }) == Some(p(P::Integer))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn program_requirement(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
         // Program predicates need not mention an ordinary parameter: a
         // completed associated Boolean can be the whole condition. Classify
@@ -302,6 +314,7 @@ impl Checker<'_, '_> {
                 ));
             }
             Ok(match &value.kind {
+                _ if checker.ptc_integer_comparison(value).is_some() => true,
                 H::Binary(BinOp::Eq | BinOp::Ne, left, right) => {
                     !matches!(left.kind, H::Lit(_))
                         && !matches!(right.kind, H::Lit(_))
@@ -321,14 +334,14 @@ impl Checker<'_, '_> {
                 H::Binary(BinOp::And | BinOp::Or, left, right) => {
                     type_shape(checker, left, depth + 1)? && type_shape(checker, right, depth + 1)?
                 }
+                _ if checker.type_predicate_not_sized_call(value)?.is_some() => true,
                 _ if checker.type_predicate_kind_call(value)?.is_some() => true,
                 _ => false,
             })
         }
-        Ok(
-            mentions_value_parameter(value, 0, &|value| self.contract_parameter_is_type(value))?
-                || !type_shape(self, value, 0)?,
-        )
+        Ok(mentions_value_parameter(value, 0, &|value| {
+            self.contract_parameter_is_type(value) || self.contract_parameter_is_ptc_integer(value)
+        })? || !type_shape(self, value, 0)?)
     }
 
     pub(super) fn ensure_contract(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
@@ -373,8 +386,10 @@ impl Checker<'_, '_> {
             })
             .or_else(|| self.signature_domains.get(&owner).cloned());
         if let Some(domains) = domains {
-            if let ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) =
-                &self.package.item(owner).unwrap().kind
+            if let ItemKind::Fn(sig, _)
+            | ItemKind::Case(sig, _)
+            | ItemKind::FnDeclaration(sig)
+            | ItemKind::Effect(sig, _) = &self.package.item(owner).unwrap().kind
             {
                 for (index, (parameter, (sort, domain))) in
                     sig.params.iter().zip(domains).enumerate()
@@ -1496,7 +1511,9 @@ impl Checker<'_, '_> {
                                 .package
                                 .item(scope)
                                 .is_some_and(|item| match &item.kind {
-                                    ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
+                                    ItemKind::Fn(sig, _)
+                                    | ItemKind::Case(sig, _)
+                                    | ItemKind::FnDeclaration(sig) => {
                                         let ready =
                                             self.signature_domains.get(&scope).map_or(0, Vec::len);
                                         sig.params
@@ -2101,7 +2118,7 @@ pub(super) fn requirement_terms<'a>(
         }
         fuel -= 1;
         match value {
-            n::TypePredicate::Bool(_) => {}
+            n::TypePredicate::Bool(_) | n::TypePredicate::IntLe(..) => {}
             n::TypePredicate::Trait(r) => {
                 terms.push(&r.subject);
                 terms.extend(&r.interface_arguments);
@@ -2110,7 +2127,7 @@ pub(super) fn requirement_terms<'a>(
                 terms.push(a);
                 terms.push(b);
             }
-            n::TypePredicate::Kind(ty, _) => terms.push(ty),
+            n::TypePredicate::Kind(ty, _) | n::TypePredicate::NotSized(ty) => terms.push(ty),
             n::TypePredicate::Not(p) => pending.push((p, depth + 1)),
             n::TypePredicate::And(ps) | n::TypePredicate::Or(ps) => {
                 pending.extend(ps.iter().map(|p| (p, depth + 1)))
@@ -2142,7 +2159,22 @@ pub(super) fn map_requirement(
                 .collect::<Result<_, _>>()?,
         }),
         Q::Equal(a, b) => Q::Equal(map(a)?, map(b)?),
+        Q::IntLe(a, b) => Q::IntLe(
+            a.try_map_rigid(map, || {
+                error(
+                    span,
+                    "integer difference term cannot be represented in i128 after substitution",
+                )
+            })?,
+            b.try_map_rigid(map, || {
+                error(
+                    span,
+                    "integer difference term cannot be represented in i128 after substitution",
+                )
+            })?,
+        ),
         Q::Kind(ty, kind) => Q::Kind(map(ty)?, *kind),
+        Q::NotSized(ty) => Q::NotSized(map(ty)?),
         Q::Not(p) => Q::Not(Box::new(map_requirement(p, map, span, depth + 1)?)),
         Q::And(ps) | Q::Or(ps) => {
             let parts = ps

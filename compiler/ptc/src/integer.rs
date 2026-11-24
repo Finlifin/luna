@@ -1,46 +1,24 @@
 //! Mathematical integer difference logic. i128 is an implementation capacity,
 //! never a source overflow rule: any exhausted arithmetic capacity is Unknown.
 use super::UnknownReason;
+
 mod proof;
 mod propagation;
 mod state;
+
 use nir::DeclarationId;
+pub use nir::IntegerTerm;
 pub use proof::IntegerBoundProof;
 pub(super) use state::Checkpoint;
 pub(super) use state::State;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct IntegerTerm {
-    pub variable: Option<DeclarationId>,
-    pub offset: i128,
-}
-impl IntegerTerm {
-    pub fn constant(value: i128) -> Self {
-        Self {
-            variable: None,
-            offset: value,
-        }
-    }
-    pub fn variable(variable: DeclarationId, offset: i128) -> Self {
-        Self {
-            variable: Some(variable),
-            offset,
-        }
-    }
-    pub fn evaluate(&self, values: &BTreeMap<DeclarationId, i128>) -> Option<i128> {
-        let base = match self.variable {
-            Some(id) => *values.get(&id)?,
-            None => 0,
-        };
-        base.checked_add(self.offset)
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IntLe {
     pub left: IntegerTerm,
     pub right: IntegerTerm,
 }
+
 impl IntLe {
     pub fn evaluate(&self, values: &BTreeMap<DeclarationId, i128>) -> Option<bool> {
         Some(self.left.evaluate(values)? <= self.right.evaluate(values)?)
@@ -80,6 +58,7 @@ impl IntLe {
         Ok((from, to, bound.ok_or(UnknownReason::ArithmeticRange)?))
     }
 }
+
 impl Graph {
     fn new<'a>(
         literals: impl Iterator<Item = (&'a IntLe, Option<bool>)>,
@@ -112,10 +91,12 @@ impl Graph {
             sources,
         })
     }
+
     fn index(&self, term: &IntegerTerm) -> usize {
         term.variable.map_or(0, |id| self.variables[&id])
     }
 }
+
 impl fmt::Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(difference-graph (zero 0) (variables")?;
@@ -206,14 +187,6 @@ pub(super) fn solve<'a>(
     Ok(Some(values))
 }
 
-impl fmt::Display for IntegerTerm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.variable {
-            Some(id) => write!(f, "(int-offset {id} {})", self.offset),
-            None => write!(f, "(integer {})", self.offset),
-        }
-    }
-}
 impl fmt::Display for IntLe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(int-le {} {})", self.left, self.right)
@@ -223,6 +196,7 @@ impl fmt::Display for IntLe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn variable(local: u32, offset: i128) -> IntegerTerm {
         IntegerTerm::variable(
             DeclarationId {
@@ -232,6 +206,7 @@ mod tests {
             offset,
         )
     }
+
     #[test]
     fn path_propagation_agrees_with_integer_valuations_and_retries() {
         let atoms = [
@@ -341,6 +316,7 @@ mod tests {
                 .contains("(edges (edge 2 1 -1) (edge 3 2 0))")
         );
     }
+
     #[test]
     fn constant_bounds_and_arithmetic_capacity_do_not_use_machine_overflow() {
         for (left, right, expected) in [(2, 3, true), (3, 2, false), (2, 2, true)] {

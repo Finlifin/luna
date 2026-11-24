@@ -10,6 +10,7 @@ pub enum TypeInputSearch {
     },
     Unresolved(ptc::TypeInputOutcome),
 }
+
 impl Engine {
     /// Fallback after direct matching, for explicitly requested unassigned Type
     /// variables. This never searches the engine's requires to infer inputs.
@@ -143,6 +144,7 @@ impl Engine {
         })
     }
 }
+
 fn charge(budget: &mut Budget) -> Result<(), InferenceError> {
     budget.steps = budget.steps.checked_sub(1).ok_or(InferenceError::Budget)?;
     Ok(())
@@ -154,6 +156,7 @@ enum Input<'a> {
     Inference(&'a InferenceTerm),
     Term(&'a Term),
 }
+
 fn existing_inputs(
     engine: &Engine,
     problem: &Requirement,
@@ -199,6 +202,7 @@ fn existing_inputs(
                     pending.extend([Input::Term(a), Input::Term(b)])
                 }
                 Formula::Kind(query) => pending.push(Input::Term(&query.ty)),
+                Formula::NotSized(query) => pending.push(Input::Term(&query.ty)),
                 Formula::Trait(query) => {
                     for term in query.inputs() {
                         charge(budget)?;

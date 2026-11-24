@@ -52,6 +52,7 @@ impl<'a> PropositionInputs<'a> {
                         observe(right)?;
                     }
                     Formula::Kind(query) => observe(&query.ty)?,
+                    Formula::NotSized(query) => observe(&query.ty)?,
                     Formula::Not(inner) => pending.push((inner, child_depth)),
                     Formula::And(items) | Formula::Or(items) => {
                         if items.len() > fuel.saturating_sub(pending.len()) {

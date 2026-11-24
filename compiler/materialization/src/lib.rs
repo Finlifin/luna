@@ -1793,7 +1793,7 @@ impl Builder<'_, '_> {
                     self.queue.push_back(Task::Type(ty.clone()));
                 }
             }
-            n::TypePredicate::Kind(ty, _) => {
+            n::TypePredicate::Kind(ty, _) | n::TypePredicate::NotSized(ty) => {
                 crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
                 self.queue.push_back(Task::Type(ty.clone()));
             }
@@ -1803,7 +1803,7 @@ impl Builder<'_, '_> {
                     self.predicate_dependencies(item, depth + 1)?;
                 }
             }
-            n::TypePredicate::Bool(_) => {}
+            n::TypePredicate::Bool(_) | n::TypePredicate::IntLe(..) => {}
         }
         Ok(())
     }
@@ -3272,7 +3272,9 @@ impl Builder<'_, '_> {
             P::Bool(value) => P::Bool(*value),
             P::Trait(requirement) => P::Trait(self.normalized_capability(requirement)?),
             P::Equal(a, b) => P::Equal(self.normalized_type(a)?, self.normalized_type(b)?),
+            P::IntLe(a, b) => P::IntLe(a.clone(), b.clone()),
             P::Kind(ty, kind) => P::Kind(self.normalized_type(ty)?, *kind),
+            P::NotSized(ty) => P::NotSized(self.normalized_type(ty)?),
             P::Not(inner) => P::Not(Box::new(self.normalized_predicate(inner, depth + 1)?)),
             P::And(items) | P::Or(items) => {
                 if items.len() > self.fuel {

@@ -17,16 +17,20 @@ pub struct Instance<'a, 'w> {
     signature: Term,
     proofs: Vec<WorldProposition<'a, 'w>>,
 }
+
 impl Instance<'_, '_> {
     pub fn operation(&self) -> &Operation {
         &self.operation
     }
+
     pub fn signature(&self) -> &Term {
         &self.signature
     }
+
     pub fn abi(&self) -> Abi {
         self.declaration.abi
     }
+
     pub fn select_layer<'s>(
         &'s self,
         row: &'s [Operation],
@@ -35,6 +39,7 @@ impl Instance<'_, '_> {
     ) -> Result<RowLayer<'s>, Error> {
         select_layer(row, &self.operation, layer, self.world.context, budget)
     }
+
     pub fn route<'s>(&'s self, frames: &'s [Frame], budget: Budget) -> Result<Route<'s>, Error> {
         route(
             &self.operation,
@@ -45,6 +50,7 @@ impl Instance<'_, '_> {
         )
     }
 }
+
 impl fmt::Display for Instance<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -67,12 +73,12 @@ fn predicate_cost(value: &TypePredicate, fuel: &mut usize, depth: usize) -> Resu
     }
     *fuel -= 1;
     match value {
-        TypePredicate::Bool(_) => Ok(()),
+        TypePredicate::Bool(_) | TypePredicate::IntLe(..) => Ok(()),
         TypePredicate::Equal(left, right) => {
             charge(left, fuel, depth - 1)?;
             charge(right, fuel, depth - 1)
         }
-        TypePredicate::Kind(ty, _) => charge(ty, fuel, depth - 1),
+        TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => charge(ty, fuel, depth - 1),
         TypePredicate::Trait(requirement) => {
             charge(&requirement.subject, fuel, depth - 1)?;
             if requirement.interface_arguments.len() > *fuel {

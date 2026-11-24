@@ -2556,7 +2556,9 @@ fn default_strategy_predicate_has_trait(predicate: &n::TypePredicate) -> bool {
             n::TypePredicate::And(parts) | n::TypePredicate::Or(parts) => stack.extend(parts),
             n::TypePredicate::Bool(_)
             | n::TypePredicate::Equal(..)
-            | n::TypePredicate::Kind(..) => {}
+            | n::TypePredicate::IntLe(..)
+            | n::TypePredicate::Kind(..)
+            | n::TypePredicate::NotSized(..) => {}
         }
     }
     false
@@ -3869,8 +3871,11 @@ impl Checker<'_, '_> {
     /// signatures. Recursive value bodies do not require recursive signatures;
     /// cycles through type observations are diagnosed explicitly.
     fn validate_comptime_receiver(&self, owner: OwnerId) -> Result<(), Error> {
-        let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _) | ItemKind::FnDeclaration(signature)) =
-            self.package.item(owner).map(|item| &item.kind)
+        let Some(
+            ItemKind::Fn(signature, _)
+            | ItemKind::Case(signature, _)
+            | ItemKind::FnDeclaration(signature),
+        ) = self.package.item(owner).map(|item| &item.kind)
         else {
             return Ok(());
         };
@@ -3954,8 +3959,10 @@ impl Checker<'_, '_> {
             let item = package
                 .item(owner)
                 .ok_or_else(|| error(span, "missing function declaration"))?;
-            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _)) =
-                &item.kind
+            let (ItemKind::Fn(sig, _)
+            | ItemKind::Case(sig, _)
+            | ItemKind::FnDeclaration(sig)
+            | ItemKind::Effect(sig, _)) = &item.kind
             else {
                 return Err(error(span, "declaration is not a supported callable"));
             };
@@ -5587,7 +5594,9 @@ impl Checker<'_, '_> {
                         .package
                         .item(id.owner)
                         .is_some_and(|item| match &item.kind {
-                            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
+                            ItemKind::Fn(sig, _)
+                            | ItemKind::Case(sig, _)
+                            | ItemKind::FnDeclaration(sig) => {
                                 sig.params.iter().any(|p| p.hir_id == *id)
                             }
                             _ => false,
@@ -5885,9 +5894,17 @@ impl Checker<'_, '_> {
     }
 
     fn type_predicate_atom(&mut self, expr: &Expr<'_>) -> Result<n::TypePredicate, Error> {
+        if let Some(arg) = self.type_predicate_not_sized_call(expr)? {
+            let operand = self.type_expr(arg)?;
+            self.check_not_sized_operand(&operand, arg.span)?;
+            return Ok(n::TypePredicate::NotSized(operand));
+        }
         if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
             let operand = self.type_expr(arg)?;
             return Ok(n::TypePredicate::Kind(operand, kind));
+        }
+        if let Some(predicate) = self.ptc_integer_comparison(expr) {
+            return Ok(predicate);
         }
         match &expr.kind {
             H::TraitBound(subject, bound) => {
@@ -6172,7 +6189,9 @@ impl Checker<'_, '_> {
                 self.callable_input_view(a, span)?,
                 self.callable_input_view(b, span)?,
             ),
+            Q::IntLe(a, b) => Q::IntLe(a.clone(), b.clone()),
             Q::Kind(ty, kind) => Q::Kind(self.callable_input_view(ty, span)?, *kind),
+            Q::NotSized(ty) => Q::NotSized(self.callable_input_view(ty, span)?),
             Q::Not(inner) => Q::Not(Box::new(self.requirement_type_view(
                 inner,
                 span,
@@ -6592,8 +6611,11 @@ impl Checker<'_, '_> {
                     "functions with quote runtime dependencies cannot be taken as bare function values",
                 ));
             }
-            if let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _) | ItemKind::FnDeclaration(signature)) =
-                self.package.item(owner).map(|item| &item.kind)
+            if let Some(
+                ItemKind::Fn(signature, _)
+                | ItemKind::Case(signature, _)
+                | ItemKind::FnDeclaration(signature),
+            ) = self.package.item(owner).map(|item| &item.kind)
             {
                 arguments::require_function_value_parameters(signature.params, expr.span)?;
             }
@@ -7134,8 +7156,11 @@ impl Checker<'_, '_> {
             &template,
             expr.span,
         )?;
-        let Some(ItemKind::Fn(declaration_sig, _) | ItemKind::Case(declaration_sig, _) | ItemKind::FnDeclaration(declaration_sig)) =
-            self.package.item(owner).map(|item| &item.kind)
+        let Some(
+            ItemKind::Fn(declaration_sig, _)
+            | ItemKind::Case(declaration_sig, _)
+            | ItemKind::FnDeclaration(declaration_sig),
+        ) = self.package.item(owner).map(|item| &item.kind)
         else {
             unreachable!()
         };
@@ -8631,6 +8656,11 @@ impl Checker<'_, '_> {
                                 operand: Box::new(operand),
                             },
                         })
+                    } else if let Some(_arg) = self.type_predicate_not_sized_call(expr)? {
+                        return Err(error(
+                            expr.span,
+                            "expression-level Type.predicates.is_not_sized is not yet implemented; use it in requires or assumes propositions",
+                        ));
                     } else if let Some((query, arg)) = self.type_layout_query_call(expr)? {
                         let operand = self.type_observation_operand(arg)?;
                         let ty = p(if is_never(&operand.ty) {

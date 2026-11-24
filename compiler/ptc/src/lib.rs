@@ -44,6 +44,10 @@ mod classification;
 
 pub use classification::{KindQuery, TypeKind};
 
+mod not_sized;
+
+pub use not_sized::NotSizedQuery;
+
 mod integer;
 
 pub use integer::{IntLe, IntegerBoundProof, IntegerTerm};
@@ -61,6 +65,7 @@ pub enum Atom {
     TypeEqual(Equality),
     IntLe(IntLe),
     Kind(KindQuery),
+    NotSized(NotSizedQuery),
     Trait(TraitQuery),
 }
 
@@ -71,6 +76,7 @@ pub enum Formula {
     Equal(Equality),
     IntLe(IntLe),
     Kind(KindQuery),
+    NotSized(NotSizedQuery),
     Trait(TraitQuery),
     Not(Box<Formula>),
     And(Vec<Formula>),
@@ -83,9 +89,11 @@ impl Formula {
         match predicate {
             P::Trait(requirement) => Self::Trait(requirement.into()),
             P::Kind(ty, kind) => Self::kind(ty.clone(), *kind),
+            P::NotSized(ty) => Self::not_sized(ty.clone()),
             P::Bool(true) => Self::True,
             P::Bool(false) => Self::False,
             P::Equal(a, b) => Self::equal(a.clone(), b.clone()),
+            P::IntLe(left, right) => Self::int_le(left.clone(), right.clone()),
             P::Not(inner) => Self::from_predicate(inner).negate(),
             P::And(items) => Self::And(items.iter().map(Self::from_predicate).collect()),
             P::Or(items) => Self::Or(items.iter().map(Self::from_predicate).collect()),
@@ -102,6 +110,10 @@ impl Formula {
 
     pub fn kind(ty: Term, kind: TypeKind) -> Self {
         Self::Kind(KindQuery { ty, kind })
+    }
+
+    pub fn not_sized(ty: Term) -> Self {
+        Self::NotSized(NotSizedQuery { ty })
     }
 
     pub fn negate(self) -> Self {
@@ -124,7 +136,7 @@ impl Formula {
                         return true;
                     }
                 }
-                Self::Kind(KindQuery { ty, .. }) => {
+                Self::Kind(KindQuery { ty, .. }) | Self::NotSized(NotSizedQuery { ty }) => {
                     if term_has_bound_or_hole(ty) {
                         return true;
                     }
@@ -358,6 +370,18 @@ impl Context {
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
 
+    /// Validate that `ty` lies in the runtime-representable domain of A11 `NotSized`.
+    pub fn check_not_sized_domain(&self, ty: &Term) -> Result<(), &'static str> {
+        match not_sized::evaluate(
+            ty,
+            &self.theory.constructors,
+            &self.theory.list_inference_heads,
+        ) {
+            not_sized::NotSizedStatus::InvalidRepresentation(message) => Err(message),
+            not_sized::NotSizedStatus::Known(_) | not_sized::NotSizedStatus::Unknown => Ok(()),
+        }
+    }
+
     fn evaluate_kind(&self, kind: TypeKind, ty: &Term) -> Option<bool> {
         evaluate_kind_with_heads(
             kind,
@@ -424,15 +448,22 @@ impl Context {
             let formula = Formula::And(formulas);
             let mut atoms = Vec::new();
             let mut terms = Terms::default();
-            collect(&formula, &mut atoms, &mut terms, 0, max_depth, &self.scope).map_err(
-                |message| {
-                    if message == "depth budget" {
-                        ProofError::BudgetExhausted
-                    } else {
-                        ProofError::Invalid
-                    }
-                },
-            )?;
+            collect_in_theory(
+                &formula,
+                &mut atoms,
+                &mut terms,
+                0,
+                max_depth,
+                &self.scope,
+                &self.theory,
+            )
+            .map_err(|message| {
+                if message == "depth budget" {
+                    ProofError::BudgetExhausted
+                } else {
+                    ProofError::Invalid
+                }
+            })?;
             let mut search = Search {
                 boolean: None,
                 theory_state: None,
@@ -521,8 +552,16 @@ impl Context {
             .iter()
             .chain(std::iter::once(&witness.goal))
         {
-            collect(formula, &mut atoms, &mut terms, 0, limit, &self.scope)
-                .map_err(|_| ProofError::Invalid)?;
+            collect_in_theory(
+                formula,
+                &mut atoms,
+                &mut terms,
+                0,
+                limit,
+                &self.scope,
+                &self.theory,
+            )
+            .map_err(|_| ProofError::Invalid)?;
         }
         let evaluation_fuel = std::cell::Cell::new(*fuel);
         let result = (|| {
@@ -534,8 +573,7 @@ impl Context {
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
-                    &self.theory.constructors.nominal_constructors,
-                    &self.theory.constructors.tuple_heads,
+                    &self.theory,
                 )
                 .is_none()
             }) {
@@ -553,8 +591,7 @@ impl Context {
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
-                    &self.theory.constructors.nominal_constructors,
-                    &self.theory.constructors.tuple_heads,
+                    &self.theory,
                 )
             };
             if self
@@ -628,6 +665,9 @@ impl Context {
                         pending.push(Input::Term(a));
                     }
                     Input::Formula(Formula::Kind(query)) => pending.push(Input::Term(&query.ty)),
+                    Input::Formula(Formula::NotSized(query)) => {
+                        pending.push(Input::Term(&query.ty))
+                    }
                     Input::Formula(Formula::Trait(query)) => {
                         pending.extend(query.inputs().map(Input::Term))
                     }
@@ -748,7 +788,8 @@ impl Context {
         }
         let mut work = vec![goal];
         while let Some(formula) = work.pop() {
-            validate_atom_inputs(formula, &self.scope).map_err(ValidationError::IllFormed)?;
+            validate_atom_inputs(formula, &self.scope, &self.theory)
+                .map_err(ValidationError::IllFormed)?;
             match formula {
                 Formula::Not(inner) => work.push(inner),
                 Formula::And(parts) | Formula::Or(parts) => work.extend(parts),
@@ -798,8 +839,15 @@ impl Context {
         let mut formulas = (*self.assumptions).clone();
         formulas.push(goal.clone().negate());
         let residual = Formula::And(formulas);
-        if let Err(message) = collect(&residual, &mut atoms, &mut terms, 0, max_depth, &self.scope)
-        {
+        if let Err(message) = collect_in_theory(
+            &residual,
+            &mut atoms,
+            &mut terms,
+            0,
+            max_depth,
+            &self.scope,
+            &self.theory,
+        ) {
             return if message == "depth budget" {
                 Outcome::Unknown {
                     reason: UnknownReason::BudgetExhausted,
@@ -893,7 +941,12 @@ fn visit_input_terms(
             Input::Formula(Formula::Kind(query)) => {
                 pending.push((Input::Term(&query.ty), depth + 1))
             }
-            Input::Predicate(P::Kind(ty, _)) => pending.push((Input::Term(ty), depth + 1)),
+            Input::Formula(Formula::NotSized(query)) => {
+                pending.push((Input::Term(&query.ty), depth + 1))
+            }
+            Input::Predicate(P::Kind(ty, _) | P::NotSized(ty)) => {
+                pending.push((Input::Term(ty), depth + 1))
+            }
             Input::Formula(Formula::Trait(query)) => {
                 if query.arguments.len().saturating_add(1) > room {
                     return Err(ProofError::BudgetExhausted);
@@ -946,7 +999,7 @@ fn visit_input_terms(
                     return Err(ProofError::BudgetExhausted);
                 }
             }
-            Input::Predicate(P::Bool(_))
+            Input::Predicate(P::Bool(_) | P::IntLe(..))
             | Input::Formula(Formula::True | Formula::False | Formula::IntLe(_)) => {}
         }
     }
@@ -1122,7 +1175,11 @@ fn has_bound(term: &Term) -> bool {
 }
 
 // Shared admission rules for validation-only checks and proof collection.
-fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), String> {
+fn validate_atom_inputs(
+    formula: &Formula,
+    scope: &[Vec<Sort>],
+    theory: &DeclarationTheory,
+) -> Result<(), String> {
     match formula {
         Formula::Equal(atom) => {
             for term in [&atom.0, &atom.1] {
@@ -1142,6 +1199,22 @@ fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), St
                 .check_scope(scope)
                 .map_err(|e| format!("invalid classified type: {e:?}"))?;
         }
+        Formula::NotSized(query) => {
+            if query.ty.sort() != Sort::Type {
+                return Err("Type.predicates.is_not_sized requires a Type term".into());
+            }
+            query
+                .ty
+                .check_scope(scope)
+                .map_err(|e| format!("invalid is_not_sized type: {e:?}"))?;
+            if let not_sized::NotSizedStatus::InvalidRepresentation(message) = not_sized::evaluate(
+                &query.ty,
+                &theory.constructors,
+                &theory.list_inference_heads,
+            ) {
+                return Err(message.into());
+            }
+        }
         Formula::Trait(query) => {
             query.validate_inputs(scope)?;
         }
@@ -1150,6 +1223,7 @@ fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), St
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn collect(
     formula: &Formula,
     atoms: &mut Vec<Atom>,
@@ -1158,10 +1232,30 @@ fn collect(
     limit: usize,
     scope: &[Vec<Sort>],
 ) -> Result<(), String> {
+    collect_in_theory(
+        formula,
+        atoms,
+        terms,
+        depth,
+        limit,
+        scope,
+        &DeclarationTheory::default(),
+    )
+}
+
+fn collect_in_theory(
+    formula: &Formula,
+    atoms: &mut Vec<Atom>,
+    terms: &mut Terms,
+    depth: usize,
+    limit: usize,
+    scope: &[Vec<Sort>],
+    theory: &DeclarationTheory,
+) -> Result<(), String> {
     if depth >= limit {
         return Err("depth budget".into());
     }
-    validate_atom_inputs(formula, scope)?;
+    validate_atom_inputs(formula, scope, theory)?;
     match formula {
         Formula::Equal(atom) => {
             for term in [&atom.0, &atom.1] {
@@ -1175,6 +1269,13 @@ fn collect(
         Formula::Kind(query) => {
             terms.insert(&query.ty);
             let atom = Atom::Kind(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
+        Formula::NotSized(query) => {
+            terms.insert(&query.ty);
+            let atom = Atom::NotSized(query.clone());
             if !atoms.contains(&atom) {
                 atoms.push(atom);
             }
@@ -1194,10 +1295,12 @@ fn collect(
                 atoms.push(atom);
             }
         }
-        Formula::Not(inner) => collect(inner, atoms, terms, depth + 1, limit, scope)?,
+        Formula::Not(inner) => {
+            collect_in_theory(inner, atoms, terms, depth + 1, limit, scope, theory)?
+        }
         Formula::And(items) | Formula::Or(items) => {
             for item in items {
-                collect(item, atoms, terms, depth + 1, limit, scope)?;
+                collect_in_theory(item, atoms, terms, depth + 1, limit, scope, theory)?;
             }
         }
         _ => {}
@@ -1211,6 +1314,7 @@ fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> O
         Formula::False => Some(false),
         Formula::Equal(atom) => atom_value(&Atom::TypeEqual(atom.clone())),
         Formula::Kind(query) => atom_value(&Atom::Kind(query.clone())),
+        Formula::NotSized(query) => atom_value(&Atom::NotSized(query.clone())),
         Formula::Trait(query) => atom_value(&Atom::Trait(query.clone())),
         Formula::IntLe(atom) => atom_value(&Atom::IntLe(atom.clone())),
         Formula::Not(inner) => evaluate(inner, atom_value).map(|b| !b),
@@ -1467,6 +1571,7 @@ struct Model {
 struct TheoryModel {
     classes: Classes,
     kinds: Vec<(usize, TypeKind, bool)>,
+    not_sized: Vec<(usize, bool)>,
     integers: BTreeMap<DeclarationId, i128>,
 }
 
@@ -1489,7 +1594,10 @@ impl Search<'_> {
         match tree {
             ProofTree::BooleanConflict => {
                 if evaluate(self.formula, &|atom| {
-                    assignment[self.atoms.iter().position(|a| a == atom).unwrap()]
+                    self.atoms
+                        .iter()
+                        .position(|a| a == atom)
+                        .and_then(|index| assignment.get(index).copied().flatten())
                 }) == Some(false)
                 {
                     Ok(())
@@ -1602,7 +1710,9 @@ impl Search<'_> {
             .checked_sub(self.terms.nodes.len().saturating_mul(3))
             .ok_or(UnknownReason::BudgetExhausted)?;
         let mut classes = Classes::new(self.terms.nodes.len());
-        let Some(kinds) = self.type_theory_with_classes(assignment, &mut classes, None)? else {
+        let Some((kinds, not_sized)) =
+            self.type_theory_with_classes(assignment, &mut classes, None)?
+        else {
             return Ok(None);
         };
         let integers = integer::solve(
@@ -1621,6 +1731,7 @@ impl Search<'_> {
         Ok(integers.map(|integers| TheoryModel {
             classes,
             kinds,
+            not_sized,
             integers,
         }))
     }
@@ -1630,7 +1741,7 @@ impl Search<'_> {
         assignment: &[Option<bool>],
         classes: &mut Classes,
         baseline: Option<Vec<usize>>,
-    ) -> Result<Option<Vec<(usize, TypeKind, bool)>>, UnknownReason> {
+    ) -> Result<Option<(Vec<(usize, TypeKind, bool)>, Vec<(usize, bool)>)>, UnknownReason> {
         let mut agenda = if let Some(roots) = baseline {
             Some(congruence::Agenda::new(self.terms, roots, &mut self.steps)?)
         } else {
@@ -1805,7 +1916,36 @@ impl Search<'_> {
             }
             kinds.push((root, query.kind, *value));
         }
-        Ok(Some(kinds))
+        let mut not_sized: Vec<(usize, bool)> = Vec::new();
+        for (atom, value) in self.atoms.iter().zip(assignment) {
+            let (Atom::NotSized(query), Some(value)) = (atom, value) else {
+                continue;
+            };
+            let root = classes.root(self.terms.ids[&query.ty]);
+            for id in classes.ordered_members(root, &mut self.steps)? {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                match not_sized::evaluate(
+                    &self.terms.nodes[id],
+                    &self.context.theory.constructors,
+                    &self.context.theory.list_inference_heads,
+                ) {
+                    not_sized::NotSizedStatus::InvalidRepresentation(message) => {
+                        return Err(UnknownReason::UnresolvedPrerequisite(message.into()));
+                    }
+                    not_sized::NotSizedStatus::Known(actual) if actual != *value => {
+                        return Ok(None);
+                    }
+                    not_sized::NotSizedStatus::Known(_) | not_sized::NotSizedStatus::Unknown => {}
+                }
+            }
+            for &(other_root, truth) in &not_sized {
+                if root == other_root && truth != *value {
+                    return Ok(None);
+                }
+            }
+            not_sized.push((root, *value));
+        }
+        Ok(Some((kinds, not_sized)))
     }
 
     /// Reject finite-tree occurs cycles (e.g. `R == *R` or `A == *B /\ B == *A`)
@@ -1932,8 +2072,7 @@ fn evaluate_model(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
-    nominal: &NominalConstructors,
-    tuple_heads: &BTreeSet<DeclarationId>,
+    theory: &DeclarationTheory,
 ) -> Option<bool> {
     evaluate(formula, &|atom| {
         model_atom(
@@ -1943,8 +2082,7 @@ fn evaluate_model(
             applications,
             fuel,
             integers,
-            nominal,
-            tuple_heads,
+            theory,
         )
     })
 }
@@ -1956,9 +2094,10 @@ fn model_atom(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
-    nominal: &NominalConstructors,
-    tuple_heads: &BTreeSet<DeclarationId>,
+    theory: &DeclarationTheory,
 ) -> Option<bool> {
+    let nominal = &theory.constructors.nominal_constructors;
+    let tuple_heads = &theory.constructors.tuple_heads;
     match atom {
         // An abstract SAT assignment is not implementation-world evidence.
         Atom::Trait(_) => None,
@@ -1978,6 +2117,14 @@ fn model_atom(
                     nominal,
                     tuple_heads,
                 )
+            }
+        }
+        Atom::NotSized(query) => {
+            let ty = substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?;
+            match not_sized::evaluate(&ty, &theory.constructors, &theory.list_inference_heads) {
+                not_sized::NotSizedStatus::Known(value) => Some(value),
+                not_sized::NotSizedStatus::InvalidRepresentation(_)
+                | not_sized::NotSizedStatus::Unknown => None,
             }
         }
         Atom::TypeEqual(atom) => {
@@ -2181,6 +2328,12 @@ fn rebuild(
         Term::Tuple(items) => Some(Term::Tuple(
             items.iter().map(&mut *child).collect::<Option<_>>()?,
         )),
+        Term::Record(fields) => Some(Term::Record(
+            fields
+                .iter()
+                .map(|(label, ty)| Some((label.clone(), child(ty)?)))
+                .collect::<Option<_>>()?,
+        )),
         Term::Function { parameters, result } if !has_bound(term) => Some(Term::Function {
             parameters: parameters
                 .iter()
@@ -2282,6 +2435,7 @@ impl fmt::Display for Atom {
             Self::TypeEqual(atom) => atom.fmt(f),
             Self::IntLe(atom) => atom.fmt(f),
             Self::Kind(query) => query.fmt(f),
+            Self::NotSized(query) => query.fmt(f),
             Self::Trait(query) => query.fmt(f),
         }
     }
@@ -2301,6 +2455,7 @@ impl fmt::Display for Formula {
             Self::Equal(atom) => atom.fmt(f),
             Self::IntLe(atom) => atom.fmt(f),
             Self::Kind(query) => query.fmt(f),
+            Self::NotSized(query) => query.fmt(f),
             Self::Trait(query) => query.fmt(f),
             Self::Not(inner) => write!(f, "(not {inner})"),
             Self::And(items) | Self::Or(items) => {
@@ -3117,5 +3272,34 @@ mod tuple_classification_tests {
             context.prove(unit_eq.negate(), Budget::default()),
             Outcome::Entailed(_)
         ));
+    }
+
+    #[test]
+    fn boolean_conflict_with_missing_atom_returns_invalid_without_panicking() {
+        let rigid = Term::Rigid {
+            declaration: DeclarationId {
+                package: 77,
+                local: 1,
+            },
+            sort: Sort::Type,
+        };
+        let formula = Formula::equal(rigid, Term::Primitive(Primitive::Bool));
+        let context = Context::default();
+        let terms = Terms::default();
+        let mut search = Search {
+            boolean: None,
+            theory_state: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &[],
+            terms: &terms,
+            steps: 1000,
+            max_depth: 128,
+        };
+        assert_eq!(
+            search.check_tree(&ProofTree::BooleanConflict, &mut [], 0),
+            Err(ProofError::Invalid)
+        );
     }
 }

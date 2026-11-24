@@ -787,12 +787,12 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
             Node::Predicate(predicate) => {
                 use n::TypePredicate as P;
                 match predicate {
-                    P::Bool(_) => {}
+                    P::Bool(_) | P::IntLe(..) => {}
                     P::Equal(a, b) => {
                         work.push((Node::Type(a), depth + 1));
                         work.push((Node::Type(b), depth + 1));
                     }
-                    P::Kind(ty, _) => work.push((Node::Type(ty), depth + 1)),
+                    P::Kind(ty, _) | P::NotSized(ty) => work.push((Node::Type(ty), depth + 1)),
                     P::Trait(requirement) => work.push((Node::Requirement(requirement), depth + 1)),
                     P::Not(inner) => work.push((Node::Predicate(inner), depth + 1)),
                     P::And(items) | P::Or(items) => {

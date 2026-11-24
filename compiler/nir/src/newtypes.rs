@@ -17,6 +17,7 @@ pub struct Newtype {
     pub capabilities: Vec<TraitRequirement>,
     pub representation: Term,
 }
+
 impl Newtype {
     pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, TypeError> {
         if self.capture_count > self.type_parameters.len() {
@@ -173,6 +174,7 @@ impl Newtype {
     pub fn instantiate_representation(&self, arguments: &[Term]) -> Result<Term, TypeError> {
         self.instantiate_representation_in_scope(arguments, &[])
     }
+
     pub fn instantiate_representation_in_scope(
         &self,
         arguments: &[Term],
@@ -195,6 +197,7 @@ impl Newtype {
         .instantiate(&self.representation)
     }
 }
+
 impl fmt::Display for Newtype {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(newtype (id {}) (name ", self.declaration)?;
@@ -226,6 +229,7 @@ pub enum ValidationError {
     Budget,
     Invalid(&'static str),
 }
+
 impl ValidationError {
     pub fn message(&self) -> &'static str {
         match self {
@@ -234,11 +238,13 @@ impl ValidationError {
         }
     }
 }
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
     }
 }
+
 impl std::error::Error for ValidationError {}
 
 /// Compatibility entry for callers without a shared declaration allowance.
@@ -326,7 +332,19 @@ pub fn validate_in(
                     validate_contract_capture(left, &parameters, fuel)?;
                     validate_contract_capture(right, &parameters, fuel)?;
                 }
-                TypePredicate::Kind(ty, _) => {
+                TypePredicate::IntLe(left, right) => {
+                    for id in [left.variable, right.variable].into_iter().flatten() {
+                        validate_contract_capture(
+                            &Term::Rigid {
+                                declaration: id,
+                                sort: Sort::ComptimeValue,
+                            },
+                            &parameters,
+                            fuel,
+                        )?;
+                    }
+                }
+                TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => {
                     validate_contract_capture(ty, &parameters, fuel)?;
                 }
                 TypePredicate::Trait(capability) => {
@@ -394,6 +412,7 @@ fn metadata_spend(fuel: &mut usize, amount: usize) -> Result<(), ValidationError
     *fuel = fuel.checked_sub(amount).ok_or(ValidationError::Budget)?;
     Ok(())
 }
+
 fn metadata_term(term: &Term, fuel: &mut usize) -> Result<(), ValidationError> {
     crate::type_computations::charge_term(term, fuel).map_err(|_| ValidationError::Budget)
 }
@@ -405,6 +424,7 @@ pub enum Direction {
     Wrap,
     Unwrap,
 }
+
 impl fmt::Display for Direction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -423,20 +443,25 @@ pub struct Conversion {
     source: Term,
     target: Term,
 }
+
 impl Conversion {
     pub fn declaration(&self) -> DeclarationId {
         self.declaration
     }
+
     pub fn direction(&self) -> Direction {
         self.direction
     }
+
     pub fn source(&self) -> &Term {
         &self.source
     }
+
     pub fn target(&self) -> &Term {
         &self.target
     }
 }
+
 impl fmt::Display for Conversion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -446,12 +471,14 @@ impl fmt::Display for Conversion {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConversionError {
     Budget,
     Type(TypeError),
     DuplicateIdentity(DeclarationId),
 }
+
 impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -461,6 +488,7 @@ impl fmt::Display for ConversionError {
         }
     }
 }
+
 impl std::error::Error for ConversionError {}
 
 fn spend(fuel: &mut usize, amount: usize) -> Result<(), ConversionError> {
@@ -475,6 +503,7 @@ fn spend(fuel: &mut usize, amount: usize) -> Result<(), ConversionError> {
         }
     }
 }
+
 fn charge(ty: &Term, fuel: &mut usize) -> Result<(), ConversionError> {
     crate::type_computations::charge_term(ty, fuel).map_err(|_| {
         *fuel = 0;

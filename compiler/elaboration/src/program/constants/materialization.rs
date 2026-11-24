@@ -292,7 +292,24 @@ impl Checker<'_, '_> {
                         }
                         mentions |= left_mentions || right_mentions;
                     }
-                    n::TypePredicate::Kind(ty, _) => {
+                    n::TypePredicate::IntLe(left, right) => {
+                        for id in [left.variable, right.variable].into_iter().flatten() {
+                            let (ok, var_mentions) = term_in_scope(
+                                &Term::Rigid {
+                                    declaration: id,
+                                    sort: Sort::ComptimeValue,
+                                },
+                                type_scope,
+                                required_steps,
+                                span,
+                            )?;
+                            if !ok {
+                                return Ok(false);
+                            }
+                            mentions |= var_mentions;
+                        }
+                    }
+                    n::TypePredicate::Kind(ty, _) | n::TypePredicate::NotSized(ty) => {
                         let (ty_ok, ty_mentions) =
                             term_in_scope(ty, type_scope, required_steps, span)?;
                         if !ty_ok {

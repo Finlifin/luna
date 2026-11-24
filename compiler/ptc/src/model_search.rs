@@ -1,8 +1,10 @@
 //! Construct and replay concrete Type models. Candidate choices are private
 //! search state, never equality evidence or a complete enumeration of Type.
 use super::*;
+
 mod combinations;
 mod fresh;
+
 pub(super) use fresh::candidate as fresh_candidate;
 
 #[cfg(test)]
@@ -18,6 +20,14 @@ impl Search<'_> {
         for atom in self.atoms {
             self.steps = self.steps.checked_sub(1)?;
             if matches!(atom, Atom::Trait(_)) {
+                return None;
+            }
+        }
+        // No closed unsized runtime Term constructor exists yet; any model
+        // requiring `NotSized(T) = true` remains conservatively `Unknown`.
+        for &(_, truth) in &theory.not_sized {
+            self.steps = self.steps.checked_sub(1)?;
+            if truth {
                 return None;
             }
         }
@@ -57,7 +67,12 @@ impl Search<'_> {
             // One representative cannot satisfy even two distinct pointer
             // inputs. Generate a bounded supply of fresh shapes; their count
             // is search coverage, never a claim that the category is exhausted.
-            let structural = [TypeKind::Tuple, TypeKind::Pointer, TypeKind::Function];
+            let structural = [
+                TypeKind::Tuple,
+                TypeKind::Pointer,
+                TypeKind::Function,
+                TypeKind::Record,
+            ];
             let mut needs_shapes = false;
             for category in structural {
                 let mut permitted = true;
@@ -344,8 +359,7 @@ impl Search<'_> {
                 &application_index,
                 &evaluation_fuel,
                 &theory.integers,
-                &self.context.theory.constructors.nominal_constructors,
-                &self.context.theory.constructors.tuple_heads,
+                &self.context.theory,
             );
             self.steps = evaluation_fuel.get();
             atom_values.push(value?);

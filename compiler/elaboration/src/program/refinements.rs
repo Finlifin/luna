@@ -309,6 +309,7 @@ fn classify_refinement<'a>(
     expr: &'a Expr<'a>,
     mut type_operand: impl FnMut(&'a Expr<'a>) -> bool,
     is_metatype: impl Fn(&Expr<'_>) -> bool,
+    is_int_comparison: impl Fn(&Expr<'_>) -> bool,
 ) -> Option<bool> {
     let mut observed = false;
     let mut pending = vec![expr];
@@ -324,8 +325,14 @@ fn classify_refinement<'a>(
                 pending.push(right);
                 pending.push(left);
             }
+            _ if is_int_comparison(expr) => observed = true,
             H::Binary(BinOp::Eq | BinOp::Ne, left, right)
                 if type_operand(left) && type_operand(right) =>
+            {
+                observed = true
+            }
+            _ if Checker::syntactic_type_predicate_not_sized_with(expr, &is_metatype)
+                .is_some_and(&mut type_operand) =>
             {
                 observed = true
             }
@@ -986,6 +993,7 @@ impl Checker<'_, '_> {
             expr,
             |value| self.refinement_type_operand(value),
             |base| self.is_metatype_base(base),
+            |expr| self.ptc_integer_comparison(expr).is_some(),
         )
         .is_some()
     }
@@ -995,6 +1003,7 @@ impl Checker<'_, '_> {
             expr,
             |value| self.refinement_type_operand(value),
             |base| self.is_metatype_base(base),
+            |expr| self.ptc_integer_comparison(expr).is_some(),
         ) == Some(true)
     }
 
@@ -1078,12 +1087,17 @@ impl Checker<'_, '_> {
         predicate: n::TypePredicate,
         span: Span,
     ) -> Result<(), Error> {
-        let outcome = self.context.prove(
+        let mut context = self.context.fork();
+        self.admit_not_sized_nominals(&predicate, &mut context, span)?;
+        let outcome = context.prove(
             crate::ptc::Formula::from_predicate(&predicate),
             crate::ptc::Budget::default(),
         );
         if matches!(outcome, crate::ptc::Outcome::Entailed(_)) {
             return Ok(());
+        }
+        if let crate::ptc::Outcome::IllFormed(message) = outcome {
+            return Err(error(span, message));
         }
         let assumptions = self.capability_assumptions();
         if !self.interfaces_ready && has_trait(&predicate) {
@@ -1100,14 +1114,170 @@ impl Checker<'_, '_> {
                 self.pending_refinements.push(Pending {
                     owner,
                     predicate,
-                    context: self.context.clone(),
+                    context,
                     assumptions,
                     span,
                 });
                 return Ok(());
             }
         }
-        self.prove_source_refinement(&predicate, &self.context, &assumptions, span)
+        self.prove_source_refinement(&predicate, &context, &assumptions, span)
+    }
+
+    pub(super) fn check_not_sized_operand(
+        &mut self,
+        operand: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut context = self.context.fork();
+        let mut checked = std::collections::HashSet::new();
+        self.admit_not_sized_nominals_in_term(operand, &mut context, &mut checked, span, 0)?;
+        context
+            .check_not_sized_domain(operand)
+            .map_err(|message| error(span, message))
+    }
+
+    fn admit_not_sized_nominals(
+        &mut self,
+        predicate: &n::TypePredicate,
+        context: &mut crate::ptc::Context,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut pending = vec![predicate];
+        let mut checked = std::collections::HashSet::new();
+        while let Some(pred) = pending.pop() {
+            match pred {
+                n::TypePredicate::NotSized(ty) => {
+                    self.admit_not_sized_nominals_in_term(ty, context, &mut checked, span, 0)?;
+                }
+                n::TypePredicate::Not(inner) => pending.push(inner),
+                n::TypePredicate::And(parts) | n::TypePredicate::Or(parts) => pending.extend(parts),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_not_sized_nominals_in_term(
+        &mut self,
+        ty: &Term,
+        context: &mut crate::ptc::Context,
+        checked: &mut std::collections::HashSet<Term>,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), Error> {
+        if depth >= 128 {
+            return Ok(());
+        }
+        match ty {
+            Term::Nominal {
+                declaration,
+                arguments,
+            } => {
+                if !checked.insert(ty.clone()) {
+                    return Ok(());
+                }
+                let is_active = self
+                    .source_declarations
+                    .owner(*declaration)
+                    .is_some_and(|owner| self.active_nominals.contains(&owner));
+                if !is_active {
+                    self.ensure_nominal_type(ty, span)?;
+                }
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let layout = nir::compute_layout(self, ty, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                match layout {
+                    Ok(_) => {
+                        if arguments.is_empty() {
+                            context.admit_nominal_sized(*declaration);
+                        }
+                    }
+                    Err(nir::LayoutError::ComptimeOnly(_)) => {
+                        if arguments.is_empty() {
+                            context.admit_nominal_comptime_only(*declaration);
+                        }
+                        return Err(error(
+                            span,
+                            "comptime-only type has no runtime representation for Type.predicates.is_not_sized",
+                        ));
+                    }
+                    Err(_) => {}
+                }
+            }
+            Term::Optional(inner) | Term::UnsafeFunction(inner) => {
+                self.admit_not_sized_nominals_in_term(inner, context, checked, span, depth + 1)?;
+            }
+            Term::Tuple(elements) => {
+                for element in elements {
+                    self.admit_not_sized_nominals_in_term(
+                        element,
+                        context,
+                        checked,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+            }
+            Term::Record(fields) => {
+                for (_, field_ty) in fields {
+                    self.admit_not_sized_nominals_in_term(
+                        field_ty,
+                        context,
+                        checked,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+            }
+            Term::ErrorResult { errors, result } => {
+                for err_ty in errors {
+                    self.admit_not_sized_nominals_in_term(
+                        err_ty,
+                        context,
+                        checked,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+                self.admit_not_sized_nominals_in_term(result, context, checked, span, depth + 1)?;
+            }
+            Term::Closure { environment, .. } => {
+                for env_ty in environment {
+                    self.admit_not_sized_nominals_in_term(
+                        env_ty,
+                        context,
+                        checked,
+                        span,
+                        depth + 1,
+                    )?;
+                }
+            }
+            Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments,
+            } if context.is_tuple_head(*head) => {
+                if let Some(elements) =
+                    nir::normal_forms::type_list_fields_with_layouts(arguments, &|id| {
+                        context.is_list_inference_head(id)
+                    })
+                {
+                    for element in elements {
+                        self.admit_not_sized_nominals_in_term(
+                            element,
+                            context,
+                            checked,
+                            span,
+                            depth + 1,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn prove_source_refinement(
@@ -1647,6 +1817,7 @@ mod classification_tests {
                 value,
                 |operand| matches!(operand.kind, H::TyType),
                 |base| matches!(base.kind, H::TyType),
+                |_| false,
             )
         };
         assert_eq!(classify(value), Some(true));

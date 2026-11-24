@@ -5036,33 +5036,52 @@ pub enum TypePredicate {
     Bool(bool),
     Trait(TraitRequirement),
     Equal(Term, Term),
+    IntLe(crate::IntegerTerm, crate::IntegerTerm),
     Kind(Term, crate::TypeKind),
+    NotSized(Term),
     Not(Box<TypePredicate>),
     And(Vec<TypePredicate>),
     Or(Vec<TypePredicate>),
 }
 
 impl TypePredicate {
-    pub(crate) fn try_map_types<E>(
+    pub(crate) fn try_map_types<E: From<crate::TypeError>>(
         &self,
         transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        self.try_map_types_with_invalid_integer(transform, &|| {
+            crate::TypeError::InvalidIntegerTerm.into()
+        })
+    }
+
+    pub(crate) fn try_map_types_with_invalid_integer<E>(
+        &self,
+        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+        invalid_integer: &impl Fn() -> E,
     ) -> Result<Self, E> {
         Ok(match self {
             Self::Bool(value) => Self::Bool(*value),
             Self::Trait(requirement) => Self::Trait(requirement.try_map_types(transform)?),
             Self::Equal(left, right) => Self::Equal(transform(left)?, transform(right)?),
+            Self::IntLe(left, right) => Self::IntLe(
+                left.try_map_rigid(transform, invalid_integer)?,
+                right.try_map_rigid(transform, invalid_integer)?,
+            ),
             Self::Kind(ty, kind) => Self::Kind(transform(ty)?, *kind),
-            Self::Not(inner) => Self::Not(Box::new(inner.try_map_types(transform)?)),
+            Self::NotSized(ty) => Self::NotSized(transform(ty)?),
+            Self::Not(inner) => Self::Not(Box::new(
+                inner.try_map_types_with_invalid_integer(transform, invalid_integer)?,
+            )),
             Self::And(parts) => Self::And(
                 parts
                     .iter()
-                    .map(|p| p.try_map_types(transform))
+                    .map(|p| p.try_map_types_with_invalid_integer(transform, invalid_integer))
                     .collect::<Result<_, _>>()?,
             ),
             Self::Or(parts) => Self::Or(
                 parts
                     .iter()
-                    .map(|p| p.try_map_types(transform))
+                    .map(|p| p.try_map_types_with_invalid_integer(transform, invalid_integer))
                     .collect::<Result<_, _>>()?,
             ),
         })
@@ -5092,8 +5111,11 @@ impl TypePredicate {
             match predicate {
                 TypePredicate::Bool(value) => Some(*value),
                 TypePredicate::Trait(_) => None,
-                TypePredicate::Kind(..) => None,
+                TypePredicate::Kind(..) | TypePredicate::NotSized(_) => None,
                 TypePredicate::Equal(left, right) => (left == right).then_some(true),
+                TypePredicate::IntLe(left, right) => {
+                    (left.variable == right.variable).then_some(left.offset <= right.offset)
+                }
                 TypePredicate::Not(value) => visit(value, depth + 1, fuel).map(|v| !v),
                 TypePredicate::And(values) | TypePredicate::Or(values) => {
                     let is_and = matches!(predicate, TypePredicate::And(_));
@@ -5125,7 +5147,12 @@ impl TypePredicate {
                     terms.push(a);
                     terms.push(b);
                 }
-                Self::Kind(ty, _) => terms.push(ty),
+                Self::IntLe(a, b) => {
+                    if a.variable == Some(declaration) || b.variable == Some(declaration) {
+                        return true;
+                    }
+                }
+                Self::Kind(ty, _) | Self::NotSized(ty) => terms.push(ty),
                 Self::Not(p) => predicates.push(p),
                 Self::And(ps) | Self::Or(ps) => predicates.extend(ps),
                 Self::Bool(_) => {}
@@ -5178,7 +5205,9 @@ impl fmt::Display for TypePredicate {
             Self::Bool(value) => write!(f, "(type-proposition {value})"),
             Self::Trait(requirement) => write!(f, "(trait-proposition {requirement})"),
             Self::Equal(a, b) => write!(f, "(type-equal {a} {b})"),
+            Self::IntLe(a, b) => write!(f, "(int-le {a} {b})"),
             Self::Kind(ty, kind) => write!(f, "(kind {kind} {ty})"),
+            Self::NotSized(ty) => write!(f, "(not-sized {ty})"),
             Self::Not(p) => write!(f, "(not {p})"),
             Self::And(ps) | Self::Or(ps) => {
                 f.write_str(if matches!(self, Self::And(_)) {

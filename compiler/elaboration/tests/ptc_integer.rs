@@ -8,15 +8,19 @@ fn id(index: u32) -> DeclarationId {
         local: index,
     }
 }
+
 fn x(index: u32, offset: i128) -> I {
     I::variable(id(index), offset)
 }
+
 fn n(value: i128) -> I {
     I::constant(value)
 }
+
 fn le(left: I, right: I) -> F {
     F::int_le(left, right)
 }
+
 fn prove(context: &Context, goal: F) {
     let result = context.prove(goal, Budget::default());
     let Outcome::Entailed(proof) = result else {
@@ -24,6 +28,7 @@ fn prove(context: &Context, goal: F) {
     };
     assert_eq!(context.verify_proof(&proof, Budget::default()), Ok(()));
 }
+
 fn eval(formula: &F, integers: &BTreeMap<DeclarationId, i128>) -> bool {
     match formula {
         F::Kind(_) => panic!("no kind atoms in this generator"),
@@ -36,7 +41,7 @@ fn eval(formula: &F, integers: &BTreeMap<DeclarationId, i128>) -> bool {
         F::Not(f) => !eval(f, integers),
         F::And(fs) => fs.iter().all(|f| eval(f, integers)),
         F::Or(fs) => fs.iter().any(|f| eval(f, integers)),
-        F::Equal(_) | F::Trait(_) => panic!("integer-only oracle"),
+        F::Equal(_) | F::NotSized(_) | F::Trait(_) => panic!("integer-only oracle"),
     }
 }
 
@@ -240,5 +245,141 @@ fn integer_witness_replay_rejects_missing_or_falsified_assignments() {
     assert_eq!(
         context.verify_witness(&changed, Budget::default()),
         Err(elaboration::ptc::ProofError::Invalid)
+    );
+}
+
+#[test]
+fn nir_int_le_predicate_wires_into_ptc_substitution_and_display() {
+    use nir::program::TypePredicate as P;
+    use nir::{DeclarationParameter, Sort, Term};
+
+    let n_id = id(10);
+    let m_id = id(11);
+    let pred = P::IntLe(I::variable(n_id, 2), I::variable(m_id, 0));
+    assert_eq!(
+        pred.to_string(),
+        format!("(int-le (int-offset {n_id} 2) (int-offset {m_id} 0))")
+    );
+    assert!(pred.mentions_rigid(n_id));
+    assert!(pred.mentions_rigid(m_id));
+    assert!(!pred.mentions_rigid(id(99)));
+    assert_eq!(pred.trivial_truth(), None);
+
+    let reflexive = P::IntLe(I::variable(n_id, 1), I::variable(n_id, 3));
+    assert_eq!(reflexive.trivial_truth(), Some(true));
+    let impossible = P::IntLe(I::variable(n_id, 4), I::variable(n_id, 3));
+    assert_eq!(impossible.trivial_truth(), Some(false));
+
+    let instantiated = pred
+        .instantiate_parameters(
+            &[
+                DeclarationParameter {
+                    declaration: n_id,
+                    sort: Sort::ComptimeValue,
+                },
+                DeclarationParameter {
+                    declaration: m_id,
+                    sort: Sort::ComptimeValue,
+                },
+            ],
+            &[
+                Term::Integer(comptime_runtime::Integer::from_i128(3)),
+                Term::Integer(comptime_runtime::Integer::from_i128(5)),
+            ],
+        )
+        .unwrap();
+    assert_eq!(instantiated.trivial_truth(), Some(true));
+    prove(&Context::default(), F::from_predicate(&instantiated));
+
+    let mut ctx = Context::default();
+    ctx.assume(F::from_predicate(&pred));
+    ctx.assume(F::from_predicate(&P::IntLe(
+        I::variable(m_id, 1),
+        I::variable(id(12), 0),
+    )));
+    prove(
+        &ctx,
+        F::from_predicate(&P::IntLe(I::variable(n_id, 3), I::variable(id(12), 0))),
+    );
+    assert!(matches!(
+        ctx.prove(
+            F::from_predicate(&P::IntLe(I::variable(n_id, 4), I::variable(id(12), 0))),
+            Budget::default()
+        ),
+        Outcome::NotEntailed(_)
+    ));
+}
+
+#[test]
+fn nir_int_le_rejects_unrepresentable_and_non_integer_substitutions() {
+    use nir::program::TypePredicate as P;
+    use nir::{DeclarationParameter, Sort, Term, TypeError};
+
+    let n_id = id(20);
+    let params = [DeclarationParameter {
+        declaration: n_id,
+        sort: Sort::ComptimeValue,
+    }];
+    let pred_zero = P::IntLe(I::variable(n_id, 0), I::constant(10));
+    let pred_plus_one = P::IntLe(I::variable(n_id, 1), I::constant(10));
+    let pred_minus_one = P::IntLe(I::variable(n_id, -1), I::constant(10));
+
+    // Integer outside i128 range must fail instead of leaking the original rigid id.
+    let huge = comptime_runtime::Integer::parse_literal(
+        "100000000000000000000000000000000000000000",
+        &mut comptime_runtime::Budget::default(),
+    )
+    .expect("parse big integer");
+    assert_eq!(
+        pred_zero.instantiate_parameters(&params, &[Term::Integer(huge)]),
+        Err(TypeError::InvalidIntegerTerm)
+    );
+
+    // Offset + substituted integer overflow must fail instead of leaking the original rigid id.
+    assert_eq!(
+        pred_plus_one.instantiate_parameters(
+            &params,
+            &[Term::Integer(comptime_runtime::Integer::from_i128(
+                i128::MAX
+            ))]
+        ),
+        Err(TypeError::InvalidIntegerTerm)
+    );
+    assert_eq!(
+        pred_minus_one.instantiate_parameters(
+            &params,
+            &[Term::Integer(comptime_runtime::Integer::from_i128(
+                i128::MIN
+            ))]
+        ),
+        Err(TypeError::InvalidIntegerTerm)
+    );
+
+    // Non-Rigid / non-Integer substitutions (NormalForm, AssociatedType) must fail.
+    let nf = Term::NormalForm {
+        head: id(21),
+        sort: Sort::ComptimeValue,
+        arguments: vec![],
+    };
+    assert_eq!(
+        pred_zero.instantiate_parameters(&params, &[nf]),
+        Err(TypeError::InvalidIntegerTerm)
+    );
+    let assoc = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(23),
+            member: id(24),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Rigid {
+            declaration: id(22),
+            sort: Sort::Type,
+        }),
+    };
+    assert_eq!(
+        I::variable(n_id, 0).try_map_rigid(&mut |_| Ok::<Term, TypeError>(assoc.clone()), || {
+            TypeError::InvalidIntegerTerm
+        }),
+        Err(TypeError::InvalidIntegerTerm)
     );
 }

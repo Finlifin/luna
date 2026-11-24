@@ -62,7 +62,7 @@ struct Relationship {
 
 fn predicate_scope(predicate: &TypePredicate) -> Result<(), nir::TypeError> {
     match predicate {
-        TypePredicate::Bool(_) => Ok(()),
+        TypePredicate::Bool(_) | TypePredicate::IntLe(..) => Ok(()),
         TypePredicate::Trait(requirement) => {
             requirement.subject.check_scope(&[])?;
             for argument in &requirement.interface_arguments {
@@ -74,7 +74,7 @@ fn predicate_scope(predicate: &TypePredicate) -> Result<(), nir::TypeError> {
             left.check_scope(&[])?;
             right.check_scope(&[])
         }
-        TypePredicate::Kind(ty, _) => ty.check_scope(&[]),
+        TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => ty.check_scope(&[]),
         TypePredicate::Not(inner) => predicate_scope(inner),
         TypePredicate::And(parts) | TypePredicate::Or(parts) => {
             for part in parts {

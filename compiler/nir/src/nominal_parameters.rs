@@ -4,6 +4,7 @@ use crate::{DeclarationId, DeclarationParameter, Primitive, Sort, Term, TypeErro
 use std::borrow::{Borrow, Cow};
 
 mod telescope;
+
 use telescope::Binders;
 
 #[cfg(test)]
@@ -166,6 +167,7 @@ pub enum InputAdmissionStage {
     Domain,
     Value,
 }
+
 impl std::fmt::Display for InputAdmissionStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -182,11 +184,13 @@ pub struct DeclarationAdmissionFailure {
     pub slot: Option<(usize, InputAdmissionStage)>,
     pub reason: AdmissionError,
 }
+
 impl From<AdmissionError> for DeclarationAdmissionFailure {
     fn from(reason: AdmissionError) -> Self {
         Self { slot: None, reason }
     }
 }
+
 impl std::fmt::Display for DeclarationAdmissionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(declaration-admission-failure")?;
@@ -324,6 +328,7 @@ pub enum ExpressionInstantiationError {
     Copy(crate::copy_budget::CopyBudgetExhausted),
     Scope(TypeError),
 }
+
 impl std::fmt::Display for ExpressionInstantiationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -332,6 +337,7 @@ impl std::fmt::Display for ExpressionInstantiationError {
         }
     }
 }
+
 impl From<ExpressionInstantiationError> for crate::type_computations::Error {
     fn from(error: ExpressionInstantiationError) -> Self {
         match error {
@@ -350,6 +356,7 @@ pub struct DeclarationSubstitution<'a> {
     arguments: Cow<'a, [Term]>,
     frames: Cow<'a, [Vec<Sort>]>,
 }
+
 impl std::fmt::Display for DeclarationSubstitution<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(declaration-substitution (inputs")?;
@@ -361,6 +368,7 @@ impl std::fmt::Display for DeclarationSubstitution<'_> {
         f.write_str(")")
     }
 }
+
 fn display_frames(f: &mut std::fmt::Formatter<'_>, frames: &[Vec<Sort>]) -> std::fmt::Result {
     f.write_str("(frames")?;
     for frame in frames {
@@ -441,6 +449,7 @@ impl<'a> DeclarationSubstitution<'a> {
             DeclarationInputScope::Caller(frames),
         )
     }
+
     fn from_parameters<D: Borrow<Term>>(
         parameters: Binders,
         domains: &[D],
@@ -454,6 +463,7 @@ impl<'a> DeclarationSubstitution<'a> {
             frames: Cow::Borrowed(scope.template()),
         })
     }
+
     pub fn bounded(
         ids: &[DeclarationId],
         domains: &[Term],
@@ -485,6 +495,7 @@ impl<'a> DeclarationSubstitution<'a> {
             frames: Cow::Borrowed(scope.template()),
         })
     }
+
     /// Check and take ownership of the caller's existing buffers. Unlike
     /// retaining a borrowed substitution, this does not copy any terms.
     pub fn bounded_owned<D: Borrow<Term>>(
@@ -541,6 +552,7 @@ impl<'a> DeclarationSubstitution<'a> {
         self.parameters
             .instantiate(term, &self.arguments, &self.frames)
     }
+
     /// A complete source function signature binds its own ordinary parameters.
     pub(crate) fn instantiate_closed_signature(&self, signature: &Term) -> Result<Term, TypeError> {
         self.parameters.instantiate(signature, &self.arguments, &[])
@@ -572,12 +584,14 @@ impl<'a> DeclarationSubstitution<'a> {
     ) -> Result<crate::program::TraitRequirement, TypeError> {
         requirement.try_map_types(&mut |ty| self.instantiate(ty))
     }
+
     pub fn instantiate_predicate(
         &self,
         predicate: &crate::program::TypePredicate,
     ) -> Result<crate::program::TypePredicate, TypeError> {
         predicate.try_map_types(&mut |ty| self.instantiate(ty))
     }
+
     fn charge_template(
         &self,
         root: crate::copy_budget::Node<'_>,
@@ -623,6 +637,7 @@ impl<'a> DeclarationSubstitution<'a> {
         self.instantiate_predicate(predicate)
             .map_err(crate::type_computations::Error::Scope)
     }
+
     /// Transport a checked producer postcondition to the caller. Declaration
     /// arguments can mention caller slots, and ordinary arguments can mention
     /// caller declarations (including recursive uses of the same declaration).
@@ -634,22 +649,25 @@ impl<'a> DeclarationSubstitution<'a> {
     ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
         use crate::type_computations::{Error, charge_frame_slots};
         self.charge_template(crate::copy_budget::Node::Predicate(predicate), fuel)?;
-        predicate.try_map_types(&mut |ty| {
-            if !ordinary.is_empty() {
-                charge_frame_slots(ty, |slot| ordinary.get(&slot).copied(), fuel)?;
-            }
-            let projected = ty
-                .replace_call_inputs(
-                    &|id| {
-                        let &(index, sort) = self.parameters.positions.get(&id)?;
-                        Some((sort, &self.arguments[index]))
-                    },
-                    Some(ordinary),
-                )
-                .map_err(Error::Scope)?;
-            projected.check_scope(&self.frames).map_err(Error::Scope)?;
-            Ok(projected)
-        })
+        predicate.try_map_types_with_invalid_integer(
+            &mut |ty| {
+                if !ordinary.is_empty() {
+                    charge_frame_slots(ty, |slot| ordinary.get(&slot).copied(), fuel)?;
+                }
+                let projected = ty
+                    .replace_call_inputs(
+                        &|id| {
+                            let &(index, sort) = self.parameters.positions.get(&id)?;
+                            Some((sort, &self.arguments[index]))
+                        },
+                        Some(ordinary),
+                    )
+                    .map_err(Error::Scope)?;
+                projected.check_scope(&self.frames).map_err(Error::Scope)?;
+                Ok(projected)
+            },
+            &|| Error::Scope(crate::TypeError::InvalidIntegerTerm),
+        )
     }
 
     pub fn instantiate_interface_bounded(
@@ -659,6 +677,7 @@ impl<'a> DeclarationSubstitution<'a> {
     ) -> Result<crate::program::InterfaceInstance, crate::type_computations::Error> {
         interface.try_map_types(&mut |ty| self.instantiate_bounded(ty, fuel))
     }
+
     pub fn instantiate_requirement_bounded(
         &self,
         requirement: &crate::program::TraitRequirement,
@@ -666,6 +685,7 @@ impl<'a> DeclarationSubstitution<'a> {
     ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
         requirement.try_map_types(&mut |ty| self.instantiate_bounded(ty, fuel))
     }
+
     pub fn instantiate_bounded(
         &self,
         term: &Term,
@@ -684,6 +704,7 @@ pub struct AdmittedArguments<'a, T = Term> {
     arguments: &'a [T],
     scope: DeclarationInputScope<'a>,
 }
+
 impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(admitted-arguments")?;
@@ -695,6 +716,7 @@ impl<T: Borrow<Term>> std::fmt::Display for AdmittedArguments<'_, T> {
         f.write_str(")")
     }
 }
+
 impl<'a> AdmittedArguments<'a> {
     /// Keep the checked binder index and the template's ordinary telescope for
     /// code in this activation. Rewriting code does not grant admission again.
@@ -716,6 +738,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
         self.parameters
             .instantiate_bounded(term, self.arguments, self.scope.template(), fuel)
     }
+
     /// A whole callable signature introduces its own ordinary telescope. A
     /// requirement in that body instead inherits the template frames.
     pub fn instantiate_in_input_scope(
@@ -726,6 +749,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
         self.parameters
             .instantiate_bounded(term, self.arguments, self.scope.input(), fuel)
     }
+
     pub(crate) fn instantiate_expression(
         &self,
         expression: &crate::program::Expr,
@@ -738,6 +762,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
             fuel,
         )
     }
+
     pub fn instantiate_requirement(
         &self,
         requirement: &crate::program::TraitRequirement,
@@ -745,6 +770,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
     ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
         requirement.try_map_types(&mut |ty| self.instantiate(ty, fuel))
     }
+
     pub fn instantiate_predicate(
         &self,
         predicate: &crate::program::TypePredicate,
@@ -752,6 +778,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
     ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
         self.predicate(predicate, fuel, 0)
     }
+
     fn predicate(
         &self,
         predicate: &crate::program::TypePredicate,
@@ -768,7 +795,16 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
             P::Bool(value) => P::Bool(*value),
             P::Trait(requirement) => P::Trait(self.instantiate_requirement(requirement, fuel)?),
             P::Equal(a, b) => P::Equal(self.instantiate(a, fuel)?, self.instantiate(b, fuel)?),
+            P::IntLe(a, b) => P::IntLe(
+                a.try_map_rigid(&mut |ty| self.instantiate(ty, fuel), || {
+                    Error::Scope(crate::TypeError::InvalidIntegerTerm)
+                })?,
+                b.try_map_rigid(&mut |ty| self.instantiate(ty, fuel), || {
+                    Error::Scope(crate::TypeError::InvalidIntegerTerm)
+                })?,
+            ),
             P::Kind(ty, kind) => P::Kind(self.instantiate(ty, fuel)?, *kind),
+            P::NotSized(ty) => P::NotSized(self.instantiate(ty, fuel)?),
             P::Not(inner) => P::Not(Box::new(self.predicate(inner, fuel, depth + 1)?)),
             P::And(parts) | P::Or(parts) => {
                 let parts = parts
@@ -898,6 +934,7 @@ pub enum DeclarationInputScope<'a> {
     Caller(&'a [Vec<Sort>]),
     ClosedInBody(&'a [Vec<Sort>]),
 }
+
 impl<'a> DeclarationInputScope<'a> {
     fn input(self) -> &'a [Vec<Sort>] {
         match self {
@@ -905,12 +942,14 @@ impl<'a> DeclarationInputScope<'a> {
             Self::ClosedInBody(_) => &[],
         }
     }
+
     fn template(self) -> &'a [Vec<Sort>] {
         match self {
             Self::Caller(frames) | Self::ClosedInBody(frames) => frames,
         }
     }
 }
+
 impl std::fmt::Display for DeclarationInputScope<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(declaration-input-scope (caller ")?;

@@ -323,7 +323,11 @@ fn separation_goal(
                     terms.push(a);
                     terms.push(b);
                 }
-                TypePredicate::Kind(ty, _) => terms.push(ty),
+                TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => terms.push(ty),
+                TypePredicate::IntLe(a, b) => {
+                    used.extend(a.variable);
+                    used.extend(b.variable);
+                }
                 TypePredicate::Not(p) => predicates.push(p),
                 TypePredicate::And(items) | TypePredicate::Or(items) => predicates.extend(items),
                 TypePredicate::Bool(_) => {}

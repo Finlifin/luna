@@ -2,8 +2,10 @@
 //! branch restoration and backjumping no longer depend on the Rust call stack.
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
+
 mod analysis;
 mod trail;
+
 use trail::{Consumer, Reason, Trail};
 
 #[cfg(test)]
@@ -17,20 +19,21 @@ fn backjump(
     assignment: &mut Trail<'_>,
     decision_level: &mut usize,
     target: usize,
-) {
+) -> bool {
     debug_assert!(target < *decision_level);
     assignment.backjump(target);
     while *decision_level > target {
-        match frames
-            .pop()
-            .expect("decision frame missing during backjump")
-        {
+        let Some(frame) = frames.pop() else {
+            return false;
+        };
+        match frame {
             Frame::Negative { .. } | Frame::Positive { .. } => *decision_level -= 1,
             Frame::Propagated { .. } => {}
         }
     }
     #[cfg(test)]
     BACKJUMPS.with(|n| n.set(n.get() + 1));
+    true
 }
 
 enum Frame {
@@ -46,10 +49,12 @@ enum Frame {
         negative: SearchResult,
     },
 }
+
 enum Step {
     Return(SearchResult),
     Descend(Frame, usize),
 }
+
 impl fmt::Display for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -72,6 +77,7 @@ impl fmt::Display for Frame {
         }
     }
 }
+
 impl Search<'_> {
     pub(super) fn solve(
         &mut self,
@@ -106,7 +112,9 @@ impl Search<'_> {
                 );
                 result = next;
                 if let Some(target) = jump {
-                    backjump(&mut frames, &mut assignment, &mut decision_level, target);
+                    if !backjump(&mut frames, &mut assignment, &mut decision_level, target) {
+                        return SearchResult::Unknown(UnknownReason::UnvalidatedModel);
+                    }
                     depth = entry_depth + decision_level;
                     continue 'search;
                 }
@@ -124,7 +132,9 @@ impl Search<'_> {
                 match frame {
                     Frame::Propagated { start } => {
                         while assignment.len() > start {
-                            let (index, value) = assignment.last_literal().unwrap();
+                            let Some((index, value)) = assignment.last_literal() else {
+                                return SearchResult::Unknown(UnknownReason::UnvalidatedModel);
+                            };
                             let (next, jump) = self.learn_first_uip(
                                 result,
                                 assignment.values(),
@@ -134,7 +144,14 @@ impl Search<'_> {
                             );
                             result = next;
                             if let Some(target) = jump {
-                                backjump(&mut frames, &mut assignment, &mut decision_level, target);
+                                if !backjump(
+                                    &mut frames,
+                                    &mut assignment,
+                                    &mut decision_level,
+                                    target,
+                                ) {
+                                    return SearchResult::Unknown(UnknownReason::UnvalidatedModel);
+                                }
                                 depth = entry_depth + decision_level;
                                 continue 'search;
                             }
@@ -154,7 +171,9 @@ impl Search<'_> {
                                     | Reason::Learned(reason)
                                     | Reason::Theory(reason) => reason,
                                     Reason::Decision => {
-                                        unreachable!("decision inside propagation frame")
+                                        return SearchResult::Unknown(
+                                            UnknownReason::UnvalidatedModel,
+                                        );
                                     }
                                 };
                                 let (negative, positive) = if value {
@@ -206,10 +225,11 @@ impl Search<'_> {
                                     self.learn_resolved(conflict, assignment.values()),
                                 )
                             }
-                            (_, model @ SearchResult::Model(_)) => model,
+                            (SearchResult::Model(model), _) | (_, SearchResult::Model(model)) => {
+                                SearchResult::Model(model)
+                            }
                             (SearchResult::Unknown(reason), _)
                             | (_, SearchResult::Unknown(reason)) => SearchResult::Unknown(reason),
-                            _ => unreachable!(),
                         };
                     }
                 }
@@ -279,8 +299,8 @@ impl Search<'_> {
         let explained = self
             .boolean
             .as_mut()
-            .unwrap()
-            .clauses(self.atoms.len(), &mut work)
+            .ok_or(())
+            .and_then(|boolean| boolean.clauses(self.atoms.len(), &mut work))
             .and_then(|cnf| cnf.explain(&trace, assignment, &mut work));
         self.steps -= allowance - work;
         let trace = if let Ok((trace, support)) = explained {
@@ -297,15 +317,16 @@ impl Search<'_> {
         if depth >= self.max_depth || self.tick().is_err() {
             return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
         }
-        if self.boolean.is_none() {
-            match boolean::Circuit::compile(self.formula, self.atoms, &mut self.steps) {
-                Ok(circuit) => self.boolean = Some(circuit),
+        let boolean = match self.boolean.as_mut() {
+            Some(circuit) => circuit,
+            None => match boolean::Circuit::compile(self.formula, self.atoms, &mut self.steps) {
+                Ok(circuit) => self.boolean.insert(circuit),
                 Err(()) => {
                     return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
                 }
-            }
-        }
-        let propagation = match self.boolean.as_mut().unwrap().propagate_changes(
+            },
+        };
+        let propagation = match boolean.propagate_changes(
             assignment.values(),
             assignment.changes(Consumer::Circuit),
             &mut self.steps,
@@ -346,7 +367,10 @@ impl Search<'_> {
             Ok(learning::Propagation::None) => {}
         }
         if forced.is_empty() && propagation.truth.is_none() {
-            let result = self.boolean.as_mut().unwrap().propagate_clause_changes(
+            let Some(boolean) = self.boolean.as_mut() else {
+                return Step::Return(SearchResult::Unknown(UnknownReason::UnvalidatedModel));
+            };
+            let result = boolean.propagate_clause_changes(
                 assignment.values(),
                 assignment.changes(Consumer::Root),
                 &mut self.steps,
@@ -441,8 +465,11 @@ impl Search<'_> {
                 depth + 1,
             )
         } else {
+            let Some(classes) = classes else {
+                return Step::Return(SearchResult::Unknown(UnknownReason::UnvalidatedModel));
+            };
             Step::Return(
-                self.witness(&classes.expect("complete assignment requested a theory model"))
+                self.witness(&classes)
                     .map(SearchResult::Model)
                     .unwrap_or_else(|| {
                         SearchResult::Unknown(if self.steps == 0 {
@@ -936,6 +963,7 @@ mod tests {
             "(positive-frame (atom 3) (negative-result unknown))"
         );
     }
+
     #[test]
     fn root_unit_reason_excludes_unrelated_entry_assignments() {
         let atom = |local| {

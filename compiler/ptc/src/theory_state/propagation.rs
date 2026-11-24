@@ -9,10 +9,12 @@ pub(crate) struct Unit {
     pub value: bool,
     pub reason: Conflict,
 }
+
 fn charge(fuel: &mut usize, work: usize) -> Option<()> {
     *fuel = fuel.checked_sub(work)?;
     Some(())
 }
+
 impl Classes {
     fn metered_root(&self, mut index: usize, fuel: &mut usize) -> Option<usize> {
         loop {
@@ -24,6 +26,7 @@ impl Classes {
         }
     }
 }
+
 impl Search<'_> {
     // Called only after successful theory synchronization for this assignment.
     // Propagation is optional; interruption publishes neither a literal nor
@@ -35,6 +38,7 @@ impl Search<'_> {
         self.steps -= allowance - work;
         result
     }
+
     fn find_theory_unit(&self, assignment: &[Option<bool>], fuel: &mut usize) -> Option<Unit> {
         let state = self.theory_state.as_ref()?;
         if state.layers.is_empty() || !state.pending.is_empty() {
@@ -44,10 +48,12 @@ impl Search<'_> {
             Equality((usize, usize)),
             Trait((nir::DeclarationId, Vec<usize>)),
             Kind(usize, TypeKind),
+            NotSized(usize),
         }
         let mut unequal = BTreeSet::new();
         let mut traits = BTreeMap::new();
         let mut kinds = Vec::new();
+        let mut not_sized = BTreeMap::new();
         let mut integers = Vec::new();
         let mut pending = Vec::new();
         for (index, (atom, value)) in self.atoms.iter().zip(assignment).enumerate() {
@@ -94,6 +100,16 @@ impl Search<'_> {
                     }
                     Query::Kind(root, query.kind)
                 }
+                Atom::NotSized(query) => {
+                    let root = state
+                        .classes
+                        .metered_root(self.terms.ids[&query.ty], fuel)?;
+                    if let Some(value) = value {
+                        not_sized.insert(root, *value);
+                        continue;
+                    }
+                    Query::NotSized(root)
+                }
                 Atom::IntLe(atom) => {
                     if value.is_none() {
                         integers.push((index, atom));
@@ -138,6 +154,29 @@ impl Search<'_> {
                     }
                     inferred
                 }
+                Query::NotSized(root) => {
+                    let mut inferred = not_sized.get(&root).copied();
+                    if inferred.is_none() {
+                        for id in state.classes.ordered_members(root, fuel).ok()? {
+                            charge(fuel, 1)?;
+                            match crate::not_sized::evaluate(
+                                &self.terms.nodes[id],
+                                &self.context.theory.constructors,
+                                &self.context.theory.list_inference_heads,
+                            ) {
+                                crate::not_sized::NotSizedStatus::Known(value) => {
+                                    inferred = Some(value);
+                                    break;
+                                }
+                                crate::not_sized::NotSizedStatus::InvalidRepresentation(_) => {
+                                    return None;
+                                }
+                                crate::not_sized::NotSizedStatus::Unknown => {}
+                            }
+                        }
+                    }
+                    inferred
+                }
             };
             if let Some(value) = value {
                 return self.explain_unit(assignment, index, value, fuel);
@@ -159,6 +198,7 @@ impl Search<'_> {
         }
         None
     }
+
     fn explain_unit(
         &self,
         assignment: &[Option<bool>],

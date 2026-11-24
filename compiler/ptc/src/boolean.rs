@@ -26,6 +26,7 @@ pub(super) struct Circuit {
     propagation: Option<cnf::Session>,
     evaluation: Option<evaluation::State>,
 }
+
 enum Node {
     Constant(bool),
     Atom(usize),
@@ -33,10 +34,12 @@ enum Node {
     And(Vec<usize>),
     Or(Vec<usize>),
 }
+
 fn charge(fuel: &mut usize) -> Result<(), ()> {
     *fuel = fuel.checked_sub(1).ok_or(())?;
     Ok(())
 }
+
 impl Circuit {
     pub(super) fn compile(formula: &Formula, atoms: &[Atom], fuel: &mut usize) -> Result<Self, ()> {
         fn visit(
@@ -68,6 +71,7 @@ impl Circuit {
                         let equal = match (f, atom) {
                             (Formula::Equal(a), Atom::TypeEqual(b)) => a == b,
                             (Formula::Kind(a), Atom::Kind(b)) => a == b,
+                            (Formula::NotSized(a), Atom::NotSized(b)) => a == b,
                             (Formula::Trait(a), Atom::Trait(b)) => a == b,
                             (Formula::IntLe(a), Atom::IntLe(b)) => a == b,
                             _ => false,
@@ -150,6 +154,7 @@ impl Circuit {
         let (values, _) = self.evaluate(assignment, fuel)?;
         self.propagate_values(&values, fuel)
     }
+
     fn evaluate(
         &self,
         assignment: &[Option<bool>],
@@ -171,6 +176,7 @@ impl Circuit {
         }
         Ok((values, index_cost))
     }
+
     fn node_value(
         &self,
         id: usize,
@@ -201,6 +207,7 @@ impl Circuit {
             }
         })
     }
+
     fn propagate_values(
         &self,
         values: &[Option<bool>],
@@ -273,6 +280,7 @@ impl Circuit {
             conflict_support: None,
         })
     }
+
     fn explain_conflict(
         &self,
         values: &[Option<bool>],
@@ -280,6 +288,7 @@ impl Circuit {
     ) -> Result<BTreeSet<usize>, ()> {
         self.explain_nodes(values, vec![self.nodes.len() - 1], fuel)
     }
+
     fn explain_nodes(
         &self,
         values: &[Option<bool>],

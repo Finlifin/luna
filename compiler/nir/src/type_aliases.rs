@@ -16,11 +16,13 @@ pub struct Contract {
     pub requirements: Vec<TypePredicate>,
     pub capabilities: Vec<TraitRequirement>,
 }
+
 impl Contract {
     pub fn parameter_binders(&self) -> Result<Vec<DeclarationParameter>, TypeError> {
         crate::nominal_parameters::binders(&self.parameters, &self.parameter_types)
     }
 }
+
 impl fmt::Display for Contract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -53,6 +55,7 @@ pub enum ValidationError {
     Budget,
     Invalid(&'static str),
 }
+
 impl ValidationError {
     pub fn message(self) -> &'static str {
         match self {
@@ -61,11 +64,13 @@ impl ValidationError {
         }
     }
 }
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
     }
 }
+
 impl std::error::Error for ValidationError {}
 
 /// Compatibility entry for callers that do not yet own a shared allowance.
@@ -175,7 +180,17 @@ pub(crate) fn admit_in(
                         charge(fuel, 2)?;
                         pending.extend([Work::Term(a), Work::Term(b)]);
                     }
-                    TypePredicate::Kind(ty, _) => {
+                    TypePredicate::IntLe(a, b) => {
+                        for id in [a.variable, b.variable].into_iter().flatten() {
+                            charge(fuel, 1)?;
+                            if !positions.get(&id).is_some_and(|(expected, _)| {
+                                *expected == crate::Sort::ComptimeValue
+                            }) {
+                                return Err(Invalid("alias contract has an undeclared parameter"));
+                            }
+                        }
+                    }
+                    TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => {
                         charge(fuel, 1)?;
                         pending.push(Work::Term(ty));
                     }
@@ -209,6 +224,7 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), ValidationError> {
     *fuel = fuel.checked_sub(amount).ok_or(ValidationError::Budget)?;
     Ok(())
 }
+
 fn charge_term(term: &Term, fuel: &mut usize) -> Result<(), ValidationError> {
     crate::type_computations::charge_term(term, fuel).map_err(|_| ValidationError::Budget)
 }

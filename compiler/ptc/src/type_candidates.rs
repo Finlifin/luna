@@ -31,6 +31,7 @@ impl Context {
                     pending.push(Input::Term(a));
                 }
                 Input::Formula(Formula::Kind(query)) => pending.push(Input::Term(&query.ty)),
+                Input::Formula(Formula::NotSized(query)) => pending.push(Input::Term(&query.ty)),
                 Input::Formula(Formula::Trait(query)) => {
                     pending.extend(query.inputs().map(Input::Term))
                 }

@@ -182,6 +182,7 @@ impl ImplementationHead {
                     work.push(Visit::Term(right));
                 }
                 Visit::Formula(Formula::Kind(query)) => work.push(Visit::Term(&query.ty)),
+                Visit::Formula(Formula::NotSized(query)) => work.push(Visit::Term(&query.ty)),
                 Visit::Formula(Formula::Trait(query)) => {
                     work.extend(query.inputs().map(Visit::Term));
                 }

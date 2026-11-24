@@ -1,10 +1,13 @@
 //! Query-local reversible equality closure, validated type facts and integer
 //! potentials. Checkers and conflict minimization use fresh theory state.
 use super::{Atom, Search, TheoryModel, TypeKind, UnknownReason, integer};
+
 mod members;
 mod propagation;
+
 #[cfg(test)]
 mod reuse_tests;
+
 use std::{collections::BTreeSet, fmt};
 
 pub(super) enum Check {
@@ -21,6 +24,7 @@ pub(super) struct Classes {
     next: Vec<usize>,
     undo: Vec<(usize, usize)>,
 }
+
 impl Classes {
     pub fn new(count: usize) -> Self {
         Self {
@@ -30,6 +34,7 @@ impl Classes {
             undo: Vec::new(),
         }
     }
+
     pub fn root(&self, mut id: usize) -> usize {
         // Path compression would require separate undo entries. Union by size
         // bounds path length while keeping each merge a single reversible step.
@@ -38,6 +43,7 @@ impl Classes {
         }
         id
     }
+
     pub fn merge(&mut self, a: usize, b: usize) -> bool {
         let (mut a, mut b) = (self.root(a), self.root(b));
         if a == b {
@@ -52,9 +58,11 @@ impl Classes {
         self.next.swap(a, b);
         true
     }
+
     fn checkpoint(&self) -> usize {
         self.undo.len()
     }
+
     fn rollback(&mut self, checkpoint: usize) {
         while self.undo.len() > checkpoint {
             let (child, parent) = self.undo.pop().unwrap();
@@ -63,6 +71,7 @@ impl Classes {
             self.next.swap(parent, child);
         }
     }
+
     fn snapshot(&self) -> Self {
         Self {
             parent: self.parent.clone(),
@@ -72,6 +81,7 @@ impl Classes {
         }
     }
 }
+
 impl fmt::Display for Classes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(equality-classes (roots")?;
@@ -95,6 +105,7 @@ struct Layer {
     checkpoint: usize,
     integers: integer::Checkpoint,
 }
+
 pub(super) struct State {
     classes: Classes,
     integers: integer::State,
@@ -102,18 +113,21 @@ pub(super) struct State {
     // Integer additions do not change this closure. Retractions invalidate it;
     // a failed extension must never replace the last committed summary.
     kinds: Option<Vec<(usize, TypeKind, bool)>>,
+    not_sized: Option<Vec<(usize, bool)>>,
     // Each admitted atom has exactly one introduction layer, not one copy in
     // every later layer. Pending atoms have not yet earned retained evidence.
     facts: Vec<Option<(bool, usize)>>,
     layers: Vec<Layer>,
     pending: BTreeSet<usize>,
 }
+
 fn charge(fuel: &mut usize, work: usize) -> Result<(), UnknownReason> {
     *fuel = fuel
         .checked_sub(work)
         .ok_or(UnknownReason::BudgetExhausted)?;
     Ok(())
 }
+
 impl State {
     fn new(
         count: usize,
@@ -129,6 +143,7 @@ impl State {
             classes: Classes::new(count),
             integers: integer::State::new(atoms, fuel)?,
             kinds: None,
+            not_sized: None,
             facts: vec![None; assignment.len()],
             layers: Vec::new(),
             pending: assignment
@@ -138,6 +153,7 @@ impl State {
                 .collect(),
         })
     }
+
     fn prepare(
         &mut self,
         assignment: &[Option<bool>],
@@ -190,8 +206,10 @@ impl State {
         self.classes.rollback(checkpoint);
         self.integers.rollback(integers);
         self.kinds = None;
+        self.not_sized = None;
         Ok(())
     }
+
     // Caller reserves pending traversal and snapshot work before publication.
     fn commit(&mut self, assignment: &[Option<bool>]) {
         let atoms: Vec<_> = self
@@ -218,6 +236,7 @@ impl State {
         self.pending.clear();
     }
 }
+
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -259,6 +278,7 @@ impl fmt::Display for State {
         write!(f, "))")
     }
 }
+
 impl Search<'_> {
     #[cfg(test)]
     pub(super) fn theory_cached(
@@ -272,6 +292,7 @@ impl Search<'_> {
                 Check::Consistent => unreachable!("requested an owned model"),
             })
     }
+
     pub(super) fn theory_cached_changes(
         &mut self,
         assignment: &[Option<bool>],
@@ -304,7 +325,7 @@ impl Search<'_> {
                     type_changed |= !matches!(self.atoms[index], Atom::IntLe(_));
                 }
             }
-            let next_kinds = if type_changed {
+            let next_summary = if type_changed {
                 // Building roots, dependency vectors and a first dirty frontier
                 // costs at least four passes. Small catalogs are cheaper to scan.
                 let count = self.terms.nodes.len();
@@ -315,12 +336,12 @@ impl Search<'_> {
                     charge(&mut self.steps, count)?;
                     Some((0..count).map(|id| state.classes.root(id)).collect())
                 };
-                let Some(kinds) =
+                let Some(summary) =
                     self.type_theory_with_classes(assignment, &mut state.classes, baseline)?
                 else {
                     return Ok(Check::Conflict);
                 };
-                Some(kinds)
+                Some(summary)
             } else {
                 None
             };
@@ -349,22 +370,30 @@ impl Search<'_> {
                 });
             charge(&mut self.steps, cost)?;
             let result = if capture_model {
-                let kinds = next_kinds
+                let kinds = next_summary
                     .as_ref()
+                    .map(|(kinds, _)| kinds)
                     .or(state.kinds.as_ref())
                     .expect("checked type closure");
-                charge(&mut self.steps, kinds.len())?;
+                let not_sized = next_summary
+                    .as_ref()
+                    .map(|(_, not_sized)| not_sized)
+                    .or(state.not_sized.as_ref())
+                    .expect("checked type closure");
+                charge(&mut self.steps, kinds.len().saturating_add(not_sized.len()))?;
                 Check::Model(TheoryModel {
                     classes: state.classes.snapshot(),
                     kinds: kinds.clone(),
+                    not_sized: not_sized.clone(),
                     integers: state.integers.model(&mut self.steps)?,
                 })
             } else {
                 Check::Consistent
             };
             state.commit(assignment);
-            if let Some(kinds) = next_kinds {
+            if let Some((kinds, not_sized)) = next_summary {
                 state.kinds = Some(kinds);
+                state.not_sized = Some(not_sized);
             }
             Ok(result)
         })();
@@ -380,6 +409,7 @@ impl Search<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn integer_layers_match_fresh_search_and_bounded_models_across_retractions() {
         use crate::{Context, Formula, IntLe, IntegerTerm, Terms, collect, learning};
@@ -589,6 +619,7 @@ mod tests {
         );
         assert_eq!(classes.size, vec![1; 6]);
     }
+
     #[test]
     fn warm_closure_matches_fresh_checks_across_branches_and_interruptions() {
         use crate::{Context, Formula, Terms, collect, learning};
@@ -691,6 +722,7 @@ mod tests {
             compare(warm, fresh);
         }
     }
+
     #[test]
     fn retained_structural_closure_avoids_repeating_decomposition_rounds() {
         use crate::{Context, Formula, Terms, collect, learning};

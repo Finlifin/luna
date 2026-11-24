@@ -30,6 +30,7 @@ pub struct SignatureDescription {
     parameters: Vec<(Sort, FrozenDescription)>,
     result: FrozenDescription,
 }
+
 impl SignatureDescription {
     pub fn from_residual(
         signature: &nir::deferred_signatures::Signature,
@@ -51,12 +52,15 @@ impl SignatureDescription {
         let result = FrozenDescription::from_annotation(signature.result(), fuel)?;
         Ok(Self { parameters, result })
     }
+
     pub fn parameters(&self) -> &[(Sort, FrozenDescription)] {
         &self.parameters
     }
+
     pub fn result(&self) -> &FrozenDescription {
         &self.result
     }
+
     /// Read a parameter or the final result slot, retaining declaration scope.
     pub fn annotation(&self, slot: usize) -> Option<&FrozenDescription> {
         if slot == self.parameters.len() {
@@ -66,6 +70,7 @@ impl SignatureDescription {
         }
     }
 }
+
 impl fmt::Display for SignatureDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(signature-description (parameters")?;
@@ -107,6 +112,7 @@ impl Description {
         }))
     }
 }
+
 impl FrozenDescription {
     /// Inspect saved syntax-level knowledge without allocating a computation
     /// task. Repeated computed annotations remain Any, even when they name the
@@ -130,6 +136,7 @@ impl FrozenDescription {
             nir::deferred_signatures::Annotation::Computed(_) => Self::Any,
         })
     }
+
     /// Re-enter an elaboration world without allocating inference variables or
     /// making equality assumptions. Scope is checked by the consuming context.
     pub fn description(&self) -> Description {
@@ -138,6 +145,7 @@ impl FrozenDescription {
             Self::Known(ty) => Description::Known(InferenceTerm::Stable(ty.clone())),
         }
     }
+
     /// Instantiate declaration binders lazily, preserving intentional Any and
     /// the distinction between it and unresolved caller inputs.
     pub fn instantiate(&self, inputs: Vec<InferenceTerm>) -> Description {
@@ -150,6 +158,7 @@ impl FrozenDescription {
         }
     }
 }
+
 impl fmt::Display for FrozenDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -158,6 +167,7 @@ impl fmt::Display for FrozenDescription {
         }
     }
 }
+
 impl fmt::Display for Freeze {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -172,6 +182,7 @@ impl fmt::Display for Freeze {
         }
     }
 }
+
 #[derive(Debug)]
 pub enum Compatibility {
     /// Instantiation and delivery checks remain necessary. This is not a proof.
@@ -181,12 +192,14 @@ pub enum Compatibility {
     Exact(Outcome),
     Waiting(BTreeSet<MetaId>),
 }
+
 #[derive(Debug)]
 pub enum Join {
     Ready(Description),
     Waiting(BTreeSet<MetaId>),
     Unproven(Outcome),
 }
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     SpeculativeContext,
@@ -195,6 +208,7 @@ pub enum Error {
     InvalidRequirement(ptc::ValidationError),
     Budget,
 }
+
 impl From<InferenceError> for Error {
     fn from(value: InferenceError) -> Self {
         if value == InferenceError::Budget {
@@ -204,11 +218,13 @@ impl From<InferenceError> for Error {
         }
     }
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(description-error {:?})", format!("{self:?}"))
     }
 }
+
 impl std::error::Error for Error {}
 
 /// Resolve ordinary inference without treating a waiting metavariable as Any.
@@ -241,6 +257,7 @@ fn resolve(
     value.check_scope(types.scope()).map_err(Error::Scope)?;
     Ok(Some(value))
 }
+
 pub fn compatible(
     left: &Description,
     right: &Description,
@@ -262,6 +279,7 @@ pub fn compatible(
         _ => Ok(Compatibility::Gradual),
     }
 }
+
 /// This is the no-target rule only. Target-directed conversions, branch facts
 /// and final representation selection remain separate obligations.
 pub fn join_without_target(
@@ -323,6 +341,7 @@ pub fn join_without_target(
     // not a proof of inequality. Resource exhaustion returned above instead.
     Ok(Join::Ready(Description::Any))
 }
+
 impl fmt::Display for Description {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -331,6 +350,7 @@ impl fmt::Display for Description {
         }
     }
 }
+
 impl fmt::Display for Compatibility {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -346,6 +366,7 @@ impl fmt::Display for Compatibility {
         }
     }
 }
+
 impl fmt::Display for Join {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -370,6 +391,7 @@ pub struct Refinement {
     pub subject: nir::DeclarationId,
     pub requirement: Formula,
 }
+
 #[derive(Debug)]
 pub enum RefinementCheck {
     NeedsInstantiation,
@@ -386,6 +408,7 @@ pub struct RefinementScope<'a> {
     body: Context,
     requirement: Refinement,
 }
+
 impl<'a> RefinementScope<'a> {
     pub fn new(
         parent: &'a Context,
@@ -462,11 +485,13 @@ impl<'a> RefinementScope<'a> {
             .check(description, inference, self.parent, budget)
     }
 }
+
 impl fmt::Display for RefinementScope<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(definition-refinement-scope {})", self.requirement)
     }
 }
+
 impl Refinement {
     pub fn check(
         &self,
@@ -509,6 +534,7 @@ impl Refinement {
             types.prove_metered(requirement, budget),
         ))
     }
+
     fn instantiate(
         &self,
         actual: &Term,
@@ -540,6 +566,7 @@ impl Refinement {
                 Formula::False => Formula::False,
                 Formula::Equal(ptc::Equality(a, b)) => Formula::equal(term(a)?, term(b)?),
                 Formula::Kind(query) => Formula::kind(term(&query.ty)?, query.kind),
+                Formula::NotSized(query) => Formula::not_sized(term(&query.ty)?),
                 Formula::Trait(query) => Formula::Trait(ptc::TraitQuery {
                     interface: query.interface,
                     subject: term(&query.subject)?,
@@ -573,6 +600,7 @@ impl Refinement {
         visit(&self.requirement, self.subject, &term)
     }
 }
+
 impl fmt::Display for Refinement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -582,6 +610,7 @@ impl fmt::Display for Refinement {
         )
     }
 }
+
 impl fmt::Display for RefinementCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
