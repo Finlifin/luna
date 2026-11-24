@@ -2447,6 +2447,11 @@ impl<'a> Formatter<'a> {
         let tab = self.tab_spaces();
 
         let (head_doc, body, body_slot) = match kind {
+            NodeKind::ArmImport => {
+                let expr = ch[0];
+                let e_slot = inner_slot.child_slot_from(self.parsed, inner_slot.first + 1, expr);
+                return Doc::concat([attrs_doc, Doc::str("use "), self.format_expr(expr, e_slot)]);
+            }
             NodeKind::ConditionArm => {
                 // `[cond, body]`, where `cond == 0` is `else => body`!
                 let cond = ch[0];

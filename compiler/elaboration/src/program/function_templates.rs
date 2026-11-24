@@ -175,16 +175,52 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 "invalid function template parameter correspondence",
             ));
         }
-        if explicit_parameters.is_some_and(|explicit| {
-            explicit.len() != parameters.len()
-                || explicit
-                    .iter()
-                    .zip(parameters)
-                    .any(|(param, input)| param.hir_id != input.binding)
-        }) {
+        let is_arm_instance = explicit_parameters
+            .is_some_and(|explicit| explicit.iter().any(|p| matches!(p.ty.kind, T::Case(_))));
+        if let Some(explicit) = explicit_parameters {
+            let valid = if is_arm_instance {
+                explicit.len() <= parameters.len()
+                    && explicit
+                        .iter()
+                        .zip(parameters)
+                        .all(|(param, input)| param.hir_id == input.binding)
+            } else {
+                explicit.len() == parameters.len()
+                    && explicit
+                        .iter()
+                        .zip(parameters)
+                        .all(|(param, input)| param.hir_id == input.binding)
+            };
+            if !valid {
+                return Err(error(
+                    item.span,
+                    "invalid explicit function template parameter correspondence",
+                ));
+            }
+        }
+        let template_head = if let E::NFApplication(head, _) = template.kind {
+            head
+        } else {
+            *template
+        };
+        let template_owner = match template_head.kind {
+            E::ResolvedDef { def_id, .. } => source.definition_owner(def_id),
+            _ => None,
+        };
+        if let Some(template_owner) = template_owner {
+            package
+                .function_template_origins
+                .insert(owner, template_owner);
+        }
+        if is_arm_instance
+            && (!formal.modifiers.is_quote
+                || formal.modifiers.is_comptime
+                || !modifiers.is_quote
+                || modifiers.is_comptime)
+        {
             return Err(error(
                 item.span,
-                "invalid explicit function template parameter correspondence",
+                "case arm instance requires quote fn on both template and arm",
             ));
         }
         let applied = matches!(template.kind, E::NFApplication(..));
@@ -244,19 +280,24 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             .map(|(index, (p, input))| {
                 let mut p = rebind.parameter(p, 0)?;
                 if let Some(explicit) = explicit_parameters {
-                    let explicit = &explicit[index];
-                    if explicit.ty.flags != p.ty.flags {
-                        return Err(error(explicit.span, "function template instance parameter markers must match the inherited interface"));
+                    if is_arm_instance && (index == 0 || index >= explicit.len()) {
+                        // Index 0 matches via the case pattern; omitted trailing
+                        // slots inherit the formal `implicit quote` parameters.
+                    } else {
+                        let explicit = &explicit[index];
+                        if explicit.ty.flags != p.ty.flags {
+                            return Err(error(explicit.span, "function template instance parameter markers must match the inherited interface"));
+                        }
+                        let annotation = match (&explicit.ty.kind, &p.ty.kind) {
+                            (T::Positional(annotation), T::Positional(_))
+                            | (T::Varadic(_, annotation), T::Varadic(..)) => annotation,
+                            _ => return Err(error(explicit.span, "explicit function template parameter protocol compatibility is not implemented")),
+                        };
+                        // The inherited collector remains authoritative. An instance
+                        // ascription checks its domain without replacing collection
+                        // behavior or evaluating a second collector declaration.
+                        p.template_annotation = Some(annotation);
                     }
-                    let annotation = match (&explicit.ty.kind, &p.ty.kind) {
-                        (T::Positional(annotation), T::Positional(_))
-                        | (T::Varadic(_, annotation), T::Varadic(..)) => annotation,
-                        _ => return Err(error(explicit.span, "explicit function template parameter protocol compatibility is not implemented")),
-                    };
-                    // The inherited collector remains authoritative. An instance
-                    // ascription checks its domain without replacing collection
-                    // behavior or evaluating a second collector declaration.
-                    p.template_annotation = Some(annotation);
                 }
                 p.hir_id = input.binding;
                 p.name = input.name;
@@ -338,6 +379,14 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             package.insert_body(id, body);
         }
         rebind.publish_local_definitions(&mut package);
+        for (arm_id, import_expr) in &source.match_arm_imports {
+            if let Some(&new_arm_id) = rebind.bindings.get(arm_id) {
+                let new_import_expr = rebind.expr(import_expr, 0)?;
+                package
+                    .match_arm_imports
+                    .insert(new_arm_id, new_import_expr);
+            }
+        }
         for (id, evidence) in rebind.resolution()? {
             if let Some(plan) = evidence.trait_sources {
                 package.trait_sources.insert(id, plan);
@@ -362,8 +411,61 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         body_value.params =
             arena.alloc_param_slice(sig.params.iter().map(hir::body::BodyParam::from_fn_param));
         package.insert_body(expanded_body, body_value);
+        for (site_id, locals) in &source.lexical_call_locals {
+            if let Some(&new_site_id) = rebind.bindings.get(site_id) {
+                let remapped = locals
+                    .iter()
+                    .map(|(name, target)| {
+                        (
+                            name.clone(),
+                            rebind.bindings.get(target).copied().unwrap_or(*target),
+                        )
+                    })
+                    .collect();
+                package.lexical_call_locals.insert(new_site_id, remapped);
+            }
+        }
         let mut expanded = item.clone();
-        expanded.kind = ItemKind::Fn(sig, expanded_body);
+        if is_arm_instance {
+            let template_owner = template_owner.ok_or_else(|| {
+                error(
+                    template.span,
+                    "match arm template instance requires a declaration template",
+                )
+            })?;
+            let Some([first_param, ..]) = explicit_parameters else {
+                return Err(error(
+                    template.span,
+                    "match arm template instance requires an explicit case parameter",
+                ));
+            };
+            let T::Case(case_pattern) = first_param.ty.kind else {
+                return Err(error(
+                    first_param.span,
+                    "match arm template instance requires a case first parameter",
+                ));
+            };
+            let (pattern, guard) = match &case_pattern.kind {
+                hir::pattern::PatternKind::Guard(pat, guard) => (*pat, Some(*guard)),
+                _ => (case_pattern, None),
+            };
+            package.quote_fn_arms.insert(
+                owner,
+                hir::item::QuoteFnArm {
+                    template: *template,
+                    template_owner,
+                    clauses: clause_bindings.clone(),
+                    pattern,
+                    guard,
+                    sig: sig.clone(),
+                    body: expanded_body,
+                    span: item.span,
+                },
+            );
+            expanded.kind = ItemKind::FnDeclaration(sig);
+        } else {
+            expanded.kind = ItemKind::Fn(sig, expanded_body);
+        }
         let mut info = info.clone();
         info.node = hir::owner::OwnerNode::Item(arena.alloc_item(expanded));
         package.insert_owner(owner, info);
@@ -495,6 +597,7 @@ impl<'h> Rebind<'_, 'h> {
             }
             T::Varadic(name, e) => T::Varadic(name, self.expr(e, depth)?),
             T::Itself { is_ref } => T::Itself { is_ref },
+            T::Case(pat) => T::Case(self.pattern(pat, depth)?),
         };
         Ok(ty)
     }

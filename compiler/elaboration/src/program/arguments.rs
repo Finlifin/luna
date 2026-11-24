@@ -310,12 +310,14 @@ fn input_entries(
             .iter()
             .map(|parameter| {
                 let implicit = parameter.ty.is_implicit();
+                let contextual = implicit && parameter.ty.is_quote();
                 let optional = matches!(parameter.ty.kind, TyParamKind::Optional(..));
                 let variadic = matches!(parameter.ty.kind, TyParamKind::Varadic(..));
                 input_routing::Entry {
                     name: (implicit || optional || variadic).then_some(parameter.name.name),
                     optional,
                     implicit,
+                    contextual,
                     variadic,
                     lambda: parameter.ty.is_lambda(),
                     post_target: matches!(

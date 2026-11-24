@@ -140,6 +140,19 @@ pub struct TestTemplateInterface<'hir> {
     pub ty: &'hir Expr<'hir>,
 }
 
+/// A quoted match-arm rule contributed by `quote fn id(case pat) use template { body }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuoteFnArm<'hir> {
+    pub template: &'hir Expr<'hir>,
+    pub template_owner: OwnerId,
+    pub clauses: Vec<FunctionTemplateClause>,
+    pub pattern: &'hir Pattern<'hir>,
+    pub guard: Option<&'hir Expr<'hir>>,
+    pub sig: FnSig<'hir>,
+    pub body: BodyId,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EffectModifiers {
     pub is_async: bool,

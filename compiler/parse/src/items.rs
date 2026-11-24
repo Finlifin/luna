@@ -268,6 +268,35 @@ impl Parser<'_> {
                 );
             }
 
+            // case pattern (if expr)? (quote fn match arm parameter)
+            if p.eat_token(TokenKind::Case) {
+                let mut pattern = p.try_pattern()?;
+                if pattern == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "expected pattern after `case` parameter".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                if p.eat_token(TokenKind::If) {
+                    let condition = p.try_expr_without_extended_call()?;
+                    if condition == 0 {
+                        return Err(ParseError::invalid_syntax(
+                            "expected guard condition after `if` in `case` parameter".to_string(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    pattern = NodeBuilder::new(NodeKind::IfGuardPattern, p.current_span())
+                        .add_single_child(pattern)
+                        .add_single_child(condition)
+                        .build(&mut p.ast);
+                }
+                return Ok(NodeBuilder::new(NodeKind::CaseParam, p.current_span())
+                    .add_single_child(pattern)
+                    .build(&mut p.ast));
+            }
+
             // trivial parameter: just an id
             Ok(p.try_id()?)
         })

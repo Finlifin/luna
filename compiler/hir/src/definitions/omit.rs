@@ -102,6 +102,18 @@ pub fn omit_generation_sources<'h>(
     package
         .function_template_applications
         .retain(|owner, _| !omitted.contains(owner));
+    package
+        .function_template_origins
+        .retain(|owner, _| !omitted.contains(owner));
+    package
+        .match_arm_imports
+        .retain(|id, _| !omitted.contains(&id.owner));
+    package
+        .quote_fn_arms
+        .retain(|owner, _| !omitted.contains(owner));
+    package
+        .lexical_call_locals
+        .retain(|id, _| !omitted.contains(&id.owner));
     package.definition_attributes.retain(|attribute| {
         let owner = match attribute.target {
             AttributeTarget::Definition(owner) => owner,

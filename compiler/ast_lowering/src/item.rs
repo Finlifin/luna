@@ -227,8 +227,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let mut cursor = node;
                 let mut modifiers = FnModifiers::default();
                 let mut effect_modifiers = EffectModifiers::default();
-                while let Some((NodeKind::AttributeSetTrue, _, parts)) = self.ast.get_node(cursor)
-                {
+                while let Some((NodeKind::AttributeSetTrue, _, parts)) = self.ast.get_node(cursor) {
                     if self.ast.get_node_kind(parts[0]) != Some(NodeKind::Id) {
                         break;
                     }
@@ -689,14 +688,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let mut fn_params = Vec::new();
         for param_node in param_nodes.to_vec() {
             if let Some(mut param) = self.lower_fn_param(param_node) {
-                if fn_params
-                    .iter()
-                    .any(|previous: &FnParam<'hir>| previous.name.name == param.name.name)
+                let is_case = matches!(param.ty.kind, TyParamKind::Case(_));
+                if !is_case
+                    && fn_params
+                        .iter()
+                        .any(|previous: &FnParam<'hir>| previous.name.name == param.name.name)
                 {
                     self.emit_malformed("duplicate function parameter", param.span);
                 }
                 param.index = fn_params.len() as u32;
-                self.define_fn_param(param.name, param_node, param.hir_id);
+                if !is_case {
+                    self.define_fn_param(param.name, param_node, param.hir_id);
+                }
                 let site = self.ast_node_ref(param_node);
                 if let Some(definition) = self
                     .resolver
@@ -2485,29 +2488,83 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 })
             }
             NodeKind::ComptimeParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= TPARAM_COMPTIME;
                 param
             }),
             NodeKind::ImplicitParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= TPARAM_IMPLICIT;
                 param
             }),
             NodeKind::LambdaParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= TPARAM_LAMBDA;
                 param
             }),
             NodeKind::ErrorParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= TPARAM_ERROR;
                 param
             }),
             NodeKind::CatchParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= hir::common::TPARAM_CATCH;
                 param
             }),
             NodeKind::QuoteParam => self.lower_fn_param(children[0]).map(|mut param| {
+                if matches!(param.ty.kind, TyParamKind::Case(_)) {
+                    self.emit_malformed("case parameters cannot carry parameter modifiers", span);
+                }
                 param.ty.flags |= TPARAM_QUOTE;
                 param
             }),
+            NodeKind::CaseParam => {
+                let mut pat_node = children[0];
+                let guard_node =
+                    if self.ast.get_node_kind(pat_node) == Some(NodeKind::IfGuardPattern) {
+                        let parts = self.ast.get_children(pat_node);
+                        pat_node = parts[0];
+                        Some(parts[1])
+                    } else {
+                        None
+                    };
+                let pat = self.lower_pattern(pat_node);
+                self.bind_arm_pattern(pat_node, &pat);
+                let pat = if let Some(guard_node) = guard_node {
+                    let guard = self.lower_expr(ExprContext::RuntimeFunctionBody, guard_node);
+                    hir::Pattern {
+                        hir_id: self.next_hir_id(),
+                        kind: hir::PatternKind::Guard(
+                            self.arena.alloc_pattern(pat),
+                            self.arena.alloc_expr(guard),
+                        ),
+                        span,
+                    }
+                } else {
+                    pat
+                };
+                let pat_ref = self.arena.alloc_pattern(pat);
+                let tp = TyParam::new(self.next_hir_id(), TyParamKind::Case(pat_ref), span);
+                Some(FnParam {
+                    template_annotation: None,
+                    hir_id: tp.hir_id,
+                    name: Ident::new(Symbol::intern(""), span),
+                    index: 0,
+                    ty: tp,
+                    span,
+                })
+            }
             NodeKind::Id => {
                 // Bare identifier param (no type annotation)
                 let ident = self.node_to_ident(node);

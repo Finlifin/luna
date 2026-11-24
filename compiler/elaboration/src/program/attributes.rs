@@ -15,6 +15,7 @@ mod macros;
 mod merge;
 mod metadata;
 mod phases;
+mod quote_fn_template;
 mod stability;
 mod volatile;
 
@@ -26,6 +27,7 @@ pub use macros::{MacroHandlerAttr, MacroKindTag, macro_handlers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
 pub use phases::{MemberPhase, member_phases};
+pub use quote_fn_template::{QuoteFnTemplateFlags, quote_fn_template_flags};
 pub use stability::{StableSinceEntry, is_valid_semver, stable_since_versions};
 pub use volatile::{VolatileTarget, volatile_targets};
 
@@ -124,6 +126,7 @@ impl Checker<'_, '_> {
             let _abi = calling_conventions(self.package, &selected, &mut budget)?;
             let _stability = stable_since_versions(self.package, &selected, &mut budget)?;
             let _macros = macro_handlers(self.package, &selected, &mut budget)?;
+            let quote_templates = quote_fn_template_flags(self.package, &selected, &mut budget)?;
             for target in &selected {
                 for (key, value) in target.iter() {
                     if !inspect_only
@@ -139,6 +142,8 @@ impl Checker<'_, '_> {
                                 | "__flurry_macro_kind"
                                 | "__flurry_macro_variadic"
                                 | "__flurry_macro_grammar"
+                                | "__flurry_quote_fn_template_for_match_arms"
+                                | "__flurry_quote_fn_template_allow_non_exhaustive_instance"
                         )
                     {
                         return Err(MergeFailure {
@@ -155,7 +160,14 @@ impl Checker<'_, '_> {
             } else {
                 Some(self.publish_definition_attributes(&selected, demanded, &mut budget)?)
             };
-            Ok((phases, packed, volatile, direct_passing, frozen))
+            Ok((
+                phases,
+                packed,
+                volatile,
+                direct_passing,
+                quote_templates,
+                frozen,
+            ))
         })();
         self.required_steps = self
             .required_steps
@@ -169,7 +181,8 @@ impl Checker<'_, '_> {
         if inspect_only && result.is_err() {
             return Ok(attributes);
         }
-        let (phases, packed, volatile, direct_passing, frozen) = result.map_err(merge_error)?;
+        let (phases, packed, volatile, direct_passing, quote_templates, frozen) =
+            result.map_err(merge_error)?;
         self.member_phases = phases
             .into_iter()
             .map(|entry| {
@@ -222,6 +235,10 @@ impl Checker<'_, '_> {
         self.direct_passing_effects = direct_passing
             .into_iter()
             .map(|entry| (entry.owner, entry.enabled))
+            .collect();
+        self.quote_fn_template_flags = quote_templates
+            .into_iter()
+            .map(|entry| (entry.owner, entry))
             .collect();
         if let Some(frozen) = frozen {
             self.definition_attributes = if frozen.is_empty() {

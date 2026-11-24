@@ -1754,6 +1754,10 @@ impl<'a> Formatter<'a> {
                     self.format_clause_or_param(ch[0], TokenSlot::new(slot.first + 1, slot.last));
                 Doc::concat([Doc::str("quote "), sub])
             }
+            NodeKind::CaseParam => {
+                let pat_doc = self.format_pattern(ch[0], TokenSlot::new(slot.first + 1, slot.last));
+                Doc::concat([Doc::str("case "), pat_doc])
+            }
             NodeKind::AssocParam => {
                 let sub =
                     self.format_clause_or_param(ch[0], TokenSlot::new(slot.first + 1, slot.last));

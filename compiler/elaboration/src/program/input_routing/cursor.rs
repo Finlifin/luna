@@ -204,13 +204,15 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
             .iter()
             .zip(&self.supplied)
             .any(|(entry, supplied)| {
-                !supplied && (entry.implicit || (!entry.optional && !entry.variadic))
+                !supplied
+                    && ((entry.implicit && !entry.contextual)
+                        || (!entry.optional && !entry.variadic && !entry.implicit))
             })
     }
 
     pub fn finish(&self) -> Result<(), FailureKind> {
         for (entry, supplied) in self.entries.iter().zip(&self.supplied) {
-            if !supplied && entry.implicit {
+            if !supplied && entry.implicit && !entry.contextual {
                 return Err(FailureKind::MissingImplicit);
             }
             if !supplied && !entry.skipped() && !entry.variadic {

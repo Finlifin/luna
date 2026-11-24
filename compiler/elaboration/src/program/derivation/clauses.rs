@@ -176,7 +176,7 @@ fn parameters_mention_clause<'h>(
                     return Ok(true);
                 }
             }
-            T::Itself { .. } => {}
+            T::Itself { .. } | T::Case(_) => {}
         }
     }
     Ok(false)
@@ -261,7 +261,7 @@ fn expr_mentions_clause<'h>(
                             return Ok(true);
                         }
                     }
-                    T::Itself { .. } => {}
+                    T::Itself { .. } | T::Case(_) => {}
                 }
             }
             Ok(false)
@@ -1079,6 +1079,7 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             T::Optional(n, e, def) => T::Optional(n, go(e)?, go(def)?),
             T::Varadic(n, e) => T::Varadic(n, go(e)?),
             T::Itself { is_ref } => T::Itself { is_ref },
+            T::Case(pat) => T::Case(pat),
         };
         Ok(ty)
     }

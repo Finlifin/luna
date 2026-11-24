@@ -1884,13 +1884,36 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::comma("match arm", |p| p.try_case_arm())],
+                &[Rule::comma("match arm or `use` import", |p| {
+                    if p.peek(TokenKind::Use.as_ref()) {
+                        p.try_arm_import()
+                    } else {
+                        p.try_case_arm()
+                    }
+                })],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
             Ok(NodeBuilder::new(NodeKind::PostMatch, p.current_span())
                 .add_single_child(left)
                 .add_multiple_children(arms)
+                .build(&mut p.ast))
+        })
+    }
+
+    fn try_arm_import(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Use.as_ref(), |p| {
+            p.eat_tokens(1);
+            let expr = p.try_expr()?;
+            if expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "expected template expression after `use` in `match`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::ArmImport, p.current_span())
+                .add_single_child(expr)
                 .build(&mut p.ast))
         })
     }

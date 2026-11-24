@@ -297,6 +297,26 @@ impl Display for Package<'_> {
                 application
             )?;
         }
+        f.write_str(") (match-arm-imports")?;
+        for (arm, expr) in &self.match_arm_imports {
+            write!(f, " (arm-import (arm {}) (expr {expr}))", Id(*arm))?;
+        }
+        f.write_str(") (quote-fn-arms")?;
+        for (owner, arm) in &self.quote_fn_arms {
+            write!(f, " (arm-entry (owner {}) {arm})", Owner(*owner))?;
+        }
+        f.write_str(") (lexical-call-locals")?;
+        for (call, locals) in &self.lexical_call_locals {
+            write!(f, " (call-locals (call {}) (bindings", Id(*call))?;
+            for (name, binding) in locals {
+                write!(f, " ({} {})", Quoted(name), Id(*binding))?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (function-template-origins")?;
+        for (instance, template) in &self.function_template_origins {
+            write!(f, " (origin {} {})", Owner(*instance), Owner(*template))?;
+        }
         f.write_str(") (definition-attributes")?;
         for attribute in &self.definition_attributes {
             write!(f, " {attribute}")?;
@@ -494,6 +514,7 @@ impl Display for TyParamKind<'_> {
             }
             Self::Varadic(name, ty) => form!(f, "variadic", "name" => Name(*name), "type" => ty),
             Self::Itself { is_ref } => form!(f, "itself", "ref" => is_ref),
+            Self::Case(pattern) => form!(f, "case", "pattern" => pattern),
         }
     }
 }
@@ -1159,5 +1180,22 @@ impl Display for crate::item::FunctionTemplateApplication<'_> {
 impl Display for crate::item::FunctionTemplateInterface<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "function-template-body-interface", "parameter" => self.parameter, "type" => self.ty)
+    }
+}
+
+impl Display for crate::item::QuoteFnArm<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(
+            f,
+            "quote-fn-arm",
+            "template" => self.template,
+            "template-owner" => Owner(self.template_owner),
+            "clauses" => List(&self.clauses),
+            "pattern" => self.pattern,
+            "guard" => Maybe(self.guard),
+            "signature" => self.sig,
+            "body" => self.body,
+            "span" => Location(self.span)
+        )
     }
 }

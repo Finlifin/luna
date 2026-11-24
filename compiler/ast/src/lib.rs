@@ -330,6 +330,7 @@ pub enum NodeKind {
     PostMatch,    // a, N (expr match { case_arm* })
     PostLambda,   // a, b (expr do (lambda | block | expr))
     CaseArm,      // a, b
+    ArmImport,    // a (use expr inside match)
     ConditionArm, // a, b
     CatchArm,     // a, b
 
@@ -573,6 +574,8 @@ pub enum NodeKind {
     AssocParam, // a
     // ^expr parameter
     AttrParam, // a, b (attr_expr, inner_param)
+    // case pattern (quote fn match arm parameter)
+    CaseParam, // a
 
     // blocks
     // { (items | statements | ...)* }
@@ -945,6 +948,8 @@ impl NodeKind {
             LambdaParam,
             ImplicitParam,
             QuoteParam,
+            CaseParam,
+            ArmImport,
             AssocParam,
             AttrParam,
             Block,
@@ -1023,6 +1028,8 @@ impl NodeKind {
             | QuoteParam
             | AssocParam
             | QuoteDeclClause
+            | CaseParam
+            | ArmImport
             | ModStatement
             | UseStatement
             | ProjectionAllPath

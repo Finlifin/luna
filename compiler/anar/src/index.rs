@@ -1731,6 +1731,7 @@ impl<'a> IndexBuilder<'a> {
             | TyParamKind::PositionalDependencyCatched(_, ty)
             | TyParamKind::Optional(_, ty, _)
             | TyParamKind::Varadic(_, ty) => extract_head_def_id(ty),
+            TyParamKind::Case(_) => None,
         };
         if let Some(nom) = hint {
             self.index.local_type_hints.insert(key, nom);
@@ -1757,6 +1758,9 @@ impl<'a> IndexBuilder<'a> {
             TyParamKind::Optional(_, ty, def) => {
                 self.walk_expr(ctx, ty, false);
                 self.walk_expr(ctx, def, false);
+            }
+            TyParamKind::Case(pat) => {
+                self.walk_pattern(ctx, pat, None);
             }
         }
     }
@@ -2029,7 +2033,11 @@ impl<'a> IndexBuilder<'a> {
                 let scrutinee_nom = self.infer_expr_nominal(ctx, scrutinee);
                 self.walk_expr(ctx, scrutinee, false);
                 for arm in *arms {
-                    self.walk_pattern_arm(ctx, arm, scrutinee_nom);
+                    if let Some(import_expr) = ctx.pkg.hir_pkg.match_arm_imports.get(&arm.hir_id) {
+                        self.walk_expr(ctx, import_expr, false);
+                    } else {
+                        self.walk_pattern_arm(ctx, arm, scrutinee_nom);
+                    }
                 }
             }
             ExprKind::InlineMatch(arms) => {
@@ -3271,6 +3279,7 @@ fn format_fn_param(param: &FnParam<'_>, source_map: &SourceMap) -> String {
                         format_expr_compact(ty, source_map)
                     )
                 }
+                TyParamKind::Case(_) => format!("{prefix}case ..."),
                 TyParamKind::Itself { .. } => unreachable!(),
             }
         }
@@ -3293,6 +3302,7 @@ fn format_ty_param(tp: &TyParam<'_>, source_map: &SourceMap) -> String {
         TyParamKind::Varadic(id, ty) => {
             format!("...{}: {}", id.name, format_expr_compact(ty, source_map))
         }
+        TyParamKind::Case(_) => String::from("case ..."),
     }
 }
 

@@ -104,7 +104,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                         | TyParamKind::PositionalDependencyCatched(_, ty)
                         | TyParamKind::Optional(_, ty, _)
                         | TyParamKind::Varadic(_, ty) => Some(ty),
-                        TyParamKind::Itself { .. } => None,
+                        TyParamKind::Itself { .. } | TyParamKind::Case(_) => None,
                     })
             }
             H::Application(callee, _) => match applied_declaration(callee)

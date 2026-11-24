@@ -3,7 +3,9 @@
 //! and body expressions return through the shared source checking driver.
 use super::*;
 use driver::{Request, Step};
+
 mod ordinary;
+
 use ordinary::Ordinary;
 
 enum State {
@@ -23,6 +25,7 @@ pub(super) struct Frame<'h> {
     input_delivery: Option<Destination>,
     operand_scope: scoped_operands::Boundary,
     state: State,
+    next_source: usize,
     arms: Vec<(n::Pattern, CheckedBlock)>,
     scope: Option<LexicalScope>,
     premise: Option<refinements::TypeConditionScope>,
@@ -55,6 +58,7 @@ impl<'h> Frame<'h> {
             input_delivery: None,
             operand_scope: Default::default(),
             state: State::Ready,
+            next_source: 0,
             arms: Vec::new(),
             scope: None,
             premise: None,
@@ -92,6 +96,7 @@ impl<'h> Frame<'h> {
             input_delivery,
             operand_scope: Default::default(),
             state: State::Ready,
+            next_source: 0,
             arms: Vec::new(),
             scope: None,
             premise: None,
@@ -117,6 +122,7 @@ impl<'h> Frame<'h> {
         Ok(())
     }
 
+    #[inline(never)]
     pub(super) fn step(
         &mut self,
         checker: &mut Checker<'_, '_>,
@@ -160,9 +166,17 @@ impl<'h> Frame<'h> {
                 Ok(Step::Continue)
             }
             (State::Arms(value), None) => {
-                let Some(arm) = arms.get(self.arms.len()) else {
+                let Some(arm) = arms.get(self.next_source) else {
                     return self.finish(checker, value);
                 };
+                if let Some(import_expr) =
+                    checker.package.match_arm_imports.get(&arm.hir_id).copied()
+                {
+                    self.import_arm_expressions(checker, import_expr, &value)?;
+                    self.next_source += 1;
+                    self.state = State::Arms(value);
+                    return Ok(Step::Continue);
+                }
                 checker.required_steps = checker
                     .required_steps
                     .checked_sub(1)
@@ -188,7 +202,7 @@ impl<'h> Frame<'h> {
                         &self.source,
                         &self.destination,
                         arm,
-                        self.arms.len(),
+                        self.next_source,
                         &pattern,
                         self.scope.as_ref().unwrap(),
                     )?
@@ -207,7 +221,8 @@ impl<'h> Frame<'h> {
                 // Join outside matched premises, with bindings still available
                 // for the ordinary success-payload stabilization rule.
                 self.leave_body(checker);
-                let arm = &arms[self.arms.len()];
+                let arm = &arms[self.next_source];
+                self.next_source += 1;
                 let checked = if let Some(ordinary) = &mut self.ordinary {
                     ordinary.accept_body(checker, pattern, body, &value.ty, arm.span)?
                 } else {
@@ -230,6 +245,42 @@ impl<'h> Frame<'h> {
         }
     }
 
+    #[inline(never)]
+    fn import_arm_expressions(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        import_expr: &Expr<'_>,
+        value: &n::Expr,
+    ) -> Result<(), Error> {
+        if self.ordinary.is_none() {
+            return Err(error(
+                import_expr.span,
+                "quote fn arm import requires an ordinary match expression",
+            ));
+        }
+        let expected_res = self
+            .destination
+            .ordinary_view()
+            .and_then(|view| view.expected)
+            .filter(|ty| !is_never(ty))
+            .cloned();
+        let imported =
+            checker.expand_quote_fn_arms_import(import_expr, value, expected_res.as_ref(), true)?;
+        for (pattern, body) in imported {
+            let ordinary = self.ordinary.as_mut().expect("ordinary match");
+            let checked = ordinary.accept_body(
+                checker,
+                pattern,
+                CheckedBlock::Ordinary(body),
+                &value.ty,
+                import_expr.span,
+            )?;
+            self.arms.push(checked);
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
     fn advance_search(
         &mut self,
         checker: &mut Checker<'_, '_>,
@@ -267,6 +318,31 @@ impl<'h> Frame<'h> {
                 unreachable!()
             };
             let arm = &arms[request.index];
+            if let Some(import_expr) = checker.package.match_arm_imports.get(&arm.hir_id).copied() {
+                let imported =
+                    checker.expand_quote_fn_arms_import(import_expr, value, None, false)?;
+                let mut ty = p(P::Never);
+                for (_, body) in imported {
+                    if !is_never(&body.ty) {
+                        if !is_never(&ty) {
+                            checker.require(&body.ty, &ty, import_expr.span)?;
+                        }
+                        ty = body.ty;
+                    }
+                }
+                let synthetic = n::Expr {
+                    source: source(import_expr.span),
+                    ty,
+                    kind: K::Unit,
+                };
+                let probe = self.probe.take().expect("active probe");
+                let result = probe.finish(checker, Ok(synthetic))?;
+                let State::Inferring(_, search) = &mut self.state else {
+                    unreachable!()
+                };
+                search.observe(result);
+                return Ok(Step::Continue);
+            }
             let pattern = checker.match_arm_pattern(arm, value)?;
             self.premise =
                 Some(checker.enter_matched_pattern_type_facts(&pattern, value, arm.body.span)?);
@@ -396,7 +472,7 @@ impl std::fmt::Display for Frame<'_> {
             "(match-check (source {}) {} (next {}) ",
             source(self.source.span),
             self.destination,
-            self.arms.len()
+            self.next_source
         )?;
         match &self.state {
             State::Ready => f.write_str("(phase ready)"),
@@ -467,6 +543,7 @@ mod tests {
             input_delivery: None,
             operand_scope: Default::default(),
             state: State::Body(value, n::Pattern::Wild),
+            next_source: 0,
             arms: Vec::new(),
             scope: None,
             premise: None,

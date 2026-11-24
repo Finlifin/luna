@@ -13,7 +13,7 @@ pub(super) fn annotation_source<'h>(
         | TyParamKind::Positional(ty)
         | TyParamKind::PositionalDependencyCatched(_, ty)
         | TyParamKind::Varadic(_, ty) => Some(ty),
-        TyParamKind::Itself { .. } => None,
+        TyParamKind::Itself { .. } | TyParamKind::Case(_) => None,
     }
 }
 

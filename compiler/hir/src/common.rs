@@ -129,6 +129,7 @@ pub enum Arg<'hir> {
     /// Trailing `do` input; routed using the declaration's lambda marker.
     PostLambda(&'hir Expr<'hir>),
 }
+
 /// A literal value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lit {
@@ -210,12 +211,19 @@ pub enum BindingMode {
 }
 
 pub const TPARAM_IMPLICIT: u32 = 1 << 0;
+
 pub const TPARAM_COMPTIME: u32 = 1 << 1;
+
 pub const TPARAM_QUOTE: u32 = 1 << 2;
+
 pub const TPARAM_ERROR: u32 = 1 << 3;
+
 pub const TPARAM_LAMBDA: u32 = 1 << 4;
+
 pub const TPARAM_ASSOC: u32 = 1 << 5;
+
 pub const TPARAM_CATCH: u32 = 1 << 6;
+
 /// Named optional input in a callable type; its default belongs to the callable.
 pub const TPARAM_OPTIONAL: u32 = 1 << 7;
 
@@ -231,24 +239,31 @@ impl TyParam<'_> {
     pub fn is_optional(&self) -> bool {
         self.flags & TPARAM_OPTIONAL != 0
     }
+
     pub fn is_implicit(&self) -> bool {
         self.flags & TPARAM_IMPLICIT != 0
     }
+
     pub fn is_comptime(&self) -> bool {
         self.flags & TPARAM_COMPTIME != 0
     }
+
     pub fn is_quote(&self) -> bool {
         self.flags & TPARAM_QUOTE != 0
     }
+
     pub fn is_error(&self) -> bool {
         self.flags & TPARAM_ERROR != 0
     }
+
     pub fn is_lambda(&self) -> bool {
         self.flags & TPARAM_LAMBDA != 0
     }
+
     pub fn is_assoc(&self) -> bool {
         self.flags & TPARAM_ASSOC != 0
     }
+
     pub fn is_catch(&self) -> bool {
         self.flags & TPARAM_CATCH != 0
     }
@@ -268,26 +283,32 @@ impl<'hir> TyParam<'hir> {
         self.flags |= TPARAM_IMPLICIT;
         self
     }
+
     pub fn with_comptime(mut self) -> Self {
         self.flags |= TPARAM_COMPTIME;
         self
     }
+
     pub fn with_quote(mut self) -> Self {
         self.flags |= TPARAM_QUOTE;
         self
     }
+
     pub fn with_error(mut self) -> Self {
         self.flags |= TPARAM_ERROR;
         self
     }
+
     pub fn with_lambda(mut self) -> Self {
         self.flags |= TPARAM_LAMBDA;
         self
     }
+
     pub fn with_assoc(mut self) -> Self {
         self.flags |= TPARAM_ASSOC;
         self
     }
+
     pub fn with_flags(mut self, flags: u32) -> Self {
         self.flags |= flags;
         self
@@ -314,4 +335,5 @@ pub enum TyParamKind<'hir> {
     Optional(Ident, &'hir Expr<'hir>, &'hir Expr<'hir>),
     Varadic(Ident, &'hir Expr<'hir>),
     Itself { is_ref: bool },
+    Case(&'hir crate::pattern::Pattern<'hir>),
 }

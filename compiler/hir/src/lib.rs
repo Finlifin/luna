@@ -108,7 +108,17 @@ pub struct Package<'hir> {
     pub derive_visible_strategies: FxHashMap<OwnerId, std::sync::Arc<[symbol::DefId]>>,
     pub function_template_bodies: FxHashMap<OwnerId, item::FunctionTemplateBody<'hir>>,
     pub function_template_applications: FxHashMap<OwnerId, item::FunctionTemplateApplication<'hir>>,
+    pub function_template_origins: std::collections::BTreeMap<OwnerId, OwnerId>,
     pub staged_parameter_definitions: FxHashMap<HirId, symbol::DefId>,
+    /// Imported rule-template expressions inside `match` (`use expr`), keyed by
+    /// the synthetic `PatternArm.hir_id` entry in `ExprKind::Match`.
+    pub match_arm_imports: std::collections::BTreeMap<HirId, &'hir Expr<'hir>>,
+    /// Quote function match-arm instances (`quote fn name(case pat) use template { body }`).
+    pub quote_fn_arms: std::collections::BTreeMap<OwnerId, item::QuoteFnArm<'hir>>,
+    /// Visible lexical local bindings (`name -> HirId`) captured at call sites
+    /// for contextual `implicit quote` parameter resolution.
+    pub lexical_call_locals:
+        std::collections::BTreeMap<HirId, std::collections::BTreeMap<String, HirId>>,
 }
 
 impl<'hir> Package<'hir> {
@@ -132,7 +142,11 @@ impl<'hir> Package<'hir> {
             derive_visible_strategies: FxHashMap::default(),
             function_template_bodies: FxHashMap::default(),
             function_template_applications: FxHashMap::default(),
+            function_template_origins: std::collections::BTreeMap::new(),
             staged_parameter_definitions: FxHashMap::default(),
+            match_arm_imports: std::collections::BTreeMap::new(),
+            quote_fn_arms: std::collections::BTreeMap::new(),
+            lexical_call_locals: std::collections::BTreeMap::new(),
         }
     }
 

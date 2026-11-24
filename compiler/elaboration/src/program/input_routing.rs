@@ -5,6 +5,7 @@
 use std::{fmt, hash::Hash};
 
 mod cursor;
+
 pub(super) use cursor::Cursor;
 
 #[derive(Clone, Debug)]
@@ -12,6 +13,7 @@ pub(super) struct Entry<Name> {
     pub name: Option<Name>,
     pub optional: bool,
     pub implicit: bool,
+    pub contextual: bool,
     pub variadic: bool,
     pub lambda: bool,
     pub post_target: bool,
@@ -23,6 +25,7 @@ impl<Name> Entry<Name> {
             name: None,
             optional: false,
             implicit: false,
+            contextual: false,
             variadic: false,
             lambda: false,
             post_target: true,
@@ -204,8 +207,13 @@ impl<Name: fmt::Display> fmt::Display for Entry<Name> {
         }
         write!(
             f,
-            ") (optional {}) (implicit {}) (variadic {}) (lambda {}) (post-target {}))",
-            self.optional, self.implicit, self.variadic, self.lambda, self.post_target
+            ") (optional {}) (implicit {}) (contextual {}) (variadic {}) (lambda {}) (post-target {}))",
+            self.optional,
+            self.implicit,
+            self.contextual,
+            self.variadic,
+            self.lambda,
+            self.post_target
         )
     }
 }
@@ -358,7 +366,7 @@ mod tests {
         let entry = collected("items\"\n");
         assert_eq!(
             entry.to_string(),
-            "(input-entry (name \"items\\\"\\n\") (optional false) (implicit false) (variadic true) (lambda false) (post-target false))"
+            "(input-entry (name \"items\\\"\\n\") (optional false) (implicit false) (contextual false) (variadic true) (lambda false) (post-target false))"
         );
         let plan = route(
             &[Entry::<&str>::anchored(), collected("rest")],

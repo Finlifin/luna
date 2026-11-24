@@ -15,6 +15,7 @@
 - `attrs.mem.volatile`（及 `attrs.volatile`）：产生 `{ __flurry_volatile: true }`，标示易失内存／MMIO 结构体、newtype 或结构体字段；LLVM 后端对对应访问发射 `load volatile` / `store volatile`，程序纯度分析归入 P0（禁止 `memory(none)`/`speculatable`/`nosync`/`readonly`）。不允许以裸 key 或 definition configuration 形式附着，且不能与 `packed` 混用。
 - `attrs.macros.ast(variadic)`、`attrs.macros.peg(grammar)`、`attrs.macros.macro3` 与 `attrs.macros.macro4` 声明宏处理器的输入模式，展开器读取顶层的 `__flurry_macro_kind` 及对应参数。
 - `attrs.effects.direct_passing`：产生 `{ __flurry_direct_passing: true }`，供直接传递效应声明检查消费。
+- `attrs.quote_fn_template.{for_match_arms, allow_non_exhaustive_instance}`：分别产生 `{ __flurry_quote_fn_template_for_match_arms: true }` 与 `{ __flurry_quote_fn_template_allow_non_exhaustive_instance: true }`，标记用于 `match` `use` 规则接入的无体 `template quote fn` 声明及其单臂非穷尽许可。
 - `attrs.derivation`：编译器已消费 `{ __flurry_derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
 
 Object 通过 `meta.Object` 导入，attrs 不重复建立原始 builtin 绑定。

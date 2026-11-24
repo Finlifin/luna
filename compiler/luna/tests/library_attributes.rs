@@ -706,6 +706,18 @@ fn repository_attribute_package_validates_abi_conventions_semver_and_macro_targe
             "__flurry_stable_since",
         ),
         ("^attrs.macros.macro3 fn bad_macro() {}", "__flurry_macro_"),
+        (
+            "^attrs.quote_fn_template.for_match_arms fn not_a_quote_template(x: u32) -> u32 { x }",
+            "bodyless template quote fn",
+        ),
+        (
+            "^attrs.quote_fn_template.for_match_arms template quote fn has_body(x: u32, quote lambda body: <|- u32>) -> u32 { ~<body> }",
+            "bodyless template quote fn",
+        ),
+        (
+            "^attrs.quote_fn_template.allow_non_exhaustive_instance template quote fn missing_for_arms(x: u32) -> u32;",
+            "for_match_arms",
+        ),
     ] {
         let rejected = run(invalid_source, "nir");
         assert_eq!(
@@ -719,6 +731,27 @@ fn repository_attribute_package_validates_abi_conventions_semver_and_macro_targe
             "expected `{expected_diag}` in stderr for `{invalid_source}`:\n{stderr}"
         );
     }
+
+    let valid_template = r#"
+        ^attrs.quote_fn_template.for_match_arms
+        ^attrs.quote_fn_template.allow_non_exhaustive_instance
+        template quote fn rule_template(x: u32) -> u32;
+    "#;
+    let attr_out = run(valid_template, "attributes");
+    assert!(
+        attr_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&attr_out.stderr)
+    );
+    let attr_dump = String::from_utf8_lossy(&attr_out.stdout);
+    assert!(
+        attr_dump.contains("__flurry_quote_fn_template_for_match_arms"),
+        "{attr_dump}"
+    );
+    assert!(
+        attr_dump.contains("__flurry_quote_fn_template_allow_non_exhaustive_instance"),
+        "{attr_dump}"
+    );
 
     std::fs::remove_dir_all(&directory).unwrap();
 }

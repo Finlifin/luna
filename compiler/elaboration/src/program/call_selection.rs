@@ -179,6 +179,59 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         })
     }
 
+    #[inline(never)]
+    fn select_explicit_call_callee(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        head: &Expr<'_>,
+        types: &[Arg<'_>],
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<Result<n::Expr, n::Expr>, Error> {
+        if let H::Projection(base, name) = &head.kind
+            && let Some(method) =
+                self.static_method(base, name.name.as_str(), head.span, head.hir_id)?
+        {
+            let mut prefix = Some(Vec::new());
+            if let Some(call) = self.partial_named_method_call(
+                expr,
+                callee,
+                &method,
+                types,
+                args,
+                &mut prefix,
+                expected,
+                partial,
+            )? {
+                return Ok(Ok(call));
+            }
+        }
+        let instantiated = match self.select_explicit_instance(callee, head, types, None, true)? {
+            block_regions::ExplicitInstance::Checking(frame) => {
+                return self
+                    .check_invocation_region(expr, args, expected, partial, *frame)
+                    .map(Ok);
+            }
+            block_regions::ExplicitInstance::Ready(callee) => callee,
+        };
+        if args.is_empty()
+            && !matches!(
+                instantiated.ty,
+                Term::Function { .. }
+                    | Term::Closure { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::NormalFormFunction(..)
+                    | Term::UnsafeFunction(_)
+            )
+        {
+            return Ok(Ok(instantiated));
+        }
+        Ok(Err(instantiated))
+    }
+
+    #[inline(never)]
     fn select_call(
         &mut self,
         expr: &Expr<'_>,
@@ -291,44 +344,12 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             }
         }
         let callee = if let Some((head, types)) = explicit {
-            if let H::Projection(base, name) = &head.kind
-                && let Some(method) =
-                    self.static_method(base, name.name.as_str(), head.span, head.hir_id)?
+            match self
+                .select_explicit_call_callee(expr, callee, head, types, args, expected, partial)?
             {
-                let mut prefix = Some(Vec::new());
-                if let Some(call) = self.partial_named_method_call(
-                    expr,
-                    callee,
-                    &method,
-                    types,
-                    args,
-                    &mut prefix,
-                    expected,
-                    partial,
-                )? {
-                    return Ok(call);
-                }
+                Ok(done) => return Ok(done),
+                Err(instantiated) => instantiated,
             }
-            let instantiated =
-                match self.select_explicit_instance(callee, head, types, None, true)? {
-                    block_regions::ExplicitInstance::Checking(frame) => {
-                        return self.check_invocation_region(expr, args, expected, partial, *frame);
-                    }
-                    block_regions::ExplicitInstance::Ready(callee) => callee,
-                };
-            if args.is_empty()
-                && !matches!(
-                    instantiated.ty,
-                    Term::Function { .. }
-                        | Term::Closure { .. }
-                        | Term::ComptimeFunction(_)
-                        | Term::NormalFormFunction(..)
-                        | Term::UnsafeFunction(_)
-                )
-            {
-                return Ok(instantiated);
-            }
-            instantiated
         } else if let Some(owner) = direct {
             self.ensure_signature(owner, expr.span)?;
             let ty = self
@@ -356,8 +377,8 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         self.finish_call(expr, callee, args, Vec::new(), expected, partial)
     }
 
-    /// One source-ordered plan for ordinary, static and receiver calls.
-    pub(super) fn finish_call(
+    #[inline(never)]
+    fn finish_planned_prefix_call(
         &mut self,
         expr: &Expr<'_>,
         callee: n::Expr,
@@ -366,22 +387,6 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        if prefix.is_empty()
-            || !matches!(
-                callee.kind,
-                K::PlannedFunctionInstance { .. } | K::ComptimeFunctionInstance { .. }
-            )
-        {
-            return self.finish_prepared_call(
-                expr,
-                callee,
-                args,
-                prefix,
-                expected,
-                partial,
-                CallUse::Invocation,
-            );
-        }
         // The receiver is the leftmost source computation. Bind it outside
         // clause preparation, also when a spread later wraps the inner call.
         let saved_locals = self.locals.clone();
@@ -413,6 +418,37 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         result
     }
 
+    /// One source-ordered plan for ordinary, static and receiver calls.
+    #[inline(never)]
+    pub(super) fn finish_call(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: n::Expr,
+        args: &[Arg<'_>],
+        prefix: Vec<n::Expr>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        if prefix.is_empty()
+            || !matches!(
+                callee.kind,
+                K::PlannedFunctionInstance { .. } | K::ComptimeFunctionInstance { .. }
+            )
+        {
+            return self.finish_prepared_call(
+                expr,
+                callee,
+                args,
+                prefix,
+                expected,
+                partial,
+                CallUse::Invocation,
+            );
+        }
+        self.finish_planned_prefix_call(expr, callee, args, prefix, expected, partial)
+    }
+
+    #[inline(never)]
     pub(super) fn finish_prepared_call(
         &mut self,
         expr: &Expr<'_>,
@@ -427,6 +463,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             .finish(self)
     }
 
+    #[inline(never)]
     pub(super) fn plan_prepared_call<'h>(
         &mut self,
         expr: &Expr<'h>,
@@ -474,6 +511,9 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         let direct = direct_id
             .filter(|_| !callee.ty.is_normal_form_callable())
             .and_then(|id| self.source_declarations.owner(id));
+        if let Some(owner) = direct {
+            self.check_quote_callable(owner, expr.span)?;
+        }
         if direct.is_some_and(|owner| self.is_quote_function(owner)) {
             self.record_quote_application(expr.hir_id, expr.span)?;
         }
@@ -560,7 +600,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         if offset > signature.parameters.len() {
             return Err(error(expr.span, "method receiver count mismatch"));
         }
-        let (routes, assigned) = route_arguments(
+        let (routes, mut assigned) = route_arguments(
             args,
             declarations.map(|p| &p[offset..]),
             signature.parameters.len() - offset,
@@ -572,6 +612,11 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             }
             failure
         })?;
+        let contextual =
+            self.resolve_contextual_quote_inputs(expr, declarations, offset, &assigned)?;
+        for &(slot, _) in &contextual {
+            assigned[slot - offset] = true;
+        }
         let site = dependent_inputs::CallSite {
             callee,
             owner: direct,
@@ -588,6 +633,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             retained_callable,
             assigned,
             prefix,
+            contextual,
             parameter_bindings,
             expected,
         )

@@ -25,7 +25,7 @@ impl CallPlan<'_> {
     ) -> Result<n::Expr, Error> {
         match self {
             Self::Ready(value) => Ok(value),
-            Self::Inputs(frame) => checker.drive_input_consumer(*frame),
+            Self::Inputs(frame) => checker.drive_input_consumer(frame),
         }
     }
 }
@@ -63,6 +63,7 @@ impl std::fmt::Display for Invocation<'_> {
 
 impl<'h> Root<'h> for Invocation<'h> {
     type Output = n::Expr;
+
     type Invocation = tasks::InputWork;
 
     fn advance(
@@ -133,6 +134,7 @@ struct Completion<'h> {
 pub(in crate::program) struct CallInputs<'h> {
     completion: Option<Completion<'h>>,
     assigned: Vec<bool>,
+    contextual_slots: BTreeSet<usize>,
     offset: usize,
     next: usize,
     waiting: Option<(usize, bool)>,
@@ -140,8 +142,74 @@ pub(in crate::program) struct CallInputs<'h> {
     phase: Phase,
 }
 
+impl<'h> Root<'h> for Box<CallInputs<'h>> {
+    type Output = n::Expr;
+
+    type Invocation = tasks::InputWork;
+
+    fn resume(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        reply: tasks::InputReply,
+    ) -> Result<(), Error> {
+        (**self).resume(checker, reply)
+    }
+
+    fn advance(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        returned: Option<CheckedBlock>,
+    ) -> Result<Poll<Request<'h>, n::Expr, Self::Invocation>, Error> {
+        (**self).advance(checker, returned)
+    }
+
+    fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
+        (**self).unwind(checker);
+    }
+}
+
+impl<'h> CallInputs<'h> {
+    #[inline(never)]
+    fn supply_contextual_inputs(&mut self, checker: &mut Checker<'_, '_>) -> Result<(), Error> {
+        let site = &self.completion.as_ref().expect("active call").site;
+        let Phase::Supply(PreparedInputs {
+            signature,
+            producers: prepared,
+            binding,
+        }) = &mut self.phase
+        else {
+            unreachable!()
+        };
+        let signature = CallSignature::of(signature).expect("prepared callable signature");
+        for &slot in &self.contextual_slots {
+            let parameter = &signature.parameters[slot];
+            let domain = checker
+                .with_call_type_fuel(|_, fuel| binding.substitute_bounded(&parameter.ty, fuel))
+                .map_err(|failure| {
+                    error(
+                        site.source.span,
+                        format!("dependent call input is not available: {failure}"),
+                    )
+                })?;
+            let domain = checker.observe_call_type(&domain, &site.source)?;
+            let value = prepared.values[slot]
+                .take()
+                .expect("prepared contextual quote input");
+            checker.require_expression(&value.ty, &domain, site.source.span)?;
+            self.arguments.push(n::CallArgument {
+                passing: Default::default(),
+                parameter: slot,
+                value,
+                is_default: false,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl<'h> Root<'h> for CallInputs<'h> {
     type Output = n::Expr;
+
     type Invocation = tasks::InputWork;
 
     fn resume(
@@ -209,45 +277,59 @@ impl<'h> Root<'h> for CallInputs<'h> {
             });
         }
 
+        {
+            let Phase::Supply(PreparedInputs {
+                signature,
+                producers: prepared,
+                binding,
+            }) = &mut self.phase
+            else {
+                unreachable!()
+            };
+            let signature = CallSignature::of(signature).expect("prepared callable signature");
+            while let Some(input) = site.routes.get(self.next) {
+                self.next += 1;
+                let slot = self.offset + input.parameter;
+                let parameter = &signature.parameters[slot];
+                let domain = checker
+                    .with_call_type_fuel(|_, fuel| binding.substitute_bounded(&parameter.ty, fuel))
+                    .map_err(|failure| {
+                        error(
+                            site.source.span,
+                            format!("dependent call input is not available: {failure}"),
+                        )
+                    })?;
+                let domain = checker.observe_call_type(&domain, &site.source)?;
+                input.require_collection_type(checker, &domain, site.source.span)?;
+                if let Some(value) = prepared.values[slot].take() {
+                    self.arguments.push(n::CallArgument {
+                        passing: Default::default(),
+                        parameter: slot,
+                        value,
+                        is_default: false,
+                    });
+                    continue;
+                }
+                self.waiting = Some((slot, checker.in_staged_input));
+                checker.in_staged_input |= parameter.sort != Sort::Runtime;
+                return Ok(Poll::Child(Request::routed(
+                    input.requested_source(&site.source),
+                    domain,
+                )));
+            }
+        }
+        if !self.contextual_slots.is_empty() {
+            self.supply_contextual_inputs(checker)?;
+        }
+        let site = &self.completion.as_ref().expect("active call").site;
         let Phase::Supply(PreparedInputs {
-            signature,
             producers: prepared,
             binding,
+            ..
         }) = &mut self.phase
         else {
             unreachable!()
         };
-        let signature = CallSignature::of(signature).expect("prepared callable signature");
-        while let Some(input) = site.routes.get(self.next) {
-            self.next += 1;
-            let slot = self.offset + input.parameter;
-            let parameter = &signature.parameters[slot];
-            let domain = checker
-                .with_call_type_fuel(|_, fuel| binding.substitute_bounded(&parameter.ty, fuel))
-                .map_err(|failure| {
-                    error(
-                        site.source.span,
-                        format!("dependent call input is not available: {failure}"),
-                    )
-                })?;
-            let domain = checker.observe_call_type(&domain, &site.source)?;
-            input.require_collection_type(checker, &domain, site.source.span)?;
-            if let Some(value) = prepared.values[slot].take() {
-                self.arguments.push(n::CallArgument {
-                    passing: Default::default(),
-                    parameter: slot,
-                    value,
-                    is_default: false,
-                });
-                continue;
-            }
-            self.waiting = Some((slot, checker.in_staged_input));
-            checker.in_staged_input |= parameter.sort != Sort::Runtime;
-            return Ok(Poll::Child(Request::routed(
-                input.requested_source(&site.source),
-                domain,
-            )));
-        }
         for (index, assigned) in self.assigned.iter().enumerate() {
             if *assigned {
                 continue;
@@ -310,6 +392,13 @@ impl std::fmt::Display for CallInputs<'_> {
         }
         if let Some((slot, caller_staged)) = self.waiting {
             write!(f, " (waiting {slot} (caller-staged {caller_staged}))")?;
+        }
+        if !self.contextual_slots.is_empty() {
+            f.write_str(" (contextual")?;
+            for slot in &self.contextual_slots {
+                write!(f, " {slot}")?;
+            }
+            f.write_str(")")?;
         }
         f.write_str(" (arguments")?;
         for argument in &self.arguments {
@@ -394,6 +483,7 @@ impl Completion<'_> {
 }
 
 impl Checker<'_, '_> {
+    #[inline(never)]
     pub(in crate::program) fn plan_ordinary_call<'h>(
         &mut self,
         site: CallSite<'h>,
@@ -401,6 +491,7 @@ impl Checker<'_, '_> {
         retained_callable: Term,
         assigned: Vec<bool>,
         prefix: Vec<n::Expr>,
+        contextual: Vec<(usize, n::Expr)>,
         parameter_bindings: Vec<n::LocalId>,
         expected: Option<&Term>,
     ) -> Result<CallPlan<'h>, Error> {
@@ -409,6 +500,11 @@ impl Checker<'_, '_> {
         let mut prepared = InputProducers::new(count);
         for (slot, value) in prefix.into_iter().enumerate() {
             prepared.values[slot] = Some(value);
+        }
+        let mut contextual_slots = BTreeSet::new();
+        for (slot, value) in contextual {
+            prepared.values[slot] = Some(value);
+            contextual_slots.insert(slot);
         }
         let written_types = self.acquire_written_call_types(&site.source)?;
         let dependencies = tasks::Frame::new(self, callable, &site, &assigned, offset, prepared)?;
@@ -424,6 +520,7 @@ impl Checker<'_, '_> {
                 expected,
             }),
             assigned,
+            contextual_slots,
             offset,
             next: 0,
             waiting: None,

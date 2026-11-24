@@ -119,20 +119,46 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 .to_vec()
             {
                 if let Some(mut parameter) = self.lower_fn_param(node) {
-                    if !seen.insert(parameter.name.name) {
+                    let is_case = matches!(parameter.ty.kind, hir::common::TyParamKind::Case(_));
+                    if !is_case && !seen.insert(parameter.name.name) {
                         self.emit_malformed(
                             "duplicate function template instance parameter",
                             parameter.span,
                         );
                     }
                     parameter.index = lowered.len() as u32;
-                    self.define_fn_param(parameter.name, node, parameter.hir_id);
+                    if !is_case {
+                        self.define_fn_param(parameter.name, node, parameter.hir_id);
+                    }
                     parameters.push(FunctionTemplateInput {
                         name: parameter.name,
                         binding: parameter.hir_id,
                         formal: None,
                     });
                     lowered.push(parameter);
+                }
+            }
+            if matches!(
+                lowered.first().map(|parameter| &parameter.ty.kind),
+                Some(hir::common::TyParamKind::Case(_))
+            ) && lowered.len() < names.len()
+            {
+                let site = self.ast_node_ref(node);
+                let start = lowered.len();
+                for (offset, (name, param_span)) in names.into_iter().skip(start).enumerate() {
+                    let index = (start + offset) as u32;
+                    let name = Ident::new(name, param_span);
+                    if !seen.insert(name.name) {
+                        self.emit_malformed("duplicate function template parameter", param_span);
+                    }
+                    let binding = self.next_hir_id();
+                    self.expanded_locals.insert((site, index), binding);
+                    self.define_symbol(name, BindingKind::ExpandedLocal(site, index));
+                    parameters.push(FunctionTemplateInput {
+                        name,
+                        binding,
+                        formal: None,
+                    });
                 }
             }
             Some(self.arena.alloc_fn_param_slice(lowered))
@@ -326,14 +352,73 @@ pub(crate) fn link<'hir>(
                         .any(|body| body.hir_id == parameter.hir_id)
                 })
                 .collect::<Vec<_>>();
-            if parameters.len() != ordinary.len() {
-                return Err("function template instance parameter count mismatch");
-            }
-            for (input, parameter) in parameters.iter_mut().zip(ordinary) {
-                if explicit_parameters.is_none() && input.name.name != parameter.name.name {
-                    return Err("function template inherited parameter name mismatch");
+            if let Some(explicit) = explicit_parameters {
+                let has_case = explicit.iter().enumerate().any(|(index, parameter)| {
+                    matches!(parameter.ty.kind, hir::common::TyParamKind::Case(_))
+                        || index > 0
+                            && matches!(parameter.ty.kind, hir::common::TyParamKind::Case(_))
+                });
+                if has_case {
+                    if !matches!(
+                        explicit.first().map(|parameter| &parameter.ty.kind),
+                        Some(hir::common::TyParamKind::Case(_))
+                    ) || explicit.iter().skip(1).any(|parameter| {
+                        matches!(parameter.ty.kind, hir::common::TyParamKind::Case(_))
+                    }) {
+                        return Err(
+                            "case parameter is only valid as the first arm pattern parameter",
+                        );
+                    }
+                    if !body_ports.is_empty() {
+                        return Err("match arm template instance cannot carry a body interface");
+                    }
+                    if parameters.len() != ordinary.len() {
+                        return Err("function template instance parameter count mismatch");
+                    }
+                    for (index, (input, parameter)) in
+                        parameters.iter_mut().zip(ordinary.iter()).enumerate()
+                    {
+                        if index >= explicit.len()
+                            && !(parameter.ty.is_implicit() && parameter.ty.is_quote())
+                        {
+                            return Err("function template instance parameter count mismatch");
+                        }
+                        if index >= explicit.len() && input.name.name != parameter.name.name {
+                            return Err("function template inherited parameter name mismatch");
+                        }
+                        if index > 0 && index < explicit.len() {
+                            let param = &explicit[index];
+                            if !(param.ty.is_implicit() && param.ty.is_quote())
+                                || !(parameter.ty.is_implicit() && parameter.ty.is_quote())
+                            {
+                                return Err(
+                                    "match arm template instance extra parameters must be implicit quote inputs",
+                                );
+                            }
+                            if input.name.name != parameter.name.name {
+                                return Err("function template inherited parameter name mismatch");
+                            }
+                        }
+                        input.formal = Some(parameter.hir_id);
+                    }
+                } else {
+                    if parameters.len() != ordinary.len() {
+                        return Err("function template instance parameter count mismatch");
+                    }
+                    for (input, parameter) in parameters.iter_mut().zip(ordinary) {
+                        input.formal = Some(parameter.hir_id);
+                    }
                 }
-                input.formal = Some(parameter.hir_id);
+            } else {
+                if parameters.len() != ordinary.len() {
+                    return Err("function template instance parameter count mismatch");
+                }
+                for (input, parameter) in parameters.iter_mut().zip(ordinary) {
+                    if input.name.name != parameter.name.name {
+                        return Err("function template inherited parameter name mismatch");
+                    }
+                    input.formal = Some(parameter.hir_id);
+                }
             }
             *signature = Some(formal.clone());
             Ok(())

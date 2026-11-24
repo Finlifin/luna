@@ -74,7 +74,7 @@ fn quote_functions_retain_their_own_runtime_category() {
         };
         assert!(dump.contains("(quote true)"), "{dump}");
         assert!(dump.contains("(comptime false)"), "{dump}");
-        if source.contains("implicit") || source.ends_with("bool;") {
+        if source.ends_with("bool;") {
             assert!(compile(source, Emit::Nir).is_err());
         } else {
             let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
@@ -1209,8 +1209,8 @@ fn quote_parameter_protocols_reject_missing_ambiguous_and_invalid_supplies() {
             "ambiguous post do",
         ),
         (
-            "quote fn apply(implicit quote value:bool)->bool {value}",
-            "contextual quote fn inputs",
+            "quote fn apply(implicit quote value:bool)->bool {value} fn run()->bool {apply()}",
+            "missing contextual quote input",
         ),
     ] {
         let failure = compile(source, Emit::Nir)
@@ -2206,4 +2206,82 @@ fn whole_quote_single_hole_rule_rejects_multiple_quote_applications_even_in_bran
         execute(&valid, vec![]).0,
         comptime_interpretor::Value::Bool(true)
     );
+}
+
+#[test]
+fn contextual_quote_fn_binds_from_template_and_caller_scope() {
+    let source = "
+        typealias u32 = .u32'builtin;
+
+        quote fn add_current(value: u32, implicit quote current: u32) -> u32
+            where requires value <= 100 and current <= 100
+        {
+            value + current
+        }
+
+        template fn with_current(
+            value: u32,
+            quote lambda body: <current: u32 |- u32>,
+        ) -> u32
+            where requires value <= 100
+        {
+            let current = value;
+            ~<body>
+        }
+
+        fn adjusted use with_current { add_current(2) }
+
+        fn direct_caller() -> u32 {
+            let current: u32 = 10;
+            add_current(5)
+        }
+
+        quote fn generic_ctx(implicit quote current: T) -> T where T {
+            current
+        }
+
+        fn generic_caller() -> u32 {
+            let current: u32 = 7;
+            generic_ctx()
+        }
+
+        fn run() -> bool {
+            adjusted(40) == 42 and direct_caller() == 15 and generic_caller() == 7
+        }
+    ";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_quote_fn_rejects_missing_mismatched_and_comptime_runtime_reads() {
+    for invalid in [
+        // Missing contextual binding in caller lexical scope.
+        "typealias u32 = .u32'builtin;
+         quote fn add_current(value: u32, implicit quote current: u32) -> u32 { value + current }
+         fn run() -> u32 { add_current(1) }",
+        // Mismatched contextual binding type in caller lexical scope.
+        "typealias u32 = .u32'builtin;
+         quote fn add_current(value: u32, implicit quote current: u32) -> u32 { value + current }
+         fn run() -> u32 { let current = true; add_current(1) }",
+        // Comptime constant cannot satisfy a runtime contextual quote parameter.
+        "typealias u32 = .u32'builtin;
+         quote fn add_current(value: u32, implicit quote current: u32) -> u32 { value + current }
+         fn run() -> u32 { const current = 1; add_current(1) }",
+        // Reading runtime contextual input inside comptime block is rejected.
+        "typealias u32 = .u32'builtin;
+         quote fn bad(implicit quote current: u32) -> u32 { comptime { current + 1 } }
+         fn run() -> u32 { let current = 2; bad() }",
+        // Calling a contextual quote fn inside comptime is rejected.
+        "typealias u32 = .u32'builtin;
+         quote fn add_current(value: u32, implicit quote current: u32) -> u32 { value + current }
+         fn run() -> u32 { let current = 2; comptime { add_current(1) } }",
+    ] {
+        assert!(
+            compile(invalid, Emit::Nir).is_err(),
+            "expected contextual quote fn failure for:\n{invalid}"
+        );
+    }
 }

@@ -591,6 +591,7 @@ impl<'a, 'h> Reads<'a, 'h> {
                     self.expression(default)?;
                 }
                 TyParamKind::Itself { .. } => {}
+                TyParamKind::Case(pattern) => self.pattern(pattern)?,
             },
             Node::Clause(kind) => match kind {
                 Clause::Type(_) => {}
@@ -983,7 +984,13 @@ impl<'a, 'h> Reads<'a, 'h> {
             H::Match(value, arms) | H::EffectHandle(value, arms) => {
                 self.expression(value)?;
                 for arm in *arms {
-                    self.arm(arm)?;
+                    if let Some(import_expr) =
+                        self.source.package.match_arm_imports.get(&arm.hir_id)
+                    {
+                        self.expression(import_expr)?;
+                    } else {
+                        self.arm(arm)?;
+                    }
                 }
             }
             H::RefinedType { requirement, base } => {

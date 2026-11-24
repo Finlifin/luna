@@ -21,6 +21,13 @@ pub mod effects {
     pub use .effects_impl.strategy.direct_passing;
 }
 
+pub mod quote_fn_template {
+    pub const for_match_arms = { __flurry_quote_fn_template_for_match_arms: true }
+    pub const allow_non_exhaustive_instance = {
+        __flurry_quote_fn_template_allow_non_exhaustive_instance: true
+    }
+}
+
 pub mod prelude {
     pub use .abi;
     pub use .comptime_phase;

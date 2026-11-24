@@ -70,6 +70,7 @@ impl Idx for LocalDefId {
     fn new(raw: u32) -> Self {
         LocalDefId(raw)
     }
+
     #[inline]
     fn index(self) -> usize {
         self.0 as usize
@@ -136,6 +137,7 @@ pub struct ItemLocalId(u32);
 impl ItemLocalId {
     /// The owner node itself.
     pub const ZERO: Self = ItemLocalId(0);
+
     pub const INVALID: Self = ItemLocalId(u32::MAX);
 
     #[inline]
@@ -176,6 +178,7 @@ impl Idx for ItemLocalId {
     fn new(raw: u32) -> Self {
         ItemLocalId(raw)
     }
+
     #[inline]
     fn index(self) -> usize {
         self.0 as usize
@@ -192,7 +195,7 @@ impl Idx for ItemLocalId {
 /// independently (e.g. for incremental compilation).
 ///
 /// Analogous to rustc's `HirId`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HirId {
     pub owner: OwnerId,
     pub local_id: ItemLocalId,

@@ -723,7 +723,7 @@ fn elaborate_in_mode(
         attributes::index_suppliers(package, package_identities, invocation_steps)?;
     let package_metadata = build_package_metadata(package, package_identities, protocols)?;
     let declaration_paths = build_declaration_paths(package, package_identities);
-    let mut checker = Checker {
+    let mut checker = Box::new(Checker {
         declared_theory: source_declarations.nominal_context.clone(),
         source_declarations,
         package_metadata,
@@ -794,6 +794,10 @@ fn elaborate_in_mode(
         range_pattern_infos: BTreeMap::new(),
         bitvec_pattern_infos: BTreeMap::new(),
         direct_passing_effects: BTreeMap::new(),
+        quote_fn_template_flags: BTreeMap::new(),
+        checked_quote_fn_arms: BTreeMap::new(),
+        quote_fn_arms_by_template: BTreeMap::new(),
+        internal_return_empty_replacements: BTreeMap::new(),
         definition_attributes,
         attribute_demands,
         allow_packed_pointer_projection: false,
@@ -943,7 +947,7 @@ fn elaborate_in_mode(
         local_runtime_deliveries: BTreeMap::new(),
         local_write_versions: BTreeMap::new(),
         active_env_parameters: BTreeMap::new(),
-    };
+    });
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -974,6 +978,7 @@ struct BodySideState {
     newtypes: usize,
     alias_contracts: usize,
     computed_scalar_packets: usize,
+    internal_return_empty_replacements: usize,
     code_packet_nominals: usize,
     expansion_sources: usize,
     runtime_domains: usize,
@@ -1000,6 +1005,7 @@ fn checker_body_side_state(checker: &Checker<'_, '_>) -> BodySideState {
         newtypes: checker.newtypes.len(),
         alias_contracts: checker.alias_contracts.len(),
         computed_scalar_packets: checker.computed_scalar_packets.len(),
+        internal_return_empty_replacements: checker.internal_return_empty_replacements.len(),
         code_packet_nominals: checker.code_packet_nominals.len(),
         expansion_sources: checker.expansion_sources.len(),
         runtime_domains: checker.runtime_domains.len(),
@@ -1855,6 +1861,7 @@ fn elaborate_candidate<'a, 'h>(
     for owner in checker.data_consumers.keys().copied().collect::<Vec<_>>() {
         checker.check_data_consumer(owner)?;
     }
+    checker.check_all_quote_fn_arms()?;
     let mut recorded_bodies =
         (!incremental.record_upstream_packages.is_empty()).then(CachedUpstreamBodies::default);
     for (owner, item, sig) in functions {
@@ -1964,6 +1971,12 @@ fn elaborate_candidate<'a, 'h>(
     output
         .internal_return_packets
         .extend(checker.computed_scalar_packets.iter().copied());
+    output.internal_return_empty_replacements.extend(
+        checker
+            .internal_return_empty_replacements
+            .iter()
+            .map(|(key, value)| (*key, *value)),
+    );
     // Staged declaration values can remain in checked default descriptions and
     // invocation inputs even though only concrete residual bodies are emitted.
     // Identity metadata admits their phase; it never authorizes execution.
@@ -3623,6 +3636,10 @@ struct Checker<'a, 'h> {
     range_pattern_infos: BTreeMap<n::LocalId, crate::automata::RangePatternInfo>,
     bitvec_pattern_infos: BTreeMap<n::LocalId, crate::automata::BitVecPatternInfo>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
+    quote_fn_template_flags: BTreeMap<OwnerId, attributes::QuoteFnTemplateFlags>,
+    checked_quote_fn_arms: BTreeMap<OwnerId, CheckedQuoteFnArm>,
+    quote_fn_arms_by_template: BTreeMap<OwnerId, Vec<OwnerId>>,
+    internal_return_empty_replacements: BTreeMap<(u32, u32), DeclarationId>,
     definition_attributes: n::DefinitionAttributes,
     attribute_demands: attributes::Demands,
     allow_packed_pointer_projection: bool,
@@ -4550,6 +4567,10 @@ impl Checker<'_, '_> {
                     ));
                 }
             }
+            let is_quote_fn = matches!(
+                &item.kind,
+                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_quote
+            );
             let mut annotations = Vec::new();
             for (parameter_index, parameter) in sig.params.iter().enumerate() {
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
@@ -4567,12 +4588,23 @@ impl Checker<'_, '_> {
                         "effect parameter protocol is not yet implemented",
                     ));
                 }
-                if parameter.ty.flags
-                    & !(hir::common::TPARAM_IMPLICIT
+                let is_contextual_quote = is_quote_fn
+                    && parameter.ty.is_implicit()
+                    && parameter.ty.is_quote()
+                    && !parameter.ty.is_comptime()
+                    && !parameter.ty.is_lambda()
+                    && matches!(parameter.ty.kind, TyParamKind::Positional(_));
+                let allowed_flags = if is_contextual_quote {
+                    hir::common::TPARAM_IMPLICIT
                         | hir::common::TPARAM_LAMBDA
-                        | hir::common::TPARAM_COMPTIME)
-                    != 0
-                {
+                        | hir::common::TPARAM_COMPTIME
+                        | hir::common::TPARAM_QUOTE
+                } else {
+                    hir::common::TPARAM_IMPLICIT
+                        | hir::common::TPARAM_LAMBDA
+                        | hir::common::TPARAM_COMPTIME
+                };
+                if parameter.ty.flags & !allowed_flags != 0 {
                     return Err(error(
                         parameter.span,
                         "parameter protocols are not implemented",
@@ -4607,6 +4639,12 @@ impl Checker<'_, '_> {
                     | TyParamKind::Positional(ty)
                     | TyParamKind::PositionalDependencyCatched(_, ty)
                     | TyParamKind::Varadic(_, ty) => self.signature_annotation(ty)?,
+                    TyParamKind::Case(_) => {
+                        return Err(error(
+                            parameter.span,
+                            "case parameters are only valid on quote function template arm instances",
+                        ));
+                    }
                 };
                 self.check_template_parameter_annotation(parameter, &annotation)?;
                 if annotation.needs_instance() {
@@ -4638,6 +4676,17 @@ impl Checker<'_, '_> {
                 } else {
                     ty
                 };
+                if is_contextual_quote
+                    && (ty == p(P::Type)
+                        || matches!(ty, Term::ComptimeFunction(_))
+                        || ty.is_normal_form_callable()
+                        || matches!(ty, Term::Primitive(P::Integer | P::Float)))
+                {
+                    return Err(error(
+                        parameter.span,
+                        "contextual quote input must have a runtime value type",
+                    ));
+                }
                 let parameter_type = Parameter {
                     sort: if parameter.ty.is_comptime() {
                         if ty == p(P::Type) {
@@ -7457,6 +7506,7 @@ impl Checker<'_, '_> {
         selected_method: Option<interfaces::SelectedMethod>,
         call_use: CallUse,
     ) -> Result<n::Expr, Error> {
+        self.check_quote_callable(owner, expr.span)?;
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.hir_id, expr.span)?;
         }
@@ -7495,7 +7545,17 @@ impl Checker<'_, '_> {
             declarations.len() - offset,
             expr.span,
         )?;
-        let assigned: Vec<_> = std::iter::repeat_n(true, offset).chain(supplied).collect();
+        let contextual =
+            self.resolve_contextual_quote_inputs(expr, Some(declarations), offset, &supplied)?;
+        let mut prep_supplied = supplied;
+        let mut contextual_slots = BTreeSet::new();
+        for &(slot, _) in &contextual {
+            prep_supplied[slot - offset] = true;
+            contextual_slots.insert(slot);
+        }
+        let assigned: Vec<_> = std::iter::repeat_n(true, offset)
+            .chain(prep_supplied)
+            .collect();
         let Term::Function {
             parameters: ordinary,
             result,
@@ -7503,7 +7563,7 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        let (known_inputs, known_values, seed, mut collected) = self
+        let (known_inputs, known_values, mut seed, mut collected) = self
             .infer_independent_call_inputs(
                 ordinary,
                 result,
@@ -7514,6 +7574,9 @@ impl Checker<'_, '_> {
                 expr,
                 expected,
             )?;
+        for (slot, value) in &contextual {
+            seed[*slot] = Some(value.clone());
+        }
         let caller_scope = self.call_inference_domains();
         let caller_frames = if caller_scope.is_empty() {
             vec![]
@@ -7595,6 +7658,9 @@ impl Checker<'_, '_> {
         let mut checked = vec![None; declarations.len()];
         for (index, value) in prefix.into_iter().enumerate() {
             checked[index] = Some(prepared.values[index].take().unwrap_or(value));
+        }
+        for (slot, value) in contextual {
+            checked[slot] = Some(value);
         }
         let discharge_effects = self.active_effect_environment().is_some()
             && !matches!(expected, Some(Term::Computation { .. }));
@@ -7972,6 +8038,16 @@ impl Checker<'_, '_> {
                     value,
                     is_default: true,
                 });
+            } else if contextual_slots.contains(&parameter) {
+                let value = checked[parameter]
+                    .take()
+                    .ok_or_else(|| error(expr.span, "missing prepared contextual quote input"))?;
+                arguments.push(n::CallArgument {
+                    passing: Default::default(),
+                    parameter,
+                    value,
+                    is_default: false,
+                });
             }
         }
         if let Term::Function {
@@ -7984,6 +8060,9 @@ impl Checker<'_, '_> {
                     .ty
                     .substitute(&[])
                     .map_err(|e| error(expr.span, e.to_string()))?;
+                if contextual_slots.contains(&argument.parameter) {
+                    self.require_expression(&argument.value.ty, &target, expr.span)?;
+                }
                 self.adapt_error_argument_layout(&mut argument.value, &target, expr.span, 0)?;
             }
         }
@@ -8809,245 +8888,8 @@ impl Checker<'_, '_> {
                 H::If(..) => self.check_ordinary_if_region(expr, expected, partial),
                 H::Match(..) => self.check_ordinary_match_region(expr, expected, partial, None),
                 H::When(_) => self.check_ordinary_when_region(expr, expected, partial, None),
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types" | "enum_symbol_values" | "enum_bit_width" | "enum_bit_base_type" | "enum_bit_masks" | "enum_bit_values" | "enum_bit_offsets")) => {
-                    self.enum_reflection_builtin(expr, callee, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_concat" | "object_append" | "object_replace" | "object_remove" | "object_slice")) => {
-                    self.object_edit_builtin(expr, callee, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_length" | "object_key" | "object_entry_type" | "object_value" | "object_get")) => {
-                    self.object_query_builtin(expr, callee, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "build_enum" | "build_enum_paths" | "build_symbol_enum_paths" | "build_bits_enum_paths")) =>
-                {
-                    let H::Builtin(name) = &callee.kind else {
-                        unreachable!()
-                    };
-                    self.build_enum_builtin(
-                        expr,
-                        args,
-                        expected,
-                        name.as_str() != "build_enum",
-                        name.as_str() == "build_symbol_enum_paths",
-                        name.as_str() == "build_bits_enum_paths",
-                    )
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_newtype") => {
-                    self.build_newtype_builtin(expr, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {
-                    self.build_struct_builtin(expr, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "newtype_representation") => {
-                    self.newtype_reflection_builtin(expr, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "struct_field_types" | "struct_field_names")) => {
-                    self.struct_reflection_builtin(expr, callee, args, expected)
-                }
-
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
-                    self.list_builtin(expr, callee, args, expected)
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "comptime_integer_div_trunc" | "comptime_integer_rem_trunc")) =>
-                {
-                    if self.runtime_value_context() || self.in_code_body {
-                        return Err(error(
-                            expr.span,
-                            "explicit Integer division requires comptime invocation",
-                        ));
-                    }
-                    let [Arg::Positional(left), Arg::Positional(right)] = args else {
-                        return Err(error(
-                            expr.span,
-                            "explicit Integer division requires two positional Integer operands",
-                        ));
-                    };
-                    let H::Builtin(name) = &callee.kind else {
-                        unreachable!()
-                    };
-                    let left = self.expr(left, Some(&p(P::Integer)))?;
-                    let right = self.expr(right, Some(&p(P::Integer)))?;
-                    let ty = if is_never(&left.ty) || is_never(&right.ty) {
-                        p(P::Never)
-                    } else {
-                        p(P::Integer)
-                    };
-                    if let Some(expected) = expected {
-                        self.require_expression(&ty, expected, expr.span)?;
-                    }
-                    Ok(n::Expr {
-                        source: source(expr.span),
-                        ty,
-                        kind: K::IntegerBinary {
-                            op: if name.as_str() == "comptime_integer_div_trunc" {
-                                n::IntegerOp::DivideTrunc
-                            } else {
-                                n::IntegerOp::RemainderTrunc
-                            },
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                    })
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "comptime_integer_convert") =>
-                {
-                    if self.runtime_value_context() || self.in_code_body {
-                        return Err(error(
-                            expr.span,
-                            "integer conversion requires comptime invocation",
-                        ));
-                    }
-                    let [Arg::Positional(target), Arg::Positional(value)] = args else {
-                        return Err(error(
-                            expr.span,
-                            "integer conversion requires a Type and an integer",
-                        ));
-                    };
-                    let target = self.type_expr(target)?;
-                    let value = self.expr(value, None)?;
-                    let ty = if is_never(&value.ty) {
-                        p(P::Never)
-                    } else {
-                        target
-                    };
-                    if !n::comptime_integer_conversion_valid(&value.ty, &ty) {
-                        return Err(error(
-                            expr.span,
-                            "integer conversion requires concrete integer domains",
-                        ));
-                    }
-                    if let Some(expected) = expected {
-                        self.require_expression(&ty, expected, expr.span)?;
-                    }
-                    Ok(n::Expr {
-                        source: source(expr.span),
-                        ty,
-                        kind: K::ComptimeIntegerConvert(Box::new(value)),
-                    })
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "integer_representation") =>
-                {
-                    let [Arg::Positional(value)] = args else {
-                        return Err(error(
-                            expr.span,
-                            "integer representation requires one positional integer",
-                        ));
-                    };
-                    let value = self.expr(value, None)?;
-                    let ty = if is_never(&value.ty) {
-                        p(P::Never)
-                    } else {
-                        p(P::U128)
-                    };
-                    if !n::integer_representation_valid(&value.ty, &ty) {
-                        return Err(error(
-                            expr.span,
-                            "integer representation requires a machine integer",
-                        ));
-                    }
-                    if let Some(expected) = expected {
-                        self.require_expression(&ty, expected, expr.span)?;
-                    }
-                    Ok(n::Expr {
-                        source: source(expr.span),
-                        ty,
-                        kind: K::IntegerRepresentation(Box::new(value)),
-                    })
-                }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte" | "str_slice" | "str_concat" | "str_from_char" | "symbol_byte_length" | "symbol_byte")) => {
-                    self.text_builtin(expr, callee, args, expected)
-                }
                 H::Application(callee, args) => {
-                    if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
-                        let operand = self.type_observation_operand(arg)?;
-                        let ty = p(if is_never(&operand.ty) {
-                            P::Never
-                        } else {
-                            P::Bool
-                        });
-                        if let Some(expected) = expected {
-                            self.require_expression(&ty, expected, expr.span)?;
-                        }
-                        Ok(n::Expr {
-                            source: source(expr.span),
-                            ty,
-                            kind: K::TypeKind {
-                                kind,
-                                operand: Box::new(operand),
-                            },
-                        })
-                    } else if let Some(arg) = self.type_predicate_not_sized_call(expr)? {
-                        let operand = self.type_observation_operand(arg)?;
-                        if let K::TypeValue(ty) = &operand.kind
-                            && !is_never(ty)
-                        {
-                            self.check_not_sized_operand(ty, arg.span)?;
-                        }
-                        let ty = p(if is_never(&operand.ty) {
-                            P::Never
-                        } else {
-                            P::Bool
-                        });
-                        if let Some(expected) = expected {
-                            self.require_expression(&ty, expected, expr.span)?;
-                        }
-                        Ok(n::Expr {
-                            source: source(expr.span),
-                            ty,
-                            kind: K::TypeNotSized {
-                                operand: Box::new(operand),
-                            },
-                        })
-                    } else if let Some((query, arg, field)) = self.type_layout_query_call(expr)? {
-                        let subject_op = self.type_observation_operand(arg)?;
-                        let (operand, never_operand) = if let Some(field_expr) = field {
-                            let field_op = self.expr(field_expr, Some(&p(P::Symbol)))?;
-                            let never = is_never(&subject_op.ty) || is_never(&field_op.ty);
-                            let tuple = n::Expr {
-                                source: source(expr.span),
-                                ty: Term::Tuple(vec![subject_op.ty.clone(), field_op.ty.clone()]),
-                                kind: K::Tuple(vec![subject_op, field_op]),
-                            };
-                            (tuple, never)
-                        } else {
-                            let never = is_never(&subject_op.ty);
-                            (subject_op, never)
-                        };
-                        let ty = p(if never_operand { P::Never } else { P::Usize });
-                        if let Some(expected) = expected {
-                            self.require_expression(&ty, expected, expr.span)?;
-                        }
-                        Ok(n::Expr {
-                            source: source(expr.span),
-                            ty,
-                            kind: K::TypeLayout {
-                                query,
-                                operand: Box::new(operand),
-                            },
-                        })
-                    } else {
-                        let quote_head = if let H::NFApplication(head, _) = callee.kind {
-                            head
-                        } else {
-                            callee
-                        };
-                        if let H::ResolvedDef { def_id, .. } = quote_head.kind {
-                            if self
-                                .package
-                                .definition_owner(def_id)
-                                .is_some_and(|owner| self.is_quote_function(owner))
-                            {
-                                self.record_quote_application(expr.hir_id, expr.span)?;
-                            }
-                        }
-                        if let Some((ty, index)) = self.variant_target(callee, expected)? {
-                            self.with_constructor_inputs(callee, ty, expr.span, |this, ty| {
-                                this.construct_variant(expr, ty, index, args, expected)
-                            })
-                        } else {
-                            self.call(expr, callee, args, expected, partial)
-                        }
-                    }
+                    self.application_expression_value(expr, callee, args, expected, partial)
                 }
                 H::ExtendedApplication(callee, args) => {
                     if let Some((ty, index)) = self.variant_target(callee, expected)? {
@@ -9084,6 +8926,291 @@ impl Checker<'_, '_> {
         }
     }
 
+    #[inline(never)]
+    fn application_expression_value(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        if let Some(value) = self.special_application_expression(expr, callee, args, expected)? {
+            return Ok(value);
+        }
+        let quote_head = if let H::NFApplication(head, _) = callee.kind {
+            head
+        } else {
+            callee
+        };
+        if let H::ResolvedDef { def_id, .. } = quote_head.kind
+            && let Some(owner) = self.package.definition_owner(def_id)
+        {
+            self.check_quote_callable(owner, expr.span)?;
+            if self.is_quote_function(owner) {
+                self.record_quote_application(expr.hir_id, expr.span)?;
+            }
+        }
+        if let Some((ty, index)) = self.variant_target(callee, expected)? {
+            self.with_constructor_inputs(callee, ty, expr.span, |this, ty| {
+                this.construct_variant(expr, ty, index, args, expected)
+            })
+        } else {
+            self.call(expr, callee, args, expected, partial)
+        }
+    }
+
+    #[inline(never)]
+    fn special_application_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<Option<n::Expr>, Error> {
+        if let H::Builtin(name) = &callee.kind {
+            match name.as_str() {
+                "enum_group_paths"
+                | "enum_variant_paths"
+                | "enum_variant_shapes"
+                | "enum_variant_field_names"
+                | "enum_variant_field_types"
+                | "enum_symbol_values"
+                | "enum_bit_width"
+                | "enum_bit_base_type"
+                | "enum_bit_masks"
+                | "enum_bit_values"
+                | "enum_bit_offsets" => {
+                    return self
+                        .enum_reflection_builtin(expr, callee, args, expected)
+                        .map(Some);
+                }
+                "object_concat" | "object_append" | "object_replace" | "object_remove"
+                | "object_slice" => {
+                    return self
+                        .object_edit_builtin(expr, callee, args, expected)
+                        .map(Some);
+                }
+                "object_length" | "object_key" | "object_entry_type" | "object_value"
+                | "object_get" => {
+                    return self
+                        .object_query_builtin(expr, callee, args, expected)
+                        .map(Some);
+                }
+                "build_enum"
+                | "build_enum_paths"
+                | "build_symbol_enum_paths"
+                | "build_bits_enum_paths" => {
+                    return self
+                        .build_enum_builtin(
+                            expr,
+                            args,
+                            expected,
+                            name.as_str() != "build_enum",
+                            name.as_str() == "build_symbol_enum_paths",
+                            name.as_str() == "build_bits_enum_paths",
+                        )
+                        .map(Some);
+                }
+                "build_newtype" => {
+                    return self.build_newtype_builtin(expr, args, expected).map(Some);
+                }
+                "build_struct" => {
+                    return self.build_struct_builtin(expr, args, expected).map(Some);
+                }
+                "newtype_representation" => {
+                    return self
+                        .newtype_reflection_builtin(expr, args, expected)
+                        .map(Some);
+                }
+                "struct_field_types" | "struct_field_names" => {
+                    return self
+                        .struct_reflection_builtin(expr, callee, args, expected)
+                        .map(Some);
+                }
+                "list_length" | "list_concat" => {
+                    return self.list_builtin(expr, callee, args, expected).map(Some);
+                }
+                "comptime_integer_div_trunc" | "comptime_integer_rem_trunc" => {
+                    if self.runtime_value_context() || self.in_code_body {
+                        return Err(error(
+                            expr.span,
+                            "explicit Integer division requires comptime invocation",
+                        ));
+                    }
+                    let [Arg::Positional(left), Arg::Positional(right)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "explicit Integer division requires two positional Integer operands",
+                        ));
+                    };
+                    let left = self.expr(left, Some(&p(P::Integer)))?;
+                    let right = self.expr(right, Some(&p(P::Integer)))?;
+                    let ty = if is_never(&left.ty) || is_never(&right.ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::Integer)
+                    };
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    return Ok(Some(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::IntegerBinary {
+                            op: if name.as_str() == "comptime_integer_div_trunc" {
+                                n::IntegerOp::DivideTrunc
+                            } else {
+                                n::IntegerOp::RemainderTrunc
+                            },
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                    }));
+                }
+                "comptime_integer_convert" => {
+                    if self.runtime_value_context() || self.in_code_body {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires comptime invocation",
+                        ));
+                    }
+                    let [Arg::Positional(target), Arg::Positional(value)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires a Type and an integer",
+                        ));
+                    };
+                    let target = self.type_expr(target)?;
+                    let value = self.expr(value, None)?;
+                    let ty = if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        target
+                    };
+                    if !n::comptime_integer_conversion_valid(&value.ty, &ty) {
+                        return Err(error(
+                            expr.span,
+                            "integer conversion requires concrete integer domains",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    return Ok(Some(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::ComptimeIntegerConvert(Box::new(value)),
+                    }));
+                }
+                "integer_representation" => {
+                    let [Arg::Positional(value)] = args else {
+                        return Err(error(
+                            expr.span,
+                            "integer representation requires one positional integer",
+                        ));
+                    };
+                    let value = self.expr(value, None)?;
+                    let ty = if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        p(P::U128)
+                    };
+                    if !n::integer_representation_valid(&value.ty, &ty) {
+                        return Err(error(
+                            expr.span,
+                            "integer representation requires a machine integer",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    return Ok(Some(n::Expr {
+                        source: source(expr.span),
+                        ty,
+                        kind: K::IntegerRepresentation(Box::new(value)),
+                    }));
+                }
+                "str_byte_length" | "str_byte" | "str_slice" | "str_concat" | "str_from_char"
+                | "symbol_byte_length" | "symbol_byte" => {
+                    return self.text_builtin(expr, callee, args, expected).map(Some);
+                }
+                _ => {}
+            }
+        }
+        if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
+            let operand = self.type_observation_operand(arg)?;
+            let ty = p(if is_never(&operand.ty) {
+                P::Never
+            } else {
+                P::Bool
+            });
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeKind {
+                    kind,
+                    operand: Box::new(operand),
+                },
+            }));
+        }
+        if let Some(arg) = self.type_predicate_not_sized_call(expr)? {
+            let operand = self.type_observation_operand(arg)?;
+            if let K::TypeValue(ty) = &operand.kind
+                && !is_never(ty)
+            {
+                self.check_not_sized_operand(ty, arg.span)?;
+            }
+            let ty = p(if is_never(&operand.ty) {
+                P::Never
+            } else {
+                P::Bool
+            });
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeNotSized {
+                    operand: Box::new(operand),
+                },
+            }));
+        }
+        if let Some((query, arg, field)) = self.type_layout_query_call(expr)? {
+            let subject_op = self.type_observation_operand(arg)?;
+            let (operand, never_operand) = if let Some(field_expr) = field {
+                let field_op = self.expr(field_expr, Some(&p(P::Symbol)))?;
+                let never = is_never(&subject_op.ty) || is_never(&field_op.ty);
+                let tuple = n::Expr {
+                    source: source(expr.span),
+                    ty: Term::Tuple(vec![subject_op.ty.clone(), field_op.ty.clone()]),
+                    kind: K::Tuple(vec![subject_op, field_op]),
+                };
+                (tuple, never)
+            } else {
+                let never = is_never(&subject_op.ty);
+                (subject_op, never)
+            };
+            let ty = p(if never_operand { P::Never } else { P::Usize });
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeLayout {
+                    query,
+                    operand: Box::new(operand),
+                },
+            }));
+        }
+        Ok(None)
+    }
+
     fn type_observation_operand(&mut self, arg: &Expr<'_>) -> Result<n::Expr, Error> {
         if self.runtime_value_context() {
             let ty = self.type_expr(arg)?;
@@ -9108,6 +9235,35 @@ impl Checker<'_, '_> {
             });
         }
         Ok(operand)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::program) struct CheckedQuoteFnArm {
+    pub owner: OwnerId,
+    pub template_owner: OwnerId,
+    pub type_parameters: Vec<DeclarationId>,
+    pub applied_args: Option<Vec<Term>>,
+    pub scrutinee_ty: Term,
+    pub contextual_parameters: Vec<(hir::Symbol, n::LocalId, Term)>,
+    pub result_ty: Term,
+    pub pattern: n::Pattern,
+    pub body: n::Expr,
+    pub span: Span,
+}
+
+impl std::fmt::Display for CheckedQuoteFnArm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(checked-quote-fn-arm (owner {}) (template {}) (scrutinee {}) (result {}) (pattern {}) (body {}))",
+            self.owner,
+            self.template_owner,
+            self.scrutinee_ty,
+            self.result_ty,
+            self.pattern,
+            self.body
+        )
     }
 }
 

@@ -21,7 +21,12 @@ impl Checker<'_, '_> {
         let item = self.package.item(owner).unwrap();
         let sig = match &item.kind {
             ItemKind::Fn(sig, _) => sig,
-            ItemKind::FnDeclaration(sig) if sig.modifiers.is_function_template => sig,
+            ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_function_template
+                    || self.package.quote_fn_arms.contains_key(&owner) =>
+            {
+                sig
+            }
             ItemKind::FnDeclaration(_)
                 if self.self_types.contains_key(&owner)
                     && !self.self_containers.contains_key(&owner) =>
@@ -48,16 +53,202 @@ impl Checker<'_, '_> {
         }) {
             return Err(error(span, "unsupported quote fn clause protocol"));
         }
-        if sig.params.iter().any(|param|
-            // Ordinary supply/lambda markers use the shared router;
-            // comptime inputs use staged binding before expansion.
-            // Neither grants contextual binding correspondence.
-            param.ty.flags & !(hir::common::TPARAM_IMPLICIT | hir::common::TPARAM_LAMBDA | hir::common::TPARAM_COMPTIME) != 0
-                || !matches!(param.ty.kind, TyParamKind::Positional(_) | TyParamKind::Optional(..) | TyParamKind::Varadic(..) | TyParamKind::Itself {..}))
+        if sig.params.iter().any(|param| {
+            let is_contextual_quote = param.ty.is_implicit()
+                && param.ty.is_quote()
+                && !param.ty.is_comptime()
+                && !param.ty.is_lambda()
+                && matches!(param.ty.kind, TyParamKind::Positional(_));
+            let allowed_flags = if is_contextual_quote {
+                hir::common::TPARAM_IMPLICIT
+                    | hir::common::TPARAM_LAMBDA
+                    | hir::common::TPARAM_COMPTIME
+                    | hir::common::TPARAM_QUOTE
+            } else {
+                hir::common::TPARAM_IMPLICIT
+                    | hir::common::TPARAM_LAMBDA
+                    | hir::common::TPARAM_COMPTIME
+            };
+            param.ty.flags & !allowed_flags != 0
+                || !matches!(
+                    param.ty.kind,
+                    TyParamKind::Positional(_)
+                        | TyParamKind::Optional(..)
+                        | TyParamKind::Varadic(..)
+                        | TyParamKind::Itself { .. }
+                )
+        }) {
+            return Err(error(
+                span,
+                "unsupported parameter protocol in quote fn signature",
+            ));
+        }
+        if self
+            .quote_fn_template_flags
+            .get(&owner)
+            .is_some_and(|flags| flags.for_match_arms)
         {
-            return Err(error(span, "contextual quote fn inputs or dependent parameter protocols are not yet implemented"));
+            if sig.params.is_empty()
+                || !matches!(sig.params[0].ty.kind, TyParamKind::Positional(_))
+                || sig.params[0].ty.flags != 0
+            {
+                return Err(error(
+                    span,
+                    "match-arm quote template requires an ordinary first scrutinee parameter",
+                ));
+            }
+            if sig
+                .params
+                .iter()
+                .skip(1)
+                .any(|param| !(param.ty.is_implicit() && param.ty.is_quote()))
+            {
+                return Err(error(
+                    span,
+                    "match-arm quote template parameters after the scrutinee must be implicit quote inputs",
+                ));
+            }
         }
         Ok(())
+    }
+
+    #[inline(never)]
+    pub(in crate::program) fn check_quote_callable(
+        &self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<(), Error> {
+        if self
+            .quote_fn_template_flags
+            .get(&owner)
+            .is_some_and(|flags| flags.for_match_arms)
+            || self.package.quote_fn_arms.contains_key(&owner)
+        {
+            return Err(error(
+                span,
+                "quote match-arm templates and arm instances cannot be called or referenced as values; use them in a match expression",
+            ));
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    pub(in crate::program) fn validate_contextual_quote_binding(
+        &self,
+        binding: n::LocalId,
+        name: &str,
+        span: Span,
+        context_label: &str,
+    ) -> Result<Term, Error> {
+        if self.code_values.contains_key(&binding) {
+            return Err(error(
+                span,
+                format!("contextual quote input `{name}` cannot bind a quoted code value"),
+            ));
+        }
+        if self.pattern_codes.contains_key(&binding) {
+            return Err(error(
+                span,
+                format!("contextual quote input `{name}` cannot bind a quoted pattern value"),
+            ));
+        }
+        if self.in_required_comptime || self.in_staged_input || !self.runtime_value_context() {
+            return Err(error(
+                span,
+                format!(
+                    "contextual quote input `{name}` cannot read a runtime value during comptime"
+                ),
+            ));
+        }
+        if self.generator_data.contains_key(&binding) {
+            return Err(error(
+                span,
+                format!(
+                    "contextual quote input `{name}` requires a runtime lexical binding, not a comptime local"
+                ),
+            ));
+        }
+        let ty = self.locals.get(&binding).cloned().ok_or_else(|| {
+            error(
+                span,
+                format!(
+                    "contextual quote input `{name}` is not active in {context_label} lexical scope"
+                ),
+            )
+        })?;
+        if ty == p(P::Type)
+            || matches!(ty, Term::ComptimeFunction(_))
+            || ty.is_normal_form_callable()
+            || matches!(ty, Term::Primitive(P::Integer | P::Float))
+        {
+            return Err(error(
+                span,
+                format!("contextual quote input `{name}` cannot bind a comptime-only value"),
+            ));
+        }
+        Ok(ty)
+    }
+
+    #[inline(never)]
+    pub(in crate::program) fn resolve_contextual_quote_input(
+        &self,
+        call_expr: &Expr<'_>,
+        parameter: &hir::common::FnParam<'_>,
+    ) -> Result<n::Expr, Error> {
+        let Some(target_hir_id) = self
+            .package
+            .lexical_call_locals
+            .get(&call_expr.hir_id)
+            .and_then(|locals| locals.get(parameter.name.name.as_str()).copied())
+        else {
+            return Err(error(
+                call_expr.span,
+                format!(
+                    "missing contextual quote input `{}` in caller lexical scope",
+                    parameter.name.name
+                ),
+            ));
+        };
+        let binding = local(target_hir_id);
+        let ty = self.validate_contextual_quote_binding(
+            binding,
+            parameter.name.name.as_str(),
+            call_expr.span,
+            "caller",
+        )?;
+        Ok(n::Expr {
+            source: source(call_expr.span),
+            ty,
+            kind: K::Local(binding),
+        })
+    }
+
+    #[inline(never)]
+    pub(in crate::program) fn resolve_contextual_quote_inputs(
+        &self,
+        call_expr: &Expr<'_>,
+        declarations: Option<&[hir::common::FnParam<'_>]>,
+        offset: usize,
+        assigned: &[bool],
+    ) -> Result<Vec<(usize, n::Expr)>, Error> {
+        let Some(declarations) = declarations else {
+            return Ok(Vec::new());
+        };
+        let mut resolved = Vec::new();
+        for (index, is_assigned) in assigned.iter().enumerate() {
+            if *is_assigned {
+                continue;
+            }
+            let slot = offset + index;
+            let parameter = &declarations[slot];
+            if parameter.ty.is_implicit() && parameter.ty.is_quote() {
+                resolved.push((
+                    slot,
+                    self.resolve_contextual_quote_input(call_expr, parameter)?,
+                ));
+            }
+        }
+        Ok(resolved)
     }
 
     pub(in crate::program) fn record_quote_application(
@@ -123,6 +314,7 @@ struct Expansion<'a> {
     selection: Option<&'a n::Package>,
     parameter_domains: Option<BTreeMap<DeclarationId, Term>>,
     templates: &'a BTreeMap<DeclarationId, &'a n::Function>,
+    contextual_slots: Option<&'a BTreeMap<DeclarationId, BTreeSet<usize>>>,
     caller_env_parameters: &'a [n::RuntimeEnvParameter],
     caller_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, n::Expr>,
     in_closure: bool,
@@ -219,6 +411,7 @@ impl Expansion<'_> {
         result.map_err(|message| error(span, message))
     }
 
+    #[inline(never)]
     fn expand(
         &mut self,
         expression: &mut n::Expr,
@@ -271,6 +464,7 @@ impl Expansion<'_> {
         result
     }
 
+    #[inline(never)]
     fn expand_inner(
         &mut self,
         expression: &mut n::Expr,
@@ -576,6 +770,7 @@ impl Expansion<'_> {
         Ok(())
     }
 
+    #[inline(never)]
     fn expand_template(
         &mut self,
         expression: &mut n::Expr,
@@ -708,6 +903,10 @@ impl Expansion<'_> {
             connections.insert(*parameter, self.fresh(span)?);
             prepared_connections.insert(*parameter, self.fresh(span)?);
         }
+        let contextual = self
+            .contextual_slots
+            .and_then(|map| map.get(&source_template.declaration));
+        let mut aliased = BTreeSet::new();
         let mut prepared_types = BTreeMap::new();
         let mut statements = Vec::new();
         for argument in std::mem::take(arguments) {
@@ -715,6 +914,15 @@ impl Expansion<'_> {
                 .parameters
                 .get(argument.parameter)
                 .ok_or_else(|| error(span, "invalid quote fn argument slot"))?;
+            if !argument.is_default
+                && contextual.is_some_and(|slots| slots.contains(&argument.parameter))
+                && let K::Local(caller_binding) = argument.value.kind
+            {
+                connections.insert(*original, caller_binding);
+                prepared_connections.insert(*original, caller_binding);
+                aliased.insert(*original);
+                continue;
+            }
             let mut value = argument.value;
             if argument.is_default {
                 // Defaults run in the callee's parameter frame after explicit
@@ -780,6 +988,9 @@ impl Expansion<'_> {
         // This is a move of responsibility, not a second evaluation: failure
         // in the body must retire callee parameters before caller temporaries.
         for parameter in &template.parameters {
+            if aliased.contains(parameter) {
+                continue;
+            }
             let (ty, source) = prepared_types
                 .remove(parameter)
                 .ok_or_else(|| error(span, "missing prepared quote input"))?;
@@ -985,6 +1196,7 @@ impl Expansion<'_> {
 impl n::Rewriter for Expansion<'_> {
     type Error = Error;
 
+    #[inline(never)]
     fn expression(&mut self, expr: &mut n::Expr) -> Result<bool, Error> {
         *self.fuel = self
             .fuel
@@ -1138,9 +1350,27 @@ pub(in crate::program) fn expand_quote_functions(
             functions.push(function);
         }
     }
+    let mut contextual_slots = BTreeMap::new();
+    for (owner, info) in hir.owners() {
+        if let ItemKind::Fn(sig, _) = &info.node.expect_item().kind
+            && sig.modifiers.is_quote
+        {
+            let slots: BTreeSet<usize> = sig
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, param)| {
+                    (param.ty.is_implicit() && param.ty.is_quote()).then_some(index)
+                })
+                .collect();
+            if !slots.is_empty() {
+                contextual_slots.insert(declaration(hir, identities, owner), slots);
+            }
+        }
+    }
     output.functions = functions;
     adapt_ordinary_quote_methods(output, next, fuel)?;
-    expand_retained_quote_functions(output, next, fuel)
+    expand_retained_quote_functions(output, &contextual_slots, next, fuel)
 }
 
 /// An ordinary trait contract promises a callable entry, even when its chosen
@@ -1236,6 +1466,7 @@ fn adapt_ordinary_quote_methods(
 /// A later implementation-selection pass can reuse the same expansion path.
 pub(in crate::program) fn expand_retained_quote_functions(
     output: &mut n::Package,
+    contextual_slots: &BTreeMap<DeclarationId, BTreeSet<usize>>,
     next: &mut u32,
     fuel: &mut u64,
 ) -> Result<(), Error> {
@@ -1298,6 +1529,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
             parameter_domains: parameter_domains.take(),
             selection: selection.as_ref(),
             templates: &templates,
+            contextual_slots: Some(contextual_slots),
             caller_env_parameters: &function.interface.env_parameters,
             caller_runtime_deliveries: &function.runtime_deliveries,
             in_closure: false,
@@ -1359,6 +1591,7 @@ pub(crate) fn expand_materialized_quotes(
         parameter_domains: None,
         selection: Some(package),
         templates: &templates,
+        contextual_slots: None,
         caller_env_parameters,
         caller_runtime_deliveries,
         in_closure: false,
@@ -1409,6 +1642,7 @@ pub(crate) fn expand_bound_quote(
         parameter_domains: None,
         selection: Some(package),
         templates: &templates,
+        contextual_slots: None,
         caller_env_parameters,
         caller_runtime_deliveries,
         in_closure,
@@ -1452,6 +1686,7 @@ pub(crate) fn inline_template(
         parameter_domains: None,
         selection,
         templates: &templates,
+        contextual_slots: None,
         caller_env_parameters,
         caller_runtime_deliveries,
         in_closure,

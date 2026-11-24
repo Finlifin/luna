@@ -15,7 +15,9 @@ impl Checker<'_, '_> {
                     .package
                     .item(expr.hir_id.owner)
                     .ok_or_else(|| error(expr.span, "self requires a method receiver"))?;
-                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
+                    &item.kind
+                else {
                     return Err(error(expr.span, "self requires a method receiver"));
                 };
                 let param = sig
@@ -299,6 +301,7 @@ impl Checker<'_, '_> {
                 {
                     return self.normal_form_value(expr, owner, expected);
                 }
+                self.check_quote_callable(owner, expr.span)?;
                 self.require_non_trait_body_reference(owner, expr.span)?;
                 self.ensure_signature(owner, expr.span)?;
                 if self

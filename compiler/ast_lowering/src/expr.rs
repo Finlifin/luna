@@ -730,8 +730,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let callee = self.lower_expr(ctx, children[0]);
                 let callee_ref = self.arena.alloc_expr(callee);
                 let args = self.lower_extend_args(ctx, children[1]);
+                let hir_id = self.next_hir_id();
+                self.capture_lexical_call_locals(hir_id);
                 Expr {
-                    hir_id: self.next_hir_id(),
+                    hir_id,
                     kind: ExprKind::ExtendedApplication(callee_ref, args),
                     span,
                 }
@@ -1667,6 +1669,35 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         values.pop().expect("lowered operator expression")
     }
 
+    #[inline(never)]
+    fn capture_lexical_call_locals(&mut self, call_hir_id: hir::HirId) {
+        let mut locals = std::collections::BTreeMap::new();
+        for rib in self.resolver.ribs().inner_to_outer() {
+            for (name, binding) in &rib.bindings {
+                let key = name.as_str();
+                if locals.contains_key(key) {
+                    continue;
+                }
+                let target = match binding.kind {
+                    BindingKind::Local(ast_ref) | BindingKind::FnParam(ast_ref) => {
+                        self.ast_ref_to_hir_id.get(&ast_ref).copied()
+                    }
+                    BindingKind::ExpandedLocal(site, idx) => {
+                        self.expanded_locals.get(&(site, idx)).copied()
+                    }
+                    _ => None,
+                };
+                if let Some(hir_id) = target {
+                    locals.insert(key.to_owned(), hir_id);
+                }
+            }
+        }
+        if !locals.is_empty() {
+            self.package.lexical_call_locals.insert(call_hir_id, locals);
+        }
+    }
+
+    #[inline(never)]
     fn lower_application_expr(
         &mut self,
         ctx: ExprContext,
@@ -1677,8 +1708,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let callee = self.lower_expr(ctx, callee_node);
         let callee_ref = self.arena.alloc_expr(callee);
         let args = self.lower_args(ctx, args_multi);
+        let hir_id = self.next_hir_id();
+        self.capture_lexical_call_locals(hir_id);
         Expr {
-            hir_id: self.next_hir_id(),
+            hir_id,
             kind: ExprKind::Application(callee_ref, args),
             span,
         }
@@ -2849,6 +2882,28 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 .pending_semantics
                 .push((span, "case arm attribute".into()));
             return self.lower_match_arm(ctx, children[1]);
+        }
+        if let Some((NodeKind::ArmImport, span, children)) = self.ast.get_node(node) {
+            let import_expr = self.lower_expr(ExprContext::Type, children[0]);
+            let import_ref = self.arena.alloc_expr(import_expr);
+            let hir_id = self.next_hir_id();
+            self.package.match_arm_imports.insert(hir_id, import_ref);
+            self.capture_lexical_call_locals(import_ref.hir_id);
+            return PatternArm {
+                hir_id,
+                pat: Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::Wild,
+                    span,
+                },
+                guard: None,
+                body: self.arena.alloc_expr(Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Unit,
+                    span,
+                }),
+                span,
+            };
         }
         let Some((NodeKind::CaseArm | NodeKind::CatchArm, span, children)) =
             self.ast.get_node(node)

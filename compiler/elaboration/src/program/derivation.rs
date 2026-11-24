@@ -1288,6 +1288,7 @@ mod splice_auto {
                         ));
                     }
                 }
+                hir::common::TyParamKind::Case(_) => {}
             }
         }
         Ok(())

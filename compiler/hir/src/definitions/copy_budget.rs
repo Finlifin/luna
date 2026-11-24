@@ -75,6 +75,10 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         staged_parameter_definitions,
         function_template_bodies,
         function_template_applications,
+        function_template_origins,
+        match_arm_imports,
+        quote_fn_arms,
+        lexical_call_locals,
     } = package;
     for strategies in derive_visible_strategies.values() {
         charge(fuel, strategies.len().saturating_add(1))?;
@@ -111,6 +115,10 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         staged_parameter_definitions.capacity(),
         function_template_bodies.capacity(),
         function_template_applications.capacity(),
+        function_template_origins.len(),
+        match_arm_imports.len(),
+        quote_fn_arms.len(),
+        lexical_call_locals.len(),
     ] {
         charge(fuel, count)?;
     }
