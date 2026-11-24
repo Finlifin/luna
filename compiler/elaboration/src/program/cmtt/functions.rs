@@ -9,6 +9,7 @@ impl Checker<'_, '_> {
             ItemKind::Fn(sig,_) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_quote)
         })
     }
+
     pub(in crate::program) fn validate_quote_function(
         &self,
         owner: OwnerId,
@@ -58,7 +59,12 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
-    pub(in crate::program) fn record_quote_application(&mut self, span: Span) -> Result<(), Error> {
+
+    pub(in crate::program) fn record_quote_application(
+        &mut self,
+        id: hir::HirId,
+        span: Span,
+    ) -> Result<(), Error> {
         let comptime = self.in_required_comptime
             || self.in_staged_input
             || self
@@ -76,20 +82,34 @@ impl Checker<'_, '_> {
         if comptime && !self.in_code_body {
             return Err(error(span, "quote fn application requires a runtime phase"));
         }
-        self.record_quote_hole(span)
+        self.record_quote_hole(id, span)
     }
-    pub(in crate::program) fn record_quote_hole(&mut self, span: Span) -> Result<(), Error> {
+
+    pub(in crate::program) fn record_quote_hole(
+        &mut self,
+        id: hir::HirId,
+        span: Span,
+    ) -> Result<(), Error> {
         if self.in_code_body {
-            self.quote_holes.insert((span.lo().0, span.hi().0));
-            if self.quote_holes.len() > 1 {
-                return Err(error(
-                    span,
-                    "a quote permits at most one splice or quote fn application",
-                ));
-            }
+            insert_quote_hole(&mut self.quote_holes, id, span)?;
         }
         Ok(())
     }
+}
+
+fn insert_quote_hole(
+    holes: &mut BTreeSet<n::LocalId>,
+    id: hir::HirId,
+    span: Span,
+) -> Result<(), Error> {
+    holes.insert(local(id));
+    if holes.len() > 1 {
+        return Err(error(
+            span,
+            "a quote permits at most one splice or quote fn application",
+        ));
+    }
+    Ok(())
 }
 
 fn at(source: n::SourceRange) -> Span {
@@ -98,6 +118,7 @@ fn at(source: n::SourceRange) -> Span {
         rustc_span::BytePos(source.end),
     )
 }
+
 struct Expansion<'a> {
     selection: Option<&'a n::Package>,
     parameter_domains: Option<BTreeMap<DeclarationId, Term>>,
@@ -128,6 +149,7 @@ struct PreparedTemplate {
     prepared: Vec<n::Expr>,
     statements: Vec<n::Expr>,
 }
+
 impl Expansion<'_> {
     fn domains(&mut self, ids: &[DeclarationId], span: Span) -> Result<Vec<Term>, Error> {
         if ids.is_empty() {
@@ -157,6 +179,7 @@ impl Expansion<'_> {
         *self.fuel = fuel as u64;
         result.map_err(|reason| error(span, reason))
     }
+
     fn fresh(&mut self, span: Span) -> Result<n::LocalId, Error> {
         let id = n::LocalId {
             owner: u32::MAX,
@@ -168,6 +191,7 @@ impl Expansion<'_> {
             .ok_or_else(|| error(span, "quote fn identity space exhausted"))?;
         Ok(id)
     }
+
     fn node(&mut self, ty: Term, kind: K, source: n::SourceRange) -> Result<n::Expr, Error> {
         *self.fuel = self
             .fuel
@@ -185,6 +209,7 @@ impl Expansion<'_> {
             source: n::SourceRange::generated(index),
         })
     }
+
     fn charge(&mut self, body: &n::Expr, span: Span) -> Result<(), Error> {
         let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
         let result = nir::visit::expression(body, &mut fuel, |expr, fuel| {
@@ -193,6 +218,7 @@ impl Expansion<'_> {
         *self.fuel = fuel as u64;
         result.map_err(|message| error(span, message))
     }
+
     fn expand(
         &mut self,
         expression: &mut n::Expr,
@@ -244,6 +270,7 @@ impl Expansion<'_> {
         self.active.pop();
         result
     }
+
     fn expand_inner(
         &mut self,
         expression: &mut n::Expr,
@@ -253,6 +280,7 @@ impl Expansion<'_> {
         let template = self.templates[&id];
         self.expand_template(expression, template, types)
     }
+
     fn enter_computation_body(
         &mut self,
         expression: &mut n::Expr,
@@ -299,6 +327,7 @@ impl Expansion<'_> {
             }
         }
     }
+
     fn checked_result(
         &mut self,
         value: n::Expr,
@@ -349,6 +378,7 @@ impl Expansion<'_> {
             source,
         )
     }
+
     fn contract_returns(
         &mut self,
         body: &mut n::Expr,
@@ -402,6 +432,7 @@ impl Expansion<'_> {
         *self.fuel = fuel as u64;
         checked.map_err(|failure| error(at(body.source), failure))
     }
+
     fn merge_entry_contract(
         &mut self,
         expression: &n::Expr,
@@ -544,6 +575,7 @@ impl Expansion<'_> {
             .extend(program.postconditions);
         Ok(())
     }
+
     fn expand_template(
         &mut self,
         expression: &mut n::Expr,
@@ -949,8 +981,10 @@ impl Expansion<'_> {
         Ok(())
     }
 }
+
 impl n::Rewriter for Expansion<'_> {
     type Error = Error;
+
     fn expression(&mut self, expr: &mut n::Expr) -> Result<bool, Error> {
         *self.fuel = self
             .fuel
@@ -1213,9 +1247,19 @@ pub(in crate::program) fn expand_retained_quote_functions(
         *fuel = remaining as u64;
         result.map_err(|reason| error(at(function.body.source), reason.to_string()))?;
     }
+    let Some(package_span) = output
+        .functions
+        .iter()
+        .chain(&output.quote_templates)
+        .next()
+        .map(|function| at(function.body.source))
+    else {
+        output.quote_identity_cursor = *next;
+        return Ok(());
+    };
     let domains = output.declaration_parameter_domains(&mut remaining);
     *fuel = remaining as u64;
-    let domains = domains.map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    let domains = domains.map_err(|reason| error(package_span, reason))?;
     let selection = if domains.values().any(|domain| *domain != p(P::Type))
         || output
             .traits
@@ -1227,7 +1271,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
             nir::visit::expressions(function, &mut remaining, |expr, remaining| {
                 nir::type_computations::charge_term(&expr.ty, remaining).map_err(|e| e.to_string())
             })
-            .map_err(|message| error(rustc_span::DUMMY_SP, message))?;
+            .map_err(|message| error(at(function.body.source), message))?;
         }
         *fuel = remaining as u64;
         Some(output.clone())
@@ -1426,4 +1470,28 @@ pub(crate) fn inline_template(
         .map_err(|failure| failure.to_string());
     *fuel = remaining as usize;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_holes_reject_distinct_hir_nodes_even_with_identical_synthetic_spans() {
+        let mut holes = BTreeSet::new();
+        let owner = hir::OwnerId::new(hir::LocalDefId::new(1));
+        let first = hir::HirId::new(owner, hir::ItemLocalId::new(10));
+        let second = hir::HirId::new(owner, hir::ItemLocalId::new(11));
+        let synthetic = Span::default();
+
+        insert_quote_hole(&mut holes, first, synthetic).expect("first hole succeeds");
+        insert_quote_hole(&mut holes, first, synthetic).expect("same HirId does not double-count");
+        let failure = insert_quote_hole(&mut holes, second, synthetic)
+            .expect_err("second distinct HirId with identical synthetic span must fail");
+        assert!(
+            failure.message.contains("at most one"),
+            "{}",
+            failure.message
+        );
+    }
 }

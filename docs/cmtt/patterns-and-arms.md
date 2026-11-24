@@ -214,19 +214,22 @@ fn configured_pattern() -> bool {
 
 属性集合也参与类型推导，随后可供后面的默认参数引用。整个调用仍产生 comptime 模式代码；属性调用不使普通 comptime record 自动成为 runtime 值。
 
-模式生成器的数据参数可以在本次 comptime 调用内保留活动存储，包括指针、含指针的聚合，以及同包中的合法 comptime 回调。直接传参、默认参数、生成器转调与展开包保留所指对象身份，不把指针复制成脱离调用者的快照。入口／退出契约可读取这些数据。模式最终只能捕获可冻结的数据，不能把活动指针或不合法的回调捕获带入 runtime。
+模式生成器的数据参数与值引用接收者可以在本次 comptime 调用内更新数据状态，并可接收同包中的合法 comptime 回调。comptime 阶段不使用指针、`.ref` 或 `.*`；直接传参、值引用 `self`、默认参数、生成器转调与展开包遵循统一的值与值引用语义。入口／退出契约可读取这些数据。模式最终只能捕获可冻结的数据，不能把 runtime 指针或不合法的回调捕获带入 runtime。
 
 ~~~flurry
-comptime fn remember(flag: *bool) -> < bool -| value: bool > {
-    let wanted = flag.*;
-    flag.* = not wanted;
-    '<value if value == wanted>
+struct State { flag: bool }
+impl State {
+    comptime fn remember(self) -> < bool -| value: bool > {
+        let wanted = self.flag;
+        self.flag = not wanted;
+        '<value if value == wanted>
+    }
 }
 ~~~
 
-生成器按段执行数据计算时，为当前可读取的机器标量 pointee 建立有预算限制的快照，并在本段入口用程序谓词检查该快照。这样后续机器整数运算可以利用本次 invocation 的当前数值。每段重新观察；写入、别名修改及调用仍按程序验证层规则使旧事实失效，不把前一段的条件无条件沿用到下一段。快照不延长对象生命期，也不授予 Copy 或所有权。
+生成器按段执行数据计算时，在每段入口按预算检查当前可读取的标量与结构快照，使后续运算可以使用本次 invocation 的当前数值。写入及调用仍按程序验证层规则使旧事实失效，不把前一段的条件无条件沿用到下一段。快照不授予 Copy 或所有权。
 
-`remember` 先读取当前值，再修改调用者的存储；返回模式保留的是读取到的 bool，随后修改该存储不改变已生成模式的判别条件。直接在 quote 的 guard 中引用 `flag.*` 则会试图捕获 comptime 活动存储，必须拒绝。
+`remember` 先读取当前 `self.flag` 到不可变绑定 `wanted`，再通过值引用 `self` 修改调用者的状态；返回模式保留的是读取到的 bool，随后修改该绑定不改变已生成模式的判别条件。直接在 quote 的 guard 中引用未读取的可变接收者或非法 comptime 状态会拒绝。
 
 显式实参按源码顺序求值，再按声明顺序填入缺省值；只有前面的参数对后面的默认值可见。显式覆盖跳过对应默认值的执行，但定义检查仍验证所有默认表达式。implicit 参数支持显式具名供应，尚不自动寻找供应者。缺少必需输入、重复供应和未知具名入口均拒绝。
 

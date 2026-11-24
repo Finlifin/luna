@@ -1828,14 +1828,14 @@ struct Flag where tag: bool { value: Payload(tag) }
 若正文改为 `if flag { bool } else { bool }`，当前解释执行仍报告未决；即使两个分支文本相同，也不据此绕过条件求值。这个入口不放宽 Type 描述中的开放值索引检查，也不展开 normal-form 的头。
 
 
-引用接收者通过生成阶段的数据环境修改调用者对象，然后返回独立的代码值：
+值引用接收者通过生成阶段的数据环境修改调用者对象，然后返回独立的代码值：
 
 ```flurry
 struct Builder { flag: bool }
 impl Builder {
-    comptime fn build(*self) -> <|-bool> {
-        self.*.flag = true;
-        let flag = self.*.flag;
+    comptime fn build(self) -> <|-bool> {
+        self.flag = true;
+        let flag = self.flag;
         '(flag)
     }
 }
@@ -1847,58 +1847,75 @@ comptime fn build_code() -> <|-bool> {
 fn run() -> bool { ~<build_code()> }
 ```
 
-这里的指针只在构造代码时使用，返回的 quote 保存读取到的布尔值。显式 `*Builder` 数据参数采用相同的传递机制；trait 分派转发同一个地址，公开前置／后置条件仍在公开接口的参数环境中检查。运行时参数不能借此进入生成阶段，指针本身也不能成为无上下文 quote 的运行时结果。
+值引用 `self` 直接更新 `var builder` 或其嵌套字段的生成期存储，返回的 quote 保存读取到的布尔值。comptime 阶段不使用 `*self`、`.ref` 或 `.*` 指针；trait 分派按值引用转发同一个接收者位置，公开前置／后置条件仍在公开接口的参数环境中检查。运行时指针不能作为生成器数据传入，也不能成为无上下文 quote 的运行时结果。
 
 
-局部指针与普通指针参数共享同一存储身份，间接写入会刷新所有者的数据快照：
+局部值拷贝保留原始快照，而值引用接收者只修改对应可变位置：
 
 ```flurry
-comptime fn build_alias() -> <|-bool> {
-    var flag = false;
-    let pointer = flag.ref;
-    pointer.* = true;
-    let value = flag and pointer.*;
+struct Flag { value: bool }
+impl Flag {
+    comptime fn enable(self) {
+        self.value = true;
+    }
+}
+comptime fn build_snapshot() -> <|-bool> {
+    var flag = Flag { value: false };
+    let saved = flag;
+    flag.enable();
+    let value = not saved.value and flag.value;
     '(value)
 }
 ```
 
-`var` 指针可以重新绑定；`let` 指针不能重新绑定，但不因此把指向的对象改成只读。指针别名保留原目标，不随另一变量的重新绑定而改变。读取产生的普通值可以进入 quote；指针本身不能被隐式转成运行时上下文。
+`var` 绑定可以重新绑定，也可以作为值引用 `self` 方法的接收者；`let` 绑定保留独立快照，不随原绑定后续修改而改变。读取产生的普通值可以进入 quote；`.ref` 与 `.*` 等指针操作只能在 runtime 或 quote 主体内使用，不能在生成器数据求值中执行。
 
 
-例如，`let pair = (left.ref, right.ref); let (first, second) = pair;` 保留两个指针原来的目标，随后通过 `first.*` 或 `second.*` 写入会更新对应所有者。含指针的名义数据同样保留类型与 payload 身份，不被转成可冻结常量。聚合中同时出现回调时，仍检查回调的捕获图；加入一个指针字段不会允许可变捕获或 runtime 回调绕过既有边界。
+同样地，在元组或结构体中保存值只会保留当时快照，需要跨函数更新对象时应通过值引用 `self` 显式传入目标位置，或在 `var` 结构字段上调用方法。含 runtime 指针字段的名义数据不被生成器数据域接纳，也不会被转成可冻结常量。聚合中同时出现回调时，仍检查回调的捕获图；不能让可变捕获或 runtime 回调绕过既有边界。
 
 
-生成器后置条件中的入口快照保留参数进入本次调用时的值，即使正文通过该参数的地址间接修改了它：
+生成器后置条件中的入口快照保留接收者进入本次调用时的值，即使正文通过值引用 `self` 修改了它：
 
 ```flurry
-comptime fn build(flag: bool) -> <|-bool>
-    where ensures flag and not flag'old {
-    let pointer = flag.ref;
-    pointer.* = true;
-    '(flag)
+struct Flag { value: bool }
+impl Flag {
+    comptime fn build(self) -> <|-bool>
+        where ensures self.value and not self'old.value {
+        self.value = true;
+        '(self.value)
+    }
 }
 
-fn run() -> bool { ~<build(false)> }
+fn run() -> bool {
+    const code = do { var f = Flag { value: false }; f.build() };
+    ~<code>
+}
 ```
 
-这里 `flag'old` 为 `false`，返回时的 `flag` 为 `true`。聚合参数的入口字段也保持原值；如果字段本身是指针，快照保留的是该地址，不是地址所指对象的深层历史状态。嵌套调用和 trait 分派分别保存自己的入口值，不会覆盖外层的快照。入口复制消耗同一 invocation 预算，并检查存储仍具有有效的构造责任。
+这里 `self'old.value` 为 `false`，返回时的 `self.value` 为 `true`。聚合参数与接收者的入口字段也保持原值。嵌套调用和 trait 分派分别保存自己的入口值，不会覆盖外层的快照。入口复制消耗同一 invocation 预算，并检查存储仍具有有效的构造责任。
 
-活动数据的读取、间接写入后的所有者刷新和 trait 方法转发也消耗 invocation 预算。转发保留共享存储与回调身份，不等同于语言级 Copy；预算耗尽或存储责任无效时拒绝本次生成，不发布部分刷新的快照。
+活动数据的读取、接收者更新后的位置写回和 trait 方法转发也消耗 invocation 预算。转发保留共享值引用接收者与回调身份，不等同于语言级 Copy；预算耗尽或存储责任无效时拒绝本次生成，不发布部分刷新的快照。
 
 
-生成器的 `tuple_enumerate` 也可遍历指针或含指针的数据。每次迭代的元素绑定保留原目标，过滤 guard 和 continue 前的修改按执行顺序写回；元素绑定本身仍不可重新赋值。
+生成器的 `tuple_enumerate` 也可遍历数据元组。每次迭代的元素绑定按值访问，循环体可以通过局部 `var` 绑定或值引用 `self` 方法按执行顺序累积状态；元素绑定本身不可重新赋值。
 
 ```flurry
-comptime fn toggle() -> <|-bool> {
-    var first = false;
-    var second = false;
-    let pointers = (first.ref, second.ref, first.ref);
-    inline for pointer in pointers'tuple_enumerate {
-        pointer.* = not pointer.*;
+struct Pair { first: bool, second: bool }
+impl Pair {
+    comptime fn flip(self, pick_first: bool) {
+        if pick_first { self.first = not self.first; }
+        else { self.second = not self.second; }
     }
-    let result = not first and second;
+}
+comptime fn toggle() -> <|-bool> {
+    var pair = Pair { first: false, second: false };
+    let steps = (true, false, true);
+    inline for pick_first in steps'tuple_enumerate {
+        pair.flip(pick_first);
+    }
+    let result = not pair.first and pair.second;
     '(result)
 }
 ```
 
-这里 first 被修改两次，second 被修改一次。循环不会为了冻结元素而复制其指向的对象；活动元素同样不能通过 quote 导出成 runtime 指针。
+这里 `pair.first` 被翻转两次，`pair.second` 被翻转一次。循环不会为元素引入 comptime 指针，也不能把 runtime 指针通过 quote 导出。

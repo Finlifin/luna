@@ -1,9 +1,11 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
+
 use comptime_interpretor::{Interpreter, Value};
 use support::run_iir as run;
 
@@ -5895,15 +5897,14 @@ fn generator_schema_snapshots_need_no_runtime_copy_capability() {
 fn generator_schema_evidence_does_not_execute_factories_or_survive_possible_writes() {
     for statement in [
         "schema.word=.char'builtin;",
-        "let pointer=schema.ref;",
-        "touch(schema.ref);",
+        "schema.touch();",
         "if flag {schema.word=.char'builtin;}",
     ] {
         let source = format!(
             "struct Types {{word:.Type'builtin}}
-            comptime fn touch(value:*Types) {{value.*.word = .char'builtin;}}
+            impl Types {{comptime fn touch(self) {{self.word = .char'builtin;}}}}
             comptime fn build(flag:bool)-><|-bool> {{
-                let schema=Types {{word:.u8'builtin}};
+                var schema=Types {{word:.u8'builtin}};
                 {statement}
                 let Word=schema.word;
                 let value:Word=17;'(value == 17)
@@ -5913,6 +5914,23 @@ fn generator_schema_evidence_does_not_execute_factories_or_survive_possible_writ
         assert!(
             failure.contains("completed Type value"),
             "after {statement}: {failure}"
+        );
+    }
+    for pointer_stmt in ["let pointer=schema.ref;", "touch(schema.ref);"] {
+        let source = format!(
+            "struct Types {{word:.Type'builtin}}
+            comptime fn touch(value:*Types) {{value.*.word = .char'builtin;}}
+            comptime fn build(flag:bool)-><|-bool> {{
+                var schema=Types {{word:.u8'builtin}};
+                {pointer_stmt}
+                let Word=schema.word;
+                let value:Word=17;'(value == 17)
+            }}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("pointer operations cannot execute at comptime"),
+            "after {pointer_stmt}: {failure}"
         );
     }
     let source = "struct Types {word:.Type'builtin}
@@ -7073,11 +7091,11 @@ fn generator_temporary_pointer_writes_reject_stage_leaks_and_wrong_pointees() {
     for (source, anchor) in [
         (
             "pure comptime fn bad()-><value:bool|-bool> {value.ref.* = false;'(value)}",
-            "runtime context",
+            "pointer operations cannot execute at comptime",
         ),
         (
             "pure comptime fn bad()-><|-bool> {var value=false;value.ref.* = 'x';'(value)}",
-            "type",
+            "pointer operations cannot execute at comptime",
         ),
         (
             "pure comptime fn bad()-><|-*bool> {var value=false;let pointer=value.ref;'(pointer)} fn run()->*bool {~<bad()>}",
@@ -7085,7 +7103,15 @@ fn generator_temporary_pointer_writes_reject_stage_leaks_and_wrong_pointees() {
         ),
         (
             "fn select(p:*bool)->*bool {p} pure comptime fn bad()-><|-bool> {var value=false;select(value.ref).* = true;'(value)}",
-            "execution phase",
+            "pointer operations cannot execute at comptime",
+        ),
+        (
+            "pure comptime fn bad()-><value:bool|-bool> {value = false;'(value)}",
+            "runtime context",
+        ),
+        (
+            "pure comptime fn bad()-><|-bool> {var value=false;value = 'x';'(value)}",
+            "type",
         ),
     ] {
         let failure =
@@ -7192,6 +7218,7 @@ fn generator_named_field_candidates_read_prior_bindings() {
         }";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
+
 #[test]
 fn generator_value_clauses_select_code_without_runtime_capture() {
     let source = "comptime fn choose()-><x:bool |- bool> where flag:bool {
@@ -7337,6 +7364,7 @@ fn generator_value_clauses_reject_invalid_inputs_and_unused_bodies() {
         );
     }
 }
+
 #[test]
 fn generator_value_defaults_wait_for_inferred_types_and_previous_defaults() {
     let source="typealias Type=.Type'builtin;
@@ -7382,6 +7410,7 @@ fn generator_deferred_value_defaults_keep_contract_rejection() {
         "{error}"
     );
 }
+
 #[test]
 fn generator_deferred_defaults_keep_type_and_value_declaration_order() {
     let source="typealias Type=.Type'builtin;
@@ -7395,6 +7424,7 @@ fn generator_deferred_defaults_keep_type_and_value_declaration_order() {
         Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
     );
 }
+
 #[test]
 fn generator_structural_type_defaults_keep_literal_context_before_value_defaults() {
     let source = "typealias Type=.Type'builtin;
@@ -7406,6 +7436,7 @@ fn generator_structural_type_defaults_keep_literal_context_before_value_defaults
         }";
     assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(200));
 }
+
 #[test]
 fn unused_generator_value_defaults_still_check_execution_phase() {
     for body in [
@@ -7423,6 +7454,7 @@ fn unused_generator_value_defaults_still_check_execution_phase() {
         );
     }
 }
+
 #[test]
 fn generator_deferred_type_defaults_cannot_be_overridden_by_argument_inference() {
     let prefix = "typealias Type=.Type'builtin;
@@ -7445,6 +7477,7 @@ fn generator_deferred_type_defaults_cannot_be_overridden_by_argument_inference()
     .unwrap_err();
     assert!(error.contains("elaboration failed"), "{error}");
 }
+
 #[test]
 fn generator_ready_defaults_supply_narrow_literal_contexts_before_arguments() {
     let source = "typealias Type=.Type'builtin;
@@ -11564,7 +11597,10 @@ fn generator_restarts_field_observation_after_control_flow() {
         )
         .replace("~<generate(false)>", "true");
     let failure = sysroot::compile(&stale).unwrap_err();
-    assert!(failure.contains("result identity known during definition checking"), "{failure}");
+    assert!(
+        failure.contains("result identity known during definition checking"),
+        "{failure}"
+    );
 }
 
 #[test]
@@ -11572,9 +11608,19 @@ fn generated_struct_layout_is_independent_of_its_supplied_name() {
     let source = include_str!("../../../development/repros/builder-local-type-in-quote.fl")
         .replace("fn generate()", "fn generate(name: Symbol)")
         .replace("(.name = .QuoteLocal)", "(.name = name)")
-        .replace("~<generate()>", "~<generate(.First)> and ~<generate(.Second)>");
+        .replace(
+            "~<generate()>",
+            "~<generate(.First)> and ~<generate(.Second)>",
+        );
     let package = sysroot::compile(&source).unwrap();
-    let generated = |name| package.structs.iter().find(|s| s.name == name).unwrap().declaration;
+    let generated = |name| {
+        package
+            .structs
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .declaration
+    };
     assert_ne!(generated("First"), generated("Second"));
     assert_eq!(
         luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
@@ -11605,10 +11651,17 @@ fn generator_joins_builder_fields_from_continuing_branches() {
     assert_eq!(sysroot::run(&returning), Value::Bool(true));
 
     let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
-    for different in ["builder.add_field(.other, bool);", "builder.add_field(.active, char);", ""] {
+    for different in [
+        "builder.add_field(.other, bool);",
+        "builder.add_field(.active, char);",
+        "",
+    ] {
         let invalid = unused.replace("builder.add_field(.active, bool);", different);
         let failure = sysroot::compile(&invalid).unwrap_err();
-        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+        assert!(
+            failure.contains("result identity known during definition checking"),
+            "{failure}"
+        );
     }
 }
 
@@ -11635,11 +11688,15 @@ fn generator_when_joins_fallthrough_without_replaying_selectors() {
         "not flag =>",
         "do { builder = meta.StructBuilder.new(.name = .Empty); not flag } =>",
     );
-    let missing_arm = unused.replace("true => { builder.add_field(.active, bool); },", "")
+    let missing_arm = unused
+        .replace("true => { builder.add_field(.active, bool); },", "")
         .replace("else => { builder.add_field(.unreachable, char); },", "");
     for invalid in [effectful_guard, missing_arm] {
         let failure = sysroot::compile(&invalid).unwrap_err();
-        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+        assert!(
+            failure.contains("result identity known during definition checking"),
+            "{failure}"
+        );
     }
 }
 
@@ -11693,8 +11750,14 @@ fn checked_factory_branches_preserve_receivers_and_returned_field_descriptions()
         fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
-    let different = source.replace("draft.add_field(.active, bool);", "draft.add_field(.other, char);");
-    let selected = different.replace("let draft = describe(choice);", "let draft = describe(true);");
+    let different = source.replace(
+        "draft.add_field(.active, bool);",
+        "draft.add_field(.other, char);",
+    );
+    let selected = different.replace(
+        "let draft = describe(choice);",
+        "let draft = describe(true);",
+    );
     assert_eq!(sysroot::run(&selected), Value::Bool(true));
 
     for invalid in [
@@ -11703,7 +11766,10 @@ fn checked_factory_branches_preserve_receivers_and_returned_field_descriptions()
     ] {
         let unused = invalid.replace("~<generate(true)> and ~<generate(false)>", "true");
         let failure = sysroot::compile(&unused).unwrap_err();
-        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+        assert!(
+            failure.contains("result identity known during definition checking"),
+            "{failure}"
+        );
     }
 }
 
@@ -12061,11 +12127,17 @@ fn factory_match_observes_failed_guards_before_later_arms() {
     let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
     for bad in [
         unused.replace("cell.item = After", "cell.item = Before"),
-        unused.replace("false => Cell { item: After }", "false => Cell { item: Before }"),
+        unused.replace(
+            "false => Cell { item: After }",
+            "false => Cell { item: Before }",
+        ),
         unused.replace("cell.item = After; false", "cell.item = After; true"),
     ] {
         let error = sysroot::compile(&bad).unwrap_err();
-        assert!(error.contains("identity") || error.contains("field"), "{error}");
+        assert!(
+            error.contains("identity") || error.contains("field"),
+            "{error}"
+        );
     }
 }
 
@@ -12090,9 +12162,15 @@ fn factory_match_keeps_pattern_bindings_and_guard_returns_in_scope() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
     let unused = source.replace("~<generate(false)> and ~<generate(true)>", "true");
-    let bad = unused.replace("return Packet { item: t }", "return Packet { item: Before }");
+    let bad = unused.replace(
+        "return Packet { item: t }",
+        "return Packet { item: Before }",
+    );
     let error = sysroot::compile(&bad).unwrap_err();
-    assert!(error.contains("identity") || error.contains("field"), "{error}");
+    assert!(
+        error.contains("identity") || error.contains("field"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -12403,4 +12481,69 @@ fn factory_predicate_returns_include_early_exits_in_call_operands() {
         error.contains("identity") || error.contains("field"),
         "{error}"
     );
+}
+
+#[test]
+fn generator_value_reference_self_and_trait_dispatch_reject_pointer_receivers() {
+    let valid = "
+        trait Emit {
+            comptime fn emit(self) -> <|- bool>;
+        }
+        struct Flag { value: bool }
+        impl Emit for Flag {
+            comptime fn emit(self) -> <|- bool> {
+                self.value = true;
+                let v = self.value;
+                '(v)
+            }
+        }
+        comptime fn build() -> <|- bool> {
+            var flag = Flag { value: false };
+            let saved = flag;
+            const code = flag.as(Emit).emit();
+            let ok = not saved.value and flag.value;
+            '(ok and ~<code>)
+        }
+        fn run() -> bool { ~<build()> }
+    ";
+    assert_eq!(run(valid, "run", vec![]), Value::Bool(true));
+
+    for (invalid, anchor) in [
+        (
+            "trait Emit { comptime fn emit(*self) -> <|- bool>; }",
+            "comptime methods use value-reference self",
+        ),
+        (
+            "struct Flag { value: bool }
+             impl Flag { comptime fn emit(*self) -> <|- bool> { '(true) } }",
+            "comptime methods use value-reference self",
+        ),
+        (
+            "struct Flag { value: bool }
+             impl Flag { comptime fn emit(self) -> <|- bool> { self.* = Flag { value: true }; '(true) } }",
+            "pointer operations cannot execute at comptime; use value-reference self",
+        ),
+    ] {
+        let failure = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains(anchor), "{invalid}: {failure}");
+    }
+}
+
+#[test]
+fn whole_quote_single_hole_rule_applies_across_when_and_match_branches() {
+    for invalid in [
+        "fn bad(flag: bool) -> bool {
+            const code = '(true);
+            const invalid = '(when { flag => ~<code>, else => ~<code> });
+            false
+        }",
+        "fn bad(flag: bool) -> bool {
+            const code = '(true);
+            const invalid = '(flag match { true => ~<code>, false => ~<code> });
+            false
+        }",
+    ] {
+        let failure = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains("parsing failed"), "{invalid}: {failure}");
+    }
 }

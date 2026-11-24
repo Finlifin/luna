@@ -53,6 +53,11 @@ impl Checker<'_, '_> {
         };
         let receiver = if contract.by_value {
             subject
+        } else if comptime {
+            return Err(error(
+                pattern.span,
+                "comptime list patterns require value-reference self; replace *self with self",
+            ));
         } else {
             n::Expr {
                 source: source(pattern.span),

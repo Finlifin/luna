@@ -2079,7 +2079,7 @@ impl Checker<'_, '_> {
             };
             let mut continue_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let before_continue_fuel = continue_fuel;
-            let may_continue = if !is_never(&body.ty) {
+            let may_continue = if !is_never(&body.ty) || self.in_code_body {
                 Ok(true)
             } else {
                 control::loop_may_continue(&body, identity, &mut continue_fuel)

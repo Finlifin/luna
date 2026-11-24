@@ -156,7 +156,15 @@ impl Checker<'_, '_> {
             )?;
             for slot in deferred {
                 if let Some(value) = completed.clauses.get(slot) {
-                    let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
+                    let index = parameters
+                        .iter()
+                        .position(|id| *id == all[*slot])
+                        .ok_or_else(|| {
+                            error(
+                                span,
+                                "missing generator clause parameter in inference scope",
+                            )
+                        })?;
                     candidate
                         .constrain_type_argument(index, value, crate::ptc::Budget::default())
                         .map_err(|e| call_inference_error(span, e))?;
@@ -222,7 +230,15 @@ impl Checker<'_, '_> {
                     break;
                 }
                 let value = self.generator_clause_default(owner, *slot, &prefix)?;
-                let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
+                let index = parameters
+                    .iter()
+                    .position(|id| *id == all[*slot])
+                    .ok_or_else(|| {
+                        error(
+                            span,
+                            "missing generator clause parameter in inference scope",
+                        )
+                    })?;
                 candidate
                     .constrain_type_argument(index, &value, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(span, e))?;

@@ -45,7 +45,7 @@ impl Checker<'_, '_> {
         use hir::pattern::PatternKind as HP;
         match &pattern.kind {
             HP::CodeSplice(operand, outputs) => {
-                self.record_quote_hole(pattern.span)?;
+                self.record_quote_hole(pattern.hir_id, pattern.span)?;
                 self.connect_pattern_code(operand, outputs, ty, pattern.span)
             }
             HP::ErrorOk(inner) => {

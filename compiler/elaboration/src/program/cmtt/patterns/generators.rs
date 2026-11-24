@@ -202,7 +202,11 @@ impl fmt::Display for PatternGenerator {
         for (name, ty) in &self.outputs {
             write!(f, " (output {name:?} {ty})")?;
         }
-        if let Some(sites) = self.checked_operands.as_ref().filter(|sites| !sites.is_empty()) {
+        if let Some(sites) = self
+            .checked_operands
+            .as_ref()
+            .filter(|sites| !sites.is_empty())
+        {
             f.write_str(") (constructor-type-operands")?;
             for (site, ()) in sites {
                 write!(f, " {}", local(*site))?;
@@ -391,12 +395,13 @@ impl Checker<'_, '_> {
             let mut input_binders = BTreeMap::new();
             for (slot, parameter) in sig.params.iter().enumerate() {
                 if let TyParamKind::Itself { is_ref } = parameter.ty.kind {
-                    let subject = this.self_type(owner, parameter.span)?;
-                    let ty = if is_ref {
-                        Term::Pointer(Box::new(subject))
-                    } else {
-                        subject
-                    };
+                    if is_ref {
+                        return Err(error(
+                            parameter.span,
+                            "comptime methods use value-reference self; replace *self with self",
+                        ));
+                    }
+                    let ty = this.self_type(owner, parameter.span)?;
                     this.locals.insert(local(parameter.hir_id), ty.clone());
                     inputs.push((local(parameter.hir_id), PatternInput::Data(ty)));
                     continue;
@@ -614,7 +619,10 @@ impl Checker<'_, '_> {
             }
             this.run_pattern_generator_body(owner, &definition, span)
         })?;
-        self.pattern_generators.get_mut(&owner).unwrap().checked_operands = Some(operands);
+        self.pattern_generators
+            .get_mut(&owner)
+            .unwrap()
+            .checked_operands = Some(operands);
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 //! Code-method selection uses the ordinary implementation proofs. Value
 //! receivers enter the comptime input pipeline before the remaining arguments.
 use super::*;
+
 mod traits;
 
 impl Checker<'_, '_> {
@@ -169,7 +170,7 @@ impl Checker<'_, '_> {
             .map(|((public, _), (selected, _))| (*public, *selected))
             .collect();
         self.selected_generator_frame(target, &bindings, span, |this| {
-            this.run_code_generator(&definition, arguments)
+            this.run_code_generator(&definition, arguments, span)
         })
         .map(Some)
     }
@@ -429,23 +430,16 @@ impl Checker<'_, '_> {
                     },
                     None => selected_head.clone(),
                 };
-                let saved = self.code_method_captures.insert(owner, captures);
-                let by_reference = signature.params.first().is_some_and(|param| {
+                if signature.params.first().is_some_and(|param| {
                     matches!(param.ty.kind, TyParamKind::Itself { is_ref: true })
-                });
-                let addressed = receiver.map(|base| Expr {
-                    kind: H::Ref(base),
-                    ..base.clone()
-                });
-                let result = invoke(
-                    self,
-                    &selected_callee,
-                    if by_reference {
-                        addressed.as_ref()
-                    } else {
-                        receiver
-                    },
-                );
+                }) {
+                    return Err(error(
+                        head.span,
+                        "comptime methods use value-reference self; replace *self with self",
+                    ));
+                }
+                let saved = self.code_method_captures.insert(owner, captures);
+                let result = invoke(self, &selected_callee, receiver);
                 match saved {
                     Some(saved) => {
                         self.code_method_captures.insert(owner, saved);

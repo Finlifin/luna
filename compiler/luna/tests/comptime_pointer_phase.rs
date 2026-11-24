@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 #[test]
@@ -102,5 +103,74 @@ fn pointer_operations_in_quote_producers_are_not_runtime_code() {
     assert!(
         error.contains("pointer operations cannot execute at comptime"),
         "{error}"
+    );
+}
+
+#[test]
+fn generator_pointer_receivers_and_ops_are_rejected_and_value_self_works() {
+    for (source, anchor) in [
+        (
+            "struct Cell { value: bool }
+             impl Cell { comptime fn build(*self) -> <|- bool> { '(true) } }",
+            "comptime methods use value-reference self",
+        ),
+        (
+            "trait Build { comptime fn build(*self) -> <|- bool>; }",
+            "comptime methods use value-reference self",
+        ),
+        (
+            "struct Cell { value: bool }
+             impl Cell { comptime fn pat(*self) -> <bool -| v: bool> { '<v> } }",
+            "comptime methods use value-reference self",
+        ),
+        (
+            "comptime fn bad(flag: bool) -> <|- bool> {
+                if flag { var x = false; x.ref.* = true; }
+                '(true)
+            }",
+            "pointer operations cannot execute at comptime",
+        ),
+        (
+            "comptime fn bad(p: *bool) -> <|- bool> { '(true) }",
+            "immutable value domain",
+        ),
+    ] {
+        let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(error.contains(anchor), "{source}: {error}");
+    }
+
+    let valid = support::compile(
+        "struct Cell { value: bool }
+         impl Cell {
+             comptime fn build(self) -> <|- bool> {
+                 self.value = true;
+                 let snapshot = self.value;
+                 '(snapshot)
+             }
+             comptime fn pat(self) -> <bool -| matched: bool> {
+                 let wanted = self.value;
+                 self.value = not wanted;
+                 '<matched if matched == wanted>
+             }
+         }
+         comptime fn produce_code() -> <|- bool> {
+             var cell = Cell { value: false };
+             let saved = cell;
+             const code = cell.build();
+             let ok = not saved.value and cell.value;
+             '(ok and ~<code>)
+         }
+         comptime fn produce_pat() -> <|- bool> {
+             var cell = Cell { value: true };
+             let saved = cell;
+             const pattern: <bool -| matched: bool> = cell.pat();
+             let ok = saved.value and not cell.value;
+             '(ok and (true match { ~<pattern> => matched, _ => false }))
+         }
+         fn run() -> bool { ~<produce_code()> and ~<produce_pat()> }",
+    );
+    assert_eq!(
+        luna::execution::interpret(&valid, "run", 100_000).unwrap(),
+        Value::Bool(true)
     );
 }

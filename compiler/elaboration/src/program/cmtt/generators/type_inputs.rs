@@ -46,7 +46,7 @@ impl Checker<'_, '_> {
         }
         let operands = if let Some(definition) = self.code_generators.get(&owner) {
             if definition.checked_operands.is_none() {
-                self.check_code_generator(owner)?;
+                self.check_code_generator_at(owner, Some(callee.span))?;
             }
             &self.code_generators[&owner].checked_operands
         } else if let Some(definition) = self.data_consumers.get(&owner) {

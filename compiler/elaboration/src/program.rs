@@ -3682,7 +3682,7 @@ struct Checker<'a, 'h> {
     inline_selection: Option<(hir::HirId, usize)>,
     inline_match_input: Option<(hir::HirId, n::Expr, Term)>,
     in_unselected_inline: bool,
-    quote_holes: BTreeSet<(u32, u32)>,
+    quote_holes: BTreeSet<n::LocalId>,
     code_construction_depth: usize,
     expansion_sources: Vec<n::ExpansionSource>,
     aliases: BTreeSet<OwnerId>,
@@ -7213,7 +7213,7 @@ impl Checker<'_, '_> {
         call_use: CallUse,
     ) -> Result<n::Expr, Error> {
         if self.is_quote_function(owner) {
-            self.record_quote_application(expr.span)?;
+            self.record_quote_application(expr.hir_id, expr.span)?;
         }
         let written_types = self.acquire_written_call_types(expr)?;
         let structural_result = self
@@ -8792,7 +8792,7 @@ impl Checker<'_, '_> {
                                 .definition_owner(def_id)
                                 .is_some_and(|owner| self.is_quote_function(owner))
                             {
-                                self.record_quote_application(expr.span)?;
+                                self.record_quote_application(expr.hir_id, expr.span)?;
                             }
                         }
                         if let Some((ty, index)) = self.variant_target(callee, expected)? {

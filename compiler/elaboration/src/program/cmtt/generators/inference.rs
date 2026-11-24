@@ -121,19 +121,7 @@ impl Checker<'_, '_> {
                 }
                 return self.generator_branch_type_hint(arms.iter().map(|arm| arm.body), depth + 1);
             }
-            H::Ref(inner) => {
-                return Ok(self
-                    .generator_intrinsic_input_hint(inner, depth + 1)?
-                    .map(|ty| Term::Pointer(Box::new(ty))));
-            }
-            H::Deref(inner) => {
-                return Ok(
-                    match self.generator_intrinsic_input_hint(inner, depth + 1)? {
-                        Some(Term::Pointer(pointee)) => Some(*pointee),
-                        _ => None,
-                    },
-                );
-            }
+            H::Ref(_) | H::Deref(_) => return Ok(None),
             H::Projection(base, field) => {
                 return self.generator_field_type_hint(
                     base,

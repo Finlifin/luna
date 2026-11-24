@@ -2,7 +2,7 @@
 
 Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收者或 `meta.Object` 调用；旧的 `meta.object_*` 自由函数不再导出。编辑方法返回新 Object，保留输入快照。
 
-数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。List、StructBuilder 与 EnumBuilder 接收者已使用值引用；其他历史 comptime 指针用例仍待迁移。
+数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。List、StructBuilder、EnumBuilder 与 Object 接收者均使用值引用 `self`，comptime 阶段不使用指针接收者或 `.ref`/`.*`。
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 
@@ -213,7 +213,6 @@ comptime 快照，不要求这些 payload 实现 runtime Copy／Clone。源码�
 列表复制与分配，但不保证连续追加的总成本为线性；一般拼接仍按快照顺序求值。
 普通值引用参数在调用入口借用验证 List 内容，不再仅为验证复制列表缓冲区；
 每次调用仍检查当前内容，依赖输入与显式契约快照继续按原规则物化。
-上面的 Object 指针示例仍是待迁移的旧实现记录，不是有效的 comptime 语言用法。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化
 保留每个条目的类型、顺序与键，不把对象伪装成 normal term；嵌套 Object

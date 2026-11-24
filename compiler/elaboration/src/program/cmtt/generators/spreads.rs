@@ -8,6 +8,7 @@ pub(in crate::program::cmtt) struct SpreadPlan<'h> {
     pub(in crate::program::cmtt) fields: BTreeMap<n::LocalId, (usize, usize)>,
     pub(in crate::program::cmtt) empty: Vec<(usize, usize)>,
 }
+
 struct Packet<'h> {
     source: Expr<'h>,
     width: usize,
@@ -17,15 +18,18 @@ struct Packet<'h> {
     // invocation-local pointer identity without freezing the packet.
     values: Option<Vec<Option<(Argument, Term)>>>,
 }
+
 impl SpreadPlan<'_> {
     pub(in crate::program::cmtt) fn field_type(&self, id: n::LocalId) -> Option<&Term> {
         let (packet, element) = self.fields.get(&id)?;
         self.packets.get(*packet)?.types.as_ref()?.get(*element)
     }
+
     pub(in crate::program::cmtt) fn source_start(&self, packet: usize) -> u32 {
         self.packets[packet].source.span.lo().0
     }
 }
+
 impl fmt::Display for SpreadPlan<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(generator-spreads (packets")?;
@@ -58,6 +62,7 @@ impl fmt::Display for SpreadPlan<'_> {
         f.write_str("))")
     }
 }
+
 impl Checker<'_, '_> {
     pub(in crate::program::cmtt) fn invoke_spread_generator(
         &mut self,
@@ -117,10 +122,10 @@ impl Checker<'_, '_> {
             .filter_map(|(index, width)| width.is_none().then_some(index))
             .collect::<Vec<_>>();
         if let [index] = unknown.as_slice() {
-            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                &self.package.item(owner).unwrap().kind
+            let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+                self.package.item(owner).map(|item| &item.kind)
             else {
-                unreachable!()
+                return Err(error(span, "generator spread callee is not a function"));
             };
             let unfilled_collection = signature.params.iter().any(|param| {
                 matches!(param.ty.kind, TyParamKind::Varadic(..))
@@ -403,7 +408,14 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(Argument, Term), Error> {
         self.prepare_generator_packet(plan, packet, None)?;
-        let (value, ty) = plan.packets[packet].values.as_mut().unwrap()[element]
+        let values = plan.packets[packet]
+            .values
+            .as_mut()
+            .ok_or_else(|| error(span, "generator spread packet is not prepared"))?;
+        let slot = values
+            .get_mut(element)
+            .ok_or_else(|| error(span, "generator spread element out of bounds"))?;
+        let (value, ty) = slot
             .take()
             .ok_or_else(|| error(span, "generator spread element supplied more than once"))?;
         if let Some(expected) = expected {

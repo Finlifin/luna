@@ -475,7 +475,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             .filter(|_| !callee.ty.is_normal_form_callable())
             .and_then(|id| self.source_declarations.owner(id));
         if direct.is_some_and(|owner| self.is_quote_function(owner)) {
-            self.record_quote_application(expr.span)?;
+            self.record_quote_application(expr.hir_id, expr.span)?;
         }
         if let (Some(owner), K::FunctionInstance { arguments, .. }) = (direct, &callee.kind) {
             if arguments.len() < self.type_parameters[&owner].len() {

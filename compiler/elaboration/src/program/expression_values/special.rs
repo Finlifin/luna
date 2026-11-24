@@ -64,7 +64,7 @@ impl Checker<'_, '_> {
             }
         }
         if let H::CodeSplice(operand, substitutions) = &expr.kind {
-            self.record_quote_hole(expr.span)?;
+            self.record_quote_hole(expr.hir_id, expr.span)?;
             return self
                 .connect_code(expr, operand, substitutions, expected)
                 .map(Some);

@@ -256,7 +256,7 @@ pub(super) struct Attempt {
     retained: RetainedCheckpoint,
     storage: StorageCheckpoint,
     generated_functions: generated_functions::Checkpoint,
-    quote_holes: BTreeSet<(u32, u32)>,
+    quote_holes: BTreeSet<n::LocalId>,
     defaults: bool,
     pattern_pending: Option<bool>,
 }
@@ -428,8 +428,8 @@ impl std::fmt::Display for Attempt {
             write!(f, " {pending}")?;
         }
         f.write_str(") (quote-holes")?;
-        for (start, end) in &self.quote_holes {
-            write!(f, " (source {start} {end})")?;
+        for hole in &self.quote_holes {
+            write!(f, " {hole}")?;
         }
         write!(
             f,
@@ -517,7 +517,10 @@ mod tests {
                 graph: None,
             },
             generated_functions: generated_functions::GeneratedFunctions::default().checkpoint(),
-            quote_holes: BTreeSet::from([(11, 13)]),
+            quote_holes: BTreeSet::from([n::LocalId {
+                owner: 1,
+                index: 11,
+            }]),
             defaults: false,
             pattern_pending: Some(true),
         };
@@ -527,7 +530,7 @@ mod tests {
             "(checking-disposition retain-code)",
             "(parent-defaults false)",
             "(pattern-pending true)",
-            "(quote-holes (source 11 13))",
+            "(quote-holes (local 1 11))",
             "(pending-type-uses 7)",
             "(checking-lexical ",
             "(checking-retained ",

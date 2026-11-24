@@ -287,18 +287,18 @@ impl Checker<'_, '_> {
                         "code generator parameter protocols are not yet implemented",
                     ));
                 }
-                let input = if annotation.is_some_and(|annotation| {
-                    matches!(annotation.kind, H::ContextualPatternType(..))
-                }) {
+                let input = if let Some(annotation) = annotation
+                    && matches!(annotation.kind, H::ContextualPatternType(..))
+                {
                     if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
                         return Err(error(
                             parameter.span,
                             "pattern code collections are not yet implemented",
                         ));
                     }
-                    Input::Pattern(self.pattern_input_interface(annotation.unwrap())?)
-                } else if annotation
-                    .is_some_and(|annotation| matches!(annotation.kind, H::ContextualExprType(..)))
+                    Input::Pattern(self.pattern_input_interface(annotation)?)
+                } else if let Some(annotation) = annotation
+                    && matches!(annotation.kind, H::ContextualExprType(..))
                 {
                     if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
                         return Err(error(
@@ -306,17 +306,18 @@ impl Checker<'_, '_> {
                             "code collections require code-container evidence not yet implemented",
                         ));
                     }
-                    Input::Code(self.code_interface(annotation.unwrap())?)
+                    Input::Code(self.code_interface(annotation)?)
                 } else {
                     let ty = match annotation {
                         Some(annotation) => self.type_expr(annotation)?,
                         None => {
-                            let ty = self.self_type(owner, parameter.span)?;
                             if matches!(parameter.ty.kind, TyParamKind::Itself { is_ref: true }) {
-                                Term::Pointer(Box::new(ty))
-                            } else {
-                                ty
+                                return Err(error(
+                                    parameter.span,
+                                    "comptime methods use value-reference self; replace *self with self",
+                                ));
                             }
+                            self.self_type(owner, parameter.span)?
                         }
                     };
                     if !self.generator_data_domain(&ty, &visible_parameters, parameter.span)? {
@@ -530,7 +531,31 @@ impl Checker<'_, '_> {
     }
 
     pub(in crate::program) fn check_code_generator(&mut self, owner: OwnerId) -> Result<(), Error> {
-        let definition = self.copy_code_generator(owner, self.package.item(owner).unwrap().span)?;
+        self.check_code_generator_at(owner, None)
+    }
+
+    pub(in crate::program::cmtt) fn check_code_generator_at(
+        &mut self,
+        owner: OwnerId,
+        span: Option<Span>,
+    ) -> Result<(), Error> {
+        let owner_span = self
+            .package
+            .item(owner)
+            .map(|item| item.span)
+            .or(span)
+            .or_else(|| {
+                self.package
+                    .item(OwnerId::new(hir::LocalDefId::new(0)))
+                    .map(|item| item.span)
+            })
+            .ok_or_else(|| {
+                error(
+                    rustc_span::Span::new(rustc_span::BytePos(0), rustc_span::BytePos(0)),
+                    "missing code generator declaration",
+                )
+            })?;
+        let definition = self.copy_code_generator(owner, owner_span)?;
         if definition.checked_operands.is_some() {
             return Ok(());
         }
@@ -552,10 +577,7 @@ impl Checker<'_, '_> {
                 .chain(std::iter::once(&interface.result))
             {
                 nir::phases::validate_runtime_storage(ty, &metadata, &[]).map_err(|message| {
-                    error(
-                        self.package.item(owner).unwrap().span,
-                        format!("quoted runtime interface: {message}"),
-                    )
+                    error(owner_span, format!("quoted runtime interface: {message}"))
                 })?;
             }
         }
@@ -565,10 +587,7 @@ impl Checker<'_, '_> {
             .map(|(_, input)| {
                 Ok(match input {
                     Input::Pattern(interface) => Some(Argument::Code(CodeValue::Pattern(
-                        self.abstract_pattern_input(
-                            interface,
-                            self.package.item(owner).unwrap().span,
-                        )?,
+                        self.abstract_pattern_input(interface, owner_span)?,
                     ))),
                     Input::Data(_) => Some(Argument::Data(None)),
                     Input::Code(interface) => Some(Argument::Code(CodeValue::Expression(
@@ -584,13 +603,13 @@ impl Checker<'_, '_> {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let operands = self.check_generator_body(owner, |this| {
-            this.install_generator_captures(&definition, this.package.item(owner).unwrap().span)?;
+            this.install_generator_captures(&definition, owner_span)?;
             this.check_generator_clause_defaults(owner, &definition)?;
-            this.run_code_generator(&definition, arguments)
+            this.run_code_generator(&definition, arguments, owner_span)
         })?;
         self.code_generators
             .get_mut(&owner)
-            .unwrap()
+            .ok_or_else(|| error(owner_span, "missing checked code generator entry"))?
             .checked_operands = Some(operands);
         Ok(())
     }
@@ -617,10 +636,12 @@ impl Checker<'_, '_> {
         let result = self.generator_frame(owner, |this| {
             this.context = context;
             this.install_generator_capture_values(&definition.captures, span)?;
-            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-                &this.package.item(owner).unwrap().kind
-            else {
-                unreachable!()
+            let item = this
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing code method declaration"))?;
+            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+                return Err(error(span, "code method requires a function declaration"));
             };
             if sig.return_binding.is_some() && result_type.is_none() {
                 return Err(error(
@@ -1094,7 +1115,9 @@ impl Checker<'_, '_> {
                 defaults: BTreeMap::new(),
             }));
         }
-        self.generator_frame(owner, |this| this.run_code_generator(&definition, values))
+        self.generator_frame(owner, |this| {
+            this.run_code_generator(&definition, values, site.span)
+        })
     }
 
     fn generator_default(&mut self, value: &Expr<'_>, input: &Input) -> Result<Argument, Error> {
@@ -1183,26 +1206,29 @@ impl Checker<'_, '_> {
         &mut self,
         definition: &Generator,
         arguments: Vec<Option<Argument>>,
+        span: Span,
     ) -> Result<Arc<ExpressionCode>, Error> {
-        self.install_generator_captures(
-            definition,
-            self.package
-                .item(self.signature_owner.unwrap())
-                .unwrap()
-                .span,
-        )?;
+        let owner = self
+            .signature_owner
+            .ok_or_else(|| error(span, "missing active code generator owner"))?;
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(span, "missing code generator declaration"))?;
+        let owner_span = item.span;
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &item.kind else {
+            return Err(error(
+                span,
+                "code generator requires a function declaration",
+            ));
+        };
+        self.install_generator_captures(definition, owner_span)?;
         self.alias_substitution.extend(
             definition
                 .types
                 .iter()
                 .map(|(id, ty)| (*id, Arc::new(ty.clone()))),
         );
-        let owner = self.signature_owner.expect("generator frame");
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
-        };
         self.install_generator_clause_values(owner, &definition.types, &definition.clause_domains)?;
         self.locals.extend(definition.output.context.clone());
         let mut inherited: BTreeMap<n::LocalId, Option<n::LocalId>> = BTreeMap::new();
@@ -2218,13 +2244,12 @@ impl Checker<'_, '_> {
                         })
                         .collect::<Result<BTreeSet<_>, _>>()?
                 };
-                if targets.len() != 1 {
+                let (1, Some(&to)) = (targets.len(), targets.first()) else {
                     return Err(error(
                         value.span,
                         "code assignment requires an unambiguous existing runtime context connection",
                     ));
-                }
-                let to = *targets.first().unwrap();
+                };
                 self.require(ty, &previous.context[&to], value.span)?;
                 connections.insert(*from, to);
             }
@@ -2302,9 +2327,7 @@ impl Checker<'_, '_> {
                         pending.push((result, depth + 1));
                     }
                 }
-                Term::Optional(inner) | Term::Pointer(inner) | Term::Lift(inner) => {
-                    pending.push((inner, depth + 1))
-                }
+                Term::Optional(inner) | Term::Lift(inner) => pending.push((inner, depth + 1)),
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
                 Term::Closure {
                     environment,
@@ -2356,15 +2379,29 @@ impl Checker<'_, '_> {
             let mut roots = vec![(value, true)];
             while let Some((root, comptime)) = roots.pop() {
                 nir::visit::expression_pruned(root, &mut fuel, |expr, _| {
+                    if comptime
+                        && matches!(
+                            expr.kind,
+                            K::AddressOf(_)
+                                | K::ConstAddress { .. }
+                                | K::StaticAddress(_)
+                                | K::ReadPointer(_)
+                                | K::WritePointer { .. }
+                                | K::PointerField { .. }
+                                | K::PointerAnonymousField { .. }
+                                | K::BitWritePointer { .. }
+                        )
+                    {
+                        return Err(
+                            "pointer operations cannot execute at comptime; use value-reference self"
+                                .into(),
+                        );
+                    }
                     may_change_schema |= matches!(
                         expr.kind,
-                        K::AddressOf(_)
-                            | K::ConstAddress { .. }
-                            | K::Assign { .. }
+                        K::Assign { .. }
                             | K::BitAssign { .. }
                             | K::BitUpdate { .. }
-                            | K::WritePointer { .. }
-                            | K::BitWritePointer { .. }
                             | K::Call { .. }
                     );
                     if let K::Call {
@@ -2469,7 +2506,10 @@ impl Checker<'_, '_> {
         // Check and execute embedded pattern computations in the same frame
         // as surrounding construction data. Even a scalar initializer may
         // produce a live pointer or mutate an outer binding during matching.
-        let result = self.generator_data_frame_with(decl.init.unwrap(), |this| {
+        let init = decl
+            .init
+            .ok_or_else(|| error(decl.span, "live generator pattern requires an initializer"))?;
+        let result = self.generator_data_frame_with(init, |this| {
             if !decl.mutable {
                 this.immutable.extend(pattern_binding_ids(&decl.pattern));
             }
@@ -2844,7 +2884,10 @@ impl Checker<'_, '_> {
             }
             return Ok(());
         }
-        let (values, _) = self.required_normal_input(decl.init.unwrap(), root, vec![])?;
+        let init = decl
+            .init
+            .ok_or_else(|| error(decl.span, "generator pattern requires an initializer"))?;
+        let (values, _) = self.required_normal_input(init, root, vec![])?;
         let comptime_interpretor::Value::Tuple(values) = values else {
             return Err(error(
                 decl.span,

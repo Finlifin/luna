@@ -197,6 +197,16 @@ impl Checker<'_, '_> {
             },
             None => selected_head.clone(),
         };
+        if signature
+            .params
+            .first()
+            .is_some_and(|param| matches!(param.ty.kind, TyParamKind::Itself { is_ref: true }))
+        {
+            return Err(error(
+                head.span,
+                "comptime methods use value-reference self; replace *self with self",
+            ));
+        }
         let mut captures = BTreeMap::new();
         if target != public {
             captures.insert(target, target_captures);
@@ -210,23 +220,7 @@ impl Checker<'_, '_> {
         if target != public {
             self.code_method_targets.insert(public, target);
         }
-        let by_reference = signature
-            .params
-            .first()
-            .is_some_and(|param| matches!(param.ty.kind, TyParamKind::Itself { is_ref: true }));
-        let addressed = receiver.map(|base| Expr {
-            kind: H::Ref(base),
-            ..base.clone()
-        });
-        let result = invoke(
-            self,
-            &selected_callee,
-            if by_reference {
-                addressed.as_ref()
-            } else {
-                receiver
-            },
-        );
+        let result = invoke(self, &selected_callee, receiver);
         self.code_method_targets.remove(&public);
         if let Some(target) = saved_target {
             self.code_method_targets.insert(public, target);

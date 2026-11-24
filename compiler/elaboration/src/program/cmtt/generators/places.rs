@@ -304,15 +304,17 @@ impl Checker<'_, '_> {
                     }
                     break;
                 }
-                // The pointer expression is evaluated inside the private data
-                // frame. Ordinary place checking validates its pointee; free
-                // binding validation rejects runtime context and code storage.
-                // No address is frozen across generator statements.
-                H::Deref(_) | H::SelfValue => break,
+                H::Deref(_) => {
+                    return Err(error(
+                        target.span,
+                        "pointer operations cannot execute at comptime; use value-reference self",
+                    ));
+                }
+                H::SelfValue => break,
                 _ => {
                     return Err(error(
                         target.span,
-                        "generator assignment requires an owned data place or a temporary pointer place",
+                        "generator assignment requires an owned data place",
                     ));
                 }
             }
@@ -661,7 +663,9 @@ impl Checker<'_, '_> {
                     "generator update frame returned invalid arity",
                 ));
             }
-            let output = updated.pop().unwrap();
+            let output = updated
+                .pop()
+                .ok_or_else(|| error(value.span, "generator update frame returned empty state"))?;
             let mut completed = BTreeMap::new();
             for ((id, ty), stored) in identities.into_iter().zip(updated) {
                 let snapshot = if self.generator_value_needs_live_storage(&stored, value.span)? {
@@ -728,7 +732,11 @@ impl Checker<'_, '_> {
         }
         if let Some((updated, output, ty, cells)) = result? {
             for (id, cell) in cells {
-                let snapshot = updated.get(&id).and_then(Option::as_ref).unwrap().clone();
+                let snapshot = updated
+                    .get(&id)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| error(value.span, "missing refreshed generator cell snapshot"))?
+                    .clone();
                 self.generator_cells.insert(id, (snapshot, cell));
             }
             self.generator_data.extend(updated);

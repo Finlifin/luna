@@ -1559,11 +1559,13 @@ fn effectful_staged_and_trait_quotes_keep_computation_rows() {
 
 #[test]
 fn effectful_quote_direct_passing_keeps_installation_before_argument_evaluation() {
-    let source = effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;
+    let source = effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool;
         fn argument()->bool {true}
         fn provide()->bool {true}
         quote fn subject(value:bool)->#setting bool {value and (setting()#) and (setting()#)}
-        fn run()->bool {subject(argument())# {setting()=>provide(),}}");
+        fn run()->bool {subject(argument())# {setting()=>provide(),}}"
+    );
     let (value, calls) = execute(source, vec![]);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "provide", "argument"]);
@@ -1571,8 +1573,10 @@ fn effectful_quote_direct_passing_keeps_installation_before_argument_evaluation(
 
 #[test]
 fn effectful_quote_affine_direct_passing_slots_keep_request_counts() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {}
-        ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {}
+        ^attrs.effects.direct_passing effect token()->Token;"
+    );
     for (body, allowed) in [
         ("if flag {return token()#;}token()#", true),
         ("let ignored=token()#;token()#", false),
@@ -2166,4 +2170,40 @@ fn quote_type_valued_indices_evaluate_ordinary_inputs_once() {
     assert_eq!(calls, ["run", "input"]);
     let invalid = source.replace("keep<Type,bool>", "keep<bool,bool>");
     assert!(compile(&invalid, Emit::Nir).is_err());
+}
+
+#[test]
+fn whole_quote_single_hole_rule_rejects_multiple_quote_applications_even_in_branches() {
+    let prefix = "quote fn id(value: bool) -> bool { value } ";
+    for invalid in [
+        format!(
+            "{prefix} fn bad(flag: bool) -> bool {{ const c = '(if flag {{ id(true) }} else {{ id(false) }}); ~<c> }}"
+        ),
+        format!(
+            "{prefix} fn bad(flag: bool) -> bool {{ const c = '(when {{ flag => id(true), else => id(false) }}); ~<c> }}"
+        ),
+        format!(
+            "{prefix} fn bad(flag: bool) -> bool {{ const c = '(flag match {{ true => id(true), false => id(false) }}); ~<c> }}"
+        ),
+        format!(
+            "{prefix} fn bad(flag: bool) -> bool {{ const inner = '(true); const c = '(if flag {{ ~<inner> }} else {{ id(false) }}); ~<c> }}"
+        ),
+    ] {
+        let failure = compile(&invalid, Emit::Nir)
+            .err()
+            .expect("must reject two holes in one quote");
+        assert!(failure.contains("at most one"), "{invalid}: {failure}");
+    }
+
+    let valid = format!(
+        "{prefix}
+         comptime fn pick(flag: bool) -> <|- bool> {{
+             if flag {{ '(id(true)) }} else {{ '(id(false)) }}
+         }}
+         fn run() -> bool {{ ~<pick(true)> and not ~<pick(false)> }}"
+    );
+    assert_eq!(
+        execute(&valid, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
 }
