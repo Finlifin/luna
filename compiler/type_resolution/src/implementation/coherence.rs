@@ -363,7 +363,13 @@ fn separation_goal(
                     }
                     terms.push(value);
                 }
-                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
+                Term::ListConcat { ty, parts: fields }
+                | Term::NominalValue { ty, fields, .. }
+                | Term::ClosureValue {
+                    ty,
+                    captures: fields,
+                    ..
+                } => {
                     terms.push(ty);
                     terms.extend(fields);
                 }

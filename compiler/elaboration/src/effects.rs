@@ -245,6 +245,11 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::Tuple(arguments)
         | Term::ClosureContextValue(arguments)
         | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
+        Term::ClosureValue { ty, body, captures } => {
+            charge(ty, fuel, depth - 1)?;
+            bytes(fuel, body.len())?;
+            terms(captures, fuel, depth - 1)
+        }
         Term::AssociatedType {
             subject, arguments, ..
         } => {

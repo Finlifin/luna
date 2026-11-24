@@ -262,6 +262,11 @@ fn walk<'p, L: Lookup<'p>>(
             factory: *factory,
             arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
+        Term::ClosureValue { ty, body, captures } => Term::ClosureValue {
+            ty: Box::new(walk(ty, values, fuel, depth + 1)?),
+            body: body.clone(),
+            captures: walk_many(captures, values, fuel, depth + 1)?,
+        },
         Term::Tuple(items) => Term::Tuple(walk_many(items, values, fuel, depth + 1)?),
         Term::TupleValue(items) => Term::TupleValue(walk_many(items, values, fuel, depth + 1)?),
         Term::ClosureContextValue(items) => {

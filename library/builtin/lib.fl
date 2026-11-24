@@ -34,7 +34,7 @@ pub use ops.*;
 pub use option.OptionalOps;
 pub use patterns.{ListPatternView, StableListPatternView}
 pub use primitives.*;
-pub use protocols.staging.Splice;
+pub use protocols.staging.{Splice, splice_auto};
 pub use result.ErrorResultOps;
 pub use text_impl.bytes.TextBytes;
 pub use traits.*;
@@ -78,7 +78,7 @@ pub mod prelude {
     pub use option.OptionalOps;
     pub use patterns.{ListPatternView, StableListPatternView}
     pub use primitives.*;
-    pub use protocols.staging.Splice;
+    pub use protocols.staging.{Splice, splice_auto};
     pub use result.ErrorResultOps;
     pub use text_impl.bytes.TextBytes;
     pub use traits.*;

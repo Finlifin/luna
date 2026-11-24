@@ -3226,6 +3226,29 @@ fn push_default_strategy_term_step<'a>(
             Ok(a_fac == b_fac
                 && push_default_strategy_pairs(a_args, b_args, obligations, next_depth))
         }
+        (
+            Term::ClosureValue {
+                ty: a_ty,
+                body: a_body,
+                captures: a_captures,
+            },
+            Term::ClosureValue {
+                ty: b_ty,
+                body: b_body,
+                captures: b_captures,
+            },
+        ) => {
+            if a_body != b_body || a_captures.len() != b_captures.len() {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a_ty, b_ty, next_depth));
+            Ok(push_default_strategy_pairs(
+                a_captures,
+                b_captures,
+                obligations,
+                next_depth,
+            ))
+        }
         (Term::MethodValue(a), Term::MethodValue(b)) => {
             if a.member != b.member || a.interface.declaration != b.interface.declaration {
                 return Ok(false);

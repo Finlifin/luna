@@ -182,6 +182,7 @@ fn local_identity(
             | Term::AnyType
             | Term::ClosureContextValue(_)
             | Term::ClosureSnapshot { .. }
+            | Term::ClosureValue { .. }
             | Term::Primitive(_)
             | Term::MethodValue(_)
             | Term::FunctionValue { .. }

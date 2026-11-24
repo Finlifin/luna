@@ -177,11 +177,44 @@ fn delivery_constant<'layout>(
     value: &Expr,
     fuel: &mut usize,
 ) -> Result<(), String> {
-    let heads = heads.into();
+    delivery_constant_with_locals(heads.into(), value, &BTreeSet::new(), fuel, 0)
+}
+
+fn delivery_constant_with_locals<'layout>(
+    heads: Layouts<'layout>,
+    value: &Expr,
+    locals: &BTreeSet<LocalId>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<(), String> {
+    if depth >= 128 {
+        return Err("staged constant depth exceeded".into());
+    }
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         charge(fuel, 1)?;
         match &value.kind {
+            K::Local(id) if locals.contains(id) => {}
+            K::Block { .. } | K::Closure { .. } => {
+                super::closures::validate_closed_closure_delivery(
+                    heads,
+                    value,
+                    locals,
+                    fuel,
+                    depth,
+                    &mut delivery_constant_with_locals,
+                )?;
+            }
+            K::Call { .. } if super::closures::unwrap_initializer_closure_call(value).is_some() => {
+                super::closures::validate_closed_closure_delivery(
+                    heads,
+                    value,
+                    locals,
+                    fuel,
+                    depth,
+                    &mut delivery_constant_with_locals,
+                )?;
+            }
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
                 if matches!(value.ty.callable_signature(), Term::Function { .. }) =>
             {
@@ -273,6 +306,13 @@ fn delivery_constant<'layout>(
                     pending.push(field);
                 }
             }
+            K::OptionalAbsent => {
+                crate::completed_type(&value.ty, &BTreeSet::new(), fuel)?;
+            }
+            K::OptionalPresent(inner) | K::NewtypeConvert(inner) => {
+                crate::completed_type(&value.ty, &BTreeSet::new(), fuel)?;
+                pending.push(inner);
+            }
             _ => {
                 constant(heads, value, fuel, 0)?;
             }
@@ -350,7 +390,7 @@ pub(super) fn evaluate_default<C>(
         return Err("invalid staged default frame outputs".into());
     }
     let mut fields = fields.into_iter();
-    let result = fields.next().unwrap();
+    let result = fields.next().ok_or("missing staged default result value")?;
     for (id, value) in access.writable.into_iter().zip(fields) {
         constant(layouts(context), &value, fuel, 0)?;
         prepared.insert(id, value);
@@ -361,6 +401,7 @@ pub(super) fn evaluate_default<C>(
 #[cfg(test)]
 mod delivery_tests {
     use super::*;
+
     fn value(kind: K, ty: Term) -> Expr {
         Expr {
             kind,
@@ -368,6 +409,7 @@ mod delivery_tests {
             source: nir::program::SourceRange { start: 0, end: 1 },
         }
     }
+
     #[test]
     fn aggregate_delivery_rejects_forged_fields_calls_and_missing_layouts() {
         let boolean = Term::Primitive(Primitive::Bool);
@@ -424,6 +466,7 @@ mod delivery_tests {
         opaque.ty = boolean;
         assert!(delivery_constant(&[], &opaque, &mut 1000).is_err());
     }
+
     #[test]
     fn nominal_delivery_rejects_mismatched_identity_and_unevaluated_fields() {
         let declaration = nir::DeclarationId {
@@ -483,6 +526,7 @@ mod delivery_tests {
         );
         assert!(delivery_constant(&[], &wrong, &mut 1000).is_err());
     }
+
     #[test]
     fn trait_method_delivery_requires_completed_instance_types() {
         let id = nir::DeclarationId {
@@ -528,5 +572,57 @@ mod delivery_tests {
             }
             assert!(delivery_constant(&[], &invalid, &mut 1000).is_err());
         }
+    }
+
+    #[test]
+    fn closed_capturing_closure_delivery_validates_captures_and_rejects_leaks() {
+        use std::sync::Arc;
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(bool_ty.clone()),
+        };
+        let closure_ty = Term::Closure {
+            environment: vec![bool_ty.clone()],
+            signature: Box::new(sig),
+        };
+        let cap_id = LocalId { owner: 3, index: 0 };
+        let body = Arc::new(value(K::Local(cap_id), bool_ty.clone()));
+        let capture = nir::program::Capture {
+            binding: cap_id,
+            ty: bool_ty.clone(),
+            value: None,
+        };
+        let closed = value(
+            K::Block {
+                statements: vec![value(
+                    K::Let {
+                        binding: cap_id,
+                        value: Box::new(value(K::Literal(Literal::Bool(true)), bool_ty.clone())),
+                    },
+                    Term::Primitive(Primitive::Void),
+                )],
+                result: Some(Box::new(value(
+                    K::Closure {
+                        captures: vec![capture.clone()],
+                        parameters: vec![],
+                        body: body.clone(),
+                    },
+                    closure_ty.clone(),
+                ))),
+            },
+            closure_ty.clone(),
+        );
+        delivery_constant(&[], &closed, &mut 1000).unwrap();
+
+        let leaking = value(
+            K::Closure {
+                captures: vec![capture],
+                parameters: vec![],
+                body,
+            },
+            closure_ty,
+        );
+        assert!(delivery_constant(&[], &leaking, &mut 1000).is_err());
     }
 }

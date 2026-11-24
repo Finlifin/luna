@@ -2,19 +2,59 @@
 //! All fields of one graph share closure bindings until its root is complete.
 use super::*;
 use comptime_interpretor::ClosureIdentity;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod captures;
+
+#[derive(Default)]
+pub(super) struct ClosureRegistry {
+    buckets: BTreeMap<u64, Vec<usize>>,
+    identities: Vec<ClosureIdentity>,
+}
+
+impl ClosureRegistry {
+    pub(super) fn intern(&mut self, closure: &std::sync::Arc<comptime_interpretor::Closure>) -> usize {
+        let identity = ClosureIdentity::new(closure);
+        let digest = closure_digest(closure);
+        let bucket = self.buckets.entry(digest).or_default();
+        if let Some(&id) = bucket.iter().find(|&&id| self.identities[id] == identity) {
+            return id;
+        }
+        let id = self.identities.len();
+        self.identities.push(identity);
+        bucket.push(id);
+        id
+    }
+}
+
+fn closure_digest(closure: &comptime_interpretor::Closure) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mix = |hash: &mut u64, bytes: &[u8]| {
+        for &byte in bytes {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+    mix(&mut hash, &closure.parameters().len().to_le_bytes());
+    let body = closure.body();
+    mix(&mut hash, &body.source.start.to_le_bytes());
+    mix(&mut hash, &body.source.end.to_le_bytes());
+    mix(&mut hash, closure.ty().to_string().as_bytes());
+    let capture_count = closure.captured_values().count();
+    mix(&mut hash, &capture_count.to_le_bytes());
+    hash
+}
 
 #[derive(Default)]
 pub(super) struct Materialization {
     // Generator arguments can contain callbacks anywhere in their owned graph.
     generator: bool,
     type_scope: BTreeSet<DeclarationId>,
-    // Owning identities remain valid across all values materialized in this
-    // snapshot; no addresses enter NIR, diagnostics or persistent caches.
-    closures: HashMap<ClosureIdentity, (n::LocalId, Term)>,
-    active: HashSet<ClosureIdentity>,
+    // Deterministic DFS discovery indices retain owning identities across this
+    // snapshot; no addresses or randomized hashes enter keys or caches.
+    closure_registry: ClosureRegistry,
+    closures: BTreeMap<usize, (n::LocalId, Term)>,
+    active: BTreeSet<usize>,
     pub(super) bindings: Vec<n::Expr>,
 }
 
@@ -139,8 +179,9 @@ impl Checker<'_, '_> {
                 &value,
                 span,
                 0,
-                &mut HashSet::new(),
-                &mut HashSet::new(),
+                &mut ClosureRegistry::default(),
+                &mut BTreeSet::new(),
+                &mut BTreeSet::new(),
                 &type_scope,
             )?;
             let expression = self.materialize_local_constant_in_scope(
@@ -416,7 +457,7 @@ impl Checker<'_, '_> {
         Ok((requirements, capabilities))
     }
 
-    fn snapshot_contract_in_scope(
+    pub(in crate::program) fn snapshot_contract_in_scope(
         &mut self,
         type_scope: &BTreeSet<DeclarationId>,
         span: Span,
@@ -858,7 +899,7 @@ impl Checker<'_, '_> {
                 return self.materialized_trait_method(identity, &ty, span);
             }
             Value::Closure(closure) => {
-                let identity = ClosureIdentity::new(closure);
+                let identity = snapshot.closure_registry.intern(closure);
                 if let Some((binding, previous_type)) = snapshot.closures.get(&identity) {
                     if previous_type != &ty {
                         return Err(error(span, "shared constant closure type mismatch"));
@@ -874,12 +915,13 @@ impl Checker<'_, '_> {
                         value,
                         span,
                         depth,
-                        &mut HashSet::new(),
-                        &mut HashSet::new(),
+                        &mut ClosureRegistry::default(),
+                        &mut BTreeSet::new(),
+                        &mut BTreeSet::new(),
                         &snapshot.type_scope,
                     )?;
                 }
-                if !snapshot.active.insert(identity.clone()) {
+                if !snapshot.active.insert(identity) {
                     return Err(error(
                         span,
                         "cyclic closure environment cannot be materialized as a constant",

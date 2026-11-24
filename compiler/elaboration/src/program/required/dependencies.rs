@@ -271,6 +271,7 @@ impl Discovery<'_> {
                     Term::ClosureSnapshot { factory, .. } => {
                         found.insert(Dependency::Callable(*factory));
                     }
+                    Term::ClosureValue { .. } => {}
                     Term::TupleValue(_)
                     | Term::RecordValue(_)
                     | Term::OptionalValue { .. }

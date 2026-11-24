@@ -613,6 +613,13 @@ pub enum Term {
         factory: DeclarationId,
         arguments: Vec<Term>,
     },
+    /// Alpha-normalized canonical staged closure value with explicit runtime/comptime
+    /// callable type, normalized S-expression body, and closed capture constants.
+    ClosureValue {
+        ty: Box<Term>,
+        body: std::sync::Arc<str>,
+        captures: Vec<Term>,
+    },
     /// Canonical exact builtin integer; no machine-width truncation or store identity.
     Integer(comptime_runtime::Integer),
     Float(comptime_runtime::decimal::DecimalValue),
@@ -812,6 +819,10 @@ impl Term {
                     pending.push(method.subject);
                     pending.extend(method.interface.arguments);
                     pending.extend(method.method_arguments);
+                }
+                Self::ClosureValue { ty, captures, .. } => {
+                    pending.push(*ty);
+                    pending.extend(captures);
                 }
                 Self::ClosureSnapshot { arguments, .. }
                 | Self::FunctionValue { arguments, .. }
@@ -1225,6 +1236,7 @@ impl Term {
             | Self::Char(_)
             | Self::String(_)
             | Self::ClosureSnapshot { .. }
+            | Self::ClosureValue { .. }
             | Self::Symbol(_)
             | Self::MethodValue(_)
             | Self::FunctionValue { .. }
@@ -1709,6 +1721,11 @@ impl Term {
             Self::ClosureSnapshot { factory, arguments } => Self::ClosureSnapshot {
                 factory: *factory,
                 arguments: many(arguments, leaf)?,
+            },
+            Self::ClosureValue { ty, body, captures } => Self::ClosureValue {
+                ty: Box::new(ty.rewrite(nesting, leaf)?),
+                body: body.clone(),
+                captures: many(captures, leaf)?,
             },
             Self::MethodValue(method) => Self::MethodValue(Box::new(crate::TraitMethodIdentity {
                 interface: crate::program::InterfaceInstance {
@@ -2674,6 +2691,19 @@ fn validate<'term>(
                 validate(argument, holes, frames, allow_free, core)?;
             }
         }
+        Term::ClosureValue { ty, captures, .. } => {
+            require_sort(ty, Sort::Type)?;
+            validate(ty, holes, frames, allow_free, core)?;
+            for capture in captures {
+                if capture.sort() == Sort::Runtime {
+                    return Err(TypeError::WrongSort {
+                        expected: Sort::ComptimeValue,
+                        actual: Sort::Runtime,
+                    });
+                }
+                validate(capture, holes, frames, allow_free, core)?;
+            }
+        }
         Term::Nominal { arguments, .. }
         | Term::FunctionValue { arguments, .. }
         | Term::NormalForm { arguments, .. } => {
@@ -2979,6 +3009,18 @@ impl fmt::Display for Term {
                     write!(f, " {argument}")?;
                 }
                 f.write_str("))")
+            }
+            Self::ClosureValue { ty, body, captures } => {
+                write!(f, "(closure-value {ty} ")?;
+                crate::display::string(f, body)?;
+                if !captures.is_empty() {
+                    f.write_str(" (captures")?;
+                    for capture in captures {
+                        write!(f, " {capture}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
             }
             Self::FunctionValue {
                 declaration,

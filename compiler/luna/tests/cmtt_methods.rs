@@ -228,7 +228,6 @@ fn contextual_runtime_method_transport_preserves_the_public_contract() {
 }
 
 #[test]
-#[ignore = "builtin has no runtime callable Splice implementation yet"]
 fn transported_runtime_methods_preserve_clause_domains_and_nested_storage() {
     for selected in [true, false] {
         let source = format!(

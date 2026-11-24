@@ -375,6 +375,12 @@ impl Writer {
                 self.byte(30)?;
                 self.terms(values, d)?;
             }
+            T::ClosureValue { ty, body, captures } => {
+                self.byte(42)?;
+                self.term(ty, d)?;
+                self.text(body)?;
+                self.terms(captures, d)?;
+            }
             T::ContextualClosure { context, signature } => {
                 self.byte(31)?;
                 self.term(context, d)?;
@@ -677,6 +683,11 @@ impl<'a> Reader<'a> {
                 arguments: self.terms(d)?,
             },
             30 => T::ClosureContextValue(self.terms(d)?),
+            42 => T::ClosureValue {
+                ty: Box::new(self.term(d)?),
+                body: self.text()?.into(),
+                captures: self.terms(d)?,
+            },
             31 => T::ContextualClosure {
                 context: Box::new(self.term(d)?),
                 signature: Box::new(self.term(d)?),

@@ -72,6 +72,13 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
             Term::FunctionValue { arguments, .. } => arguments
                 .iter()
                 .all(|value| visit(value, depth + 1, remaining, type_leaf)),
+            Term::ClosureValue { ty, captures, .. } => {
+                ty.sort() == Sort::Type
+                    && visit(ty, depth + 1, remaining, type_leaf)
+                    && captures
+                        .iter()
+                        .all(|value| visit(value, depth + 1, remaining, type_leaf))
+            }
             Term::MethodValue(method) => {
                 method.subject.sort() == Sort::Type
                     && method

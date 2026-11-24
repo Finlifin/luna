@@ -32,6 +32,12 @@ macro_rules! visit_children {
                     $visit(argument)?;
                 }
             }
+            Self::ClosureValue { ty, captures, .. } => {
+                $visit(ty)?;
+                for capture in captures {
+                    $visit(capture)?;
+                }
+            }
             Self::Nominal { arguments, .. }
             | Self::TraitObject { arguments, .. }
             | Self::NormalForm { arguments, .. }

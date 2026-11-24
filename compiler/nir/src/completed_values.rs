@@ -30,6 +30,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 })
             }
             Term::AssociatedType { arguments, .. } => arguments.len().saturating_add(1),
+            Term::ClosureValue { ty: _, captures, .. } => captures.len().saturating_add(1),
             Term::Nominal { arguments, .. }
             | Term::TraitObject { arguments, .. }
             | Term::ClosureSnapshot { arguments, .. }
@@ -74,6 +75,10 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             } => {
                 children.push(subject.as_ref());
                 children.extend(arguments);
+            }
+            Term::ClosureValue { ty: inner, captures, .. } => {
+                children.push(inner);
+                children.extend(captures);
             }
             Term::Nominal { arguments, .. }
             | Term::TraitObject { arguments, .. }

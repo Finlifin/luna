@@ -1102,6 +1102,11 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                 factory: *factory,
                 arguments: self.many(arguments, depth + 1)?,
             },
+            Term::ClosureValue { ty, body, captures } => Term::ClosureValue {
+                ty: Box::new(self.normalize(ty, depth + 1)?),
+                body: body.clone(),
+                captures: self.many(captures, depth + 1)?,
+            },
             Term::ClosureContextValue(items) => {
                 Term::ClosureContextValue(self.many(items, depth + 1)?)
             }

@@ -11,6 +11,7 @@ use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod closures;
 mod error_values;
 mod frozen;
 mod general;
@@ -1145,7 +1146,9 @@ fn fold_bit_representation<'layout>(
                         Primitive::F32 => Literal::Float32(raw as u32),
                         Primitive::F64 => Literal::Float64(raw as u64),
                         _ => {
-                            let (signed, width) = heads.integer_layout(primitive).unwrap();
+                            let (signed, width) = heads
+                                .integer_layout(primitive)
+                                .ok_or("staged bit conversion requires an integer layout")?;
                             if signed {
                                 Literal::SignedInteger(
                                     ((raw << (128 - width)) as i128) >> (128 - width),
@@ -1224,20 +1227,34 @@ fn fold_bitvec_operation<'layout>(
         steps: *fuel,
         max_limbs: 4096,
     };
-    let result = (|| -> Result<Literal, comptime_runtime::bitvec::Error> {
+    let result = (|| -> Result<Literal, String> {
+        let missing_right = || "staged bitvec operation missing right operand".to_owned();
         if matches!(expr.kind, K::BitEqual(..)) {
-            budget.consume(left.words().len().saturating_add(1))?;
-            return Ok(Literal::Bool(left == right.unwrap()));
+            budget
+                .consume(left.words().len().saturating_add(1))
+                .map_err(|e| e.to_string())?;
+            let right = right.as_ref().ok_or_else(missing_right)?;
+            return Ok(Literal::Bool(left == *right));
         }
         let bits = match &expr.kind {
-            K::Not(_) => left.not(&mut budget)?,
-            K::And(..) => left.and(&right.unwrap(), &mut budget)?,
-            K::Or(..) => left.or(&right.unwrap(), &mut budget)?,
-            K::BitConcat(..) => left.concat(&right.unwrap(), &mut budget)?,
-            K::BitSlice { start, end, .. } => left.slice(*start, *end, &mut budget)?,
+            K::Not(_) => left.not(&mut budget).map_err(|e| e.to_string())?,
+            K::And(..) => left
+                .and(right.as_ref().ok_or_else(missing_right)?, &mut budget)
+                .map_err(|e| e.to_string())?,
+            K::Or(..) => left
+                .or(right.as_ref().ok_or_else(missing_right)?, &mut budget)
+                .map_err(|e| e.to_string())?,
+            K::BitConcat(..) => left
+                .concat(right.as_ref().ok_or_else(missing_right)?, &mut budget)
+                .map_err(|e| e.to_string())?,
+            K::BitSlice { start, end, .. } => left
+                .slice(*start, *end, &mut budget)
+                .map_err(|e| e.to_string())?,
             _ => unreachable!(),
         };
-        budget.consume(bits.words().len().saturating_add(1))?;
+        budget
+            .consume(bits.words().len().saturating_add(1))
+            .map_err(|e| e.to_string())?;
         Ok(Literal::BitVec {
             width: bits.width(),
             words: bits.words().to_vec(),
@@ -1398,6 +1415,112 @@ fn substitute_forwarded_expression<'layout>(
                 depth + 1,
             )?;
             return Ok(false);
+        }
+        if let K::Match { value, arms } = &expr.kind
+            && !values.is_empty()
+            && let Ok(free) = nir::free_bindings::collect(value, fuel)
+            && !free.is_empty()
+            && free
+                .iter()
+                .all(|b| values.contains_key(b) && !masked.contains(b) && !unavailable.contains(b))
+        {
+            let mut probe = value.clone();
+            if substitute_forwarded_expression(
+                heads,
+                &mut probe,
+                values,
+                unavailable,
+                masked,
+                true,
+                fuel,
+                depth + 1,
+            )
+            .is_ok()
+                && let Ok(scrutinee) = fold_input(heads, &probe, fuel, depth + 1)
+                && constant(heads, &scrutinee, fuel, depth + 1).is_ok()
+            {
+                let mut matched_arm = None;
+                let mut can_collapse = true;
+                for arm in arms {
+                    let mut arm_locals = std::collections::BTreeMap::new();
+                    match patterns::matches(
+                        heads,
+                        &arm.pattern,
+                        &scrutinee,
+                        &mut arm_locals,
+                        fuel,
+                        depth + 1,
+                    ) {
+                        Ok(false) => continue,
+                        Ok(true) => {}
+                        Err(_) => {
+                            can_collapse = false;
+                            break;
+                        }
+                    }
+                    if let Some(guard) = &arm.guard {
+                        let Ok(folded_guard) =
+                            fold_local_input(heads, guard, &arm_locals, fuel, depth + 1)
+                        else {
+                            can_collapse = false;
+                            break;
+                        };
+                        match constant(heads, &folded_guard, fuel, depth + 1) {
+                            Ok(Term::Bool(false)) => continue,
+                            Ok(Term::Bool(true)) => {}
+                            _ => {
+                                can_collapse = false;
+                                break;
+                            }
+                        }
+                    }
+                    matched_arm = Some((arm.body.clone(), arm_locals));
+                    break;
+                }
+                if can_collapse
+                    && let Some((mut selected_body, arm_locals)) = matched_arm
+                    && {
+                        let mut written = BTreeSet::new();
+                        forwarding_writes(
+                            &selected_body,
+                            &BTreeSet::new(),
+                            &mut written,
+                            fuel,
+                            depth + 1,
+                        )
+                        .is_ok()
+                            && !arm_locals.keys().any(|id| written.contains(id))
+                    }
+                {
+                    let origin = expr.source;
+                    prepare_local_input_in_place(
+                        heads,
+                        &mut selected_body,
+                        &arm_locals,
+                        fuel,
+                        depth + 1,
+                    )?;
+                    let mut inner_masked = masked.clone();
+                    let mut inner_unavailable = unavailable.clone();
+                    for id in arm_locals.keys() {
+                        inner_masked.remove(id);
+                        inner_unavailable.remove(id);
+                    }
+                    substitute_forwarded_expression(
+                        heads,
+                        &mut selected_body,
+                        values,
+                        &inner_unavailable,
+                        &inner_masked,
+                        staged,
+                        fuel,
+                        depth + 1,
+                    )?;
+                    selected_body.source = origin;
+                    *expr = selected_body;
+                    return Ok(false);
+                }
+            }
         }
         if let K::Local(binding) = expr.kind {
             if staged && !masked.contains(&binding) {
@@ -2838,25 +2961,33 @@ fn fold_machine_input<'layout>(
         steps: *fuel,
         max_limbs: 4096,
     };
-    let value = match op {
-        Some(Op::Add) => left.add(right.unwrap(), &mut budget),
-        Some(Op::Subtract) => left.subtract(right.unwrap(), &mut budget),
-        Some(Op::Multiply) => left.multiply(right.unwrap(), &mut budget),
-        Some(Op::DivideTrunc) => left
-            .div_rem_trunc(right.unwrap(), &mut budget)
-            .map(|(q, _)| q),
-        Some(Op::RemainderTrunc) => left
-            .div_rem_trunc(right.unwrap(), &mut budget)
-            .map(|(_, r)| r),
-        None => left.negate(&mut budget),
-        _ => unreachable!(),
+    let value = match (op, right) {
+        (Some(Op::Add), Some(right)) => left.add(right, &mut budget),
+        (Some(Op::Subtract), Some(right)) => left.subtract(right, &mut budget),
+        (Some(Op::Multiply), Some(right)) => left.multiply(right, &mut budget),
+        (Some(Op::DivideTrunc), Some(right)) => {
+            left.div_rem_trunc(right, &mut budget).map(|(q, _)| q)
+        }
+        (Some(Op::RemainderTrunc), Some(right)) => {
+            left.div_rem_trunc(right, &mut budget).map(|(_, r)| r)
+        }
+        (None, None) => left.negate(&mut budget),
+        _ => return Err("staged machine integer operation operand mismatch".into()),
     };
     *fuel = budget.steps;
     let value = value.map_err(|e| e.to_string())?;
     let literal = if signed {
-        Literal::SignedInteger(value.signed_value().unwrap())
+        Literal::SignedInteger(
+            value
+                .signed_value()
+                .ok_or("staged machine integer result overflows signed i128")?,
+        )
     } else {
-        Literal::UnsignedInteger(value.unsigned_value().unwrap())
+        Literal::UnsignedInteger(
+            value
+                .unsigned_value()
+                .ok_or("staged machine integer result overflows unsigned u128")?,
+        )
     };
     Ok(Expr {
         ty: expr.ty.clone(),
@@ -2866,10 +2997,11 @@ fn fold_machine_input<'layout>(
 }
 
 #[inline(never)]
-fn nominal_constant<'layout>(
+fn nominal_constant_with_locals<'layout>(
     heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fields: &[Expr],
+    locals: &BTreeMap<LocalId, Term>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, String> {
@@ -2887,7 +3019,7 @@ fn nominal_constant<'layout>(
         },
         fields: fields
             .iter()
-            .map(|field| constant(heads, field, fuel, depth + 1))
+            .map(|field| constant_with_locals(heads, field, locals, fuel, depth + 1))
             .collect::<Result<_, _>>()?,
     })
 }
@@ -2902,24 +3034,84 @@ pub fn canonical_input_with_layouts(
     constant(layouts, expr, fuel, 0).map(|_| ())
 }
 
-// This accepts canonical immutable data and named callable identities, never a call,
-// local reference, pointer or expression whose evaluation could repeat effects.
+// This accepts canonical immutable data, closed closure expressions, and named
+// callable identities; non-constant calls or escaping locals are rejected.
 fn constant<'layout>(
     heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, String> {
-    let heads = heads.into();
+    constant_with_locals(heads.into(), expr, &BTreeMap::new(), fuel, depth)
+}
+
+fn constant_with_locals<'layout>(
+    heads: Layouts<'layout>,
+    expr: &Expr,
+    locals: &BTreeMap<LocalId, Term>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, String> {
     if depth >= 128 {
         return Err("staged constant depth exceeded".into());
     }
     charge(fuel, 1)?;
     Ok(match (&expr.kind, &expr.ty) {
+        (K::ComptimeValue(value @ Term::ClosureValue { ty, .. }), _) => {
+            nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
+            if ty.as_ref() != &expr.ty {
+                return Err("staged closure value type mismatch".into());
+            }
+            value.clone()
+        }
         (K::ComptimeValue(value), _) => {
             let decoded = frozen::fold(heads, expr, value, fuel, depth + 1)?;
-            constant(heads, &decoded, fuel, depth + 1)?
+            constant_with_locals(heads, &decoded, locals, fuel, depth + 1)?
         }
+        (K::Local(id), _) => {
+            let Some(bound) = locals.get(id) else {
+                return Err("staged input requires a supported canonical constant".into());
+            };
+            nir::type_computations::charge_term(bound, fuel).map_err(|e| e.to_string())?;
+            bound.clone()
+        }
+        (K::Block { statements, result }, _) => {
+            let mut inner = locals.clone();
+            for statement in statements {
+                let K::Let { binding, value } = &statement.kind else {
+                    return Err("staged constant block allows only closed let bindings".into());
+                };
+                let bound = constant_with_locals(heads, value, &inner, fuel, depth + 1)?;
+                inner.insert(*binding, bound);
+            }
+            match result {
+                Some(result) => constant_with_locals(heads, result, &inner, fuel, depth + 1)?,
+                None => Term::Unit,
+            }
+        }
+        (K::Call { .. }, _) if closures::unwrap_initializer_closure_call(expr).is_some() => {
+            let body = closures::unwrap_initializer_closure_call(expr)
+                .ok_or("staged initializer closure call vanished")?;
+            constant_with_locals(heads, body, locals, fuel, depth + 1)?
+        }
+        (
+            K::Closure {
+                parameters,
+                captures,
+                body,
+            },
+            _,
+        ) => closures::canonicalize_closed_closure(
+            heads,
+            expr,
+            parameters,
+            captures,
+            body,
+            locals,
+            fuel,
+            depth,
+            &mut constant_with_locals,
+        )?,
 
         (K::TypeList(fields), ty) => {
             let element = heads
@@ -2932,7 +3124,7 @@ fn constant<'layout>(
                 if field.ty != element {
                     return Err("staged list element type mismatch".into());
                 }
-                values.push(constant(heads, field, fuel, depth + 1)?);
+                values.push(constant_with_locals(heads, field, locals, fuel, depth + 1)?);
             }
             nir::comptime_values::freeze_admitted_list(ty, values, fuel)
                 .map_err(|error| error.to_string())?
@@ -2948,7 +3140,13 @@ fn constant<'layout>(
             nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
             Term::OptionalValue {
                 ty: Box::new(expr.ty.clone()),
-                value: Some(Box::new(constant(heads, value, fuel, depth + 1)?)),
+                value: Some(Box::new(constant_with_locals(
+                    heads,
+                    value,
+                    locals,
+                    fuel,
+                    depth + 1,
+                )?)),
             }
         }
         (
@@ -3056,7 +3254,7 @@ fn constant<'layout>(
                 },
             )
             .map_err(|error| error.to_string())?;
-            let payload = constant(heads, value, fuel, depth + 1)?;
+            let payload = constant_with_locals(heads, value, locals, fuel, depth + 1)?;
             match conversion {
                 C::Success | C::Failure => Term::ErrorValue {
                     ty: Box::new(ty.clone()),
@@ -3094,7 +3292,7 @@ fn constant<'layout>(
             Term::NominalValue {
                 ty: Box::new(ty.clone()),
                 variant: None,
-                fields: vec![constant(heads, value, fuel, depth + 1)?],
+                fields: vec![constant_with_locals(heads, value, locals, fuel, depth + 1)?],
             }
         }
         (K::TypeValue(ty), Term::Primitive(Primitive::Type)) => {
@@ -3210,7 +3408,9 @@ fn constant<'layout>(
                 declaration: expected,
                 ..
             },
-        ) if declaration == expected => nominal_constant(heads, expr, fields, fuel, depth)?,
+        ) if declaration == expected => {
+            nominal_constant_with_locals(heads, expr, fields, locals, fuel, depth)?
+        }
         (K::AnonymousRecord { fields }, Term::Record(types)) if fields.len() == types.len() => {
             let mut names = BTreeSet::new();
             let mut values = Vec::new();
@@ -3219,7 +3419,10 @@ fn constant<'layout>(
                 if !names.insert(name) || field.ty != *ty {
                     return Err("staged record field type or label mismatch".into());
                 }
-                values.push((name.clone(), constant(heads, field, fuel, depth + 1)?));
+                values.push((
+                    name.clone(),
+                    constant_with_locals(heads, field, locals, fuel, depth + 1)?,
+                ));
             }
             Term::RecordValue(values)
         }
@@ -3247,7 +3450,7 @@ fn constant<'layout>(
                 if value.ty != *ty {
                     return Err("staged tuple field type mismatch".into());
                 }
-                fields.push(constant(heads, value, fuel, depth + 1)?);
+                fields.push(constant_with_locals(heads, value, locals, fuel, depth + 1)?);
             }
             Term::TupleValue(fields)
         }
@@ -5604,6 +5807,182 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn closed_capturing_closures_alpha_canonicalize_and_preserve_captured_values() {
+        use super::*;
+        use std::sync::Arc;
+        let source = nir::program::SourceRange { start: 10, end: 20 };
+        let other_source = nir::program::SourceRange { start: 30, end: 40 };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let fn_ty = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::Runtime,
+                ty: bool_ty.clone(),
+            }],
+            result: Box::new(bool_ty.clone()),
+        };
+        let closure_ty_a = Term::Closure {
+            environment: vec![bool_ty.clone()],
+            signature: Box::new(fn_ty.clone()),
+        };
+        let closure_ty_b = Term::Closure {
+            environment: vec![bool_ty.clone()],
+            signature: Box::new(fn_ty.clone()),
+        };
+
+        let make_closed = |owner: u32, cap_val: bool, src: nir::program::SourceRange| {
+            let cap_id = LocalId { owner, index: 1 };
+            let param_id = LocalId { owner, index: 2 };
+            let closure = Expr {
+                kind: K::Closure {
+                    captures: vec![nir::program::Capture {
+                        binding: cap_id,
+                        ty: bool_ty.clone(),
+                        value: None,
+                    }],
+                    parameters: vec![param_id],
+                    body: Arc::new(Expr {
+                        kind: K::If {
+                            condition: Box::new(Expr {
+                                kind: K::Local(cap_id),
+                                ty: bool_ty.clone(),
+                                source: src,
+                            }),
+                            then_branch: Box::new(Expr {
+                                kind: K::Local(param_id),
+                                ty: bool_ty.clone(),
+                                source: src,
+                            }),
+                            else_branch: Some(Box::new(Expr {
+                                kind: K::Literal(Literal::Bool(false)),
+                                ty: bool_ty.clone(),
+                                source: src,
+                            })),
+                        },
+                        ty: bool_ty.clone(),
+                        source: src,
+                    }),
+                },
+                ty: closure_ty_a.clone(),
+                source: src,
+            };
+            Expr {
+                kind: K::Block {
+                    statements: vec![Expr {
+                        kind: K::Let {
+                            binding: cap_id,
+                            value: Box::new(Expr {
+                                kind: K::Literal(Literal::Bool(cap_val)),
+                                ty: bool_ty.clone(),
+                                source: src,
+                            }),
+                        },
+                        ty: Term::Primitive(Primitive::Void),
+                        source: src,
+                    }],
+                    result: Some(Box::new(closure)),
+                },
+                ty: closure_ty_b.clone(),
+                source: src,
+            }
+        };
+
+        let true_a = make_closed(10, true, source);
+        let true_b = make_closed(99, true, other_source);
+        let false_a = make_closed(10, false, source);
+
+        let canon_a = constant(&[], &true_a, &mut 1000, 0).unwrap();
+        let canon_b = constant(&[], &true_b, &mut 1000, 0).unwrap();
+        let canon_f = constant(&[], &false_a, &mut 1000, 0).unwrap();
+
+        assert_eq!(
+            canon_a, canon_b,
+            "alpha-equivalent closed closures must match"
+        );
+        assert_ne!(
+            canon_a, canon_f,
+            "distinct capture constants must not collide"
+        );
+        assert!(canon_a.to_string().contains("(closure-value "));
+
+        // Direct escaping uncaptured local must be rejected.
+        let leaking = Expr {
+            kind: K::Closure {
+                captures: vec![nir::program::Capture {
+                    binding: LocalId { owner: 5, index: 7 },
+                    ty: bool_ty.clone(),
+                    value: None,
+                }],
+                parameters: vec![],
+                body: Arc::new(Expr {
+                    kind: K::Local(LocalId { owner: 5, index: 7 }),
+                    ty: bool_ty,
+                    source,
+                }),
+            },
+            ty: closure_ty_a,
+            source,
+        };
+        assert!(constant(&[], &leaking, &mut 1000, 0).is_err());
+    }
+
+    #[test]
+    fn frozen_fold_decodes_function_instances_and_trait_methods() {
+        use super::*;
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let fn_ty = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let fn_decl = nir::DeclarationId {
+            package: 2,
+            local: 9,
+        };
+        let fn_val = Term::FunctionValue {
+            declaration: fn_decl,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let expr = Expr {
+            kind: K::Unit,
+            ty: fn_ty,
+            source,
+        };
+        let decoded = frozen::fold(Layouts::new(&[], &[]), &expr, &fn_val, &mut 1000, 0).unwrap();
+        assert_eq!(
+            decoded.kind,
+            K::FunctionInstance {
+                declaration: fn_decl,
+                arguments: vec![Term::Primitive(Primitive::Bool)],
+            }
+        );
+
+        let method_val = Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+            interface: nir::program::InterfaceInstance {
+                declaration: nir::DeclarationId {
+                    package: 1,
+                    local: 3,
+                },
+                arguments: vec![],
+            },
+            subject: Term::Primitive(Primitive::Bool),
+            member: nir::DeclarationId {
+                package: 1,
+                local: 4,
+            },
+            method_arguments: vec![Term::Bool(true)],
+        }));
+        let decoded_method =
+            frozen::fold(Layouts::new(&[], &[]), &expr, &method_val, &mut 1000, 0).unwrap();
+        assert!(matches!(decoded_method.kind, K::TraitMethod { .. }));
+
+        // ClosureSnapshot without a factory lookup still reports explicit error.
+        let snapshot = Term::ClosureSnapshot {
+            factory: fn_decl,
+            arguments: vec![],
+        };
+        assert!(frozen::fold(Layouts::new(&[], &[]), &expr, &snapshot, &mut 1000, 0).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -5714,6 +6093,388 @@ mod newtype_staging_tests {
             fold_value_with_layouts(layouts, &wrapped, &mut 100).unwrap(),
             wrapped
         );
+    }
+
+    #[test]
+    fn alpha_normalization_preserves_nested_captures_pattern_otherwise_or_and_call_defaults() {
+        use nir::program::{ArgumentPassing, CallArgument, Pattern as P};
+        use std::sync::Arc;
+        let source = nir::program::SourceRange { start: 1, end: 2 };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let nullary_fn_ty = Term::Function {
+            parameters: vec![],
+            result: Box::new(bool_ty.clone()),
+        };
+        let outer_fn_ty = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: bool_ty.clone(),
+                },
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: bool_ty.clone(),
+                },
+            ],
+            result: Box::new(nullary_fn_ty.clone()),
+        };
+        let outer_closure_ty = Term::Closure {
+            environment: vec![],
+            signature: Box::new(outer_fn_ty),
+        };
+        let inner_closure_ty = Term::Closure {
+            environment: vec![bool_ty.clone()],
+            signature: Box::new(nullary_fn_ty),
+        };
+        let make_nested = |pick_second: bool| {
+            let x = LocalId { owner: 1, index: 0 };
+            let y = LocalId { owner: 1, index: 1 };
+            let cap = if pick_second { y } else { x };
+            Expr {
+                kind: K::Closure {
+                    captures: vec![],
+                    parameters: vec![x, y],
+                    body: Arc::new(Expr {
+                        kind: K::Closure {
+                            captures: vec![nir::program::Capture {
+                                binding: cap,
+                                ty: bool_ty.clone(),
+                                value: None,
+                            }],
+                            parameters: vec![],
+                            body: Arc::new(Expr {
+                                kind: K::Local(cap),
+                                ty: bool_ty.clone(),
+                                source,
+                            }),
+                        },
+                        ty: inner_closure_ty.clone(),
+                        source,
+                    }),
+                },
+                ty: outer_closure_ty.clone(),
+                source,
+            }
+        };
+        let pick_first =
+            closures::alpha_normalize_closure(&[], &[], &make_nested(false), &mut 1000).unwrap();
+        let pick_second =
+            closures::alpha_normalize_closure(&[], &[], &make_nested(true), &mut 1000).unwrap();
+        assert_ne!(pick_first, pick_second);
+
+        // LetPattern preserves pattern bindings downstream after `otherwise`,
+        // while `otherwise` itself cannot reference the pattern binding.
+        let pat_var = LocalId { owner: 2, index: 0 };
+        let let_pat_ok = Expr {
+            kind: K::Block {
+                statements: vec![Expr {
+                    kind: K::LetPattern {
+                        pattern: P::Binding {
+                            binding: pat_var,
+                            inner: Box::new(P::Wild),
+                        },
+                        value: Box::new(Expr {
+                            kind: K::Literal(Literal::Bool(true)),
+                            ty: bool_ty.clone(),
+                            source,
+                        }),
+                        guard: None,
+                        otherwise: Some(Box::new(Expr {
+                            kind: K::Literal(Literal::Bool(false)),
+                            ty: bool_ty.clone(),
+                            source,
+                        })),
+                    },
+                    ty: Term::Primitive(Primitive::Void),
+                    source,
+                }],
+                result: Some(Box::new(Expr {
+                    kind: K::Local(pat_var),
+                    ty: bool_ty.clone(),
+                    source,
+                })),
+            },
+            ty: bool_ty.clone(),
+            source,
+        };
+        assert!(closures::alpha_normalize_closure(&[], &[], &let_pat_ok, &mut 1000).is_ok());
+        let let_pat_leak = Expr {
+            kind: K::LetPattern {
+                pattern: P::Binding {
+                    binding: pat_var,
+                    inner: Box::new(P::Wild),
+                },
+                value: Box::new(Expr {
+                    kind: K::Literal(Literal::Bool(true)),
+                    ty: bool_ty.clone(),
+                    source,
+                }),
+                guard: None,
+                otherwise: Some(Box::new(Expr {
+                    kind: K::Local(pat_var),
+                    ty: bool_ty.clone(),
+                    source,
+                })),
+            },
+            ty: Term::Primitive(Primitive::Void),
+            source,
+        };
+        assert!(closures::alpha_normalize_closure(&[], &[], &let_pat_leak, &mut 1000).is_err());
+
+        // P::Or keeps shared variable identity across swapped alternative binder positions.
+        let x = LocalId { owner: 3, index: 0 };
+        let y = LocalId { owner: 3, index: 1 };
+        let make_or = |swap_second: bool| {
+            let pair = |a, b| {
+                P::Tuple(vec![
+                    P::Binding {
+                        binding: a,
+                        inner: Box::new(P::Wild),
+                    },
+                    P::Binding {
+                        binding: b,
+                        inner: Box::new(P::Wild),
+                    },
+                ])
+            };
+            Expr {
+                kind: K::Match {
+                    value: Box::new(Expr {
+                        kind: K::Tuple(vec![
+                            Expr {
+                                kind: K::Literal(Literal::Bool(true)),
+                                ty: bool_ty.clone(),
+                                source,
+                            },
+                            Expr {
+                                kind: K::Literal(Literal::Bool(false)),
+                                ty: bool_ty.clone(),
+                                source,
+                            },
+                        ]),
+                        ty: Term::Tuple(vec![bool_ty.clone(), bool_ty.clone()]),
+                        source,
+                    }),
+                    arms: vec![nir::program::MatchArm {
+                        pattern: P::Or(vec![
+                            pair(x, y),
+                            if swap_second { pair(y, x) } else { pair(x, y) },
+                        ]),
+                        guard: None,
+                        body: Expr {
+                            kind: K::Local(x),
+                            ty: bool_ty.clone(),
+                            source,
+                        },
+                    }],
+                },
+                ty: bool_ty.clone(),
+                source,
+            }
+        };
+        assert_ne!(
+            closures::alpha_normalize_closure(&[], &[], &make_or(false), &mut 1000).unwrap(),
+            closures::alpha_normalize_closure(&[], &[], &make_or(true), &mut 1000).unwrap()
+        );
+
+        // Call defaults see earlier parameter_bindings, not caller locals.
+        let caller_local = LocalId { owner: 4, index: 0 };
+        let p0 = LocalId { owner: 4, index: 1 };
+        let p1 = LocalId { owner: 4, index: 2 };
+        let callee_ty = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: bool_ty.clone(),
+                },
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: bool_ty.clone(),
+                },
+            ],
+            result: Box::new(bool_ty.clone()),
+        };
+        let valid_default_call = Expr {
+            kind: K::Block {
+                statements: vec![Expr {
+                    kind: K::Let {
+                        binding: caller_local,
+                        value: Box::new(Expr {
+                            kind: K::Literal(Literal::Bool(true)),
+                            ty: bool_ty.clone(),
+                            source,
+                        }),
+                    },
+                    ty: Term::Primitive(Primitive::Void),
+                    source,
+                }],
+                result: Some(Box::new(Expr {
+                    kind: K::Call {
+                        callee: Box::new(Expr {
+                            kind: K::Function(nir::DeclarationId {
+                                package: 1,
+                                local: 1,
+                            }),
+                            ty: callee_ty.clone(),
+                            source,
+                        }),
+                        arguments: vec![
+                            CallArgument {
+                                passing: ArgumentPassing::Value,
+                                parameter: 0,
+                                is_default: false,
+                                value: Expr {
+                                    kind: K::Local(caller_local),
+                                    ty: bool_ty.clone(),
+                                    source,
+                                },
+                            },
+                            CallArgument {
+                                passing: ArgumentPassing::Value,
+                                parameter: 1,
+                                is_default: true,
+                                value: Expr {
+                                    kind: K::Local(p0),
+                                    ty: bool_ty.clone(),
+                                    source,
+                                },
+                            },
+                        ],
+                        parameter_bindings: vec![p0, p1],
+                        env_arguments: vec![],
+                    },
+                    ty: bool_ty.clone(),
+                    source,
+                })),
+            },
+            ty: bool_ty.clone(),
+            source,
+        };
+        assert!(
+            closures::alpha_normalize_closure(&[], &[], &valid_default_call, &mut 1000).is_ok()
+        );
+
+        let leaking_default_call = Expr {
+            kind: K::Block {
+                statements: vec![Expr {
+                    kind: K::Let {
+                        binding: caller_local,
+                        value: Box::new(Expr {
+                            kind: K::Literal(Literal::Bool(true)),
+                            ty: bool_ty.clone(),
+                            source,
+                        }),
+                    },
+                    ty: Term::Primitive(Primitive::Void),
+                    source,
+                }],
+                result: Some(Box::new(Expr {
+                    kind: K::Call {
+                        callee: Box::new(Expr {
+                            kind: K::Function(nir::DeclarationId {
+                                package: 1,
+                                local: 1,
+                            }),
+                            ty: callee_ty,
+                            source,
+                        }),
+                        arguments: vec![CallArgument {
+                            passing: ArgumentPassing::Value,
+                            parameter: 0,
+                            is_default: true,
+                            value: Expr {
+                                kind: K::Local(caller_local),
+                                ty: bool_ty.clone(),
+                                source,
+                            },
+                        }],
+                        parameter_bindings: vec![p0, p1],
+                        env_arguments: vec![],
+                    },
+                    ty: bool_ty.clone(),
+                    source,
+                })),
+            },
+            ty: bool_ty,
+            source,
+        };
+        assert!(
+            closures::alpha_normalize_closure(&[], &[], &leaking_default_call, &mut 1000).is_err()
+        );
+    }
+
+    #[test]
+    fn forwarded_match_collapse_stops_when_arm_local_is_written() {
+        use nir::program::Pattern as P;
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let scrut = LocalId { owner: 5, index: 0 };
+        let arm_var = LocalId { owner: 5, index: 1 };
+        let mut expr = Expr {
+            kind: K::Match {
+                value: Box::new(Expr {
+                    kind: K::Local(scrut),
+                    ty: bool_ty.clone(),
+                    source,
+                }),
+                arms: vec![nir::program::MatchArm {
+                    pattern: P::Binding {
+                        binding: arm_var,
+                        inner: Box::new(P::Wild),
+                    },
+                    guard: None,
+                    body: Expr {
+                        kind: K::Block {
+                            statements: vec![Expr {
+                                kind: K::Assign {
+                                    place: nir::program::Place {
+                                        root: arm_var,
+                                        fields: vec![],
+                                    },
+                                    value: Box::new(Expr {
+                                        kind: K::Literal(Literal::Bool(false)),
+                                        ty: bool_ty.clone(),
+                                        source,
+                                    }),
+                                },
+                                ty: Term::Primitive(Primitive::Void),
+                                source,
+                            }],
+                            result: Some(Box::new(Expr {
+                                kind: K::Local(arm_var),
+                                ty: bool_ty.clone(),
+                                source,
+                            })),
+                        },
+                        ty: bool_ty.clone(),
+                        source,
+                    },
+                }],
+            },
+            ty: bool_ty.clone(),
+            source,
+        };
+        let true_lit = Expr {
+            kind: K::Literal(Literal::Bool(true)),
+            ty: bool_ty,
+            source,
+        };
+        let mut values = BTreeMap::new();
+        values.insert(scrut, &true_lit);
+        let unavailable = BTreeSet::new();
+        let masked = BTreeSet::new();
+        substitute_forwarded_expression(
+            &[],
+            &mut expr,
+            &values,
+            &unavailable,
+            &masked,
+            false,
+            &mut 1000,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(expr.kind, K::Match { .. }));
     }
 }
 

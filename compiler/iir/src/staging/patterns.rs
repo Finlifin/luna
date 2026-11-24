@@ -69,7 +69,7 @@ fn copy_locals<'layout>(
 }
 
 #[inline(never)]
-fn matches<'layout>(
+pub(super) fn matches<'layout>(
     heads: impl Into<Layouts<'layout>>,
     pattern: &Pattern,
     value: &Expr,
@@ -331,6 +331,7 @@ pub(super) fn fold<'layout>(
 mod tests {
     use super::*;
     use nir::program::{MatchArm, SourceRange};
+
     fn boolean(value: bool) -> Expr {
         Expr {
             source: SourceRange { start: 1, end: 2 },
@@ -338,12 +339,14 @@ mod tests {
             kind: K::Literal(Literal::Bool(value)),
         }
     }
+
     fn bind(binding: LocalId) -> Pattern {
         Pattern::Binding {
             binding,
             inner: Box::new(Pattern::Wild),
         }
     }
+
     fn pair() -> Expr {
         Expr {
             source: boolean(true).source,

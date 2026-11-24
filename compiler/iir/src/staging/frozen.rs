@@ -47,9 +47,57 @@ fn decode(
             Term::FunctionValue {
                 declaration,
                 arguments,
-            } if arguments.is_empty() && matches!(ty, Term::NormalFormFunction(..)) => {
-                // The common admission step below validates the head's telescope.
-                K::Function(*declaration)
+            } if matches!(
+                ty,
+                Term::NormalFormFunction(..)
+                    | Term::Function { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::UnsafeFunction(_)
+            ) =>
+            {
+                if arguments.is_empty() {
+                    K::Function(*declaration)
+                } else {
+                    for argument in arguments {
+                        crate::completed_type(argument, &std::collections::BTreeSet::new(), fuel)?;
+                    }
+                    K::FunctionInstance {
+                        declaration: *declaration,
+                        arguments: arguments.clone(),
+                    }
+                }
+            }
+            Term::MethodValue(method)
+                if matches!(
+                    ty,
+                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                ) =>
+            {
+                crate::completed_type(&method.subject, &std::collections::BTreeSet::new(), fuel)?;
+                for argument in method
+                    .interface
+                    .arguments
+                    .iter()
+                    .chain(&method.method_arguments)
+                {
+                    crate::completed_type(argument, &std::collections::BTreeSet::new(), fuel)?;
+                }
+                K::TraitMethod {
+                    interface: method.interface.declaration,
+                    interface_arguments: method.interface.arguments.clone(),
+                    member: method.member,
+                    subject: method.subject.clone(),
+                    method_arguments: method.method_arguments.clone(),
+                }
+            }
+            Term::ClosureValue { .. } => {
+                return Err("staged closure value requires its source closure expression".into());
+            }
+            Term::ClosureSnapshot { .. } => {
+                return Err(
+                    "staged closure snapshot decoding requires factory lookup outside staging layouts"
+                        .into(),
+                );
             }
 
             Term::NominalValue {

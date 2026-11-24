@@ -1,5 +1,7 @@
 {- Ordinary runtime construction from comptime data. Implementations do not
    authorize pointers, managed storage, or arbitrary compile-time objects. -}
+use ..types.tuple.Tuple;
+
 pub trait Splice {
     assoc RuntimeTarget: Type;
 
@@ -162,6 +164,71 @@ impl Splice for void {
     assoc RuntimeTarget: Type = void;
 
     fn splice(comptime data: void) -> void {
+        data
+    }
+}
+
+impl Splice for str {
+    assoc RuntimeTarget: Type = str;
+
+    fn splice(comptime data: str) -> str {
+        data
+    }
+}
+
+impl Splice for Tuple<> {
+    assoc RuntimeTarget: Type = Tuple<>;
+
+    fn splice(comptime data: Tuple<>) -> Tuple<> {
+        data
+    }
+}
+
+impl Splice for fn() -> R where R {
+    assoc RuntimeTarget: Type = fn() -> R;
+
+    fn splice(comptime data: fn() -> R) -> fn() -> R {
+        data
+    }
+}
+
+impl Splice for fn(A0) -> R where A0, R {
+    assoc RuntimeTarget: Type = fn(A0) -> R;
+
+    fn splice(comptime data: fn(A0) -> R) -> fn(A0) -> R {
+        data
+    }
+}
+
+impl Splice for fn(A0, A1) -> R where A0, A1, R {
+    assoc RuntimeTarget: Type = fn(A0, A1) -> R;
+
+    fn splice(comptime data: fn(A0, A1) -> R) -> fn(A0, A1) -> R {
+        data
+    }
+}
+
+impl Splice for fn(A0, A1, A2) -> R where A0, A1, A2, R {
+    assoc RuntimeTarget: Type = fn(A0, A1, A2) -> R;
+
+    fn splice(comptime data: fn(A0, A1, A2) -> R) -> fn(A0, A1, A2) -> R {
+        data
+    }
+}
+
+impl Splice for fn(A0, A1, A2, A3) -> R where A0, A1, A2, A3, R {
+    assoc RuntimeTarget: Type = fn(A0, A1, A2, A3) -> R;
+
+    fn splice(comptime data: fn(A0, A1, A2, A3) -> R) -> fn(A0, A1, A2, A3) -> R {
+        data
+    }
+}
+
+^{__flurry_derivation_default: true}
+pub derive fn splice_auto for Splice {
+    assoc RuntimeTarget: Type = Self;
+
+    fn splice(comptime data: Self) -> Self {
         data
     }
 }

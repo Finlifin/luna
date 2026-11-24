@@ -12,10 +12,19 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let scope = self.local_constant_type_scope(span)?;
-        let mut active = HashSet::new();
-        let mut completed = HashSet::new();
+        let mut registry = super::ClosureRegistry::default();
+        let mut active = BTreeSet::new();
+        let mut completed = BTreeSet::new();
         for callback in callbacks {
-            self.validate_closure_snapshot(callback, span, 0, &mut active, &mut completed, &scope)?;
+            self.validate_closure_snapshot(
+                callback,
+                span,
+                0,
+                &mut registry,
+                &mut active,
+                &mut completed,
+                &scope,
+            )?;
         }
         Ok(())
     }
@@ -85,8 +94,9 @@ impl Checker<'_, '_> {
         value: &Value,
         span: Span,
         depth: usize,
-        active: &mut HashSet<ClosureIdentity>,
-        completed: &mut HashSet<ClosureIdentity>,
+        registry: &mut super::ClosureRegistry,
+        active: &mut BTreeSet<usize>,
+        completed: &mut BTreeSet<usize>,
         type_scope: &BTreeSet<DeclarationId>,
     ) -> Result<(), Error> {
         if depth >= 128 || self.required_steps == 0 {
@@ -108,6 +118,7 @@ impl Checker<'_, '_> {
                         value,
                         span,
                         depth + 1,
+                        registry,
                         active,
                         completed,
                         type_scope,
@@ -143,11 +154,11 @@ impl Checker<'_, '_> {
                 if !closure.ty().is_comptime_callable() {
                     return Err(error(span, "closure snapshot requires comptime captures"));
                 }
-                let identity = ClosureIdentity::new(closure);
+                let identity = registry.intern(closure);
                 if completed.contains(&identity) {
                     return Ok(());
                 }
-                if !active.insert(identity.clone()) {
+                if !active.insert(identity) {
                     return Err(error(
                         span,
                         "cyclic closure environment cannot be snapshotted",
@@ -166,6 +177,7 @@ impl Checker<'_, '_> {
                             capture,
                             span,
                             depth + 1,
+                            registry,
                             active,
                             completed,
                             type_scope,
@@ -354,7 +366,15 @@ impl Checker<'_, '_> {
             if let Some(domain) = domain {
                 self.check_capture_domain(domain, type_scope, span)?;
             }
-            self.validate_closure_snapshot(child, span, depth + 1, active, completed, type_scope)
+            self.validate_closure_snapshot(
+                child,
+                span,
+                depth + 1,
+                registry,
+                active,
+                completed,
+                type_scope,
+            )
         })
     }
 }

@@ -479,9 +479,10 @@ fn bit_width_at(
                     .pointer_bits(),
             ))
         }
-        Term::ComptimeFunction(_) | Term::NormalFormFunction(..) | Term::Lift(_) => {
-            Err(LayoutError::ComptimeOnly(ty.clone()))
-        }
+        Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(..)
+        | Term::Lift(_)
+        | Term::ClosureValue { .. } => Err(LayoutError::ComptimeOnly(ty.clone())),
         Term::Nominal { .. } => {
             if visiting.contains(ty) {
                 return Err(LayoutError::Cycle(ty.clone()));
@@ -1028,9 +1029,10 @@ fn layout_with_niche_at(
                 }),
             })
         }
-        Term::ComptimeFunction(_) | Term::NormalFormFunction(..) | Term::Lift(_) => {
-            Err(LayoutError::ComptimeOnly(ty.clone()))
-        }
+        Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(..)
+        | Term::Lift(_)
+        | Term::ClosureValue { .. } => Err(LayoutError::ComptimeOnly(ty.clone())),
         Term::Optional(payload) => {
             if **payload == Term::Primitive(Primitive::Never) {
                 return Ok(LayoutWithNiche {
@@ -1520,6 +1522,7 @@ fn bit_packed_field_info_at(
             Err(BitPackedError::Layout(LayoutError::Unresolved(ty.clone())))
         }
         Term::ClosureContextType
+        | Term::ClosureValue { .. }
         | Term::EffectRowType
         | Term::ErrorRowType
         | Term::ReachabilityType

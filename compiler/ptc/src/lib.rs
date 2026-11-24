@@ -1226,6 +1226,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
     match term {
         Term::MethodValue(method) => method.terms().collect(),
         Term::FunctionValue { arguments, .. } => arguments.iter().collect(),
+        Term::ClosureValue { ty, captures, .. } => {
+            std::iter::once(ty.as_ref()).chain(captures.iter()).collect()
+        }
         // Rows do not introduce binders: labels and residuals inhabit the
         // surrounding scope. Callable-local binders remain opaque below.
         Term::ErrorResult { errors, result } => errors
@@ -1302,6 +1305,9 @@ fn has_bound(term: &Term) -> bool {
         Term::MethodValue(method) => method.terms().any(has_bound),
         Term::FunctionValue { arguments, .. } | Term::ClosureSnapshot { arguments, .. } => {
             arguments.iter().any(has_bound)
+        }
+        Term::ClosureValue { ty, captures, .. } => {
+            has_bound(ty) || captures.iter().any(has_bound)
         }
         Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
         Term::Computation { effects, result } => {
@@ -1889,6 +1895,21 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     ) = (a, b)
     {
         return a == b && aa.len() == ba.len();
+    }
+    if let (
+        Term::ClosureValue {
+            body: a_body,
+            captures: a_captures,
+            ..
+        },
+        Term::ClosureValue {
+            body: b_body,
+            captures: b_captures,
+            ..
+        },
+    ) = (a, b)
+    {
+        return a_body == b_body && a_captures.len() == b_captures.len();
     }
     if let (Term::MethodValue(a), Term::MethodValue(b)) = (a, b) {
         return a.interface.declaration == b.interface.declaration
@@ -2742,6 +2763,7 @@ fn reify(
                     | Term::OptionalValue { .. }
                     | Term::ErrorValue { .. }
                     | Term::FunctionValue { .. }
+                    | Term::ClosureValue { .. }
                     | Term::MethodValue(_)
             )
         {
@@ -2800,6 +2822,11 @@ fn rebuild(
         } => Some(Term::FunctionValue {
             declaration: *declaration,
             arguments: arguments.iter().map(&mut *child).collect::<Option<_>>()?,
+        }),
+        Term::ClosureValue { ty, body, captures } => Some(Term::ClosureValue {
+            ty: Box::new(child(ty)?),
+            body: body.clone(),
+            captures: captures.iter().map(&mut *child).collect::<Option<_>>()?,
         }),
         Term::MethodValue(method) => Some(Term::MethodValue(Box::new(nir::TraitMethodIdentity {
             interface: nir::program::InterfaceInstance {

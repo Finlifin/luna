@@ -200,7 +200,8 @@ impl Key {
                 | Term::ClosureContextValue(_)
                 | Term::ListConcat { .. }
                 | Term::TupleValue(_)
-                | Term::RecordValue(_) => {
+                | Term::RecordValue(_)
+                | Term::ClosureValue { .. } => {
                     // Validate and bound the complete opaque value before cloning.
                     let mut work = vec![(ty, depth)];
                     let mut open = false;
@@ -249,7 +250,12 @@ impl Key {
                                 work.push((value, d + 1));
                             }
                             Term::ListConcat { ty, parts: fields }
-                            | Term::NominalValue { ty, fields, .. } => {
+                            | Term::NominalValue { ty, fields, .. }
+                            | Term::ClosureValue {
+                                ty,
+                                captures: fields,
+                                ..
+                            } => {
                                 if fields.len().saturating_add(1) > *fuel {
                                     return Err(Error::BudgetExhausted);
                                 }

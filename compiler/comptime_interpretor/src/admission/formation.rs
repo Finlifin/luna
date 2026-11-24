@@ -200,6 +200,12 @@ impl Interpreter<'_> {
                     self.admit_in_telescope(argument, depth + 1, frames)?;
                 }
             }
+            Term::ClosureValue { ty, captures, .. } => {
+                self.admit_in_telescope(ty, depth + 1, frames)?;
+                for capture in captures {
+                    self.admit_in_telescope(capture, depth + 1, frames)?;
+                }
+            }
             Term::Tuple(types) | Term::ClosureContextValue(types) | Term::TupleValue(types) => {
                 for ty in types {
                     self.admit_in_telescope(ty, depth + 1, frames)?;

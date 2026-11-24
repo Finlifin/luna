@@ -402,9 +402,11 @@ pub(super) fn inspect<'signature>(
                 .saturating_add(method.method_arguments.len()),
             Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
-            Term::ListConcat { parts: fields, .. } | Term::NominalValue { fields, .. } => {
-                fields.len().saturating_add(1)
-            }
+            Term::ListConcat { parts: fields, .. }
+            | Term::NominalValue { fields, .. }
+            | Term::ClosureValue {
+                captures: fields, ..
+            } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Tuple(items)
             | Term::ClosureContextValue(items)
@@ -555,7 +557,13 @@ pub(super) fn inspect<'signature>(
                 }
                 pending.push(Work::Visit(value, depth + 1));
             }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields }
+            | Term::NominalValue { ty, fields, .. }
+            | Term::ClosureValue {
+                ty,
+                captures: fields,
+                ..
+            } => {
                 pending.push(Work::Visit(ty, depth + 1));
                 pending.extend(fields.iter().map(|field| Work::Visit(field, depth + 1)));
             }

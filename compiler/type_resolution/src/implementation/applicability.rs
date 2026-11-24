@@ -481,7 +481,13 @@ pub(super) fn validate(
                 pending.push((Work::Term(value), depth + 1));
             }
             Work::Term(
-                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. },
+                Term::ListConcat { ty, parts: fields }
+                | Term::NominalValue { ty, fields, .. }
+                | Term::ClosureValue {
+                    ty,
+                    captures: fields,
+                    ..
+                },
             ) => {
                 if fields.len().saturating_add(1) > fuel {
                     return Err(nir::type_computations::Error::Budget);

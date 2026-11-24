@@ -613,6 +613,15 @@ pub(super) fn expand<'h>(
                 fuel,
             )?;
         }
+        splice_auto::maybe_expand(
+            source,
+            arena,
+            strategy,
+            validated_deriver_attrs,
+            &mut drafts,
+            span,
+            fuel,
+        )?;
         if let Some((owner, identity)) = group {
             let (execution_owner, execution_identity) = execution.unwrap();
             let (subject_owner, subject_identity) = subject_capture.unwrap();
@@ -917,4 +926,1018 @@ pub(super) fn expand<'h>(
                 ))
     });
     Ok(candidate)
+}
+
+mod splice_auto {
+    use super::*;
+    use hir::common::{Arg, BindingMode, Ident};
+    use hir::item::{Variant, VariantKind};
+    use hir::pattern::{FieldPat, Pattern, PatternArm, PatternKind as P};
+    use hir::{Expr, HirId, ItemLocalId, Node};
+
+    pub(super) fn maybe_expand<'h>(
+        source: &Package<'h>,
+        arena: &'h HirArena,
+        strategy: OwnerId,
+        validated_deriver_attrs: &BTreeSet<OwnerId>,
+        drafts: &mut [(function_templates::ClonedMember<'h>, DefId)],
+        span: rustc_span::Span,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        if !validated_deriver_attrs.contains(&strategy) {
+            return Ok(());
+        }
+        let Some(strategy_item) = source.item(strategy) else {
+            return Ok(());
+        };
+        if strategy_item.ident.name != "splice_auto" {
+            return Ok(());
+        }
+        let ItemKind::Deriver(generator) = &strategy_item.kind else {
+            return Ok(());
+        };
+        if !generator.parameters.is_empty() {
+            return Ok(());
+        }
+        let Some(strategy_def) = source.owner_definition(strategy) else {
+            return Ok(());
+        };
+        let Some(trait_owner) = expr_head_owner(source, generator.trait_ref) else {
+            return Ok(());
+        };
+        let Some(trait_def) = source.owner_definition(trait_owner) else {
+            return Ok(());
+        };
+        if strategy_def.pkg != trait_def.pkg || !is_builtin_splice_trait(source, trait_owner) {
+            return Ok(());
+        }
+        let Some((shell_draft, _)) = drafts.first() else {
+            return Ok(());
+        };
+        let ItemKind::Impl(impl_def) = &shell_draft.item.kind else {
+            return Ok(());
+        };
+        let self_ty_expr = impl_def.self_ty;
+        let subject_owner = expr_head_owner(source, self_ty_expr).ok_or_else(|| {
+            error(
+                span,
+                "derive(Splice) requires a nominal struct or enum type",
+            )
+        })?;
+        let drop_nominals = collect_drop_nominals(source, trait_def.pkg, fuel)?;
+        validate_finite_hir(
+            source,
+            subject_owner,
+            &drop_nominals,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            span,
+            fuel,
+        )?;
+        let Some((fn_draft, _)) = drafts
+            .iter_mut()
+            .skip(1)
+            .find(|(draft, _)| draft.item.ident.name == "splice")
+        else {
+            return Ok(());
+        };
+        rewrite_splice_fn_body(
+            source,
+            arena,
+            fn_draft,
+            self_ty_expr,
+            subject_owner,
+            span,
+            fuel,
+        )
+    }
+
+    fn expr_head_owner<'h>(source: &Package<'h>, mut expr: &'h Expr<'h>) -> Option<OwnerId> {
+        loop {
+            match expr.kind {
+                E::ResolvedDef { def_id, .. } => return source.definition_owner(def_id),
+                E::NFApplication(head, _) | E::Application(head, _) => expr = head,
+                _ => return None,
+            }
+        }
+    }
+
+    fn is_builtin_splice_trait<'h>(source: &Package<'h>, owner: OwnerId) -> bool {
+        let Some(item) = source.item(owner) else {
+            return false;
+        };
+        if item.ident.name != "Splice" {
+            return false;
+        }
+        let ItemKind::Trait(def) = &item.kind else {
+            return false;
+        };
+        if def.items.len() != 2 {
+            return false;
+        }
+        let mut saw_runtime_target = false;
+        let mut saw_splice_fn = false;
+        for &member_owner in &def.items {
+            let Some(member) = source.item(member_owner) else {
+                return false;
+            };
+            match &member.kind {
+                ItemKind::Associated(_) if member.ident.name == "RuntimeTarget" => {
+                    saw_runtime_target = true;
+                }
+                ItemKind::FnDeclaration(sig)
+                    if member.ident.name == "splice"
+                        && sig.params.len() == 1
+                        && sig.params[0].ty.is_comptime() =>
+                {
+                    saw_splice_fn = true;
+                }
+                _ => return false,
+            }
+        }
+        saw_runtime_target && saw_splice_fn
+    }
+
+    fn is_builtin_drop_trait<'h>(source: &Package<'h>, owner: OwnerId) -> bool {
+        let Some(item) = source.item(owner) else {
+            return false;
+        };
+        if item.ident.name != "Drop" {
+            return false;
+        }
+        let ItemKind::Trait(def) = &item.kind else {
+            return false;
+        };
+        if def.items.len() != 1 {
+            return false;
+        }
+        let Some(member) = source.item(def.items[0]) else {
+            return false;
+        };
+        matches!(
+            &member.kind,
+            ItemKind::FnDeclaration(sig)
+                if member.ident.name == "drop"
+                    && sig.params.len() == 1
+                    && matches!(
+                        sig.params[0].ty.kind,
+                        hir::common::TyParamKind::Itself { is_ref: true }
+                    )
+        )
+    }
+
+    fn is_drop_trait<'h>(source: &Package<'h>, trait_ref: &'h Expr<'h>, builtin_pkg: u32) -> bool {
+        let Some(owner) = expr_head_owner(source, trait_ref) else {
+            return false;
+        };
+        source
+            .owner_definition(owner)
+            .is_some_and(|def| def.pkg == builtin_pkg)
+            && is_builtin_drop_trait(source, owner)
+    }
+
+    fn collect_drop_nominals<'h>(
+        source: &Package<'h>,
+        builtin_pkg: u32,
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<OwnerId>, Error> {
+        let mut dropped = BTreeSet::new();
+        for (_, info) in source.owners() {
+            let item = info.node.expect_item();
+            charge(fuel, item.span)?;
+            if let ItemKind::Impl(impl_def) = &item.kind
+                && let Some(trait_ref) = impl_def.trait_ref
+                && is_drop_trait(source, trait_ref, builtin_pkg)
+                && let Some(subject) = expr_head_owner(source, impl_def.self_ty)
+            {
+                dropped.insert(subject);
+            }
+        }
+        Ok(dropped)
+    }
+
+    fn validate_finite_hir<'h>(
+        source: &Package<'h>,
+        owner: OwnerId,
+        drop_nominals: &BTreeSet<OwnerId>,
+        visiting: &mut BTreeSet<OwnerId>,
+        visited: &mut BTreeSet<OwnerId>,
+        span: rustc_span::Span,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        charge(fuel, span)?;
+        if !visiting.insert(owner) {
+            return Err(error(span, "cannot auto-derive Splice for cyclic type"));
+        }
+        if drop_nominals.contains(&owner) {
+            return Err(error(span, "cannot auto-derive Splice for Drop type"));
+        }
+        if visited.contains(&owner) {
+            visiting.remove(&owner);
+            return Ok(());
+        }
+        let item = source
+            .item(owner)
+            .ok_or_else(|| error(span, "derive(Splice) target item is missing"))?;
+        match &item.kind {
+            ItemKind::Struct(def) => {
+                for field in def.fields {
+                    validate_hir_ty(
+                        source,
+                        field.ty,
+                        Some(owner),
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+            }
+            ItemKind::Enum(def) => {
+                validate_enum_variants(
+                    source,
+                    def.variants,
+                    owner,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+            }
+            ItemKind::TypeAlias(target, ..) | ItemKind::Newtype(target, ..) => {
+                validate_hir_ty(
+                    source,
+                    target,
+                    Some(owner),
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+            }
+            _ => {
+                visiting.remove(&owner);
+                return Err(error(
+                    item.span,
+                    "derive(Splice) requires a struct or enum target type",
+                ));
+            }
+        }
+        visiting.remove(&owner);
+        visited.insert(owner);
+        Ok(())
+    }
+
+    fn validate_enum_variants<'h>(
+        source: &Package<'h>,
+        variants: &'h [Variant<'h>],
+        enum_owner: OwnerId,
+        drop_nominals: &BTreeSet<OwnerId>,
+        visiting: &mut BTreeSet<OwnerId>,
+        visited: &mut BTreeSet<OwnerId>,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        for variant in variants {
+            charge(fuel, variant.span)?;
+            match &variant.kind {
+                VariantKind::Unit | VariantKind::Const(_) => {}
+                VariantKind::Tuple(fields) => {
+                    for field_ty in *fields {
+                        validate_hir_ty(
+                            source,
+                            field_ty,
+                            Some(enum_owner),
+                            drop_nominals,
+                            visiting,
+                            visited,
+                            fuel,
+                        )?;
+                    }
+                }
+                VariantKind::Struct(fields) => {
+                    for field in *fields {
+                        validate_hir_ty(
+                            source,
+                            field.ty,
+                            Some(enum_owner),
+                            drop_nominals,
+                            visiting,
+                            visited,
+                            fuel,
+                        )?;
+                    }
+                }
+                VariantKind::SubEnum(nested) => {
+                    validate_enum_variants(
+                        source,
+                        nested,
+                        enum_owner,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                VariantKind::Pattern(_) => {
+                    return Err(error(
+                        variant.span,
+                        "cannot auto-derive Splice for pattern enum variant",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ty_params<'h>(
+        source: &Package<'h>,
+        params: &'h [hir::common::TyParam<'h>],
+        current_nominal: Option<OwnerId>,
+        drop_nominals: &BTreeSet<OwnerId>,
+        visiting: &mut BTreeSet<OwnerId>,
+        visited: &mut BTreeSet<OwnerId>,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        for param in params {
+            if param.is_comptime() || param.is_quote() {
+                return Err(error(
+                    param.span,
+                    "cannot auto-derive Splice across comptime or quote callable parameter",
+                ));
+            }
+            match param.kind {
+                hir::common::TyParamKind::Positional(ty)
+                | hir::common::TyParamKind::PositionalDependencyCatched(_, ty)
+                | hir::common::TyParamKind::Varadic(_, ty)
+                | hir::common::TyParamKind::Optional(_, ty, _) => {
+                    validate_hir_ty(
+                        source,
+                        ty,
+                        current_nominal,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                hir::common::TyParamKind::Itself { is_ref } => {
+                    if is_ref {
+                        return Err(error(
+                            param.span,
+                            "cannot auto-derive Splice across `*self` callable parameter",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_hir_ty<'h>(
+        source: &Package<'h>,
+        expr: &'h Expr<'h>,
+        current_nominal: Option<OwnerId>,
+        drop_nominals: &BTreeSet<OwnerId>,
+        visiting: &mut BTreeSet<OwnerId>,
+        visited: &mut BTreeSet<OwnerId>,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        charge(fuel, expr.span)?;
+        match expr.kind {
+            E::TyPtr(_) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across shared reference `*T`",
+            )),
+            E::LiftType(_) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across `lift` type",
+            )),
+            E::TyTraitObject(_) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across `dyn` trait object",
+            )),
+            E::TyComptimeFn(_) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across comptime function type",
+            )),
+            E::TyNFFn(_) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across normal-form function type",
+            )),
+            E::ContextualExprType(..) | E::ContextualPatternType(..) => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across contextual code type",
+            )),
+            E::TyModifiedFn(mods, params) => {
+                if mods.is_comptime {
+                    return Err(error(
+                        expr.span,
+                        "cannot auto-derive Splice across comptime function type",
+                    ));
+                }
+                validate_ty_params(
+                    source,
+                    params,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )
+            }
+            E::TyFn(params) => validate_ty_params(
+                source,
+                params,
+                current_nominal,
+                drop_nominals,
+                visiting,
+                visited,
+                fuel,
+            ),
+            E::TyFnArrow(lhs, rhs) => {
+                validate_hir_ty(
+                    source,
+                    lhs,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+                validate_hir_ty(
+                    source,
+                    rhs,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )
+            }
+            E::TyClosure(env, sig) => {
+                validate_hir_ty(
+                    source,
+                    env,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+                validate_hir_ty(
+                    source,
+                    sig,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )
+            }
+            E::TyClosureEnvironment(bindings) => {
+                for binding in bindings {
+                    validate_hir_ty(
+                        source,
+                        binding.ty,
+                        current_nominal,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                Ok(())
+            }
+            E::TySelf => {
+                if current_nominal.is_some() {
+                    Err(error(
+                        expr.span,
+                        "cannot auto-derive Splice for cyclic `Self` field",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            E::TyOptional(inner)
+            | E::EffectQualifiedType(_, inner)
+            | E::RefinedType { base: inner, .. } => validate_hir_ty(
+                source,
+                inner,
+                current_nominal,
+                drop_nominals,
+                visiting,
+                visited,
+                fuel,
+            ),
+            E::ErrorQualifiedType(err, ok) => {
+                validate_hir_ty(
+                    source,
+                    err,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+                validate_hir_ty(
+                    source,
+                    ok,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )
+            }
+            E::Tuple(elements) => {
+                for element in elements {
+                    validate_hir_ty(
+                        source,
+                        element,
+                        current_nominal,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                Ok(())
+            }
+            E::Object(ref entries) => {
+                for entry in entries {
+                    let target = match entry {
+                        hir::expr::ObjectEntry::Value(e) => e,
+                        hir::expr::ObjectEntry::Property(f) => f.expr,
+                    };
+                    validate_hir_ty(
+                        source,
+                        target,
+                        current_nominal,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                Ok(())
+            }
+            E::ResolvedDef { def_id, .. } => {
+                if let Some(owner) = source.definition_owner(def_id)
+                    && matches!(
+                        source.item(owner).map(|item| &item.kind),
+                        Some(
+                            ItemKind::Struct(_)
+                                | ItemKind::Enum(_)
+                                | ItemKind::TypeAlias(..)
+                                | ItemKind::Newtype(..)
+                        )
+                    )
+                {
+                    validate_finite_hir(
+                        source,
+                        owner,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        expr.span,
+                        fuel,
+                    )?;
+                }
+                Ok(())
+            }
+            E::NFApplication(head, args)
+            | E::Application(head, args)
+            | E::ExtendedApplication(head, args) => {
+                validate_hir_ty(
+                    source,
+                    head,
+                    current_nominal,
+                    drop_nominals,
+                    visiting,
+                    visited,
+                    fuel,
+                )?;
+                for arg in args {
+                    let arg_expr = match arg {
+                        Arg::Positional(e)
+                        | Arg::Named(_, e)
+                        | Arg::Expand(e)
+                        | Arg::Implicit(e)
+                        | Arg::PostLambda(e) => e,
+                    };
+                    validate_hir_ty(
+                        source,
+                        arg_expr,
+                        current_nominal,
+                        drop_nominals,
+                        visiting,
+                        visited,
+                        fuel,
+                    )?;
+                }
+                Ok(())
+            }
+            E::DeliveredType(_)
+            | E::ConstantObjectEntry(..)
+            | E::Lit(_)
+            | E::CodeQuote(..)
+            | E::CodePatternQuote(..)
+            | E::CodeSplice(..)
+            | E::LiteralConversion { .. }
+            | E::Path(_)
+            | E::UnresolvedIdent(_)
+            | E::TacticParameter(_)
+            | E::TacticArgument(_)
+            | E::PostLambdaBody(_)
+            | E::ResolvedLocal(..)
+            | E::ResolvedFnParam(..)
+            | E::ResolvedClauseParam(..)
+            | E::ResolvedLoopLabel(..)
+            | E::SelfValue
+            | E::Index(..)
+            | E::Range { .. }
+            | E::CollectedProperties(_)
+            | E::Binary(..)
+            | E::Unary(..)
+            | E::If(..)
+            | E::When(_)
+            | E::Block(_)
+            | E::UnsafeBlock(_)
+            | E::Loop(_)
+            | E::Match(..)
+            | E::EffectRequest(_)
+            | E::EffectHandle(..)
+            | E::Assign(..)
+            | E::AssignOp(..)
+            | E::Assumes(_)
+            | E::Defer(_)
+            | E::InlineControl(_)
+            | E::RefinementSubject
+            | E::Return(_)
+            | E::OptionPropagate(_)
+            | E::Resume(_)
+            | E::Break(_)
+            | E::BreakTo(_)
+            | E::Continue(_)
+            | E::ContinueTo(_)
+            | E::Projection(..)
+            | E::List(_)
+            | E::Ref(_)
+            | E::Deref(_)
+            | E::ErrorNew(_)
+            | E::ErrorPropagate(_)
+            | E::ErrorHandle { .. }
+            | E::Closure(..)
+            | E::Cast(..)
+            | E::DynCast(..)
+            | E::Let(_)
+            | E::Semi(_)
+            | E::Item(_)
+            | E::Undefined
+            | E::Null
+            | E::Unit
+            | E::For { .. }
+            | E::InlineIf { .. }
+            | E::InlineMatch(_)
+            | E::InlineFor { .. }
+            | E::ReachabilityType
+            | E::TyPlaceholder
+            | E::TyNoReturn
+            | E::TyVoid
+            | E::TyAny
+            | E::TyType
+            | E::TermTypedWith
+            | E::TraitBound(..)
+            | E::LambdaBound
+            | E::TermTraitBound
+            | E::Implication
+            | E::Subtype
+            | E::Forall
+            | E::Exist
+            | E::Builtin(_)
+            | E::TakeOld(_)
+            | E::TakeBitVec(_)
+            | E::TakeTagName(_)
+            | E::TakeAttribute(_)
+            | E::TakeIntrinsic(_)
+            | E::TakeTupleEnumerate(_)
+            | E::TakeTupleIndexed(_)
+            | E::TypeOf(_)
+            | E::MultiDeref(_)
+            | E::Invalid => Ok(()),
+        }
+    }
+
+    struct DraftBuilder<'a, 'h> {
+        arena: &'h HirArena,
+        draft: &'a mut function_templates::ClonedMember<'h>,
+        owner: OwnerId,
+        next_local: u32,
+        span: rustc_span::Span,
+        fuel: &'a mut usize,
+    }
+
+    impl<'a, 'h> DraftBuilder<'a, 'h> {
+        fn new(
+            arena: &'h HirArena,
+            draft: &'a mut function_templates::ClonedMember<'h>,
+            span: rustc_span::Span,
+            fuel: &'a mut usize,
+        ) -> Self {
+            let owner = draft.item.owner_id;
+            let max_binding = draft
+                .bindings
+                .values()
+                .filter(|id| id.owner == owner)
+                .map(|id| id.local_id.raw())
+                .max()
+                .unwrap_or(0);
+            let mut next_local = max_binding + 16;
+            while draft.nodes.get(ItemLocalId::new(next_local)).is_some() {
+                next_local += 1;
+            }
+            Self {
+                arena,
+                draft,
+                owner,
+                next_local,
+                span,
+                fuel,
+            }
+        }
+
+        fn alloc_id(&mut self) -> Result<HirId, Error> {
+            charge(self.fuel, self.span)?;
+            let id = HirId::new(self.owner, ItemLocalId::new(self.next_local));
+            self.next_local += 1;
+            Ok(id)
+        }
+
+        fn expr(&mut self, kind: E<'h>, span: rustc_span::Span) -> Result<&'h Expr<'h>, Error> {
+            let hir_id = self.alloc_id()?;
+            let allocated = self.arena.alloc_expr(Expr { hir_id, kind, span });
+            self.draft
+                .nodes
+                .insert(hir_id.local_id, ItemLocalId::new(0), Node::Expr(allocated));
+            Ok(allocated)
+        }
+
+        fn clone_expr(&mut self, expr: &'h Expr<'h>) -> Result<&'h Expr<'h>, Error> {
+            charge(self.fuel, expr.span)?;
+            let kind = match &expr.kind {
+                E::ResolvedDef {
+                    name,
+                    has_clause_param,
+                    def_id,
+                } => E::ResolvedDef {
+                    name: *name,
+                    has_clause_param: *has_clause_param,
+                    def_id: *def_id,
+                },
+                E::ResolvedClauseParam(name, def_id) => E::ResolvedClauseParam(*name, *def_id),
+                E::NFApplication(head, args) => {
+                    let head = self.clone_expr(head)?;
+                    let args = self.clone_args(args)?;
+                    E::NFApplication(head, args)
+                }
+                E::Application(head, args) => {
+                    let head = self.clone_expr(head)?;
+                    let args = self.clone_args(args)?;
+                    E::Application(head, args)
+                }
+                E::Projection(base, field) => E::Projection(self.clone_expr(base)?, *field),
+                E::TySelf => E::TySelf,
+                E::DeliveredType(term) => E::DeliveredType(term.clone()),
+                other => other.clone(),
+            };
+            self.expr(kind, expr.span)
+        }
+
+        fn clone_args(&mut self, args: &'h [Arg<'h>]) -> Result<&'h [Arg<'h>], Error> {
+            let mut cloned = Vec::with_capacity(args.len());
+            for arg in args {
+                cloned.push(match arg {
+                    Arg::Positional(e) => Arg::Positional(self.clone_expr(e)?),
+                    Arg::Named(ident, e) => Arg::Named(*ident, self.clone_expr(e)?),
+                    Arg::Expand(e) => Arg::Expand(self.clone_expr(e)?),
+                    Arg::Implicit(e) => Arg::Implicit(self.clone_expr(e)?),
+                    Arg::PostLambda(e) => Arg::PostLambda(self.clone_expr(e)?),
+                });
+            }
+            Ok(self.arena.alloc_arg_slice(cloned))
+        }
+
+        fn pat(
+            &mut self,
+            kind: P<'h>,
+            span: rustc_span::Span,
+        ) -> Result<(Pattern<'h>, &'h Pattern<'h>), Error> {
+            let hir_id = self.alloc_id()?;
+            let pat = Pattern { hir_id, kind, span };
+            let pat_ref = self.arena.alloc_pattern(pat.clone());
+            self.draft
+                .nodes
+                .insert(hir_id.local_id, ItemLocalId::new(0), Node::Pattern(pat_ref));
+            Ok((pat, pat_ref))
+        }
+    }
+
+    fn rewrite_splice_fn_body<'h>(
+        source: &Package<'h>,
+        arena: &'h HirArena,
+        fn_draft: &mut function_templates::ClonedMember<'h>,
+        self_ty_expr: &'h Expr<'h>,
+        subject_owner: OwnerId,
+        span: rustc_span::Span,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        let ItemKind::Fn(sig, body_id) = &fn_draft.item.kind else {
+            return Ok(());
+        };
+        let body_id = *body_id;
+        let Some(data_param) = sig.params.first() else {
+            return Ok(());
+        };
+        let data_param_name = data_param.name.name;
+        let data_param_hir_id = data_param.hir_id;
+        let data_span = data_param.span;
+        let subject_item = source
+            .item(subject_owner)
+            .ok_or_else(|| error(span, "derive(Splice) subject item missing"))?;
+        let mut builder = DraftBuilder::new(arena, fn_draft, span, fuel);
+        let new_body_expr = match &subject_item.kind {
+            ItemKind::Struct(def) => {
+                let mut args = Vec::with_capacity(def.fields.len());
+                for field in def.fields {
+                    let data_ref = builder.expr(
+                        E::ResolvedFnParam(data_param_name, data_param_hir_id),
+                        field.span,
+                    )?;
+                    let field_val =
+                        builder.expr(E::Projection(data_ref, field.ident), field.span)?;
+                    args.push(Arg::Named(field.ident, field_val));
+                }
+                let callee = builder.clone_expr(self_ty_expr)?;
+                let args = builder.arena.alloc_arg_slice(args);
+                builder.expr(E::ExtendedApplication(callee, args), span)?
+            }
+            ItemKind::Enum(def) => {
+                let mut arms = Vec::new();
+                collect_enum_arms(
+                    &mut builder,
+                    self_ty_expr,
+                    &[],
+                    def.variants,
+                    &mut arms,
+                    span,
+                )?;
+                let data_ref = builder.expr(
+                    E::ResolvedFnParam(data_param_name, data_param_hir_id),
+                    data_span,
+                )?;
+                let arms = builder.arena.alloc_arm_slice(arms);
+                for arm in arms {
+                    builder.draft.nodes.insert(
+                        arm.hir_id.local_id,
+                        ItemLocalId::new(0),
+                        Node::PatternArm(arm),
+                    );
+                }
+                let match_expr = builder.expr(E::Match(data_ref, arms), span)?;
+                match_expr
+            }
+            _ => {
+                return Err(error(
+                    span,
+                    "derive(Splice) requires a struct or enum target type",
+                ));
+            }
+        };
+        if let Some((_, body)) = fn_draft.bodies.iter_mut().find(|(id, _)| *id == body_id) {
+            body.value = new_body_expr;
+        }
+        Ok(())
+    }
+
+    fn projected_variant<'h>(
+        builder: &mut DraftBuilder<'_, 'h>,
+        self_ty_expr: &'h Expr<'h>,
+        prefix: &[Ident],
+        variant_ident: Ident,
+    ) -> Result<&'h Expr<'h>, Error> {
+        let mut expr = builder.clone_expr(self_ty_expr)?;
+        for segment in prefix {
+            expr = builder.expr(E::Projection(expr, *segment), segment.span)?;
+        }
+        builder.expr(E::Projection(expr, variant_ident), variant_ident.span)
+    }
+
+    fn collect_enum_arms<'h>(
+        builder: &mut DraftBuilder<'_, 'h>,
+        self_ty_expr: &'h Expr<'h>,
+        prefix: &[Ident],
+        variants: &'h [Variant<'h>],
+        arms: &mut Vec<PatternArm<'h>>,
+        span: rustc_span::Span,
+    ) -> Result<(), Error> {
+        for variant in variants {
+            charge(builder.fuel, variant.span)?;
+            match &variant.kind {
+                VariantKind::Unit | VariantKind::Const(_) => {
+                    let pat_target =
+                        projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let (pat, _) = builder.pat(P::Const(pat_target), variant.span)?;
+                    let body = projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let arm_id = builder.alloc_id()?;
+                    arms.push(PatternArm {
+                        hir_id: arm_id,
+                        pat,
+                        guard: None,
+                        body,
+                        span: variant.span,
+                    });
+                }
+                VariantKind::Tuple(fields) => {
+                    let callee_pat_expr =
+                        projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let (_, callee_pat) = builder.pat(P::Const(callee_pat_expr), variant.span)?;
+                    let mut sub_pats = Vec::with_capacity(fields.len());
+                    let mut call_args = Vec::with_capacity(fields.len());
+                    for (idx, field_ty) in fields.iter().enumerate() {
+                        let name = hir::Symbol::intern(&format!("__splice_v{idx}"));
+                        let ident = Ident::new(name, field_ty.span);
+                        let (bind_pat, _) = builder
+                            .pat(P::Binding(BindingMode::ByValue, ident, None), field_ty.span)?;
+                        let arg_ref =
+                            builder.expr(E::ResolvedLocal(name, bind_pat.hir_id), field_ty.span)?;
+                        sub_pats.push(bind_pat);
+                        call_args.push(Arg::Positional(arg_ref));
+                    }
+                    let sub_pats = builder.arena.alloc_pattern_slice(sub_pats);
+                    let (pat, _) = builder.pat(P::AppTuple(callee_pat, sub_pats), variant.span)?;
+                    let ctor = projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let call_args = builder.arena.alloc_arg_slice(call_args);
+                    let body = builder.expr(E::Application(ctor, call_args), variant.span)?;
+                    let arm_id = builder.alloc_id()?;
+                    arms.push(PatternArm {
+                        hir_id: arm_id,
+                        pat,
+                        guard: None,
+                        body,
+                        span: variant.span,
+                    });
+                }
+                VariantKind::Struct(fields) => {
+                    let callee_pat_expr =
+                        projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let (_, callee_pat) = builder.pat(P::Const(callee_pat_expr), variant.span)?;
+                    let mut field_pats = Vec::with_capacity(fields.len());
+                    let mut call_args = Vec::with_capacity(fields.len());
+                    for (idx, field) in fields.iter().enumerate() {
+                        let local_name = hir::Symbol::intern(&format!("__splice_f{idx}"));
+                        let local_ident = Ident::new(local_name, field.span);
+                        let (bind_pat, _) = builder.pat(
+                            P::Binding(BindingMode::ByValue, local_ident, None),
+                            field.span,
+                        )?;
+                        let arg_ref = builder
+                            .expr(E::ResolvedLocal(local_name, bind_pat.hir_id), field.span)?;
+                        field_pats.push(FieldPat {
+                            ident: field.ident,
+                            pat: bind_pat,
+                            span: field.span,
+                        });
+                        call_args.push(Arg::Named(field.ident, arg_ref));
+                    }
+                    let field_pats = builder.arena.alloc_field_pat_slice(field_pats);
+                    let (pat, _) =
+                        builder.pat(P::Struct(callee_pat, field_pats, false), variant.span)?;
+                    let ctor = projected_variant(builder, self_ty_expr, prefix, variant.ident)?;
+                    let call_args = builder.arena.alloc_arg_slice(call_args);
+                    let body =
+                        builder.expr(E::ExtendedApplication(ctor, call_args), variant.span)?;
+                    let arm_id = builder.alloc_id()?;
+                    arms.push(PatternArm {
+                        hir_id: arm_id,
+                        pat,
+                        guard: None,
+                        body,
+                        span: variant.span,
+                    });
+                }
+                VariantKind::SubEnum(nested) => {
+                    let mut next_prefix = prefix.to_vec();
+                    next_prefix.push(variant.ident);
+                    collect_enum_arms(builder, self_ty_expr, &next_prefix, nested, arms, span)?;
+                }
+                VariantKind::Pattern(_) => {
+                    return Err(error(
+                        variant.span,
+                        "cannot auto-derive Splice for pattern enum variant",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
