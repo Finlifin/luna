@@ -59,32 +59,65 @@ impl Checker<'_, '_> {
         let ItemKind::Associated(associated) = &item.kind else {
             unreachable!()
         };
-        if !associated.parameters.is_empty()
-            || !associated.clause_params.is_empty()
-            || !associated.clause_constraints.is_empty()
-        {
+        if !associated.clause_params.is_empty() {
             return Err(error(
                 item.span,
-                "parameterized associated values require dependent member elaboration not yet implemented",
+                "associated value declarations do not support where type/clause parameters",
             ));
+        }
+        if !associated.clause_constraints.is_empty() && associated.parameters.is_empty() {
+            self.ensure_contract(owner, item.span)?;
         }
         self.in_formal_declaration(owner, |this| {
             this.context = this.definition_context(owner);
-            let ty = this.type_expr(associated.ty)?;
+            if associated.parameters.is_empty() {
+                let ty = this.type_expr(associated.ty)?;
+                let default =
+                    if let Some(initializer) = associated.default.filter(|_| evaluate_default) {
+                        // A definition-side Type value may contain its stable Self or
+                        // interface binders. Form the template without interpreting it
+                        // as a closed runtime type; selection substitutes those binders.
+                        if ty == p(P::Type) {
+                            Some(n::Expr {
+                                ty: ty.clone(),
+                                source: source(initializer.span),
+                                kind: K::TypeValue(this.type_expr(initializer)?),
+                            })
+                        } else {
+                            Some(this.constant_value(owner, item.span)?)
+                        }
+                    } else {
+                        None
+                    };
+                return Ok(n::AssociatedContract {
+                    phase: this.member_phases.get(&owner).copied().unwrap_or_default(),
+                    declaration: declaration(this.package, &this.package_identities, owner),
+                    name: item.ident.name.to_string(),
+                    ty,
+                    default,
+                });
+            }
+            this.in_required_comptime = true;
+            let (param_ids, param_types, result_ty, req_predicates) =
+                this.bind_associated_parameters(associated, item.span)?;
+            let ty = Term::ComptimeFunction(Box::new(Term::Function {
+                parameters: param_types,
+                result: Box::new(
+                    result_ty
+                        .clone()
+                        .abstract_parameters(&[])
+                        .map_err(|e| error(item.span, e.to_string()))?,
+                ),
+            }));
             let default = if let Some(initializer) = associated.default.filter(|_| evaluate_default)
             {
-                // A definition-side Type value may contain its stable Self or
-                // interface binders. Form the template without interpreting it
-                // as a closed runtime type; selection substitutes those binders.
-                if ty == p(P::Type) {
-                    Some(n::Expr {
-                        ty: ty.clone(),
-                        source: source(initializer.span),
-                        kind: K::TypeValue(this.type_expr(initializer)?),
-                    })
-                } else {
-                    Some(this.constant_value(owner, item.span)?)
-                }
+                Some(this.associated_closure_default(
+                    &param_ids,
+                    &result_ty,
+                    &ty,
+                    req_predicates,
+                    initializer,
+                )?)
             } else {
                 None
             };
@@ -95,6 +128,113 @@ impl Checker<'_, '_> {
                 ty,
                 default,
             })
+        })
+    }
+
+    fn bind_associated_parameters(
+        &mut self,
+        associated: &hir::item::AssociatedDecl<'_>,
+        span: Span,
+    ) -> Result<(Vec<n::LocalId>, Vec<Parameter>, Term, Vec<n::Expr>), Error> {
+        let mut param_ids = Vec::with_capacity(associated.parameters.len());
+        let mut param_types = Vec::with_capacity(associated.parameters.len());
+        for parameter in associated.parameters {
+            let annotation = match parameter.ty.kind {
+                hir::common::TyParamKind::Positional(expr)
+                | hir::common::TyParamKind::PositionalDependencyCatched(_, expr) => expr,
+                _ => {
+                    return Err(error(
+                        parameter.span,
+                        "associated parameter requires an explicit positional type annotation",
+                    ));
+                }
+            };
+            if matches!(annotation.kind, H::TyPlaceholder) {
+                return Err(error(
+                    parameter.span,
+                    "associated parameter requires an explicit type annotation",
+                ));
+            }
+            let param_ty = self.type_expr(annotation)?;
+            let id = local(parameter.hir_id);
+            self.locals.insert(id, param_ty.clone());
+            param_ids.push(id);
+            param_types.push(Parameter {
+                sort: Sort::Runtime,
+                ty: param_ty
+                    .abstract_parameters(&[])
+                    .map_err(|e| error(parameter.span, e.to_string()))?,
+            });
+        }
+        let mut req_predicates = Vec::new();
+        for clause in associated.clause_constraints {
+            match &clause.kind {
+                hir::clause::ClauseConstraintKind::Requires(value) => {
+                    if self.is_type_assumption(value) && !self.program_requirement(value)? {
+                        self.check_refinement_expression(value)?;
+                        let predicate = self.type_predicate(value)?;
+                        let fact = crate::ptc::Formula::from_predicate(&predicate);
+                        self.context
+                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                            .map_err(|failure| error(clause.span, failure.to_string()))?;
+                        self.context.assume(fact);
+                    } else {
+                        let checked = self.expr(value, Some(&p(P::Bool)))?;
+                        let src = checked.source;
+                        req_predicates.push(n::Expr {
+                            ty: p(P::Void),
+                            source: src,
+                            kind: K::RequirePredicate(Box::new(checked)),
+                        });
+                    }
+                }
+                hir::clause::ClauseConstraintKind::Ensures(_)
+                | hir::clause::ClauseConstraintKind::Decreases(_)
+                | hir::clause::ClauseConstraintKind::Outcome => {
+                    return Err(error(
+                        clause.span,
+                        "associated declarations only support requires precondition clauses",
+                    ));
+                }
+            }
+        }
+        let result_ty = self.type_expr(associated.ty)?;
+        let _ = span;
+        Ok((param_ids, param_types, result_ty, req_predicates))
+    }
+
+    fn associated_closure_default(
+        &mut self,
+        param_ids: &[n::LocalId],
+        result_ty: &Term,
+        callable_ty: &Term,
+        mut req_predicates: Vec<n::Expr>,
+        initializer: &Expr<'_>,
+    ) -> Result<n::Expr, Error> {
+        let value = self.expr(initializer, Some(result_ty))?;
+        let body = if req_predicates.is_empty() {
+            value
+        } else {
+            let src = source(initializer.span);
+            let ty = value.ty.clone();
+            req_predicates.reserve(0);
+            n::Expr {
+                ty,
+                source: src,
+                kind: K::Block {
+                    statements: req_predicates,
+                    result: Some(Box::new(value)),
+                },
+            }
+        };
+        Ok(n::Expr {
+            ty: callable_ty.clone(),
+            source: source(initializer.span),
+            kind: K::Closure {
+                parameters: param_ids.to_vec(),
+                captures: Vec::new(),
+                body: std::sync::Arc::new(body),
+            },
         })
     }
 }
@@ -739,22 +879,34 @@ impl Checker<'_, '_> {
             value.source = source(span);
             return Ok(value);
         }
-        if !self.self_containers.contains_key(&owner) {
+        let container = self.self_containers.get(&owner).copied();
+        if container.is_none_or(|parent| {
+            matches!(
+                self.package.item(parent).map(|item| &item.kind),
+                Some(ItemKind::Trait(_))
+            )
+        }) {
             if let Some(value) = self.abstract_associated_type(owner, span)? {
                 return Ok(value);
             }
         }
-        let parent = self.self_containers.get(&owner).copied()
-            .ok_or_else(|| error(span, if self.self_types.contains_key(&owner) {
-                "abstract associated values require symbolic member elaboration not yet implemented"
-            } else { "associated value has no interface container" }))?;
+        let parent = container.ok_or_else(|| {
+            error(
+                span,
+                if self.self_types.contains_key(&owner) {
+                    "abstract associated value requires its enclosing trait context"
+                } else {
+                    "associated value has no interface container"
+                },
+            )
+        })?;
         if !matches!(
             self.package.item(parent).map(|item| &item.kind),
             Some(ItemKind::Impl(_))
         ) {
             return Err(error(
                 span,
-                "abstract associated values require symbolic member elaboration not yet implemented",
+                "associated value requires a trait or implementation container",
             ));
         }
         let current_parent = self
@@ -893,16 +1045,47 @@ impl Checker<'_, '_> {
         }) else {
             return Ok(None);
         };
-        if self
+        let arguments: Vec<_> = self.type_parameters[&parent]
+            .iter()
+            .map(|parameter| Term::Rigid {
+                declaration: *parameter,
+                sort: self
+                    .trait_input_domain(*parameter)
+                    .as_ref()
+                    .map_or(Sort::Type, Sort::of_comptime_domain),
+            })
+            .collect();
+        let parent_decl = declaration(self.package, &self.package_identities, parent);
+        let interface_instance = n::InterfaceInstance {
+            declaration: parent_decl,
+            arguments: arguments.clone(),
+        };
+        let target_subject = match self
             .signature_owner
             .and_then(|current| self.self_types.get(&current))
-            != Some(&subject)
+            .cloned()
         {
-            return Err(error(
-                span,
-                "abstract associated type requires its enclosing trait context",
-            ));
-        }
+            Some(current) => {
+                if current == subject
+                    || self
+                        .symbolic_interface_evidence(&current, &interface_instance)
+                        .map_err(|failure| error(span, failure.to_string()))?
+                {
+                    current
+                } else {
+                    return Err(error(
+                        span,
+                        "abstract associated type requires its enclosing trait context",
+                    ));
+                }
+            }
+            None => {
+                return Err(error(
+                    span,
+                    "abstract associated type requires its enclosing trait context",
+                ));
+            }
+        };
         if self.active_associated_signatures.len() >= 32
             || !self.active_associated_signatures.insert(owner)
         {
@@ -914,24 +1097,14 @@ impl Checker<'_, '_> {
         let contract = self.associated_contract(owner, false);
         self.active_associated_signatures.remove(&owner);
         let ty = contract?.ty;
-        let arguments = self.type_parameters[&parent]
-            .iter()
-            .map(|parameter| Term::Rigid {
-                declaration: *parameter,
-                sort: Sort::Type,
-            })
-            .collect();
         if ty != p(P::Type) {
             return Ok(Some(n::Expr {
                 ty,
                 source: source(span),
                 kind: K::AssociatedValue {
-                    interface: n::InterfaceInstance {
-                        declaration: declaration(self.package, &self.package_identities, parent),
-                        arguments,
-                    },
+                    interface: interface_instance,
                     member: declaration(self.package, &self.package_identities, owner),
-                    subject,
+                    subject: target_subject,
                 },
             }));
         }
@@ -940,11 +1113,11 @@ impl Checker<'_, '_> {
             source: source(span),
             kind: K::TypeValue(Term::AssociatedType {
                 origin: Box::new(nir::AssociatedTypeOrigin {
-                    interface: declaration(self.package, &self.package_identities, parent),
+                    interface: parent_decl,
                     member: declaration(self.package, &self.package_identities, owner),
                 }),
                 arguments,
-                subject: Box::new(subject),
+                subject: Box::new(target_subject),
             }),
         }))
     }
@@ -1186,7 +1359,19 @@ impl Checker<'_, '_> {
         self.in_formal_declaration(owner, |this| {
             this.in_required_comptime = true;
             this.context = this.definition_context(owner);
-            let expr = this.expr(initializer, Some(expected))?;
+            let expr = if !associated.parameters.is_empty() {
+                let (param_ids, _, result_ty, req_predicates) =
+                    this.bind_associated_parameters(associated, item.span)?;
+                this.associated_closure_default(
+                    &param_ids,
+                    &result_ty,
+                    expected,
+                    req_predicates,
+                    initializer,
+                )?
+            } else {
+                this.expr(initializer, Some(expected))?
+            };
             let before = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let template =

@@ -515,10 +515,273 @@ impl Checker<'_, '_> {
                 };
                 and(self.continuation_type_fact(value, fuel, depth + 1)?, paths)
             }
-            // In particular, a Loop can exit via break: neither its body's
-            // facts nor the negation of its entry condition describe all exits.
+            K::Loop { identity, body } => {
+                match self.collect_loop_break_facts(body, *identity, None, fuel, depth + 1)? {
+                    LoopExitFacts::Known(mut facts) if facts.len() == 1 => facts.pop(),
+                    LoopExitFacts::Known(facts) if !facts.is_empty() => Some(F::Or(facts)),
+                    LoopExitFacts::Known(_) | LoopExitFacts::Unknown => None,
+                }
+            }
             _ => None,
         })
+    }
+
+    fn collect_loop_break_facts(
+        &self,
+        expr: &n::Expr,
+        target: n::LocalId,
+        prefix: Option<crate::ptc::Formula>,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<LoopExitFacts, String> {
+        use crate::ptc::Formula as F;
+        if depth >= 128 {
+            return Err("loop exit type-fact depth exhausted".into());
+        }
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("loop exit type-fact budget exhausted")?;
+        let and = |left: Option<F>, right: Option<F>| match (left, right) {
+            (Some(left), Some(right)) => Some(F::And(vec![left, right])),
+            (known, None) | (None, known) => known,
+        };
+        match &expr.kind {
+            K::Break(id) => Ok(if *id == target {
+                match prefix {
+                    Some(fact) => LoopExitFacts::Known(vec![fact]),
+                    None => LoopExitFacts::Unknown,
+                }
+            } else {
+                LoopExitFacts::Known(Vec::new())
+            }),
+            K::Continue(_) | K::Closure { .. } | K::Return(None) => {
+                Ok(LoopExitFacts::Known(Vec::new()))
+            }
+            K::Discard(inner)
+            | K::Let { value: inner, .. }
+            | K::UnsafeScope(inner)
+            | K::EffectComputation { body: inner, .. } => {
+                self.collect_loop_break_facts(inner, target, prefix, fuel, depth + 1)
+            }
+            K::CheckTypeAlias {
+                preparations,
+                arguments,
+                body,
+                ..
+            } => {
+                let mut exits = LoopExitFacts::Known(Vec::new());
+                let mut current = prefix;
+                for preparation in preparations {
+                    let prep_exits = self.collect_loop_break_facts(
+                        &preparation.expression,
+                        target,
+                        current.clone(),
+                        fuel,
+                        depth + 1,
+                    )?;
+                    exits = exits.merge(prep_exits);
+                    if is_never(&preparation.expression.ty) {
+                        return Ok(exits);
+                    }
+                    current = and(
+                        current,
+                        self.continuation_type_fact(&preparation.expression, fuel, depth + 1)?,
+                    );
+                }
+                for argument in arguments {
+                    if normal_argument_contains_target_break(argument, target, fuel)? {
+                        return Ok(LoopExitFacts::Unknown);
+                    }
+                }
+                if let Some(inner) = body {
+                    exits = exits.merge(self.collect_loop_break_facts(
+                        inner,
+                        target,
+                        current,
+                        fuel,
+                        depth + 1,
+                    )?);
+                }
+                Ok(exits)
+            }
+            K::Return(Some(inner)) => {
+                self.collect_loop_break_facts(inner, target, prefix, fuel, depth + 1)
+            }
+            K::LetPattern {
+                pattern,
+                guard,
+                otherwise,
+                value,
+            } => {
+                let mut exits =
+                    self.collect_loop_break_facts(value, target, prefix.clone(), fuel, depth + 1)?;
+                if is_never(&value.ty) {
+                    return Ok(exits);
+                }
+                let after_value = and(prefix, self.continuation_type_fact(value, fuel, depth + 1)?);
+                if let Some(guard) = guard {
+                    let observed = match &value.kind {
+                        K::TypeValue(ty) => Some(ty),
+                        _ => None,
+                    };
+                    let guard_prefix = and(
+                        after_value.clone(),
+                        self.pattern_type_fact(pattern, observed, fuel, depth + 1)?,
+                    );
+                    let guard_exits = self.collect_loop_break_facts(
+                        guard,
+                        target,
+                        guard_prefix,
+                        fuel,
+                        depth + 1,
+                    )?;
+                    exits = exits.merge(guard_exits);
+                }
+                if let Some(otherwise) = otherwise {
+                    let otherwise_exits = self.collect_loop_break_facts(
+                        otherwise,
+                        target,
+                        after_value,
+                        fuel,
+                        depth + 1,
+                    )?;
+                    exits = exits.merge(otherwise_exits);
+                }
+                Ok(exits)
+            }
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let mut exits = LoopExitFacts::Known(Vec::new());
+                let mut current = prefix;
+                for stmt in statements {
+                    let stmt_exits = self.collect_loop_break_facts(
+                        stmt,
+                        target,
+                        current.clone(),
+                        fuel,
+                        depth + 1,
+                    )?;
+                    exits = exits.merge(stmt_exits);
+                    if is_never(&stmt.ty) {
+                        return Ok(exits);
+                    }
+                    current = and(current, self.continuation_type_fact(stmt, fuel, depth + 1)?);
+                }
+                if let Some(result) = result {
+                    let tail_exits =
+                        self.collect_loop_break_facts(result, target, current, fuel, depth + 1)?;
+                    exits = exits.merge(tail_exits);
+                }
+                Ok(exits)
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let mut exits = self.collect_loop_break_facts(
+                    condition,
+                    target,
+                    prefix.clone(),
+                    fuel,
+                    depth + 1,
+                )?;
+                if is_never(&condition.ty) {
+                    return Ok(exits);
+                }
+                let base = and(
+                    prefix,
+                    self.continuation_type_fact(condition, fuel, depth + 1)?,
+                );
+                let then_prefix = and(
+                    base.clone(),
+                    self.condition_type_fact(condition, true, fuel, depth + 1)?,
+                );
+                exits = exits.merge(self.collect_loop_break_facts(
+                    then_branch,
+                    target,
+                    then_prefix,
+                    fuel,
+                    depth + 1,
+                )?);
+                if let Some(else_branch) = else_branch {
+                    let else_prefix = and(
+                        base,
+                        self.condition_type_fact(condition, false, fuel, depth + 1)?,
+                    );
+                    exits = exits.merge(self.collect_loop_break_facts(
+                        else_branch,
+                        target,
+                        else_prefix,
+                        fuel,
+                        depth + 1,
+                    )?);
+                }
+                Ok(exits)
+            }
+            K::Match { value, arms } => {
+                let mut exits =
+                    self.collect_loop_break_facts(value, target, prefix.clone(), fuel, depth + 1)?;
+                if is_never(&value.ty) {
+                    return Ok(exits);
+                }
+                let observed = match &value.kind {
+                    K::TypeValue(ty) => Some(ty),
+                    _ => None,
+                };
+                let base = and(prefix, self.continuation_type_fact(value, fuel, depth + 1)?);
+                for arm in arms {
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("loop exit type-fact budget exhausted")?;
+                    let mut arm_prefix = and(
+                        base.clone(),
+                        self.pattern_type_fact(&arm.pattern, observed, fuel, depth + 1)?,
+                    );
+                    if let Some(guard) = &arm.guard {
+                        exits = exits.merge(self.collect_loop_break_facts(
+                            guard,
+                            target,
+                            arm_prefix.clone(),
+                            fuel,
+                            depth + 1,
+                        )?);
+                        if is_never(&guard.ty) {
+                            continue;
+                        }
+                        arm_prefix = and(
+                            arm_prefix,
+                            and(
+                                self.continuation_type_fact(guard, fuel, depth + 1)?,
+                                self.condition_type_fact(guard, true, fuel, depth + 1)?,
+                            ),
+                        );
+                    }
+                    exits = exits.merge(self.collect_loop_break_facts(
+                        &arm.body,
+                        target,
+                        arm_prefix,
+                        fuel,
+                        depth + 1,
+                    )?);
+                }
+                Ok(exits)
+            }
+            K::Loop {
+                identity: inner_id,
+                body: inner_body,
+            } => {
+                if *inner_id == target {
+                    Ok(LoopExitFacts::Known(Vec::new()))
+                } else {
+                    self.collect_loop_break_facts(inner_body, target, prefix, fuel, depth + 1)
+                }
+            }
+            _ => Ok(if expression_contains_target_break(expr, target, fuel)? {
+                LoopExitFacts::Unknown
+            } else {
+                LoopExitFacts::Known(Vec::new())
+            }),
+        }
     }
 
     fn pattern_type_fact(
@@ -1785,6 +2048,282 @@ impl Checker<'_, '_> {
         })();
         self.required_steps -= (before - fuel) as u64;
         result
+    }
+
+    pub(in crate::program) fn elaborate_loop_body_with_barrier(
+        &mut self,
+        span: Span,
+        identity: n::LocalId,
+        mut build_body: impl FnMut(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<n::Expr, Error> {
+        let entry_locals: BTreeSet<n::LocalId> = self.locals.keys().copied().collect();
+        let entry_write_versions = self.local_write_versions.clone();
+        let entry_input_facts = self.input_facts.clone();
+        let staged = self.in_required_comptime || self.in_staged_input;
+        let mut barrier_mutated = BTreeSet::new();
+        let max_passes = entry_locals
+            .len()
+            .saturating_add(entry_write_versions.len())
+            .clamp(2, 16);
+        for pass in 0..max_passes {
+            let attempt = checking_attempts::Attempt::begin(
+                self,
+                span,
+                self.numeric_defaults,
+                checking_attempts::Disposition::Commit,
+            )?;
+            let checked = build_body(self);
+            let body = match checked {
+                Ok(body) => body,
+                Err(failure) => return attempt.finish_checked(self, Err(failure)),
+            };
+            let mut continue_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before_continue_fuel = continue_fuel;
+            let may_continue = if !is_never(&body.ty) {
+                Ok(true)
+            } else {
+                control::loop_may_continue(&body, identity, &mut continue_fuel)
+                    .map_err(|reason| error(span, reason))
+            };
+            self.required_steps -= (before_continue_fuel - continue_fuel) as u64;
+            let may_continue = match may_continue {
+                Ok(flag) => flag,
+                Err(failure) => return attempt.finish_checked(self, Err(failure)),
+            };
+            let mut newly_mutated = BTreeSet::new();
+            if may_continue {
+                for binding in entry_locals.iter().chain(entry_write_versions.keys()) {
+                    if barrier_mutated.contains(binding) {
+                        continue;
+                    }
+                    let before = entry_write_versions.get(binding).copied().unwrap_or(0);
+                    let after = self.local_write_versions.get(binding).copied().unwrap_or(0);
+                    if after > before {
+                        newly_mutated.insert(*binding);
+                    }
+                }
+                for binding in entry_input_facts
+                    .types
+                    .keys()
+                    .filter(|id| !self.input_facts.types.contains_key(id))
+                    .chain(
+                        entry_input_facts
+                            .values
+                            .keys()
+                            .filter(|id| !self.input_facts.values.contains_key(id)),
+                    )
+                    .chain(
+                        entry_input_facts
+                            .partial
+                            .keys()
+                            .filter(|id| !self.input_facts.partial.contains_key(id)),
+                    )
+                    .chain(
+                        entry_input_facts
+                            .specialized
+                            .iter()
+                            .map(|(id, _, _)| id)
+                            .filter(|id| {
+                                !self
+                                    .input_facts
+                                    .specialized
+                                    .iter()
+                                    .any(|(s, _, _)| s == *id)
+                            }),
+                    )
+                    .chain(
+                        entry_input_facts
+                            .parameters
+                            .identities()
+                            .map(|(id, _)| id)
+                            .filter(|id| !self.input_facts.has_identity(id)),
+                    )
+                {
+                    if !barrier_mutated.contains(binding) {
+                        newly_mutated.insert(*binding);
+                    }
+                }
+                if !entry_input_facts.supplied.is_empty() {
+                    let supplied_check: Result<(), Error> = (|| {
+                        for binding in entry_locals
+                            .iter()
+                            .chain(entry_input_facts.parameters.identities().map(|(id, _)| id))
+                        {
+                            if barrier_mutated.contains(binding) {
+                                continue;
+                            }
+                            let had_value = matches!(
+                                entry_input_facts.supplied.lookup(
+                                    *binding,
+                                    &mut self.required_steps,
+                                    span,
+                                )?,
+                                Some((_, Some(_)))
+                            );
+                            if had_value {
+                                let still_has_value = matches!(
+                                    self.input_facts.supplied.lookup(
+                                        *binding,
+                                        &mut self.required_steps,
+                                        span,
+                                    )?,
+                                    Some((_, Some(_)))
+                                );
+                                if !still_has_value {
+                                    newly_mutated.insert(*binding);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(failure) = supplied_check {
+                        return attempt.finish_checked(self, Err(failure));
+                    }
+                }
+            }
+            if newly_mutated.is_empty() {
+                return attempt.finish_checked(self, Ok(body));
+            }
+            if pass + 1 == max_passes {
+                return attempt.finish_checked(
+                    self,
+                    Err(error(
+                        span,
+                        "loop back-edge invalidation barrier did not converge",
+                    )),
+                );
+            }
+            let _ = attempt.finish_checked::<n::Expr>(
+                self,
+                Err(error(
+                    span,
+                    "re-elaborating loop under back-edge invalidation barrier",
+                )),
+            );
+            barrier_mutated.extend(newly_mutated);
+            for binding in &barrier_mutated {
+                let version = self.local_write_versions.entry(*binding).or_insert(0);
+                *version = entry_write_versions
+                    .get(binding)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+            }
+            self.input_facts.invalidate(
+                barrier_mutated.clone(),
+                staged,
+                &mut self.required_steps,
+                span,
+            )?;
+        }
+        unreachable!()
+    }
+}
+
+enum LoopExitFacts {
+    Known(Vec<crate::ptc::Formula>),
+    Unknown,
+}
+
+impl LoopExitFacts {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Known(mut left), Self::Known(right)) => {
+                left.extend(right);
+                Self::Known(left)
+            }
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl std::fmt::Display for LoopExitFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(facts) => write!(f, "(loop-exit-facts (known {}))", facts.len()),
+            Self::Unknown => f.write_str("(loop-exit-facts unknown)"),
+        }
+    }
+}
+
+fn expression_contains_target_break(
+    expr: &n::Expr,
+    target: n::LocalId,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let mut contains_target_break = false;
+    nir::visit::expression_pruned(expr, fuel, |sub, _| {
+        if matches!(sub.kind, K::Closure { .. }) {
+            return Ok(false);
+        }
+        if matches!(sub.kind, K::Break(id) if id == target) {
+            contains_target_break = true;
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    Ok(contains_target_break)
+}
+
+fn normal_argument_contains_target_break(
+    argument: &n::NormalFormArgument,
+    target: n::LocalId,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or("loop exit type-fact budget exhausted")?;
+    match argument {
+        n::NormalFormArgument::Value(expr) | n::NormalFormArgument::ListSpread(expr) => {
+            expression_contains_target_break(expr, target, fuel)
+        }
+        n::NormalFormArgument::List { items, .. } | n::NormalFormArgument::Tuple { items, .. } => {
+            for item in items {
+                if normal_argument_contains_target_break(item, target, fuel)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        n::NormalFormArgument::If {
+            condition,
+            then_input,
+            else_input,
+            ..
+        } => Ok(expression_contains_target_break(condition, target, fuel)?
+            || normal_argument_contains_target_break(then_input, target, fuel)?
+            || normal_argument_contains_target_break(else_input, target, fuel)?),
+        n::NormalFormArgument::Block {
+            statements, result, ..
+        } => {
+            for statement in statements {
+                if expression_contains_target_break(statement, target, fuel)? {
+                    return Ok(true);
+                }
+            }
+            if let Some(result) = result {
+                normal_argument_contains_target_break(result, target, fuel)
+            } else {
+                Ok(false)
+            }
+        }
+        n::NormalFormArgument::Match { value, arms, .. } => {
+            if expression_contains_target_break(value, target, fuel)? {
+                return Ok(true);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard
+                    && expression_contains_target_break(guard, target, fuel)?
+                {
+                    return Ok(true);
+                }
+                if normal_argument_contains_target_break(&arm.body, target, fuel)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        n::NormalFormArgument::Literal { .. } => Ok(false),
     }
 }
 

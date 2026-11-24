@@ -66,10 +66,12 @@ impl Checker<'_, '_> {
             H::For {..} => return self.iterator_loop(expr, expected),
             H::Loop(block) => {
                 let identity = local(expr.hir_id);
-                self.control.loops.push(identity);
-                let body = self.block(block, None);
-                self.control.loops.pop();
-                let mut body = body?;
+                let mut body = self.elaborate_loop_body_with_barrier(expr.span, identity, |this| {
+                    this.control.loops.push(identity);
+                    let body = this.block(block, None);
+                    this.control.loops.pop();
+                    body
+                })?;
                 let mut source_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = source_fuel;
                 let freshened = control::freshen_loop_sites(&mut body, source(expr.span), &mut self.expansion_sources, &mut source_fuel);

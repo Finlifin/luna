@@ -2044,7 +2044,7 @@ fn parent_interfaces_require_independent_implementations_for_the_same_subject() 
     );
     rejected(
         "trait A :- B {} trait B :- A {}",
-        "cyclic parent interface contracts are not yet implemented",
+        "cyclic parent interface contract",
     );
 }
 

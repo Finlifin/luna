@@ -195,7 +195,7 @@ pub(in crate::program) struct PreparedRequired {
 
 /// Lexical evidence of a checked computation. Reusing the preparation shares
 /// these immutable premises; supplying captures never edits the proof scope.
-#[cfg_attr(test, derive(Clone))]
+#[derive(Clone)]
 pub(super) struct InvocationScope {
     /// ABI capture position to source parameter. Explicit or live supplies
     /// outside the signature have no parameter slot in the caller.
@@ -326,12 +326,32 @@ impl PreparedRequired {
                 Ok((*id, domain, Some(super::inputs::copy(value, steps, span)?)))
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let result_type = nominal_fields::metered(steps, |fuel| {
+            self.result_type.substitute_partial_bounded(symbols, fuel)
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
+        let mut scope = self.scope.clone();
+        if !scope.invocation_assumptions.is_empty() {
+            let scope_mut = Arc::make_mut(&mut scope);
+            for assumption in &mut scope_mut.invocation_assumptions {
+                assumption.subject = nominal_fields::metered(steps, |fuel| {
+                    assumption.subject.substitute_partial_bounded(symbols, fuel)
+                })
+                .map_err(|failure| error(span, failure.to_string()))?;
+                for argument in &mut assumption.interface_arguments {
+                    *argument = nominal_fields::metered(steps, |fuel| {
+                        argument.substitute_partial_bounded(symbols, fuel)
+                    })
+                    .map_err(|failure| error(span, failure.to_string()))?;
+                }
+            }
+        }
         Ok(Self {
             world: self.world.clone(),
             entry: self.entry,
             inputs,
-            result_type: super::inputs::copy(&self.result_type, steps, span)?,
-            scope: self.scope.clone(),
+            result_type,
+            scope,
         })
     }
 

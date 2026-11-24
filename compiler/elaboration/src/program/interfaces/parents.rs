@@ -114,35 +114,154 @@ impl Checker<'_, '_> {
         &self,
         traits: &BTreeMap<DeclarationId, n::Trait>,
     ) -> Result<(), Error> {
-        let mut fuel = Budget::default().steps;
+        let frames = self.call_input_frames();
         for (owner, info) in self.package.owners() {
+            let mut fuel = Budget::default().steps;
             let id = declaration(self.package, &self.package_identities, owner);
             let Some(interface) = traits.get(&id) else {
                 continue;
             };
             let span = info.node.expect_item().span;
-            let mut pending: Vec<_> = interface.parents.iter().map(|p| p.declaration).collect();
-            let mut seen = BTreeSet::new();
-            while let Some(parent) = pending.pop() {
-                fuel = fuel
-                    .checked_sub(1)
-                    .ok_or_else(|| error(span, "parent interface graph budget exhausted"))?;
-                if parent == id {
-                    return Err(error(
-                        span,
-                        "cyclic parent interface contracts are not yet implemented",
-                    ));
-                }
-                if !seen.insert(parent) {
-                    continue;
-                }
-                let parent = traits
-                    .get(&parent)
-                    .ok_or_else(|| error(span, "unknown parent interface"))?;
-                pending.extend(parent.parents.iter().map(|p| p.declaration));
-            }
+            let root = n::InterfaceInstance {
+                declaration: id,
+                arguments: interface
+                    .type_parameters
+                    .iter()
+                    .map(|parameter| Term::Rigid {
+                        declaration: *parameter,
+                        sort: self
+                            .trait_input_domain(*parameter)
+                            .as_ref()
+                            .map_or(Sort::Type, Sort::of_comptime_domain),
+                    })
+                    .collect(),
+            };
+            let mut ancestors = Vec::new();
+            let mut finished = Vec::new();
+            self.visit_parent_instance(
+                &root,
+                0,
+                traits,
+                &frames,
+                span,
+                &mut ancestors,
+                &mut finished,
+                &mut fuel,
+            )?;
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit_parent_instance(
+        &self,
+        instance: &n::InterfaceInstance,
+        depth: usize,
+        traits: &BTreeMap<DeclarationId, n::Trait>,
+        frames: &[Vec<Sort>],
+        span: Span,
+        ancestors: &mut Vec<n::InterfaceInstance>,
+        finished: &mut Vec<n::InterfaceInstance>,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "parent interface graph budget exhausted"))?;
+        if self.contains_proven_interface(ancestors, instance, span, fuel)? {
+            return Err(error(span, "cyclic parent interface contract"));
+        }
+        let same_declaration_depth = ancestors
+            .iter()
+            .filter(|ancestor| ancestor.declaration == instance.declaration)
+            .count();
+        if depth >= 64 || same_declaration_depth >= 8 {
+            return Err(error(
+                span,
+                "cyclic or excessively deep parent interface contract",
+            ));
+        }
+        if self.contains_proven_interface(finished, instance, span, fuel)? {
+            return Ok(());
+        }
+        let trait_def = traits
+            .get(&instance.declaration)
+            .ok_or_else(|| error(span, "unknown parent interface"))?;
+        let subject = Term::Rigid {
+            declaration: trait_def.self_parameter,
+            sort: Sort::Type,
+        };
+        let inputs: Vec<_> = std::iter::once(subject)
+            .chain(instance.arguments.iter().cloned())
+            .collect();
+        let substitution = trait_def
+            .input_substitution(&inputs, frames, fuel)
+            .map_err(|e| error(span, e.to_string()))?;
+        ancestors.push(instance.clone());
+        for ancestor in &trait_def.parents {
+            let instantiated = substitution
+                .instantiate_interface_bounded(ancestor, fuel)
+                .map_err(|e| error(span, e.to_string()))?;
+            self.visit_parent_instance(
+                &instantiated,
+                depth + 1,
+                traits,
+                frames,
+                span,
+                ancestors,
+                finished,
+                fuel,
+            )?;
+        }
+        ancestors.pop();
+        finished.push(instance.clone());
+        Ok(())
+    }
+
+    fn contains_proven_interface(
+        &self,
+        sources: &[n::InterfaceInstance],
+        requested: &n::InterfaceInstance,
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<bool, Error> {
+        for source in sources {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "interface identity comparison budget exhausted"))?;
+            if source.declaration != requested.declaration
+                || source.arguments.len() != requested.arguments.len()
+            {
+                continue;
+            }
+            let mut matched = true;
+            for (left, right) in source.arguments.iter().zip(&requested.arguments) {
+                match type_resolution::input_identity::equivalent(
+                    &self.context,
+                    left,
+                    right,
+                    Budget::default().max_depth,
+                    &[],
+                    self.context.scope(),
+                    fuel,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) | Err(nir::NominalAdmissionError::Unresolved(_)) => {
+                        matched = false;
+                        break;
+                    }
+                    Err(failure) => {
+                        return Err(error(
+                            span,
+                            format!("interface identity comparison failed: {failure}"),
+                        ));
+                    }
+                }
+            }
+            if matched {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn same_interface(

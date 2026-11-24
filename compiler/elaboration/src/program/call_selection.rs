@@ -45,6 +45,13 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     .explicit_method_instance(expr, method, args, expected, allow_optional)
                     .map(block_regions::ExplicitInstance::Ready);
             }
+            if let Some(assoc) =
+                self.associated_projection(base, name.name.as_str(), callee.span, callee.hir_id)?
+                && assoc.ty.is_comptime_callable()
+            {
+                let call = self.finish_call(expr, assoc, args, Vec::new(), expected, None)?;
+                return Ok(block_regions::ExplicitInstance::Ready(call));
+            }
         }
         let H::ResolvedDef { def_id, .. } = callee.kind else {
             return Err(error(
@@ -56,6 +63,16 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             .package
             .definition_owner(def_id)
             .ok_or_else(|| error(expr.span, "generic function has no HIR owner"))?;
+        if matches!(
+            self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Associated(_))
+        ) {
+            let assoc = self.lexical_associated_value(owner, callee.span)?;
+            if assoc.ty.is_comptime_callable() {
+                let call = self.finish_call(expr, assoc, args, Vec::new(), expected, None)?;
+                return Ok(block_regions::ExplicitInstance::Ready(call));
+            }
+        }
         self.ensure_signature(owner, expr.span)?;
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
         if let Some(frame) = self.begin_comptime_function_instance(
@@ -292,12 +309,26 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     return Ok(call);
                 }
             }
-            match self.select_explicit_instance(callee, head, types, None, true)? {
-                block_regions::ExplicitInstance::Checking(frame) => {
-                    return self.check_invocation_region(expr, args, expected, partial, *frame);
-                }
-                block_regions::ExplicitInstance::Ready(callee) => callee,
+            let instantiated =
+                match self.select_explicit_instance(callee, head, types, None, true)? {
+                    block_regions::ExplicitInstance::Checking(frame) => {
+                        return self.check_invocation_region(expr, args, expected, partial, *frame);
+                    }
+                    block_regions::ExplicitInstance::Ready(callee) => callee,
+                };
+            if args.is_empty()
+                && !matches!(
+                    instantiated.ty,
+                    Term::Function { .. }
+                        | Term::Closure { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::NormalFormFunction(..)
+                        | Term::UnsafeFunction(_)
+                )
+            {
+                return Ok(instantiated);
             }
+            instantiated
         } else if let Some(owner) = direct {
             self.ensure_signature(owner, expr.span)?;
             let ty = self
