@@ -31,10 +31,13 @@ impl Checker<'_, '_> {
                 &definition.types,
                 &definition.clause_domains,
             )?;
-            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                &this.package.item(owner).unwrap().kind
+            let item = this
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing code generator declaration for defaults"))?;
+            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &item.kind
             else {
-                unreachable!()
+                return Err(error(span, "generator defaults require a function item"));
             };
             let mut defaults = BTreeSet::new();
             for slot in 0..=last {

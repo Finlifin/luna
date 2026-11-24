@@ -169,25 +169,29 @@ impl Checker<'_, '_> {
         let holes = std::mem::take(&mut self.quote_holes);
         let result = (|| {
             let interface = if let Some(annotation) = decl.ty {
-                let H::ContextualPatternType(subject, entries) = &annotation.kind else {
-                    return Err(error(
-                        annotation.span,
-                        "pattern code requires a pattern interface",
-                    ));
-                };
-                let subject = self.type_expr(subject)?;
-                let mut outputs = BTreeMap::new();
-                for entry in entries {
-                    let ty = self.type_expr(entry.ty)?;
-                    if outputs
-                        .insert(entry.name.name.to_string(), ty.clone())
-                        .is_some()
-                    {
-                        return Err(error(entry.name.span, "duplicate pattern output name"));
+                if self.is_any_type_expr(annotation)? {
+                    None
+                } else {
+                    let H::ContextualPatternType(subject, entries) = &annotation.kind else {
+                        return Err(error(
+                            annotation.span,
+                            "pattern code requires a pattern interface or Any evidence",
+                        ));
+                    };
+                    let subject = self.type_expr(subject)?;
+                    let mut outputs = BTreeMap::new();
+                    for entry in entries {
+                        let ty = self.type_expr(entry.ty)?;
+                        if outputs
+                            .insert(entry.name.name.to_string(), ty.clone())
+                            .is_some()
+                        {
+                            return Err(error(entry.name.span, "duplicate pattern output name"));
+                        }
+                        self.locals.insert(local(entry.hir_id), ty);
                     }
-                    self.locals.insert(local(entry.hir_id), ty);
+                    Some((subject, outputs))
                 }
-                Some((subject, outputs))
             } else {
                 None
             };

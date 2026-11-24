@@ -151,6 +151,21 @@ impl Checker<'_, '_> {
         Ok(live)
     }
 
+    pub(super) fn is_code_collection_cell(
+        &self,
+        id: n::LocalId,
+        value: &comptime_interpretor::Value,
+    ) -> bool {
+        let comptime_interpretor::Value::Tuple(fields) = value else {
+            return false;
+        };
+        self.variadic_code_input_at(id).is_some()
+            || (!fields.is_empty()
+                && fields
+                    .iter()
+                    .all(|entry| matches!(entry, comptime_interpretor::Value::Code(_))))
+    }
+
     pub(super) fn refresh_generator_cells(&mut self, span: Span) -> Result<(), Error> {
         let cells = self
             .generator_cells
@@ -160,6 +175,9 @@ impl Checker<'_, '_> {
         let mut updated = BTreeMap::new();
         for (id, ty, cell) in cells {
             let value = self.read_generator_cell(&cell, span)?;
+            if self.is_code_collection_cell(id, &value) {
+                continue;
+            }
             let snapshot = if self.generator_value_needs_live_storage(&value, span)? {
                 n::Expr {
                     source: source(span),
@@ -668,7 +686,9 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(value.span, "generator update frame returned empty state"))?;
             let mut completed = BTreeMap::new();
             for ((id, ty), stored) in identities.into_iter().zip(updated) {
-                let snapshot = if self.generator_value_needs_live_storage(&stored, value.span)? {
+                let snapshot = if self.is_code_collection_cell(id, &stored)
+                    || self.generator_value_needs_live_storage(&stored, value.span)?
+                {
                     n::Expr {
                         source: source(value.span),
                         ty,
@@ -693,6 +713,9 @@ impl Checker<'_, '_> {
                 .collect::<Vec<_>>();
             for (id, ty, cell) in indirect {
                 let stored = self.read_generator_cell(&cell, value.span)?;
+                if self.is_code_collection_cell(id, &stored) {
+                    continue;
+                }
                 let snapshot = if self.generator_value_needs_live_storage(&stored, value.span)? {
                     n::Expr {
                         source: source(value.span),

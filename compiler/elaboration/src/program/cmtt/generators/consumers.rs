@@ -65,7 +65,30 @@ impl Checker<'_, '_> {
     }
 
     pub(in crate::program) fn check_data_consumer(&mut self, owner: OwnerId) -> Result<(), Error> {
-        let span = self.package.item(owner).unwrap().span;
+        self.check_data_consumer_at(owner, None)
+    }
+
+    pub(super) fn check_data_consumer_at(
+        &mut self,
+        owner: OwnerId,
+        caller_span: Option<Span>,
+    ) -> Result<(), Error> {
+        let span = self
+            .package
+            .item(owner)
+            .map(|item| item.span)
+            .or(caller_span)
+            .or_else(|| {
+                self.package
+                    .item(OwnerId::new(hir::LocalDefId::new(0)))
+                    .map(|item| item.span)
+            })
+            .ok_or_else(|| {
+                error(
+                    rustc_span::DUMMY_SP,
+                    "missing contextual data consumer item",
+                )
+            })?;
         let definition = &self.data_consumers[&owner];
         if definition.checked_operands.is_some() {
             return Ok(());
@@ -89,8 +112,12 @@ impl Checker<'_, '_> {
         let arguments = definition
             .inputs
             .iter()
-            .map(|(_, input)| {
+            .enumerate()
+            .map(|(slot, (_, input))| {
                 Ok(Some(match input {
+                    Input::Code(_) | Input::Pattern(_) if definition.variadics.contains(&slot) => {
+                        Argument::CodeCollection(Vec::new())
+                    }
                     Input::Data(_) => Argument::Data(None),
                     Input::Code(interface) => {
                         Argument::Code(CodeValue::Expression(Arc::new(ExpressionCode {
@@ -107,12 +134,16 @@ impl Checker<'_, '_> {
                 }))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let operands = self.check_generator_body(owner, |this| {
+        let operands = self.check_generator_body(owner, span, |this| {
             this.install_generator_capture_values(&definition.captures, span)?;
             this.check_generator_clause_value_defaults(owner, &definition.types)?;
-            this.run_data_consumer(&definition, arguments)
+            this.run_data_consumer(&definition, arguments, span)
         })?;
-        self.data_consumers.get_mut(&owner).unwrap().checked_operands = Some(operands);
+        let consumer = self
+            .data_consumers
+            .get_mut(&owner)
+            .ok_or_else(|| error(span, "missing checked contextual data consumer entry"))?;
+        consumer.checked_operands = Some(operands);
         Ok(())
     }
 
@@ -258,8 +289,9 @@ impl Checker<'_, '_> {
         if self.checking_code_generator {
             return Ok((None, definition.output.clone()));
         }
-        let result =
-            self.generator_frame(owner, |this| this.run_data_consumer(&definition, values))?;
+        let result = self.generator_frame(owner, |this| {
+            this.run_data_consumer(&definition, values, site.span)
+        })?;
         Ok((result, definition.signature.output))
     }
 
@@ -339,13 +371,24 @@ impl Checker<'_, '_> {
         &mut self,
         definition: &Generator<Term>,
         arguments: Vec<Option<Argument>>,
+        caller_span: Span,
     ) -> Result<Option<Value>, Error> {
-        let owner = self.signature_owner.expect("contextual consumer frame");
-        let item = self.package.item(owner).unwrap();
+        let owner = self
+            .signature_owner
+            .ok_or_else(|| error(caller_span, "missing contextual consumer frame"))?;
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(caller_span, "missing contextual data consumer item"))?;
         let (sig, body) = match &item.kind {
             ItemKind::Fn(sig, body) => (sig, Some(*body)),
             ItemKind::FnDeclaration(sig) => (sig, None),
-            _ => unreachable!(),
+            _ => {
+                return Err(error(
+                    item.span,
+                    "contextual data consumer requires a function item",
+                ));
+            }
         };
         self.install_generator_capture_values(&definition.captures, item.span)?;
         self.alias_substitution.extend(
@@ -380,6 +423,18 @@ impl Checker<'_, '_> {
                 (Input::Data(ty), Argument::LiveData(value)) => {
                     self.install_live_generator_input(*id, ty, value, sig.params[slot].span)
                 }
+                (Input::Data(ty), Argument::Code(CodeValue::Expression(code)))
+                    if *ty == Term::AnyType =>
+                {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.code_values.insert(*id, code);
+                }
+                (Input::Data(ty), Argument::Code(CodeValue::Pattern(code)))
+                    if *ty == Term::AnyType =>
+                {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.pattern_codes.insert(*id, code);
+                }
                 (Input::Code(interface), Argument::Code(CodeValue::Expression(code))) => {
                     let code = self.ascribe_code(code, Some(interface), sig.params[slot].span)?;
                     self.code_values.insert(*id, code);
@@ -387,6 +442,35 @@ impl Checker<'_, '_> {
                 (Input::Pattern(interface), Argument::Code(CodeValue::Pattern(code))) => {
                     self.ascribe_pattern_input(&code, interface, sig.params[slot].span)?;
                     self.pattern_codes.insert(*id, code);
+                }
+                (Input::Code(interface), Argument::CodeCollection(codes)) => {
+                    let mut values = Vec::with_capacity(codes.len());
+                    for entry in codes {
+                        let CodeValue::Expression(code) = entry else {
+                            return Err(error(
+                                sig.params[slot].span,
+                                "code collection element category mismatch",
+                            ));
+                        };
+                        let ascribed =
+                            self.ascribe_code(code, Some(interface), sig.params[slot].span)?;
+                        values.push(Value::Code(CodeValue::Expression(ascribed)));
+                    }
+                    self.install_code_collection_input(*id, values, sig.params[slot].span);
+                }
+                (Input::Pattern(interface), Argument::CodeCollection(codes)) => {
+                    let mut values = Vec::with_capacity(codes.len());
+                    for entry in codes {
+                        let CodeValue::Pattern(code) = entry else {
+                            return Err(error(
+                                sig.params[slot].span,
+                                "pattern code collection element category mismatch",
+                            ));
+                        };
+                        self.ascribe_pattern_input(&code, interface, sig.params[slot].span)?;
+                        values.push(Value::Code(CodeValue::Pattern(code)));
+                    }
+                    self.install_code_collection_input(*id, values, sig.params[slot].span);
                 }
                 _ => {
                     return Err(error(
@@ -423,7 +507,7 @@ impl Checker<'_, '_> {
                 .map(|((public, _), (selected, _))| (*public, *selected))
                 .collect();
             let result = self.selected_generator_frame(target, &bindings, sig.span, |this| {
-                this.run_data_consumer(&selected, arguments)
+                this.run_data_consumer(&selected, arguments, sig.span)
             })?;
             Control::DataReturn(result)
         } else {
@@ -437,7 +521,11 @@ impl Checker<'_, '_> {
                     ))
                 };
             };
-            let value = self.package.body(body).unwrap().value;
+            let value = self
+                .package
+                .body(body)
+                .ok_or_else(|| error(item.span, "missing contextual data consumer body"))?
+                .value;
             self.consumer_result(value, &definition.output, 0)?
         };
         if self.checking_code_generator {

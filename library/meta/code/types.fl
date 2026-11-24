@@ -1,0 +1,208 @@
+use builtin.{Integer, Symbol, Type, bool}
+use List;
+
+{- Failure categories for comptime code interface inspection and assembly. -}
+pub enum CodeErr {
+    InvalidCodeKind,
+    MissingProgramBody,
+    InterfaceMismatch,
+    EmptySequence,
+    IndexOutOfBounds,
+    UnresolvedContext,
+    DuplicatePort,
+    ControlEscape,
+}
+
+{- Category of a quoted CMTT program fragment. -}
+pub enum CodeKind {
+    expression,
+    pattern,
+}
+
+{- Named runtime context entry or pattern output slot in a code interface. -}
+pub struct ContextEntry {
+    raw_name: Symbol,
+    raw_ty: Type,
+    raw_has_default: bool,
+}
+
+impl ContextEntry {
+    pub pure comptime fn new(name: Symbol, ty: Type, .has_default: bool = false) -> Self {
+        Self {
+            raw_name: name,
+            raw_ty: ty,
+            raw_has_default: has_default,
+        }
+    }
+
+    pub pure comptime fn name(self) -> Symbol {
+        self.raw_name
+    }
+
+    pub pure comptime fn ValueType(self) -> Type {
+        self.raw_ty
+    }
+
+    pub pure comptime fn has_default(self) -> bool {
+        self.raw_has_default
+    }
+
+    pub pure comptime fn matches_entry(self, name: Symbol, ty: Type) -> bool {
+        self.raw_name == name and self.raw_ty == ty
+    }
+}
+
+{- Ordered rank-1 runtime context descriptor for contextual code interfaces. -}
+pub struct CodeContext {
+    raw_entries: List<ContextEntry>,
+}
+
+impl CodeContext {
+    pub pure comptime fn empty() -> Self {
+        Self { raw_entries: [] }
+    }
+
+    pub pure comptime fn from_entries(entries: List<ContextEntry>) -> !CodeErr Self {
+        var acc = Self.empty();
+        var index = 0;
+        let count = entries.length();
+        while index < count {
+            acc = acc.add(entries[index])!;
+            index += 1;
+        }
+        acc
+    }
+
+    pub pure comptime fn len(self) -> Integer {
+        self.raw_entries.length()
+    }
+
+    pub pure comptime fn is_empty(self) -> bool {
+        self.raw_entries.length() == 0
+    }
+
+    pub pure comptime fn entries(self) -> List<ContextEntry> {
+        self.raw_entries
+    }
+
+    pub pure comptime fn find(self, name: Symbol) -> ?ContextEntry {
+        var index = 0;
+        let count = self.raw_entries.length();
+        while index < count {
+            let entry = self.raw_entries[index];
+            if entry.name() == name {
+                return entry;
+            }
+            index += 1;
+        }
+        null
+    }
+
+    pub pure comptime fn has_port(self, name: Symbol) -> bool {
+        self.find(name) match {
+            _? => true,
+            null => false,
+        }
+    }
+
+    pub pure comptime fn add(self, entry: ContextEntry) -> !CodeErr Self {
+        if self.has_port(entry.name()) {
+            return error CodeErr.DuplicatePort;
+        }
+        var next = self.raw_entries;
+        next.append(entry);
+        Self { raw_entries: next }
+    }
+}
+
+{- Simultaneous port redirection entry for contextual code splicing. -}
+pub struct Substitution {
+    raw_port: Symbol,
+    raw_target: Symbol,
+}
+
+impl Substitution {
+    pub pure comptime fn new(port: Symbol, target: Symbol) -> Self {
+        Self {
+            raw_port: port,
+            raw_target: target,
+        }
+    }
+
+    pub pure comptime fn identity(port: Symbol) -> Self {
+        Self {
+            raw_port: port,
+            raw_target: port,
+        }
+    }
+
+    pub pure comptime fn port(self) -> Symbol {
+        self.raw_port
+    }
+
+    pub pure comptime fn target(self) -> Symbol {
+        self.raw_target
+    }
+}
+
+{- Comptime summary describing a quoted expression or pattern interface. -}
+pub struct CodeInterfaceSummary {
+    raw_kind: CodeKind,
+    raw_context: CodeContext,
+    raw_result_or_subject: Type,
+    raw_output_names: List<Symbol>,
+}
+
+impl CodeInterfaceSummary {
+    pub pure comptime fn expression(context: CodeContext, result: Type) -> Self {
+        Self {
+            raw_kind: CodeKind.expression,
+            raw_context: context,
+            raw_result_or_subject: result,
+            raw_output_names: [],
+        }
+    }
+
+    pub pure comptime fn pattern(
+        subject: Type,
+        output_names: List<Symbol>,
+        .context: CodeContext = CodeContext.empty(),
+    ) -> Self {
+        Self {
+            raw_kind: CodeKind.pattern,
+            raw_context: context,
+            raw_result_or_subject: subject,
+            raw_output_names: output_names,
+        }
+    }
+
+    pub pure comptime fn kind(self) -> CodeKind {
+        self.raw_kind
+    }
+
+    pub pure comptime fn context(self) -> CodeContext {
+        self.raw_context
+    }
+
+    pub pure comptime fn ResultOrSubject(self) -> Type {
+        self.raw_result_or_subject
+    }
+
+    pub pure comptime fn output_names(self) -> List<Symbol> {
+        self.raw_output_names
+    }
+
+    pub pure comptime fn is_expression(self) -> bool {
+        self.raw_kind match {
+            CodeKind.expression => true,
+            CodeKind.pattern => false,
+        }
+    }
+
+    pub pure comptime fn is_pattern(self) -> bool {
+        self.raw_kind match {
+            CodeKind.pattern => true,
+            CodeKind.expression => false,
+        }
+    }
+}

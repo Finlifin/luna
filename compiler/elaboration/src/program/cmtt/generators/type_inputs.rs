@@ -16,6 +16,7 @@ impl Checker<'_, '_> {
     pub(in crate::program::cmtt) fn check_generator_body<T>(
         &mut self,
         owner: OwnerId,
+        span: Span,
         check: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<SourceBindings<()>, Error> {
         let checking = std::mem::replace(&mut self.checking_code_generator, true);
@@ -25,8 +26,8 @@ impl Checker<'_, '_> {
         let outer_layouts = self.generator_layouts.replace(BTreeMap::new());
         let result = self.generator_frame(owner, check);
         self.generator_layouts = outer_layouts;
-        let (_, operands) =
-            std::mem::replace(&mut self.checking_constructor_operands, parent).unwrap();
+        let (_, operands) = std::mem::replace(&mut self.checking_constructor_operands, parent)
+            .ok_or_else(|| error(span, "missing constructor operands frame"))?;
         self.checking_code_generator = checking;
         result?;
         Ok(operands)
@@ -51,7 +52,7 @@ impl Checker<'_, '_> {
             &self.code_generators[&owner].checked_operands
         } else if let Some(definition) = self.data_consumers.get(&owner) {
             if definition.checked_operands.is_none() {
-                self.check_data_consumer(owner)?;
+                self.check_data_consumer_at(owner, Some(callee.span))?;
             }
             &self.data_consumers[&owner].checked_operands
         } else if let Some(definition) = self.pattern_generators.get(&owner) {

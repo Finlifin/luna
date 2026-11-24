@@ -1,0 +1,44 @@
+use builtin.{Any, Integer, Type, bool}
+
+{- Forward any code or comptime witness while preserving its recovered evidence. -}
+pub comptime fn keep(value: Any) -> Any {
+    value
+}
+
+{- Select one of two Any-held witnesses at comptime. -}
+pub comptime fn select_any(flag: bool, when_true: Any, when_false: Any) -> Any {
+    if flag { when_true } else { when_false }
+}
+
+{- Forward a typed closed expression code witness. -}
+pub pure comptime fn keep_expr(code: <|- T>) -> <|- T> where T {
+    code
+}
+
+{- Select one of two closed expression code witnesses at comptime. -}
+pub pure comptime fn select_expr(flag: bool, when_true: <|- T>, when_false: <|- T>) -> <|- T> where T {
+    if flag { when_true } else { when_false }
+}
+
+{- Return the first closed expression code element from a non-empty variadic sequence. -}
+pub pure comptime fn first_expr(head: <|- T>, ...tail: <|- T>) -> <|- T> where T {
+    head
+}
+
+{- Return the final closed expression code element from a non-empty variadic sequence. -}
+pub pure comptime fn last_expr(head: <|- T>, ...tail: <|- T>) -> <|- T> where T {
+    var current: <|- T> = head;
+    inline for elem in tail'tuple_enumerate {
+        current = elem;
+    }
+    current
+}
+
+{- Count the number of expression code witnesses supplied to a variadic code call. -}
+pub pure comptime fn count_exprs(...items: <|- T>) -> Integer where T {
+    var count: Integer = 0;
+    inline for _ in items'tuple_enumerate {
+        count += 1;
+    }
+    count
+}

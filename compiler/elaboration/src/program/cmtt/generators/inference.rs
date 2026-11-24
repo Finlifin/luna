@@ -244,8 +244,11 @@ impl Checker<'_, '_> {
                         value.span,
                     )?
                 {
+                    let def = definition.ok_or_else(|| {
+                        error(value.span, "missing generator definition for result hint")
+                    })?;
                     return self.generator_inferred_result_hint(
-                        definition.unwrap(),
+                        def,
                         arguments,
                         value,
                         depth + 1,

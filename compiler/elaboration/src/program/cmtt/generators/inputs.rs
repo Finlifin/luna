@@ -22,10 +22,13 @@ impl Checker<'_, '_> {
             H::NFApplication(_, types) => Some(types),
             _ => None,
         };
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
+        let owner_item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(site.span, "missing contextual generator declaration"))?;
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &owner_item.kind
         else {
-            unreachable!()
+            return Err(error(site.span, "contextual call requires a function item"));
         };
         let (mut routes, _) = route_arguments(
             arguments,
@@ -338,20 +341,27 @@ impl Checker<'_, '_> {
                 continue;
             }
             if route.is_collected() {
-                let Input::Data(ty) =
-                    &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter].1
-                else {
-                    return Err(error(
-                        site.span,
-                        "code collection requires code-container evidence",
-                    ));
-                };
-                if !depends_on_input(ty, &mut self.required_steps, site.span)? {
-                    route.require_collection_type(self, ty, site.span)?;
-                    let Term::Tuple(fields) = self.structural_type(ty, site.span)? else {
-                        unreachable!()
-                    };
-                    collection_types[route_index] = Some(fields);
+                match &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter].1 {
+                    Input::Data(ty) => {
+                        if !depends_on_input(ty, &mut self.required_steps, site.span)? {
+                            route.require_collection_type(self, ty, site.span)?;
+                            let Term::Tuple(fields) = self.structural_type(ty, site.span)? else {
+                                return Err(error(
+                                    site.span,
+                                    "variadic data collection requires a tuple type",
+                                ));
+                            };
+                            collection_types[route_index] = Some(fields);
+                        }
+                    }
+                    Input::Code(_) | Input::Pattern(_) => {
+                        if properties[route_index].is_some() {
+                            return Err(error(
+                                site.span,
+                                "named property packet cannot supply positional code collection",
+                            ));
+                        }
+                    }
                 }
             }
             for (element, (_, argument)) in route.source_inputs().enumerate() {
@@ -516,6 +526,17 @@ impl Checker<'_, '_> {
                             })),
                             p(P::Type),
                         )
+                    } else if *ty == Term::AnyType && self.any_code_producer(argument)? {
+                        match self.any_code_value(argument, 0)? {
+                            AnyValue::Expression(code) => {
+                                (Argument::Code(CodeValue::Expression(code)), Term::AnyType)
+                            }
+                            AnyValue::Pattern(code) => {
+                                (Argument::Code(CodeValue::Pattern(code)), Term::AnyType)
+                            }
+                            AnyValue::AbstractAny => (Argument::Data(None), Term::AnyType),
+                            AnyValue::Data(arg, ty) => (arg, ty),
+                        }
                     } else if self.checking_code_generator {
                         let value = self.check_generator_data_input(argument, expected, context)?;
                         (Argument::Data(None), value.ty)
@@ -544,39 +565,56 @@ impl Checker<'_, '_> {
                 }
             };
             if route.is_collected() || properties[route_index].is_some() {
+                let planned_input = &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter].1;
                 if !parameters.is_empty() {
                     use crate::calls::InputContext as C;
-                    // Publish only this completed field's type. Later fields keep
-                    // their provisional contexts and their original source positions.
-                    if !matches!(
-                        partial[route.parameter],
-                        C::Tuple(_) | C::NormalTuple { .. } | C::Record(_)
-                    ) {
-                        partial[route.parameter] = if let Some(fields) = properties[route_index] {
-                            C::Record(
-                                fields
-                                    .iter()
-                                    .map(|field| (field.ident.name.to_string(), C::Unknown))
-                                    .collect(),
-                            )
-                        } else {
-                            let fields = vec![C::Unknown; route.source_inputs().count()];
-                            match self.protocols.tuple {
-                                Some(head) => C::NormalTuple {
-                                    head,
-                                    fields,
-                                    list_domain: self.bound_tuple_list_domain(),
-                                },
-                                None => C::Tuple(fields),
+                    if route.is_collected()
+                        && matches!(planned_input, Input::Code(_) | Input::Pattern(_))
+                    {
+                        if matches!(partial[route.parameter], C::Unknown) {
+                            partial[route.parameter] = C::Known(ty.clone());
+                        }
+                    } else {
+                        // Publish only this completed field's type. Later fields keep
+                        // their provisional contexts and their original source positions.
+                        if !matches!(
+                            partial[route.parameter],
+                            C::Tuple(_) | C::NormalTuple { .. } | C::Record(_)
+                        ) {
+                            partial[route.parameter] = if let Some(fields) = properties[route_index]
+                            {
+                                C::Record(
+                                    fields
+                                        .iter()
+                                        .map(|field| (field.ident.name.to_string(), C::Unknown))
+                                        .collect(),
+                                )
+                            } else {
+                                let fields = vec![C::Unknown; route.source_inputs().count()];
+                                match self.protocols.tuple {
+                                    Some(head) => C::NormalTuple {
+                                        head,
+                                        fields,
+                                        list_domain: self.bound_tuple_list_domain(),
+                                    },
+                                    None => C::Tuple(fields),
+                                }
+                            };
+                        }
+                        let field = match &mut partial[route.parameter] {
+                            C::Tuple(fields) | C::NormalTuple { fields, .. } => {
+                                &mut fields[element]
+                            }
+                            C::Record(fields) => &mut fields[element].1,
+                            _ => {
+                                return Err(error(
+                                    argument.span,
+                                    "unexpected partial collection context shape",
+                                ));
                             }
                         };
+                        *field = C::Known(ty.clone());
                     }
-                    let field = match &mut partial[route.parameter] {
-                        C::Tuple(fields) | C::NormalTuple { fields, .. } => &mut fields[element],
-                        C::Record(fields) => &mut fields[element].1,
-                        _ => unreachable!(),
-                    };
-                    *field = C::Known(ty.clone());
                 }
                 collected[route_index].push((value, ty));
             } else {
@@ -636,6 +674,24 @@ impl Checker<'_, '_> {
                 continue;
             }
             let elements = std::mem::take(&mut collected[route_index]);
+            let planned_input = &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter].1;
+            if route.is_collected() && matches!(planned_input, Input::Code(_) | Input::Pattern(_)) {
+                let mut codes = Vec::with_capacity(elements.len());
+                let mut tys = Vec::with_capacity(elements.len());
+                for (elem_val, elem_ty) in elements {
+                    let Argument::Code(code) = elem_val else {
+                        return Err(error(
+                            site.span,
+                            "code collection element category mismatch",
+                        ));
+                    };
+                    codes.push(code);
+                    tys.push(elem_ty);
+                }
+                values[route.parameter] = Some(Argument::CodeCollection(codes));
+                actual[route.parameter] = tys.into_iter().next();
+                continue;
+            }
             let ty = if let Some(fields) = properties[route_index] {
                 Term::Record(
                     fields
@@ -795,7 +851,12 @@ impl Checker<'_, '_> {
                 if self.checking_code_generator {
                     // Definition checking retains abstract clause inputs. A
                     // real invocation validates defaults before emitting code.
-                    let index = parameters.iter().position(|id| *id == all[slot]).unwrap();
+                    let index = parameters
+                        .iter()
+                        .position(|id| *id == all[slot])
+                        .ok_or_else(|| {
+                            error(site.span, "missing deferred clause parameter index")
+                        })?;
                     if candidate
                         .type_argument(index)
                         .map_err(|e| call_inference_error(site.span, e))?
@@ -885,9 +946,34 @@ impl Checker<'_, '_> {
                 (Some(Argument::Code(CodeValue::Expression(code))), Input::Code(interface)) => {
                     *code = self.ascribe_code(code.clone(), Some(interface), site.span)?
                 }
-                (Some(Argument::Data(_) | Argument::LiveData(_)), Input::Data(ty)) => {
-                    self.require(actual.as_ref().unwrap(), ty, site.span)?
+                (Some(Argument::CodeCollection(codes)), Input::Code(interface)) => {
+                    for entry in codes.iter_mut() {
+                        let CodeValue::Expression(code) = entry else {
+                            return Err(error(
+                                site.span,
+                                "code collection element category mismatch",
+                            ));
+                        };
+                        *code = self.ascribe_code(code.clone(), Some(interface), site.span)?;
+                    }
                 }
+                (Some(Argument::CodeCollection(codes)), Input::Pattern(interface)) => {
+                    for entry in codes.iter() {
+                        let CodeValue::Pattern(code) = entry else {
+                            return Err(error(
+                                site.span,
+                                "pattern code collection element category mismatch",
+                            ));
+                        };
+                        self.ascribe_pattern_input(code, interface, site.span)?;
+                    }
+                }
+                (Some(Argument::Data(_) | Argument::LiveData(_)), Input::Data(ty)) => {
+                    if let Some(actual_ty) = actual.as_ref() {
+                        self.require(actual_ty, ty, site.span)?;
+                    }
+                }
+                (Some(Argument::Code(_)), Input::Data(ty)) if *ty == Term::AnyType => {}
                 (None, _) => {}
                 _ => unreachable!("generator input category changed during type instantiation"),
             }

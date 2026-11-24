@@ -18,6 +18,13 @@ use std::{fmt, sync::Arc};
 use nir::code_interfaces::ExpressionCodeInterface as Interface;
 pub(super) use nir::code_values::ExpressionCode;
 
+pub(in crate::program::cmtt) enum AnyValue {
+    Expression(Arc<ExpressionCode>),
+    Pattern(Arc<patterns::PatternCode>),
+    AbstractAny,
+    Data(generators::Argument, Term),
+}
+
 fn binding(value: &Expr<'_>) -> Result<n::LocalId, Error> {
     match value.kind {
         H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => Ok(local(id)),
@@ -86,6 +93,16 @@ impl Checker<'_, '_> {
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
         {
             return self.code_binding(decl, expected, false);
+        }
+        let is_any_ty = decl
+            .ty
+            .map(|ty| self.is_any_type_expr(ty))
+            .transpose()?
+            .unwrap_or(false);
+        if (is_any_ty || self.any_code_producer(initializer)?)
+            && let Some(expr) = self.try_any_code_declaration(decl, initializer, expected, false)?
+        {
+            return Ok(expr);
         }
         if decl.mutable {
             return Err(error(
@@ -168,11 +185,17 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(decl.span, "comptime code requires an initializer"))?;
         let saved_locals = self.locals.clone();
         let in_code = std::mem::replace(&mut self.in_code_body, false);
+        let is_any_ty = decl
+            .ty
+            .map(|annotation| self.is_any_type_expr(annotation))
+            .transpose()?
+            .unwrap_or(false);
         let value = (|| {
-            let interface = decl
-                .ty
-                .map(|annotation| self.code_interface(annotation))
-                .transpose()?;
+            let interface = match decl.ty {
+                Some(_) if is_any_ty => None,
+                Some(annotation) => Some(self.code_interface(annotation)?),
+                None => None,
+            };
             self.code_value(initializer, interface.as_ref(), 0)
         })();
         self.in_code_body = in_code;
@@ -184,7 +207,15 @@ impl Checker<'_, '_> {
         for id in bindings {
             if !decl.mutable {
                 self.immutable.insert(id);
+            } else {
+                self.immutable.remove(&id);
             }
+            if is_any_ty && mutable {
+                self.locals.insert(id, Term::AnyType);
+            }
+            self.pattern_codes.remove(&id);
+            self.generator_data.remove(&id);
+            self.generator_cells.remove(&id);
             self.code_values.insert(id, value.clone());
         }
         Ok(n::Expr {
@@ -198,7 +229,7 @@ impl Checker<'_, '_> {
         let H::ContextualExprType(bindings, result) = &annotation.kind else {
             return Err(error(
                 annotation.span,
-                "code annotation requires an expression-code interface; Any evidence is not yet implemented",
+                "code annotation requires an expression-code interface or Any",
             ));
         };
         let mut context = BTreeMap::new();
@@ -224,7 +255,7 @@ impl Checker<'_, '_> {
             context.insert(id, ty.clone());
             self.locals.insert(id, ty);
         }
-        let result = self.type_expr(result)?;
+        let result = self.code_domain_or_any_type_expr(result)?;
         if result == p(P::Type)
             || matches!(
                 result,
@@ -293,19 +324,98 @@ impl Checker<'_, '_> {
                 )
             }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
-                let code = self
-                    .code_values
-                    .shared(&local(*id))
-                    .cloned()
-                    .ok_or_else(|| {
-                        error(
+                let local_id = local(*id);
+                if let Some(code) = self.code_values.shared(&local_id).cloned() {
+                    self.ascribe_code(code, interface, value.span)
+                } else if self.pattern_codes.contains_key(&local_id) {
+                    Err(error(
+                        value.span,
+                        "expression splice cannot use pattern code; pattern code requires a pattern splice",
+                    ))
+                } else if self.locals.get(&local_id) == Some(&Term::AnyType) {
+                    if self.checking_code_generator
+                        && matches!(value.kind, H::ResolvedFnParam(..))
+                        && self.generator_data.get(&local_id) == Some(&None)
+                        && let Some(interface) = interface
+                    {
+                        Ok(Arc::new(ExpressionCode {
+                            body: None,
+                            result: interface.result.clone(),
+                            context: interface.context.clone(),
+                            ports: interface.ports.clone(),
+                            defaults: BTreeMap::new(),
+                        }))
+                    } else if self.generator_data.contains_key(&local_id) {
+                        Err(error(
                             value.span,
-                            "splice requires an actual comptime code value, not a runtime value",
-                        )
-                    })?;
-                self.ascribe_code(code, interface, value.span)
+                            "splice requires an actual comptime code value, not ordinary data",
+                        ))
+                    } else {
+                        Err(error(
+                            value.span,
+                            "splice requires an actual comptime code value, not an abstract any wildcard",
+                        ))
+                    }
+                } else {
+                    Err(error(
+                        value.span,
+                        "splice requires an actual comptime code value, not a runtime value",
+                    ))
+                }
             }
+            H::TyAny => Err(error(
+                value.span,
+                "splice requires an actual comptime code value, not an abstract any wildcard",
+            )),
+            H::Builtin(name) if name.as_str() == "any" => Err(error(
+                value.span,
+                "splice requires an actual comptime code value, not an abstract any wildcard",
+            )),
             H::Application(callee, arguments) => {
+                let head = match callee.kind {
+                    H::NFApplication(head, _) => head,
+                    _ => callee,
+                };
+                if matches!(head.kind, H::ResolvedDef { def_id, .. }
+                    if self.package.definition_owner(def_id)
+                        .is_some_and(|owner| self.is_pattern_generator(owner)))
+                {
+                    return Err(error(
+                        value.span,
+                        "expression splice cannot use pattern code; pattern code requires a pattern splice",
+                    ));
+                }
+                if self.generator_owner(callee)?.is_none()
+                    && self
+                        .generic_code_method_hint(callee)?
+                        .is_none_or(|owner| !self.is_code_generator(owner))
+                    && self.any_returning_comptime_owner(callee)?.is_some()
+                {
+                    let result =
+                        self.invoke_any_code_generator(value, callee, arguments, depth + 1)?;
+                    let code = match result {
+                        AnyValue::Expression(code) => code,
+                        AnyValue::Pattern(_) => {
+                            return Err(error(
+                                value.span,
+                                "expression splice cannot use pattern code; pattern code requires a pattern splice",
+                            ));
+                        }
+                        AnyValue::AbstractAny => {
+                            return Err(error(
+                                value.span,
+                                "splice requires an actual comptime code value, not an abstract any wildcard",
+                            ));
+                        }
+                        AnyValue::Data(..) => {
+                            return Err(error(
+                                value.span,
+                                "splice requires an actual comptime code value, not ordinary data",
+                            ));
+                        }
+                    };
+                    return self.ascribe_code(code, interface, value.span);
+                }
                 let code = self.invoke_code_generator(
                     value,
                     callee,
@@ -440,7 +550,10 @@ impl Checker<'_, '_> {
                     {
                         checker.input_context_expression(body, context)
                     } else {
-                        checker.expr(body, interface.map(|interface| &interface.result))
+                        let expected = interface
+                            .map(|interface| &interface.result)
+                            .filter(|ty| **ty != Term::AnyType);
+                        checker.expr(body, expected)
                     }
                 },
             )
@@ -741,6 +854,1006 @@ impl Checker<'_, '_> {
         self.required_steps = fuel as u64;
         checked.map_err(|message| error(site.span, message))?;
         Ok(body)
+    }
+
+    pub(in crate::program::cmtt) fn try_any_code_declaration(
+        &mut self,
+        decl: &hir::decl::LetDecl<'_>,
+        initializer: &Expr<'_>,
+        expected: Option<&Term>,
+        mutable: bool,
+    ) -> Result<Option<n::Expr>, Error> {
+        if !self.any_code_producer(initializer)? {
+            return Ok(None);
+        }
+        if (decl.mutable && !mutable) || decl.guard.is_some() || decl.otherwise.is_some() {
+            return Err(error(
+                decl.span,
+                "quoted code requires an unconditional immutable comptime binding",
+            ));
+        }
+        let mut pattern = &decl.pattern;
+        let mut bindings = Vec::new();
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(pattern.span, "code binding pattern budget exhausted"))?;
+            match &pattern.kind {
+                hir::PatternKind::Wild => break,
+                hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, child) => {
+                    bindings.push(local(pattern.hir_id));
+                    if let Some(child) = child {
+                        pattern = child;
+                    } else {
+                        break;
+                    }
+                }
+                _ => {
+                    return Err(error(
+                        pattern.span,
+                        "code binding supports names, wildcards and whole-value aliases; code destructuring is not yet implemented",
+                    ));
+                }
+            }
+        }
+        let saved_locals = self.locals.clone();
+        let in_code = std::mem::replace(&mut self.in_code_body, false);
+        let value = self.any_code_value(initializer, 0);
+        self.in_code_body = in_code;
+        self.locals = saved_locals;
+        let value = value?;
+        if let AnyValue::Data(..) = &value {
+            if !mutable {
+                return Ok(None);
+            }
+        }
+        if let Some(expected) = expected {
+            self.require(&p(P::Void), expected, decl.span)?;
+        }
+        match value {
+            AnyValue::Expression(code) => {
+                for id in bindings {
+                    if !decl.mutable {
+                        self.immutable.insert(id);
+                    } else {
+                        self.immutable.remove(&id);
+                    }
+                    if mutable {
+                        self.locals.insert(id, Term::AnyType);
+                    }
+                    self.pattern_codes.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                    self.code_values.insert(id, code.clone());
+                }
+            }
+            AnyValue::Pattern(code) => {
+                self.validate_pattern_code(&code, initializer.span)?;
+                for id in bindings {
+                    if !decl.mutable {
+                        self.immutable.insert(id);
+                    } else {
+                        self.immutable.remove(&id);
+                    }
+                    if mutable {
+                        self.locals.insert(id, Term::AnyType);
+                    }
+                    self.code_values.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                    self.pattern_codes.insert(id, code.clone());
+                }
+            }
+            AnyValue::AbstractAny => {
+                for id in bindings {
+                    if !decl.mutable {
+                        self.immutable.insert(id);
+                    } else {
+                        self.immutable.remove(&id);
+                    }
+                    self.code_values.remove(&id);
+                    self.pattern_codes.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                    self.locals.insert(id, Term::AnyType);
+                }
+            }
+            AnyValue::Data(arg, ty) => {
+                for id in bindings {
+                    if !decl.mutable {
+                        self.immutable.insert(id);
+                    } else {
+                        self.immutable.remove(&id);
+                    }
+                    self.code_values.remove(&id);
+                    self.pattern_codes.remove(&id);
+                    match &arg {
+                        generators::Argument::Data(expr) => {
+                            self.generator_cells.remove(&id);
+                            self.generator_data.insert(id, expr.clone());
+                        }
+                        generators::Argument::LiveData(live) => {
+                            self.install_live_generator_input(id, &ty, live.clone(), decl.span);
+                        }
+                        generators::Argument::Code(_) | generators::Argument::CodeCollection(_) => {
+                        }
+                    }
+                    self.locals.insert(id, Term::AnyType);
+                }
+            }
+        }
+        Ok(Some(n::Expr {
+            ty: p(P::Void),
+            source: source(decl.span),
+            kind: K::Unit,
+        }))
+    }
+
+    pub(in crate::program::cmtt) fn any_code_value(
+        &mut self,
+        value: &Expr<'_>,
+        depth: usize,
+    ) -> Result<AnyValue, Error> {
+        if depth >= 64 || self.required_steps == 0 {
+            return Err(error(value.span, "code construction budget exhausted"));
+        }
+        self.required_steps -= 1;
+        if Self::is_abstract_any_value(value) {
+            return Ok(AnyValue::AbstractAny);
+        }
+        match &value.kind {
+            H::CodeQuote(body, substitutions) => self
+                .quote_expression(value, body, substitutions, None, None, None)
+                .map(AnyValue::Expression),
+            H::CodePatternQuote(..) => self
+                .pattern_generator_value_inferred(value, None, None, None, depth + 1)
+                .map(AnyValue::Pattern),
+            H::ResolvedClauseParam(_, id)
+                if self.template_code_values.contains_key(&(id.pkg, id.index)) =>
+            {
+                self.visible_clause_input(*id, value.span)?;
+                Ok(AnyValue::Expression(
+                    self.template_code_values[&(id.pkg, id.index)].clone(),
+                ))
+            }
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                let local_id = local(*id);
+                if let Some(code) = self.code_values.shared(&local_id).cloned() {
+                    Ok(AnyValue::Expression(code))
+                } else if let Some(code) = self.pattern_codes.shared(&local_id).cloned() {
+                    Ok(AnyValue::Pattern(code))
+                } else if self.generator_data.contains_key(&local_id) {
+                    if self.checking_code_generator {
+                        let ty = self.locals.get(&local_id).cloned().unwrap_or(Term::AnyType);
+                        Ok(AnyValue::Data(generators::Argument::Data(None), ty))
+                    } else {
+                        let (data, ty) = self.generator_data_expression(value, None)?;
+                        let arg = if self.generator_value_needs_live_storage(&data, value.span)? {
+                            generators::Argument::LiveData(data)
+                        } else {
+                            generators::Argument::Data(Some(self.materialize_generator_data(
+                                data,
+                                ty.clone(),
+                                value.span,
+                            )?))
+                        };
+                        Ok(AnyValue::Data(arg, ty))
+                    }
+                } else if self.locals.get(&local_id) == Some(&Term::AnyType) {
+                    Ok(AnyValue::AbstractAny)
+                } else {
+                    Err(error(
+                        value.span,
+                        "splice requires an actual comptime code value, not a runtime value",
+                    ))
+                }
+            }
+            H::Application(callee, arguments) => {
+                let head = match callee.kind {
+                    H::NFApplication(head, _) => head,
+                    _ => callee,
+                };
+                if matches!(head.kind, H::ResolvedDef { def_id, .. }
+                    if self.package.definition_owner(def_id)
+                        .is_some_and(|owner| self.is_pattern_generator(owner)))
+                {
+                    return self
+                        .invoke_pattern_generator(callee, arguments, None, None, value.span)
+                        .map(AnyValue::Pattern);
+                }
+                if self.generator_owner(callee)?.is_some()
+                    || self
+                        .generic_code_method_hint(callee)?
+                        .is_some_and(|owner| self.is_code_generator(owner))
+                {
+                    return self
+                        .invoke_code_generator(value, callee, arguments, None, None)
+                        .map(AnyValue::Expression);
+                }
+                if self.any_returning_comptime_owner(callee)?.is_some() {
+                    return self.invoke_any_code_generator(value, callee, arguments, depth + 1);
+                }
+                self.any_data_fallback(value)
+            }
+            H::ExtendedApplication(callee, arguments) => {
+                let head = match callee.kind {
+                    H::NFApplication(head, _) => head,
+                    _ => callee,
+                };
+                if matches!(head.kind, H::ResolvedDef { def_id, .. }
+                    if self.package.definition_owner(def_id)
+                        .is_some_and(|owner| self.is_pattern_generator(owner)))
+                {
+                    return self
+                        .invoke_pattern_properties(value, callee, arguments, None, None)
+                        .map(AnyValue::Pattern);
+                }
+                if self.generator_owner(callee)?.is_some()
+                    || self
+                        .generic_code_method_hint(callee)?
+                        .is_some_and(|owner| self.is_code_generator(owner))
+                {
+                    return self
+                        .invoke_property_generator(value, callee, arguments, None, None)
+                        .map(AnyValue::Expression);
+                }
+                self.any_data_fallback(value)
+            }
+            H::Block(block) => self.any_code_block(block, depth + 1),
+            H::Return(Some(inner)) => self.any_code_value(inner, depth + 1),
+            H::InlineControl(inner)
+                if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
+            {
+                self.any_code_value(inner, depth + 1)
+            }
+            H::If(condition, yes, Some(no)) => {
+                if self.checking_code_generator {
+                    let checked = self.expr(condition, Some(&p(P::Bool)))?;
+                    self.validate_generator_data(&checked, condition.span)?;
+                    let yes_val = self.any_code_block(yes, depth + 1)?;
+                    let no_val = self.any_code_value(no, depth + 1)?;
+                    Ok(Self::join_any_values(yes_val, no_val))
+                } else {
+                    let (condition_val, _) =
+                        self.generator_data_expression(condition, Some(&p(P::Bool)))?;
+                    match condition_val {
+                        comptime_interpretor::Value::Bool(true) => {
+                            self.any_code_block(yes, depth + 1)
+                        }
+                        comptime_interpretor::Value::Bool(false) => {
+                            self.any_code_value(no, depth + 1)
+                        }
+                        _ => Err(error(
+                            value.span,
+                            "code selection requires a comptime boolean",
+                        )),
+                    }
+                }
+            }
+            H::When(arms) => {
+                if !arms.iter().any(|arm| arm.cond.is_none()) {
+                    return Err(error(value.span, "code-valued when requires an else arm"));
+                }
+                if self.checking_code_generator {
+                    let mut joined: Option<AnyValue> = None;
+                    for arm in *arms {
+                        let _ = self.generator_when_condition(arm.cond)?;
+                        let arm_val = self.generator_scope(arm.span, |this| {
+                            this.any_code_value(arm.body, depth + 1)
+                        })?;
+                        joined = Some(match joined {
+                            None => arm_val,
+                            Some(previous) => Self::join_any_values(previous, arm_val),
+                        });
+                    }
+                    return joined
+                        .ok_or_else(|| error(value.span, "code-valued when selected no arm"));
+                }
+                for arm in *arms {
+                    let selected = self.generator_when_condition(arm.cond)?;
+                    if selected == Some(true) {
+                        return self.generator_scope(arm.span, |this| {
+                            this.any_code_value(arm.body, depth + 1)
+                        });
+                    }
+                }
+                Err(error(value.span, "code-valued when selected no arm"))
+            }
+            H::Match(subject, arms) => {
+                let mut results =
+                    self.generator_match(value, subject, arms, None, |this, _, body| {
+                        this.any_code_value(body, depth + 1)
+                    })?;
+                results
+                    .drain(..)
+                    .next()
+                    .ok_or_else(|| error(value.span, "code-valued match selected no arm"))
+            }
+            _ => self.any_data_fallback(value),
+        }
+    }
+
+    fn any_data_fallback(&mut self, value: &Expr<'_>) -> Result<AnyValue, Error> {
+        if self.checking_code_generator {
+            let checked = self.expr(value, None)?;
+            self.validate_generator_data(&checked, value.span)?;
+            Ok(AnyValue::Data(generators::Argument::Data(None), checked.ty))
+        } else {
+            let (data, ty) = self.generator_data_expression(value, None)?;
+            let arg = if self.generator_value_needs_live_storage(&data, value.span)? {
+                generators::Argument::LiveData(data)
+            } else {
+                generators::Argument::Data(Some(self.materialize_generator_data(
+                    data,
+                    ty.clone(),
+                    value.span,
+                )?))
+            };
+            Ok(AnyValue::Data(arg, ty))
+        }
+    }
+
+    fn any_code_block(&mut self, block: &hir::Block<'_>, depth: usize) -> Result<AnyValue, Error> {
+        self.generator_scope(block.span, |this| {
+            let mut loops = Vec::new();
+            let mut sequence = constants::SchemaSequence::default();
+            for statement in block.stmts {
+                let next = this.generator_statement_in_sequence(
+                    statement,
+                    generators::statements::ResultInterface::Any,
+                    depth + 1,
+                    &mut loops,
+                    &mut sequence,
+                )?;
+                match next {
+                    generators::statements::Control::AnyReturn(val) => return Ok(val),
+                    generators::statements::Control::Next => {}
+                    _ => {
+                        return Err(error(
+                            statement.span,
+                            "generator loop transfer escaped its loop",
+                        ));
+                    }
+                }
+            }
+            if let Some(value) = block.expr {
+                return this.any_code_value(value, depth + 1);
+            }
+            Ok(AnyValue::Data(
+                generators::Argument::Data(Some(n::Expr {
+                    source: source(block.span),
+                    ty: p(P::Void),
+                    kind: K::Unit,
+                })),
+                p(P::Void),
+            ))
+        })
+    }
+
+    pub(in crate::program::cmtt) fn invoke_any_code_generator(
+        &mut self,
+        site: &Expr<'_>,
+        callee: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        depth: usize,
+    ) -> Result<AnyValue, Error> {
+        let owner = self
+            .any_returning_comptime_owner(callee)?
+            .ok_or_else(|| error(callee.span, "expected an Any-returning comptime function"))?;
+        let template = self.form_contextual_generator(owner, site.span, |this, output| {
+            output
+                .map(|output| this.code_domain_or_any_type_expr(output))
+                .unwrap_or(Ok(Term::AnyType))
+        })?;
+        let mut packets = generators::spreads::SpreadPlan::default();
+        let (definition, values) = self.prepare_contextual_inputs(
+            owner,
+            template,
+            site,
+            callee,
+            arguments,
+            None,
+            |ty| ty.clone(),
+            None,
+            &mut packets,
+            None,
+        )?;
+        self.generator_frame(owner, |this| {
+            this.run_any_code_generator(&definition, values, site.span, depth + 1)
+        })
+    }
+
+    fn run_any_code_generator(
+        &mut self,
+        definition: &Generator<Term>,
+        arguments: Vec<Option<generators::Argument>>,
+        span: Span,
+        depth: usize,
+    ) -> Result<AnyValue, Error> {
+        let owner = self
+            .signature_owner
+            .ok_or_else(|| error(span, "missing Any generator owner"))?;
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(span, "missing Any generator declaration"))?;
+        let (signature, body_id) = match &item.kind {
+            ItemKind::Fn(sig, body) => (sig, Some(*body)),
+            ItemKind::FnDeclaration(sig) => (sig, None),
+            _ => return Err(error(span, "Any generator requires a function declaration")),
+        };
+        self.install_generator_capture_values(&definition.captures, span)?;
+        self.alias_substitution.extend(
+            definition
+                .types
+                .iter()
+                .map(|(id, value)| (*id, Arc::new(value.clone()))),
+        );
+        self.install_generator_clause_values(owner, &definition.types, &definition.clause_domains)?;
+        for (slot, ((id, input), argument)) in definition.inputs.iter().zip(arguments).enumerate() {
+            let value = argument
+                .ok_or_else(|| error(signature.params[slot].span, "missing generator argument"))?;
+            self.mark_generator_input_binding(owner, *id);
+            self.install_generator_type_input(*id, definition.input_value(slot));
+            match (input, value) {
+                (nir::code_interfaces::CodeInput::Data(ty), generators::Argument::Data(val)) => {
+                    self.locals.insert(*id, ty.clone());
+                    self.generator_data.insert(*id, val);
+                }
+                (
+                    nir::code_interfaces::CodeInput::Data(ty),
+                    generators::Argument::LiveData(val),
+                ) => {
+                    self.install_live_generator_input(*id, ty, val, signature.params[slot].span);
+                }
+                (
+                    nir::code_interfaces::CodeInput::Data(ty),
+                    generators::Argument::Code(CodeValue::Expression(code)),
+                ) if *ty == Term::AnyType => {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.code_values.insert(*id, code);
+                }
+                (
+                    nir::code_interfaces::CodeInput::Data(ty),
+                    generators::Argument::Code(CodeValue::Pattern(code)),
+                ) if *ty == Term::AnyType => {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.pattern_codes.insert(*id, code);
+                }
+                (
+                    nir::code_interfaces::CodeInput::Code(interface),
+                    generators::Argument::Code(CodeValue::Expression(code)),
+                ) => {
+                    let code =
+                        self.ascribe_code(code, Some(interface), signature.params[slot].span)?;
+                    self.code_values.insert(*id, code);
+                }
+                (
+                    nir::code_interfaces::CodeInput::Pattern(interface),
+                    generators::Argument::Code(CodeValue::Pattern(code)),
+                ) => {
+                    self.ascribe_pattern_input(&code, interface, signature.params[slot].span)?;
+                    self.pattern_codes.insert(*id, code);
+                }
+                _ => {
+                    return Err(error(
+                        signature.params[slot].span,
+                        "Any comptime generator argument category mismatch",
+                    ));
+                }
+            }
+        }
+        let body_id = body_id.ok_or_else(|| error(span, "Any generator requires a body"))?;
+        let body = self
+            .package
+            .body(body_id)
+            .ok_or_else(|| error(span, "missing Any generator body"))?;
+        self.any_code_value(body.value, depth + 1)
+    }
+
+    fn join_any_values(left: AnyValue, right: AnyValue) -> AnyValue {
+        match (left, right) {
+            (AnyValue::Expression(y), AnyValue::Expression(n))
+                if y.result == n.result && y.context == n.context && y.ports == n.ports =>
+            {
+                AnyValue::Expression(y)
+            }
+            (AnyValue::Pattern(y), AnyValue::Pattern(n))
+                if y.subject == n.subject && y.outputs == n.outputs =>
+            {
+                AnyValue::Pattern(y)
+            }
+            (AnyValue::Data(a, ty_a), AnyValue::Data(_, ty_b)) if ty_a == ty_b => {
+                AnyValue::Data(a, ty_a)
+            }
+            _ => AnyValue::AbstractAny,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(in crate::program::cmtt) fn assemble_code_sequence(
+        &mut self,
+        elements: &[Arc<ExpressionCode>],
+        interface: Option<&Interface>,
+        span: Span,
+    ) -> Result<Arc<ExpressionCode>, Error> {
+        let metadata = self.code_storage_metadata();
+        let scope = self.call_inference_scope();
+        let frames: Vec<Vec<Sort>> = vec![scope.iter().map(|parameter| parameter.sort).collect()];
+        let check_return_escape = self.control.result.is_none() || !self.captures.is_empty();
+        let checking = self.checking_code_generator;
+        let immutable = &self.immutable;
+        let mut next_binding = self.next_temporary_binding;
+        let mut steps = self.required_steps;
+        let mut sources = std::mem::take(&mut self.expansion_sources);
+        let res = assemble_code_sequence_with(
+            elements,
+            interface,
+            span,
+            checking,
+            check_return_escape,
+            immutable,
+            &metadata,
+            &frames,
+            &mut next_binding,
+            &mut sources,
+            &mut steps,
+            |actual, expected| self.require(actual, expected, span),
+        );
+        self.next_temporary_binding = next_binding;
+        self.expansion_sources = sources;
+        self.required_steps = steps;
+        let assembled = res?;
+        self.ascribe_code(assembled, interface, span)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+fn assemble_code_sequence_with(
+    elements: &[Arc<ExpressionCode>],
+    interface: Option<&Interface>,
+    span: Span,
+    checking_code_generator: bool,
+    check_return_escape: bool,
+    immutable: &BTreeSet<n::LocalId>,
+    metadata: &n::Package,
+    frames: &[Vec<Sort>],
+    next_temporary_binding: &mut u32,
+    expansion_sources: &mut Vec<n::ExpansionSource>,
+    required_steps: &mut u64,
+    mut require_ty: impl FnMut(&Term, &Term) -> Result<(), Error>,
+) -> Result<Arc<ExpressionCode>, Error> {
+    *required_steps = required_steps
+        .checked_sub(elements.len().saturating_add(1) as u64)
+        .ok_or_else(|| error(span, "code sequence assembly budget exhausted"))?;
+    if elements.is_empty() {
+        return Ok(Arc::new(ExpressionCode {
+            body: (!checking_code_generator).then(|| {
+                Arc::new(n::Expr {
+                    ty: p(P::Void),
+                    source: source(span),
+                    kind: K::Unit,
+                })
+            }),
+            result: p(P::Void),
+            context: BTreeMap::new(),
+            ports: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+        }));
+    }
+    let explicit_target = interface.filter(|target| !target.infer_context);
+    let mut merged_context = BTreeMap::new();
+    let mut merged_ports = BTreeMap::new();
+    let mut merged_defaults = BTreeMap::new();
+    let mut conflicted_defaults = BTreeSet::new();
+    let mut port_ids: BTreeMap<String, (n::LocalId, Term)> = BTreeMap::new();
+    let mut lowered = Vec::with_capacity(elements.len());
+
+    for element in elements {
+        let mut connections = BTreeMap::new();
+        for (from, ty) in &element.context {
+            let port_names = element
+                .ports
+                .iter()
+                .filter(|(_, id)| *id == from)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            let target_id = if let Some(target) = explicit_target {
+                if port_names.is_empty() {
+                    let expected_ty = target.context.get(from).ok_or_else(|| {
+                        error(
+                            span,
+                            "code sequence element requires a fixed dependency absent from target context",
+                        )
+                    })?;
+                    require_ty(ty, expected_ty)?;
+                    *from
+                } else {
+                    let mut resolved = None;
+                    for name in &port_names {
+                        let port_id = *target.ports.get(name).ok_or_else(|| {
+                            error(
+                                span,
+                                format!("code sequence missing target context port {name}"),
+                            )
+                        })?;
+                        require_ty(ty, &target.context[&port_id])?;
+                        if let Some(prev) = resolved
+                            && prev != port_id
+                        {
+                            return Err(error(
+                                span,
+                                "code sequence port aliases map to distinct target bindings",
+                            ));
+                        }
+                        resolved = Some(port_id);
+                    }
+                    resolved
+                        .ok_or_else(|| error(span, "code sequence target port resolution failed"))?
+                }
+            } else if port_names.is_empty() {
+                if let Some(existing) = merged_context.get(from) {
+                    require_ty(ty, existing)?;
+                } else {
+                    merged_context.insert(*from, ty.clone());
+                }
+                if let Some(&default_id) = element.defaults.get(from) {
+                    match merged_defaults.entry(*from) {
+                        std::collections::btree_map::Entry::Vacant(slot)
+                            if !conflicted_defaults.contains(from) =>
+                        {
+                            slot.insert(default_id);
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot)
+                            if *slot.get() != default_id =>
+                        {
+                            slot.remove();
+                            conflicted_defaults.insert(*from);
+                        }
+                        _ => {}
+                    }
+                }
+                *from
+            } else {
+                let canonical =
+                    if let Some((existing_id, existing_ty)) = port_ids.get(&port_names[0]) {
+                        require_ty(ty, existing_ty)?;
+                        *existing_id
+                    } else {
+                        let candidate = if merged_context.contains_key(from) {
+                            let fresh = n::LocalId {
+                                owner: u32::MAX,
+                                index: *next_temporary_binding,
+                            };
+                            *next_temporary_binding =
+                                next_temporary_binding.checked_add(1).ok_or_else(|| {
+                                    error(span, "code sequence context identity space exhausted")
+                                })?;
+                            fresh
+                        } else {
+                            *from
+                        };
+                        merged_context.insert(candidate, ty.clone());
+                        candidate
+                    };
+                for name in &port_names {
+                    if let Some((prev_id, prev_ty)) = port_ids.get(name) {
+                        if *prev_id != canonical {
+                            return Err(error(
+                                span,
+                                "code sequence element mixes incompatible context ports",
+                            ));
+                        }
+                        require_ty(ty, prev_ty)?;
+                    } else {
+                        port_ids.insert(name.clone(), (canonical, ty.clone()));
+                        merged_ports.insert(name.clone(), canonical);
+                    }
+                }
+                if let Some(&default_id) = element.defaults.get(from) {
+                    match merged_defaults.entry(canonical) {
+                        std::collections::btree_map::Entry::Vacant(slot)
+                            if !conflicted_defaults.contains(&canonical) =>
+                        {
+                            slot.insert(default_id);
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot)
+                            if *slot.get() != default_id =>
+                        {
+                            slot.remove();
+                            conflicted_defaults.insert(canonical);
+                        }
+                        _ => {}
+                    }
+                }
+                canonical
+            };
+            connections.insert(*from, target_id);
+        }
+
+        if !checking_code_generator {
+            let template = element
+                .body
+                .as_ref()
+                .ok_or_else(|| error(span, "code sequence requires concrete code bodies"))?;
+            if check_return_escape {
+                let mut fuel = *required_steps as usize;
+                let checked = nir::visit::expression_in_scope(template, &mut fuel, |node, _| {
+                    if matches!(node.kind, K::Return(_)) {
+                        return Err(
+                            "code return cannot cross a closure or quote boundary at sequence splice"
+                                .into(),
+                        );
+                    }
+                    Ok(())
+                });
+                *required_steps = fuel as u64;
+                checked.map_err(|message| error(span, message))?;
+            }
+            constants::charge_copy(template, required_steps, span)?;
+            let mut body = (**template).clone();
+            freshen(
+                &mut body,
+                connections,
+                next_temporary_binding,
+                expansion_sources,
+                span,
+            )?;
+            let mut fuel = *required_steps as usize;
+            let checked = nir::visit::expression(&body, &mut fuel, |expression, _| {
+                if let K::Assign { place, .. }
+                | K::BitAssign { place, .. }
+                | K::BitUpdate { place, .. } = &expression.kind
+                    && immutable.contains(&place.root)
+                {
+                    return Err("code sequence cannot write to an immutable runtime binding".into());
+                }
+                Ok(())
+            });
+            *required_steps = fuel as u64;
+            checked.map_err(|message| error(span, message))?;
+            lowered.push(body);
+        }
+    }
+
+    let Some(last_element) = elements.last() else {
+        return Err(error(span, "code sequence is missing final element"));
+    };
+    let result_ty = last_element.result.clone();
+    let body = if checking_code_generator {
+        None
+    } else {
+        let last_expr = lowered
+            .pop()
+            .ok_or_else(|| error(span, "code sequence is missing final expression"))?;
+        Some(Arc::new(n::Expr {
+            ty: result_ty.clone(),
+            source: source(span),
+            kind: K::Block {
+                statements: lowered,
+                result: Some(Box::new(last_expr)),
+            },
+        }))
+    };
+    let (context, ports, defaults) = if let Some(target) = explicit_target {
+        (
+            target.context.clone(),
+            target.ports.clone(),
+            target.defaults.clone(),
+        )
+    } else {
+        (merged_context, merged_ports, merged_defaults)
+    };
+    let assembled = ExpressionCode {
+        body,
+        result: result_ty,
+        context,
+        ports,
+        defaults,
+    };
+    if assembled.result != Term::AnyType {
+        assembled
+            .validate_runtime_interface(metadata, frames)
+            .map_err(|message| {
+                error(span, format!("code sequence runtime interface: {message}"))
+            })?;
+    }
+    Ok(Arc::new(assembled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustc_span::DUMMY_SP;
+
+    #[test]
+    fn assemble_code_sequence_merges_ports_freshens_binders_and_preserves_last_result() {
+        let port_x = n::LocalId { owner: 1, index: 0 };
+        let internal_a = n::LocalId { owner: 1, index: 1 };
+        let internal_b = n::LocalId { owner: 2, index: 1 };
+        let other_port_x = n::LocalId { owner: 2, index: 0 };
+
+        let first = Arc::new(ExpressionCode {
+            body: Some(Arc::new(n::Expr {
+                ty: p(P::Void),
+                source: source(DUMMY_SP),
+                kind: K::Let {
+                    binding: internal_a,
+                    value: Box::new(n::Expr {
+                        ty: p(P::I32),
+                        source: source(DUMMY_SP),
+                        kind: K::Local(port_x),
+                    }),
+                },
+            })),
+            result: p(P::Void),
+            context: BTreeMap::from([(port_x, p(P::I32))]),
+            ports: BTreeMap::from([("x".into(), port_x)]),
+            defaults: BTreeMap::new(),
+        });
+
+        let second = Arc::new(ExpressionCode {
+            body: Some(Arc::new(n::Expr {
+                ty: p(P::I32),
+                source: source(DUMMY_SP),
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        ty: p(P::Void),
+                        source: source(DUMMY_SP),
+                        kind: K::Let {
+                            binding: internal_b,
+                            value: Box::new(n::Expr {
+                                ty: p(P::I32),
+                                source: source(DUMMY_SP),
+                                kind: K::Local(other_port_x),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(n::Expr {
+                        ty: p(P::I32),
+                        source: source(DUMMY_SP),
+                        kind: K::Local(internal_b),
+                    })),
+                },
+            })),
+            result: p(P::I32),
+            context: BTreeMap::from([(other_port_x, p(P::I32))]),
+            ports: BTreeMap::from([("x".into(), other_port_x)]),
+            defaults: BTreeMap::new(),
+        });
+
+        let metadata = n::Package::default();
+        let immutable = BTreeSet::new();
+        let mut next = 100;
+        let mut sources = Vec::new();
+        let mut steps = 10_000;
+        let assembled = assemble_code_sequence_with(
+            &[first, second],
+            None,
+            DUMMY_SP,
+            false,
+            true,
+            &immutable,
+            &metadata,
+            &[vec![]],
+            &mut next,
+            &mut sources,
+            &mut steps,
+            |a, b| {
+                if a == b {
+                    Ok(())
+                } else {
+                    Err(error(DUMMY_SP, "mismatch"))
+                }
+            },
+        )
+        .expect("hygienic code sequence");
+        assert_eq!(assembled.result, p(P::I32));
+        assert_eq!(assembled.context.len(), 1);
+        assert_eq!(assembled.ports.get("x"), Some(&port_x));
+        let Some(body) = &assembled.body else {
+            panic!("expected concrete assembled body");
+        };
+        let K::Block { statements, result } = &body.kind else {
+            panic!("expected block body");
+        };
+        assert_eq!(statements.len(), 1);
+        assert!(result.is_some());
+        assert!(next > 100);
+    }
+
+    #[test]
+    fn assemble_code_sequence_rejects_mismatched_port_types_and_return_escape() {
+        let port_a = n::LocalId { owner: 1, index: 0 };
+        let port_b = n::LocalId { owner: 2, index: 0 };
+        let first = Arc::new(ExpressionCode {
+            body: Some(Arc::new(n::Expr {
+                ty: p(P::I32),
+                source: source(DUMMY_SP),
+                kind: K::Local(port_a),
+            })),
+            result: p(P::I32),
+            context: BTreeMap::from([(port_a, p(P::I32))]),
+            ports: BTreeMap::from([("x".into(), port_a)]),
+            defaults: BTreeMap::new(),
+        });
+        let mismatched = Arc::new(ExpressionCode {
+            body: Some(Arc::new(n::Expr {
+                ty: p(P::Bool),
+                source: source(DUMMY_SP),
+                kind: K::Local(port_b),
+            })),
+            result: p(P::Bool),
+            context: BTreeMap::from([(port_b, p(P::Bool))]),
+            ports: BTreeMap::from([("x".into(), port_b)]),
+            defaults: BTreeMap::new(),
+        });
+
+        let metadata = n::Package::default();
+        let immutable = BTreeSet::new();
+        let mut next = 100;
+        let mut sources = Vec::new();
+        let mut steps = 10_000;
+        assert!(
+            assemble_code_sequence_with(
+                &[first.clone(), mismatched],
+                None,
+                DUMMY_SP,
+                false,
+                true,
+                &immutable,
+                &metadata,
+                &[vec![]],
+                &mut next,
+                &mut sources,
+                &mut steps,
+                |a, b| if a == b {
+                    Ok(())
+                } else {
+                    Err(error(DUMMY_SP, "mismatch"))
+                },
+            )
+            .is_err()
+        );
+
+        let escaping = Arc::new(ExpressionCode {
+            body: Some(Arc::new(n::Expr {
+                ty: p(P::Never),
+                source: source(DUMMY_SP),
+                kind: K::Return(Some(Box::new(n::Expr {
+                    ty: p(P::I32),
+                    source: source(DUMMY_SP),
+                    kind: K::Literal(n::Literal::SignedInteger(1)),
+                }))),
+            })),
+            result: p(P::Never),
+            context: BTreeMap::new(),
+            ports: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+        });
+        assert!(
+            assemble_code_sequence_with(
+                &[first, escaping],
+                None,
+                DUMMY_SP,
+                false,
+                true,
+                &immutable,
+                &metadata,
+                &[vec![]],
+                &mut next,
+                &mut sources,
+                &mut steps,
+                |a, b| if a == b {
+                    Ok(())
+                } else {
+                    Err(error(DUMMY_SP, "mismatch"))
+                },
+            )
+            .is_err()
+        );
     }
 }
 

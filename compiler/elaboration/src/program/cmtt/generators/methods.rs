@@ -116,19 +116,24 @@ impl Checker<'_, '_> {
                     .required_steps
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "selected method exit frame budget exhausted"))?;
-                let Some(value) = this.generator_data.get(&selected) else {
+                let value = this.generator_data.get(&selected).cloned();
+                let cell = this.generator_cells.get(&selected).cloned();
+                if value.is_none() && cell.is_none() {
                     continue;
-                };
-                if let Some(value) = value {
-                    constants::charge_copy(value, &mut this.required_steps, span)?;
                 }
-                let mut value = value.clone();
-                if let Some(value) = &mut value {
-                    if matches!(value.kind, K::Local(id) if id == selected) {
-                        value.kind = K::Local(public);
+                let value = match value {
+                    Some(Some(value)) => {
+                        constants::charge_copy(&value, &mut this.required_steps, span)?;
+                        let mut value = value;
+                        if matches!(value.kind, K::Local(id) if id == selected) {
+                            value.kind = K::Local(public);
+                        }
+                        Some(Some(value))
                     }
-                }
-                let mut cell = this.generator_cells.get(&selected).cloned();
+                    Some(None) => Some(None),
+                    None => None,
+                };
+                let mut cell = cell;
                 if let Some((snapshot, _)) = &mut cell {
                     constants::charge_copy(snapshot, &mut this.required_steps, span)?;
                     if matches!(snapshot.kind, K::Local(id) if id == selected) {
@@ -140,7 +145,11 @@ impl Checker<'_, '_> {
             Ok((result, outputs))
         })?;
         for (binding, value, cell) in outputs {
-            self.generator_data.insert(binding, value);
+            if let Some(value) = value {
+                self.generator_data.insert(binding, value);
+            } else {
+                self.generator_data.remove(&binding);
+            }
             if let Some(cell) = cell {
                 self.generator_cells.insert(binding, cell);
             } else {
@@ -325,9 +334,12 @@ impl Checker<'_, '_> {
                             ));
                         }
                         self.check_type_application(parent, &[], head.span)?;
+                        let owner_item = self.package.item(owner).ok_or_else(|| {
+                            error(head.span, "missing inherent code method declaration")
+                        })?;
                         Some((
                             self.nominal_self_type(parent),
-                            self.package.item(owner).unwrap().ident,
+                            owner_item.ident,
                             Some(owner),
                             None,
                         ))
@@ -401,7 +413,11 @@ impl Checker<'_, '_> {
                     .zip(inputs)
                     .collect::<Vec<_>>();
                 self.check_method_declaration_access(Some(body), head.hir_id, head.span)?;
-                let ItemKind::Fn(signature, _) = &self.package.item(owner).unwrap().kind else {
+                let owner_item = self
+                    .package
+                    .item(owner)
+                    .ok_or_else(|| error(head.span, "missing selected code method declaration"))?;
+                let ItemKind::Fn(signature, _) = &owner_item.kind else {
                     return Err(error(head.span, "selected code method requires a body"));
                 };
                 if receiver.is_some()

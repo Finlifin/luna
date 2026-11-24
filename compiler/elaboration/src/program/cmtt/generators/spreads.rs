@@ -380,20 +380,19 @@ impl Checker<'_, '_> {
             }
             values
         } else {
-            self.observed_tuple_type_inputs(
-                checked_packet.as_ref().expect("checked packet"),
-                &types,
-                source.span,
-            )?
-            .into_iter()
-            .map(|ty| {
-                Argument::Data(ty.map(|ty| n::Expr {
-                    source: super::source(source.span),
-                    ty: p(P::Type),
-                    kind: K::TypeValue(ty),
-                }))
-            })
-            .collect()
+            let checked = checked_packet
+                .as_ref()
+                .ok_or_else(|| error(source.span, "missing checked generator spread packet"))?;
+            self.observed_tuple_type_inputs(checked, &types, source.span)?
+                .into_iter()
+                .map(|ty| {
+                    Argument::Data(ty.map(|ty| n::Expr {
+                        source: super::source(source.span),
+                        ty: p(P::Type),
+                        kind: K::TypeValue(ty),
+                    }))
+                })
+                .collect()
         };
         packet.values = Some(values.into_iter().zip(types).map(Some).collect());
         Ok(())

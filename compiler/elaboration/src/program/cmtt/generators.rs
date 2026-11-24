@@ -65,6 +65,7 @@ pub(in crate::program::cmtt) enum Argument {
     Data(Option<n::Expr>),
     LiveData(comptime_interpretor::Value),
     Code(CodeValue),
+    CodeCollection(Vec<CodeValue>),
 }
 
 // Entry snapshots copy parameter values, not the objects reached through pointers.
@@ -169,7 +170,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn form_contextual_generator<O>(
+    pub(in crate::program::cmtt) fn form_contextual_generator<O>(
         &mut self,
         owner: OwnerId,
         span: Span,
@@ -290,26 +291,30 @@ impl Checker<'_, '_> {
                 let input = if let Some(annotation) = annotation
                     && matches!(annotation.kind, H::ContextualPatternType(..))
                 {
-                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
+                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..))
+                        && self.self_types.contains_key(&owner)
+                    {
                         return Err(error(
                             parameter.span,
-                            "pattern code collections are not yet implemented",
+                            "variadic pattern code collections on trait declarations are not yet implemented",
                         ));
                     }
                     Input::Pattern(self.pattern_input_interface(annotation)?)
                 } else if let Some(annotation) = annotation
                     && matches!(annotation.kind, H::ContextualExprType(..))
                 {
-                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
+                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..))
+                        && self.self_types.contains_key(&owner)
+                    {
                         return Err(error(
                             parameter.span,
-                            "code collections require code-container evidence not yet implemented",
+                            "variadic code collections on trait declarations are not yet implemented",
                         ));
                     }
                     Input::Code(self.code_interface(annotation)?)
                 } else {
                     let ty = match annotation {
-                        Some(annotation) => self.type_expr(annotation)?,
+                        Some(annotation) => self.code_domain_or_any_type_expr(annotation)?,
                         None => {
                             if matches!(parameter.ty.kind, TyParamKind::Itself { is_ref: true }) {
                                 return Err(error(
@@ -435,7 +440,16 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let span = self.package.item(owner).unwrap().span;
+        let span = self
+            .package
+            .item(owner)
+            .ok_or_else(|| {
+                error(
+                    rustc_span::DUMMY_SP,
+                    "missing generator declaration for frame",
+                )
+            })?
+            .span;
         let roots = self
             .generator_cells
             .values()
@@ -549,12 +563,7 @@ impl Checker<'_, '_> {
                     .item(OwnerId::new(hir::LocalDefId::new(0)))
                     .map(|item| item.span)
             })
-            .ok_or_else(|| {
-                error(
-                    rustc_span::Span::new(rustc_span::BytePos(0), rustc_span::BytePos(0)),
-                    "missing code generator declaration",
-                )
-            })?;
+            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing code generator declaration"))?;
         let definition = self.copy_code_generator(owner, owner_span)?;
         if definition.checked_operands.is_some() {
             return Ok(());
@@ -571,21 +580,26 @@ impl Checker<'_, '_> {
             })
             .chain(std::iter::once(&definition.output))
         {
-            for ty in interface
-                .context
-                .values()
-                .chain(std::iter::once(&interface.result))
-            {
+            for ty in interface.context.values() {
                 nir::phases::validate_runtime_storage(ty, &metadata, &[]).map_err(|message| {
                     error(owner_span, format!("quoted runtime interface: {message}"))
                 })?;
+            }
+            if interface.result != Term::AnyType {
+                nir::phases::validate_runtime_storage(&interface.result, &metadata, &[]).map_err(
+                    |message| error(owner_span, format!("quoted runtime interface: {message}")),
+                )?;
             }
         }
         let arguments = definition
             .inputs
             .iter()
-            .map(|(_, input)| {
+            .enumerate()
+            .map(|(slot, (_, input))| {
                 Ok(match input {
+                    Input::Pattern(_) | Input::Code(_) if definition.variadics.contains(&slot) => {
+                        Some(Argument::CodeCollection(Vec::new()))
+                    }
                     Input::Pattern(interface) => Some(Argument::Code(CodeValue::Pattern(
                         self.abstract_pattern_input(interface, owner_span)?,
                     ))),
@@ -602,7 +616,7 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let operands = self.check_generator_body(owner, |this| {
+        let operands = self.check_generator_body(owner, owner_span, |this| {
             this.install_generator_captures(&definition, owner_span)?;
             this.check_generator_clause_defaults(owner, &definition)?;
             this.run_code_generator(&definition, arguments, owner_span)
@@ -836,7 +850,7 @@ impl Checker<'_, '_> {
         Ok(definition)
     }
 
-    fn generator_owner(&self, callee: &Expr<'_>) -> Result<Option<OwnerId>, Error> {
+    pub(super) fn generator_owner(&self, callee: &Expr<'_>) -> Result<Option<OwnerId>, Error> {
         let callee = if let H::NFApplication(head, _) = callee.kind {
             head
         } else {
@@ -1268,6 +1282,18 @@ impl Checker<'_, '_> {
                 (Input::Data(ty), Argument::LiveData(value)) => {
                     self.install_live_generator_input(*id, ty, value, signature.params[index].span);
                 }
+                (Input::Data(ty), Argument::Code(CodeValue::Expression(code)))
+                    if *ty == Term::AnyType =>
+                {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.code_values.insert(*id, code);
+                }
+                (Input::Data(ty), Argument::Code(CodeValue::Pattern(code)))
+                    if *ty == Term::AnyType =>
+                {
+                    self.locals.insert(*id, Term::AnyType);
+                    self.pattern_codes.insert(*id, code);
+                }
                 (Input::Code(interface), Argument::Code(CodeValue::Expression(code))) => {
                     let mut defaults = code.defaults.clone();
                     for (name, from) in &interface.ports {
@@ -1304,7 +1330,43 @@ impl Checker<'_, '_> {
                     };
                     self.code_values.insert(*id, Arc::new(code));
                 }
-                _ => unreachable!("checked generator argument kind"),
+                (Input::Code(interface), Argument::CodeCollection(codes)) => {
+                    let mut values = Vec::with_capacity(codes.len());
+                    for entry in codes {
+                        let CodeValue::Expression(code) = entry else {
+                            return Err(error(
+                                signature.params[index].span,
+                                "code collection element category mismatch",
+                            ));
+                        };
+                        let ascribed =
+                            self.ascribe_code(code, Some(interface), signature.params[index].span)?;
+                        values.push(comptime_interpretor::Value::Code(CodeValue::Expression(
+                            ascribed,
+                        )));
+                    }
+                    self.install_code_collection_input(*id, values, signature.params[index].span);
+                }
+                (Input::Pattern(interface), Argument::CodeCollection(codes)) => {
+                    let mut values = Vec::with_capacity(codes.len());
+                    for entry in codes {
+                        let CodeValue::Pattern(code) = entry else {
+                            return Err(error(
+                                signature.params[index].span,
+                                "pattern code collection element category mismatch",
+                            ));
+                        };
+                        self.ascribe_pattern_input(&code, interface, signature.params[index].span)?;
+                        values.push(comptime_interpretor::Value::Code(CodeValue::Pattern(code)));
+                    }
+                    self.install_code_collection_input(*id, values, signature.params[index].span);
+                }
+                _ => {
+                    return Err(error(
+                        signature.params[index].span,
+                        "checked generator argument kind mismatch",
+                    ));
+                }
             }
         }
         // Contracts see the completed input frame, including defaults, but
@@ -1420,6 +1482,26 @@ impl Checker<'_, '_> {
         self.generator_data.insert(id, Some(marker.clone()));
         self.generator_cells
             .insert(id, (marker, GeneratorCell::live(value)));
+    }
+
+    pub(in crate::program::cmtt) fn install_code_collection_input(
+        &mut self,
+        id: n::LocalId,
+        values: Vec<comptime_interpretor::Value>,
+        span: Span,
+    ) {
+        let marker = n::Expr {
+            source: source(span),
+            ty: p(P::Void),
+            kind: K::Local(id),
+        };
+        self.generator_cells.insert(
+            id,
+            (
+                marker,
+                GeneratorCell::owned(comptime_interpretor::Value::Tuple(values)),
+            ),
+        );
     }
 
     pub(in crate::program::cmtt) fn capture_generator_entry_data(
@@ -1676,7 +1758,9 @@ impl Checker<'_, '_> {
         let Some(interface) = interface else {
             return Ok(code);
         };
-        self.require_expression(&code.result, &interface.result, span)?;
+        if interface.result != Term::AnyType {
+            self.require_expression(&code.result, &interface.result, span)?;
+        }
         if interface.infer_context {
             return Ok(code);
         }
@@ -2106,6 +2190,17 @@ impl Checker<'_, '_> {
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
         {
             self.code_binding(decl, None, true)?;
+        } else if (decl
+            .ty
+            .map(|ty| self.is_any_type_expr(ty))
+            .transpose()?
+            .unwrap_or(false)
+            || self.any_code_producer(value)?)
+            && self
+                .try_any_code_declaration(decl, value, None, !local_const)?
+                .is_some()
+        {
+            return Ok(());
         } else {
             let expected = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
             let (ty, value) = if self.checking_code_generator {
@@ -2156,6 +2251,45 @@ impl Checker<'_, '_> {
                 target.span,
                 "cannot assign an immutable generator binding",
             ));
+        }
+        if self.locals.get(&id) == Some(&Term::AnyType) {
+            match self.any_code_value(value, depth)? {
+                AnyValue::Expression(code) => {
+                    self.pattern_codes.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                    self.code_values.insert(id, code);
+                }
+                AnyValue::Pattern(code) => {
+                    self.validate_pattern_code(&code, value.span)?;
+                    self.code_values.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                    self.pattern_codes.insert(id, code);
+                }
+                AnyValue::AbstractAny => {
+                    self.code_values.remove(&id);
+                    self.pattern_codes.remove(&id);
+                    self.generator_data.remove(&id);
+                    self.generator_cells.remove(&id);
+                }
+                AnyValue::Data(arg, ty) => {
+                    self.code_values.remove(&id);
+                    self.pattern_codes.remove(&id);
+                    match arg {
+                        Argument::Data(expr) => {
+                            self.generator_cells.remove(&id);
+                            self.generator_data.insert(id, expr);
+                        }
+                        Argument::LiveData(live) => {
+                            self.install_live_generator_input(id, &ty, live, value.span);
+                            self.locals.insert(id, Term::AnyType);
+                        }
+                        Argument::Code(_) | Argument::CodeCollection(_) => {}
+                    }
+                }
+            }
+            return Ok(());
         }
         if let Some(previous) = self.pattern_codes.shared(&id).cloned() {
             let code = self.pattern_argument(value, &previous)?;
@@ -2327,6 +2461,7 @@ impl Checker<'_, '_> {
                         pending.push((result, depth + 1));
                     }
                 }
+                Term::AnyType => {}
                 Term::Optional(inner) | Term::Lift(inner) => pending.push((inner, depth + 1)),
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
                 Term::Closure {

@@ -47,6 +47,28 @@ impl std::ops::Deref for PatternGenerator {
 }
 
 impl PatternGenerator {
+    pub(in crate::program::cmtt) fn code_input_at(
+        &self,
+        slot: usize,
+    ) -> Option<(n::LocalId, nir::code_interfaces::CodeInput)> {
+        let (id, input) = self.inputs.get(slot)?;
+        let converted = match input {
+            PatternInput::Expression(iface) => nir::code_interfaces::CodeInput::Code(iface.clone()),
+            PatternInput::Code(code) => {
+                nir::code_interfaces::CodeInput::Pattern(PatternInterface {
+                    subject: code.subject.clone(),
+                    outputs: code
+                        .outputs
+                        .iter()
+                        .map(|(name, (_, ty))| (name.clone(), ty.clone()))
+                        .collect(),
+                })
+            }
+            PatternInput::Data(_) => return None,
+        };
+        Some((*id, converted))
+    }
+
     fn input_value(&self, slot: usize) -> Option<Term> {
         self.input_values.get(&slot).cloned().or_else(|| {
             self.input_binders.get(&slot).map(|binder| Term::Rigid {
@@ -91,7 +113,7 @@ impl PatternGenerator {
 
     // Preserve named interface types separately from the pattern-local output
     // identities used by definition checking and body elaboration.
-    fn contextual_signature(
+    pub(in crate::program::cmtt) fn contextual_signature(
         &self,
         steps: &mut u64,
         span: Span,
@@ -302,7 +324,11 @@ impl Checker<'_, '_> {
             return Err(error(span, "cyclic pattern generator signature"));
         }
         let result = self.generator_frame(owner, |this| {
-            let (sig, body) = match &this.package.item(owner).unwrap().kind {
+            let item = this
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing pattern generator declaration"))?;
+            let (sig, body) = match &item.kind {
                 ItemKind::Fn(sig, body) => (sig, Some(*body)),
                 ItemKind::FnDeclaration(sig) => (sig, None),
                 _ => return Err(error(span, "expected a pattern generator")),
@@ -440,10 +466,12 @@ impl Checker<'_, '_> {
                     ));
                 }
                 if let H::ContextualPatternType(subject, entries) = &annotation.kind {
-                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
+                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..))
+                        && this.self_types.contains_key(&owner)
+                    {
                         return Err(error(
                             parameter.span,
-                            "variadic pattern code collections are not yet implemented",
+                            "variadic pattern code collections on trait declarations are not yet implemented",
                         ));
                     }
                     let subject = this.type_expr(subject)?;
@@ -467,10 +495,12 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 if matches!(annotation.kind, H::ContextualExprType(..)) {
-                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
+                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..))
+                        && this.self_types.contains_key(&owner)
+                    {
                         return Err(error(
                             parameter.span,
-                            "code collections require code-container evidence not yet implemented",
+                            "variadic code collections on trait declarations are not yet implemented",
                         ));
                     }
                     inputs.push((
@@ -479,7 +509,7 @@ impl Checker<'_, '_> {
                     ));
                     continue;
                 }
-                let ty = this.type_expr(annotation)?;
+                let ty = this.code_domain_or_any_type_expr(annotation)?;
                 if parameter.ty.is_lambda() && !ty.is_comptime_callable() {
                     return Err(error(
                         parameter.span,
@@ -507,8 +537,11 @@ impl Checker<'_, '_> {
                 inputs.push((local(parameter.hir_id), PatternInput::Data(ty.clone())));
                 this.locals.insert(local(parameter.hir_id), ty);
             }
-            let H::ContextualPatternType(subject, entries) = &sig.return_ty.unwrap().kind else {
-                unreachable!()
+            let return_ty = sig.return_ty.ok_or_else(|| {
+                error(span, "pattern generator requires a pattern return interface")
+            })?;
+            let H::ContextualPatternType(subject, entries) = &return_ty.kind else {
+                return Err(error(span, "pattern generator requires a pattern return interface"));
             };
             let subject = this.type_expr(subject)?;
             let mut outputs = BTreeMap::new();
@@ -562,13 +595,17 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
     ) -> Result<(), Error> {
-        let span = self.package.item(owner).unwrap().span;
+        let span = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing pattern generator item"))?
+            .span;
         self.ensure_pattern_generator(owner, span)?;
         let definition = self.copy_pattern_generator(owner, span)?;
         if definition.checked_operands.is_some() {
             return Ok(());
         }
-        let operands = self.check_generator_body(owner, |this| {
+        let operands = self.check_generator_body(owner, span, |this| {
             this.install_generator_capture_values(&definition.captures, span)?;
             this.check_generator_clause_value_defaults(owner, &definition.types)?;
             this.alias_substitution.extend(
@@ -582,10 +619,14 @@ impl Checker<'_, '_> {
                 &definition.types,
                 &definition.clause_domains,
             )?;
+            let owner_item = this
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing pattern generator item"))?;
             let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                &this.package.item(owner).unwrap().kind
+                &owner_item.kind
             else {
-                unreachable!()
+                return Err(error(span, "pattern generator requires a function item"));
             };
             for (slot, ((id, input), parameter)) in
                 definition.inputs.iter().zip(signature.params).enumerate()
@@ -599,6 +640,11 @@ impl Checker<'_, '_> {
                     PatternInput::Data(ty) => {
                         this.locals.insert(*id, ty.clone());
                         this.generator_data.insert(*id, None);
+                    }
+                    PatternInput::Expression(_) | PatternInput::Code(_)
+                        if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) =>
+                    {
+                        this.install_code_collection_input(*id, Vec::new(), parameter.span);
                     }
                     PatternInput::Expression(code) => {
                         this.code_values.insert(
@@ -619,10 +665,11 @@ impl Checker<'_, '_> {
             }
             this.run_pattern_generator_body(owner, &definition, span)
         })?;
-        self.pattern_generators
+        let generator = self
+            .pattern_generators
             .get_mut(&owner)
-            .unwrap()
-            .checked_operands = Some(operands);
+            .ok_or_else(|| error(span, "missing checked pattern generator entry"))?;
+        generator.checked_operands = Some(operands);
         Ok(())
     }
 
@@ -775,10 +822,16 @@ impl Checker<'_, '_> {
             self.generator_clause_plan(owner, site.span)?
         };
         let definition = self.instantiate_pattern_generator(template, &plan.1, site.span)?;
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
+        let owner_item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(site.span, "missing pattern property generator item"))?;
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &owner_item.kind
         else {
-            unreachable!()
+            return Err(error(
+                site.span,
+                "pattern property generator requires a function item",
+            ));
         };
         let mut collectors = Vec::new();
         for (index, parameter) in signature.params.iter().enumerate() {
@@ -927,10 +980,14 @@ impl Checker<'_, '_> {
         let result = (|| {
             self.ensure_pattern_generator(owner, span)?;
             let template = self.copy_pattern_generator(owner, span)?;
+            let owner_item = self
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing pattern generator item"))?;
             let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                &self.package.item(owner).unwrap().kind
+                &owner_item.kind
             else {
-                unreachable!()
+                return Err(error(span, "pattern generator requires a function item"));
             };
             // The inference result includes both the subject and every named
             // success output. Solver tuples are never materialized runtime data.
@@ -1045,6 +1102,20 @@ impl Checker<'_, '_> {
                             this.install_live_generator_input(*id, ty, value, parameter.span);
                         }
                         (
+                            PatternInput::Data(ty),
+                            PatternArgument::Code(CodeValue::Expression(code)),
+                        ) if *ty == Term::AnyType => {
+                            this.locals.insert(*id, Term::AnyType);
+                            this.code_values.insert(*id, code);
+                        }
+                        (
+                            PatternInput::Data(ty),
+                            PatternArgument::Code(CodeValue::Pattern(code)),
+                        ) if *ty == Term::AnyType => {
+                            this.locals.insert(*id, Term::AnyType);
+                            this.pattern_codes.insert(*id, code);
+                        }
+                        (
                             PatternInput::Expression(_),
                             PatternArgument::Code(CodeValue::Expression(code)),
                         ) => {
@@ -1056,7 +1127,56 @@ impl Checker<'_, '_> {
                         ) => {
                             this.pattern_codes.insert(*id, code);
                         }
-                        _ => unreachable!("pattern argument category changed"),
+                        (
+                            PatternInput::Expression(interface),
+                            PatternArgument::CodeCollection(codes),
+                        ) => {
+                            let mut values = Vec::with_capacity(codes.len());
+                            for entry in codes {
+                                let CodeValue::Expression(code) = entry else {
+                                    return Err(error(
+                                        parameter.span,
+                                        "code collection element category mismatch",
+                                    ));
+                                };
+                                let ascribed =
+                                    this.ascribe_code(code, Some(interface), parameter.span)?;
+                                values.push(comptime_interpretor::Value::Code(
+                                    CodeValue::Expression(ascribed),
+                                ));
+                            }
+                            this.install_code_collection_input(*id, values, parameter.span);
+                        }
+                        (PatternInput::Code(expected), PatternArgument::CodeCollection(codes)) => {
+                            let expected_iface = PatternInterface {
+                                subject: expected.subject.clone(),
+                                outputs: expected
+                                    .outputs
+                                    .iter()
+                                    .map(|(name, (_, ty))| (name.clone(), ty.clone()))
+                                    .collect(),
+                            };
+                            let mut values = Vec::with_capacity(codes.len());
+                            for entry in codes {
+                                let CodeValue::Pattern(code) = entry else {
+                                    return Err(error(
+                                        parameter.span,
+                                        "pattern code collection element category mismatch",
+                                    ));
+                                };
+                                this.ascribe_pattern_input(&code, &expected_iface, parameter.span)?;
+                                values.push(comptime_interpretor::Value::Code(CodeValue::Pattern(
+                                    code,
+                                )));
+                            }
+                            this.install_code_collection_input(*id, values, parameter.span);
+                        }
+                        _ => {
+                            return Err(error(
+                                parameter.span,
+                                "pattern argument category mismatch",
+                            ));
+                        }
                     }
                 }
                 this.run_pattern_generator_body(owner, &definition, span)
@@ -1089,14 +1209,28 @@ impl Checker<'_, '_> {
             self.ascribe_pattern_input(&code, &definition.interface, span)?;
             code
         } else if let Some(body) = definition.body {
-            let body = self.package.body(body).unwrap().value;
+            let body = self
+                .package
+                .body(body)
+                .ok_or_else(|| error(span, "missing pattern generator body"))?
+                .value;
             self.pattern_generator_value(body, definition, 0)?
         } else if self.checking_code_generator {
-            let ItemKind::FnDeclaration(signature) = &self.package.item(owner).unwrap().kind else {
-                unreachable!()
+            let owner_item = self
+                .package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing pattern generator declaration"))?;
+            let ItemKind::FnDeclaration(signature) = &owner_item.kind else {
+                return Err(error(span, "expected pattern generator declaration"));
             };
-            let H::ContextualPatternType(_, entries) = &signature.return_ty.unwrap().kind else {
-                unreachable!()
+            let return_ty = signature
+                .return_ty
+                .ok_or_else(|| error(span, "pattern generator declaration missing return type"))?;
+            let H::ContextualPatternType(_, entries) = &return_ty.kind else {
+                return Err(error(
+                    span,
+                    "pattern generator declaration missing pattern return",
+                ));
             };
             Arc::new(PatternCode {
                 subject: definition.subject.clone(),
@@ -1770,11 +1904,36 @@ impl Checker<'_, '_> {
                     first
                 }
             }
-            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => self
-                .pattern_codes
-                .shared(&local(*id))
-                .cloned()
-                .ok_or_else(|| error(value.span, "expected a comptime pattern code value"))?,
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                let local_id = local(*id);
+                if let Some(code) = self.pattern_codes.shared(&local_id).cloned() {
+                    code
+                } else if self.code_values.contains_key(&local_id) {
+                    return Err(error(
+                        value.span,
+                        "pattern splice cannot use expression code; expression code requires an expression splice",
+                    ));
+                } else if self.locals.get(&local_id) == Some(&Term::AnyType) {
+                    return Err(error(
+                        value.span,
+                        "splice requires an actual comptime code value, not an abstract any wildcard",
+                    ));
+                } else {
+                    return Err(error(value.span, "expected a comptime pattern code value"));
+                }
+            }
+            H::TyAny => {
+                return Err(error(
+                    value.span,
+                    "splice requires an actual comptime code value, not an abstract any wildcard",
+                ));
+            }
+            H::Builtin(name) if name.as_str() == "any" => {
+                return Err(error(
+                    value.span,
+                    "splice requires an actual comptime code value, not an abstract any wildcard",
+                ));
+            }
             H::CodePatternQuote(..) => {
                 let subject = subject.ok_or_else(|| {
                     error(
@@ -1791,13 +1950,39 @@ impl Checker<'_, '_> {
             H::ExtendedApplication(callee, arguments) => {
                 self.invoke_pattern_properties(value, callee, arguments, subject, input_context)?
             }
-            H::Application(callee, arguments) => self.invoke_pattern_generator(
-                callee,
-                arguments,
-                subject,
-                input_context,
-                value.span,
-            )?,
+            H::Application(callee, arguments) => {
+                if self.any_returning_comptime_owner(callee)?.is_some() {
+                    match self.invoke_any_code_generator(value, callee, arguments, depth + 1)? {
+                        AnyValue::Pattern(code) => code,
+                        AnyValue::Expression(_) => {
+                            return Err(error(
+                                value.span,
+                                "pattern splice cannot use expression code; expression code requires an expression splice",
+                            ));
+                        }
+                        AnyValue::AbstractAny => {
+                            return Err(error(
+                                value.span,
+                                "splice requires an actual comptime code value, not an abstract any wildcard",
+                            ));
+                        }
+                        AnyValue::Data(..) => {
+                            return Err(error(
+                                value.span,
+                                "splice requires an actual comptime code value, not ordinary data",
+                            ));
+                        }
+                    }
+                } else {
+                    self.invoke_pattern_generator(
+                        callee,
+                        arguments,
+                        subject,
+                        input_context,
+                        value.span,
+                    )?
+                }
+            }
             _ => {
                 return Err(error(
                     value.span,

@@ -24,6 +24,7 @@ impl MethodCategory {
         }
     }
 }
+
 impl QuotedKind {
     fn annotation(self, value: &Expr<'_>) -> bool {
         matches!(
@@ -32,6 +33,7 @@ impl QuotedKind {
                 | (Self::Pattern, H::ContextualPatternType(..))
         )
     }
+
     fn owner(self, checker: &Checker<'_, '_>, owner: OwnerId) -> bool {
         match self {
             Self::Expression => checker.is_code_generator(owner),
@@ -41,8 +43,285 @@ impl QuotedKind {
 }
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn is_any_type_expr(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
+        self.charge_code_classification(value.span, 0)?;
+        match &value.kind {
+            H::TyAny => Ok(true),
+            H::Builtin(name) if name.as_str() == "Any" => Ok(true),
+            H::ContextualExprType(..) | H::ContextualPatternType(..) => Ok(false),
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                Ok(match self.generator_data.get(&local(*id)) {
+                    Some(Some(n::Expr {
+                        kind: K::Literal(n::Literal::Description(n::DescriptionLiteral::Any)),
+                        ..
+                    })) => true,
+                    Some(Some(n::Expr {
+                        kind: K::TypeValue(Term::AnyType),
+                        ..
+                    })) => true,
+                    _ => false,
+                })
+            }
+            H::ResolvedDef { def_id, .. } => {
+                let Some(owner) = self.package.definition_owner(*def_id) else {
+                    return Ok(false);
+                };
+                match self.package.item(owner).map(|item| &item.kind) {
+                    Some(ItemKind::TypeAlias(..) | ItemKind::Const(..)) => {
+                        Ok(self.completed_type_is_any(value)?)
+                    }
+                    Some(ItemKind::Associated(..)) => {
+                        self.completed_type_is_any_or_out_of_scope(value)
+                    }
+                    _ => Ok(false),
+                }
+            }
+            H::Projection(..)
+            | H::NFApplication(..)
+            | H::Application(..)
+            | H::ExtendedApplication(..)
+            | H::Block(..) => self.completed_type_is_any_or_out_of_scope(value),
+            _ => Ok(false),
+        }
+    }
+
+    fn completed_type_is_any(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
+        Ok(matches!(
+            self.completed_type(value)?,
+            CompletedType::Description(n::DescriptionLiteral::Any)
+                | CompletedType::Identity(Term::AnyType)
+        ))
+    }
+
+    fn completed_type_is_any_or_out_of_scope(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
+        match self.completed_type(value) {
+            Ok(
+                CompletedType::Description(n::DescriptionLiteral::Any)
+                | CompletedType::Identity(Term::AnyType),
+            ) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(err)
+                if self.required_steps > 0
+                    && !err.message.contains("budget")
+                    && !err.message.contains("exhausted")
+                    && !err.message.contains("cyclic") =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(in crate::program::cmtt) fn code_domain_or_any_type_expr(
+        &mut self,
+        value: &Expr<'_>,
+    ) -> Result<Term, Error> {
+        match self.completed_type(value)? {
+            CompletedType::Description(n::DescriptionLiteral::Any) => Ok(Term::AnyType),
+            other => other.identity(value.span),
+        }
+    }
+
+    pub(in crate::program::cmtt) fn is_abstract_any_value(value: &Expr<'_>) -> bool {
+        matches!(value.kind, H::TyAny)
+            || matches!(&value.kind, H::Builtin(name) if name.as_str() == "any")
+    }
+
+    pub(in crate::program) fn is_any_code_function(
+        &mut self,
+        owner: OwnerId,
+    ) -> Result<bool, Error> {
+        let Some(item) = self.package.item(owner) else {
+            return Ok(false);
+        };
+        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+            return Ok(false);
+        };
+        if !sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head || sig.modifiers.is_quote
+        {
+            return Ok(false);
+        }
+        let Some(ret) = sig.return_ty else {
+            return Ok(false);
+        };
+        self.is_any_type_expr(ret)
+    }
+
+    pub(in crate::program::cmtt) fn any_returning_comptime_owner(
+        &mut self,
+        callee: &Expr<'_>,
+    ) -> Result<Option<OwnerId>, Error> {
+        let head = match callee.kind {
+            H::NFApplication(head, _) => head,
+            _ => callee,
+        };
+        if let H::ResolvedDef { def_id, .. } = head.kind
+            && let Some(owner) = self.package.definition_owner(def_id)
+            && self.is_any_code_function(owner)?
+        {
+            return Ok(Some(owner));
+        }
+        Ok(None)
+    }
+
+    pub(in crate::program) fn any_code_producer(
+        &mut self,
+        value: &Expr<'_>,
+    ) -> Result<bool, Error> {
+        let mut seen = BTreeSet::new();
+        self.any_code_producer_in(value, &mut BTreeSet::new(), &mut seen, 0)
+    }
+
+    fn any_code_producer_in(
+        &mut self,
+        value: &Expr<'_>,
+        bindings: &mut BTreeSet<n::LocalId>,
+        seen: &mut BTreeSet<OwnerId>,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        self.charge_code_classification(value.span, depth)?;
+        if Self::is_abstract_any_value(value) {
+            return Ok(true);
+        }
+        Ok(match &value.kind {
+            H::CodeQuote(..) | H::CodePatternQuote(..) => true,
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                let id = local(*id);
+                bindings.contains(&id)
+                    || self.code_values.contains_key(&id)
+                    || self.pattern_codes.contains_key(&id)
+                    || self.locals.get(&id) == Some(&Term::AnyType)
+            }
+            H::Application(callee, args) | H::ExtendedApplication(callee, args) => {
+                let head = match callee.kind {
+                    H::NFApplication(head, _) => head,
+                    _ => callee,
+                };
+                let direct_generator = self.generator_owner(callee)?.is_some()
+                    || matches!(head.kind, H::ResolvedDef { def_id, .. }
+                        if self.package.definition_owner(def_id)
+                            .is_some_and(|owner| self.is_pattern_generator(owner)))
+                    || match self.generic_code_method_hint(callee)? {
+                        Some(owner) => {
+                            self.is_code_generator(owner)
+                                || self.is_pattern_generator(owner)
+                                || self.is_any_code_function(owner)?
+                        }
+                        None => false,
+                    };
+                if direct_generator {
+                    return Ok(true);
+                }
+                if let Some(owner) = self.any_returning_comptime_owner(callee)? {
+                    for arg in *args {
+                        let expr = match arg {
+                            Arg::Positional(e)
+                            | Arg::Named(_, e)
+                            | Arg::Expand(e)
+                            | Arg::Implicit(e)
+                            | Arg::PostLambda(e) => e,
+                        };
+                        if self.any_code_producer_in(expr, bindings, seen, depth + 1)? {
+                            return Ok(true);
+                        }
+                    }
+                    if seen.insert(owner)
+                        && let Some(item) = self.package.item(owner)
+                        && let ItemKind::Fn(_, body_id) = item.kind
+                        && let Some(body) = self.package.body(body_id)
+                    {
+                        return self.any_code_producer_in(body.value, bindings, seen, depth + 1);
+                    }
+                }
+                false
+            }
+            H::Let(decl) => {
+                let init = match decl.init {
+                    Some(expr) => self.any_code_producer_in(expr, bindings, seen, depth + 1)?,
+                    None => false,
+                };
+                let is_any = decl
+                    .ty
+                    .map(|ty| self.is_any_type_expr(ty))
+                    .transpose()?
+                    .unwrap_or(false);
+                if init
+                    || is_any
+                    || decl.ty.is_some_and(|ty| {
+                        matches!(
+                            ty.kind,
+                            H::ContextualExprType(..) | H::ContextualPatternType(..)
+                        )
+                    })
+                {
+                    bindings.extend(pattern_binding_ids(&decl.pattern));
+                }
+                false
+            }
+            H::Return(Some(v)) | H::Semi(v) | H::InlineControl(v) => {
+                self.any_code_producer_in(v, bindings, seen, depth + 1)?
+            }
+            H::If(_, yes, no) => {
+                let mut found = self.any_code_block_producer(yes, bindings, seen, depth + 1)?;
+                if !found && let Some(no) = no {
+                    found = self.any_code_producer_in(no, bindings, seen, depth + 1)?;
+                }
+                found
+            }
+            H::Block(body) | H::Loop(body) | H::For { body, .. } => {
+                self.any_code_block_producer(body, bindings, seen, depth + 1)?
+            }
+            H::When(arms) => {
+                let mut found = false;
+                for arm in *arms {
+                    if self.any_code_producer_in(arm.body, bindings, seen, depth + 1)? {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            }
+            H::Match(_, arms) => {
+                let mut found = false;
+                for arm in *arms {
+                    if self.any_code_producer_in(arm.body, bindings, seen, depth + 1)? {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            }
+            _ => false,
+        })
+    }
+
+    fn any_code_block_producer(
+        &mut self,
+        body: &hir::Block<'_>,
+        bindings: &mut BTreeSet<n::LocalId>,
+        seen: &mut BTreeSet<OwnerId>,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        self.charge_code_classification(body.span, depth)?;
+        let mut returned = false;
+        for statement in body.stmts {
+            returned |= self.any_code_producer_in(statement, bindings, seen, depth + 1)?;
+        }
+        Ok(returned
+            || match body.expr {
+                Some(value) => self.any_code_producer_in(value, bindings, seen, depth + 1)?,
+                None => false,
+            })
+    }
+
     pub(in crate::program) fn code_producer(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
-        self.quoted_producer_in(value, &mut BTreeSet::new(), 0, QuotedKind::Expression)
+        self.quoted_producer_in(
+            value,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            0,
+            QuotedKind::Expression,
+        )
     }
 
     pub(in crate::program) fn pattern_code_producer(
@@ -53,7 +332,13 @@ impl Checker<'_, '_> {
         if annotation.is_some_and(|ty| QuotedKind::Pattern.annotation(ty)) {
             return Ok(true);
         }
-        self.quoted_producer_in(value, &mut BTreeSet::new(), 0, QuotedKind::Pattern)
+        self.quoted_producer_in(
+            value,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            0,
+            QuotedKind::Pattern,
+        )
     }
 
     fn charge_code_classification(&mut self, span: Span, depth: usize) -> Result<(), Error> {
@@ -74,6 +359,7 @@ impl Checker<'_, '_> {
         &mut self,
         value: &Expr<'_>,
         bindings: &mut BTreeSet<n::LocalId>,
+        seen: &mut BTreeSet<OwnerId>,
         depth: usize,
         kind: QuotedKind,
     ) -> Result<bool, Error> {
@@ -88,7 +374,7 @@ impl Checker<'_, '_> {
                         QuotedKind::Pattern => self.pattern_codes.contains_key(&local(*id)),
                     }
             }
-            H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
+            H::Application(callee, args) | H::ExtendedApplication(callee, args) => {
                 let head = match callee.kind {
                     H::NFApplication(head, _) => head,
                     _ => callee,
@@ -99,14 +385,47 @@ impl Checker<'_, '_> {
                         if self.package.definition_owner(def_id)
                             .is_some_and(|owner| self.is_pattern_generator(owner))),
                 };
-                direct
+                if direct
                     || self
                         .generic_code_method_hint(callee)?
                         .is_some_and(|owner| kind.owner(self, owner))
+                {
+                    return Ok(true);
+                }
+                if let Some(owner) = self.any_returning_comptime_owner(callee)? {
+                    for arg in *args {
+                        let expr = match arg {
+                            Arg::Positional(e)
+                            | Arg::Named(_, e)
+                            | Arg::Expand(e)
+                            | Arg::Implicit(e)
+                            | Arg::PostLambda(e) => e,
+                        };
+                        if self.quoted_producer_in(expr, bindings, seen, depth + 1, kind)? {
+                            return Ok(true);
+                        }
+                    }
+                    if seen.insert(owner)
+                        && let Some(item) = self.package.item(owner)
+                        && let ItemKind::Fn(_, body_id) = item.kind
+                        && let Some(body) = self.package.body(body_id)
+                    {
+                        return self.quoted_producer_in(
+                            body.value,
+                            bindings,
+                            seen,
+                            depth + 1,
+                            kind,
+                        );
+                    }
+                }
+                false
             }
             H::Let(decl) => {
                 let initializer = match decl.init {
-                    Some(value) => self.quoted_producer_in(value, bindings, depth + 1, kind)?,
+                    Some(value) => {
+                        self.quoted_producer_in(value, bindings, seen, depth + 1, kind)?
+                    }
                     None => false,
                 };
                 if initializer || decl.ty.is_some_and(|ty| kind.annotation(ty)) {
@@ -115,23 +434,25 @@ impl Checker<'_, '_> {
                 false
             }
             H::Return(Some(value)) | H::Semi(value) | H::InlineControl(value) => {
-                self.quoted_producer_in(value, bindings, depth + 1, kind)?
+                self.quoted_producer_in(value, bindings, seen, depth + 1, kind)?
             }
             H::If(_, yes, no) => {
-                let yes = self.quoted_block_producer(yes, bindings, depth + 1, kind)?;
+                let yes = self.quoted_block_producer(yes, bindings, seen, depth + 1, kind)?;
                 let no = match no {
-                    Some(value) => self.quoted_producer_in(value, bindings, depth + 1, kind)?,
+                    Some(value) => {
+                        self.quoted_producer_in(value, bindings, seen, depth + 1, kind)?
+                    }
                     None => false,
                 };
                 yes || no
             }
             H::Block(body) | H::Loop(body) | H::For { body, .. } => {
-                self.quoted_block_producer(body, bindings, depth + 1, kind)?
+                self.quoted_block_producer(body, bindings, seen, depth + 1, kind)?
             }
             H::When(arms) => {
                 let mut found = false;
                 for arm in *arms {
-                    if self.quoted_producer_in(arm.body, bindings, depth + 1, kind)? {
+                    if self.quoted_producer_in(arm.body, bindings, seen, depth + 1, kind)? {
                         found = true;
                         break;
                     }
@@ -141,7 +462,7 @@ impl Checker<'_, '_> {
             H::Match(_, arms) => {
                 let mut found = false;
                 for arm in *arms {
-                    if self.quoted_producer_in(arm.body, bindings, depth + 1, kind)? {
+                    if self.quoted_producer_in(arm.body, bindings, seen, depth + 1, kind)? {
                         found = true;
                         break;
                     }
@@ -156,17 +477,18 @@ impl Checker<'_, '_> {
         &mut self,
         body: &hir::Block<'_>,
         bindings: &mut BTreeSet<n::LocalId>,
+        seen: &mut BTreeSet<OwnerId>,
         depth: usize,
         kind: QuotedKind,
     ) -> Result<bool, Error> {
         self.charge_code_classification(body.span, depth)?;
         let mut returned = false;
         for statement in body.stmts {
-            returned |= self.quoted_producer_in(statement, bindings, depth + 1, kind)?;
+            returned |= self.quoted_producer_in(statement, bindings, seen, depth + 1, kind)?;
         }
         Ok(returned
             || match body.expr {
-                Some(value) => self.quoted_producer_in(value, bindings, depth + 1, kind)?,
+                Some(value) => self.quoted_producer_in(value, bindings, seen, depth + 1, kind)?,
                 None => false,
             })
     }

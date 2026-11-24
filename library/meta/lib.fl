@@ -5,6 +5,7 @@ pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
 
 {- Comptime data, arithmetic, reflection, AST tokens, and checked definition builders. -}
 use ast_impl;
+use code.{combinators as code_combinators, types as code_types};
 use data.{
     errors,
     hashing,
@@ -26,6 +27,24 @@ use numeric.{conversions, equality, ordering, scalar_math}
 use reflection.structure;
 use types.equality as type_equality;
 
+pub use ast_impl.*;
+pub use code_combinators.{
+    count_exprs,
+    first_expr,
+    keep,
+    keep_expr,
+    last_expr,
+    select_any,
+    select_expr,
+}
+pub use code_types.{
+    CodeContext,
+    CodeErr,
+    CodeInterfaceSummary,
+    CodeKind,
+    ContextEntry,
+    Substitution,
+}
 pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
 pub use enums.*;
 pub use equality.ComptimeEq;

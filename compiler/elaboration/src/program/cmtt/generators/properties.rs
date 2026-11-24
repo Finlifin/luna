@@ -65,10 +65,15 @@ impl Checker<'_, '_> {
                 site.span,
             )?;
         }
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(site.span, "missing property generator declaration"))?;
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &item.kind else {
+            return Err(error(
+                site.span,
+                "property generator requires a function item",
+            ));
         };
         let mut collectors = Vec::new();
         for (index, param) in signature.params.iter().enumerate() {

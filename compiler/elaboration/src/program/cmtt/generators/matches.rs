@@ -191,7 +191,10 @@ impl Checker<'_, '_> {
                 let K::Match { mut arms, .. } = probe.kind else {
                     unreachable!()
                 };
-                let pattern = arms.pop().unwrap().pattern;
+                let pattern = arms
+                    .pop()
+                    .ok_or_else(|| error(arm.span, "missing checked match probe arm"))?
+                    .pattern;
                 Ok((Arm { pattern, bindings }, code))
             })?;
             if let Some(code) = code {

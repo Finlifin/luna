@@ -167,8 +167,11 @@ impl Checker<'_, '_> {
         let (parameters, values) = self.interface_substitution(&interface, &subject);
         let public_captures = parameters.into_iter().zip(values).collect::<Vec<_>>();
         self.check_method_declaration_access(Some(public_id), head.hir_id, head.span)?;
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(public).unwrap().kind
+        let public_item = self
+            .package
+            .item(public)
+            .ok_or_else(|| error(head.span, "missing trait code method declaration"))?;
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &public_item.kind
         else {
             return Err(error(head.span, "trait code member is not a function"));
         };

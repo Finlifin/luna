@@ -10,6 +10,9 @@ impl Checker<'_, '_> {
         fuel: &mut usize,
     ) -> Result<(), StorageError> {
         *fuel = fuel.checked_sub(1).ok_or(StorageError::Budget)?;
+        if *ty == Term::AnyType {
+            return Ok(());
+        }
         let frames = vec![self.generator_storage_frame(fuel)?];
         let resolve = |ty: &Term, fuel: &mut usize| -> Result<Vec<Term>, StorageError> {
             if let Some(element) = self.list_element_type(ty) {

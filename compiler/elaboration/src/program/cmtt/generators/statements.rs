@@ -16,6 +16,7 @@ pub(in crate::program::cmtt) enum ResultInterface<'a> {
         Option<&'a Term>,
         Option<&'a crate::calls::InputContext>,
     ),
+    Any,
 }
 
 pub(in crate::program::cmtt) enum Control {
@@ -25,6 +26,7 @@ pub(in crate::program::cmtt) enum Control {
     Continue(n::LocalId),
     Return(Arc<ExpressionCode>),
     PatternReturn(Arc<patterns::PatternCode>),
+    AnyReturn(AnyValue),
     Abstract(Flow),
 }
 
@@ -63,6 +65,18 @@ impl Control {
             },
             Self::PatternReturn(code) => Flow {
                 pattern_returns: vec![code],
+                ..Default::default()
+            },
+            Self::AnyReturn(AnyValue::Expression(code)) => Flow {
+                returns: vec![code],
+                ..Default::default()
+            },
+            Self::AnyReturn(AnyValue::Pattern(code)) => Flow {
+                pattern_returns: vec![code],
+                ..Default::default()
+            },
+            Self::AnyReturn(AnyValue::AbstractAny | AnyValue::Data(..)) => Flow {
+                data_return: true,
                 ..Default::default()
             },
             Self::Abstract(flow) => flow,
@@ -193,6 +207,7 @@ impl Checker<'_, '_> {
         }
         Ok(Control::Abstract(previous))
     }
+
     pub(in crate::program::cmtt) fn generator_statement_with_result(
         &mut self,
         value: &Expr<'_>,
@@ -487,6 +502,9 @@ impl Checker<'_, '_> {
                         depth + 1,
                     )?),
                 ),
+                ResultInterface::Any => {
+                    Ok(Control::AnyReturn(self.any_code_value(code, depth + 1)?))
+                }
             },
             H::Return(None) if matches!(interface, ResultInterface::Data(ty) if *ty == p(P::Void)) => {
                 Ok(Control::DataReturn(
@@ -505,6 +523,10 @@ impl Checker<'_, '_> {
             }
             _ if self.code_producer(value)? => {
                 self.code_value(value, None, depth + 1)?;
+                Ok(Control::Next)
+            }
+            _ if self.any_code_producer(value)? => {
+                self.any_code_value(value, depth + 1)?;
                 Ok(Control::Next)
             }
             _ => {
@@ -613,7 +635,12 @@ impl Checker<'_, '_> {
                         ty: p(P::Bool),
                         source: source(pat.span),
                         kind: K::Match {
-                            value: Box::new(checked_start.take().unwrap()),
+                            value: Box::new(checked_start.take().ok_or_else(|| {
+                                error(
+                                    iter.span,
+                                    "generator range missing checked start expression",
+                                )
+                            })?),
                             arms: vec![n::MatchArm {
                                 pattern,
                                 guard: None,
@@ -767,6 +794,154 @@ impl Checker<'_, '_> {
         result
     }
 
+    pub(super) fn variadic_code_input_at(&self, binding_id: n::LocalId) -> Option<Input> {
+        let owner = self.signature_owner?;
+        if let Some(definition) = self.code_generators.get(&owner) {
+            for (slot, (id, input)) in definition.inputs.iter().enumerate() {
+                if *id == binding_id
+                    && definition.variadics.contains(&slot)
+                    && matches!(input, Input::Code(_) | Input::Pattern(_))
+                {
+                    return Some(input.clone());
+                }
+            }
+        }
+        if let Some(definition) = self.data_consumers.get(&owner) {
+            for (slot, (id, input)) in definition.inputs.iter().enumerate() {
+                if *id == binding_id
+                    && definition.variadics.contains(&slot)
+                    && matches!(input, Input::Code(_) | Input::Pattern(_))
+                {
+                    return Some(input.clone());
+                }
+            }
+        }
+        if let Some(definition) = self.pattern_generators.get(&owner)
+            && let Some(item) = self.package.item(owner)
+            && let ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) = &item.kind
+        {
+            for (slot, param) in sig.params.iter().enumerate() {
+                if matches!(param.ty.kind, TyParamKind::Varadic(..))
+                    && let Some((id, input)) = definition.code_input_at(slot)
+                    && id == binding_id
+                {
+                    return Some(input);
+                }
+            }
+        }
+        None
+    }
+
+    fn bind_variadic_code_element(
+        &mut self,
+        pat: &hir::pattern::Pattern<'_>,
+        code: CodeValue,
+    ) -> Result<(), Error> {
+        match &pat.kind {
+            hir::PatternKind::Wild => Ok(()),
+            hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None) => {
+                let id = local(pat.hir_id);
+                self.immutable.insert(id);
+                match code {
+                    CodeValue::Expression(code) => {
+                        self.code_values.insert(id, code);
+                    }
+                    CodeValue::Pattern(code) => {
+                        self.pattern_codes.insert(id, code);
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(error(
+                pat.span,
+                "variadic code collection iteration binds each element by name or wildcard",
+            )),
+        }
+    }
+
+    fn generator_inline_code_collection(
+        &mut self,
+        value: &Expr<'_>,
+        pat: &hir::pattern::Pattern<'_>,
+        guard: Option<&Expr<'_>>,
+        body: &hir::Block<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+        items: Option<Vec<CodeValue>>,
+        abstract_input: Option<Input>,
+    ) -> Result<Control, Error> {
+        let identity = local(value.hir_id);
+        loops.push(identity);
+        let result = (|| {
+            if self.checking_code_generator {
+                let sample = match abstract_input {
+                    Some(Input::Code(iface)) => CodeValue::Expression(Arc::new(ExpressionCode {
+                        body: None,
+                        result: iface.result,
+                        context: iface.context,
+                        ports: iface.ports,
+                        defaults: BTreeMap::new(),
+                    })),
+                    Some(Input::Pattern(iface)) => {
+                        CodeValue::Pattern(self.abstract_pattern_input(&iface, pat.span)?)
+                    }
+                    _ => {
+                        return Err(error(
+                            pat.span,
+                            "variadic code collection requires contextual code element interface",
+                        ));
+                    }
+                };
+                return self.generator_scope(body.span, |this| {
+                    this.bind_variadic_code_element(pat, sample)?;
+                    let selected = this.generator_when_condition(guard)?;
+                    let body_ctrl =
+                        this.generator_statement_block(body, interface, depth + 1, loops)?;
+                    if selected == Some(false) {
+                        return Ok(Control::Next);
+                    }
+                    let mut flow = body_ctrl.flow();
+                    flow.next = true;
+                    flow.continues.remove(&identity);
+                    flow.breaks.remove(&identity);
+                    Ok(Control::Abstract(flow))
+                });
+            }
+            let Some(items) = items else {
+                return Ok(Control::Next);
+            };
+            self.required_steps = self
+                .required_steps
+                .checked_sub(items.len() as u64)
+                .ok_or_else(|| {
+                    error(
+                        value.span,
+                        "generator code collection enumeration budget exhausted",
+                    )
+                })?;
+            for item in items {
+                let next = self.generator_scope(body.span, |this| {
+                    this.bind_variadic_code_element(pat, item)?;
+                    let selected = this.generator_when_condition(guard)?;
+                    if selected == Some(false) {
+                        return Ok(Control::Next);
+                    }
+                    this.generator_statement_block(body, interface, depth + 1, loops)
+                })?;
+                match next {
+                    Control::Next => {}
+                    Control::Continue(target) if target == identity => {}
+                    Control::Break(target) if target == identity => return Ok(Control::Next),
+                    other => return Ok(other),
+                }
+            }
+            Ok(Control::Next)
+        })();
+        loops.pop();
+        result
+    }
+
     fn generator_inline_tuple(
         &mut self,
         value: &Expr<'_>,
@@ -781,6 +956,51 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
+        if let H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) = input.kind {
+            let input_id = local(id);
+            if self.checking_code_generator {
+                if let Some(variadic_input) = self.variadic_code_input_at(input_id) {
+                    return self.generator_inline_code_collection(
+                        value,
+                        pat,
+                        *guard,
+                        body,
+                        interface,
+                        depth,
+                        loops,
+                        None,
+                        Some(variadic_input),
+                    );
+                }
+            } else if let Some((_, GeneratorCell::Owned(cell_val))) =
+                self.generator_cells.get(&input_id)
+                && let Ok(cell_data) = cell_val.read().map(|guard| guard.clone())
+                && self.is_code_collection_cell(input_id, &cell_data)
+                && let comptime_interpretor::Value::Tuple(fields) = cell_data
+            {
+                let mut codes = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let comptime_interpretor::Value::Code(cv) = field else {
+                        return Err(error(
+                            input.span,
+                            "variadic code collection element is not a code value",
+                        ));
+                    };
+                    codes.push(cv);
+                }
+                return self.generator_inline_code_collection(
+                    value,
+                    pat,
+                    *guard,
+                    body,
+                    interface,
+                    depth,
+                    loops,
+                    Some(codes),
+                    None,
+                );
+            }
+        }
         let (ty, values) = if self.checking_code_generator {
             let checked = self.expr(input, None)?;
             self.validate_generator_data(&checked, input.span)?;
@@ -1118,6 +1338,7 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
         if self.pattern_code_producer(initializer, decl.ty)?
             || self.code_producer(initializer)?
+            || self.any_code_producer(initializer)?
             || decl
                 .ty
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
@@ -1125,7 +1346,9 @@ impl Checker<'_, '_> {
             return self.generator_conditional_code_binding(decl, interface, depth, loops);
         }
         let expected = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
-        let otherwise = decl.otherwise.unwrap();
+        let otherwise = decl
+            .otherwise
+            .ok_or_else(|| error(decl.span, "conditional generator binding requires else arm"))?;
         let arms = [
             hir::pattern::PatternArm {
                 hir_id: decl.hir_id,
@@ -1226,26 +1449,32 @@ impl Checker<'_, '_> {
             let mut plain = decl.clone();
             plain.guard = None;
             plain.otherwise = None;
-            let pattern = this.pattern_code_producer(plain.init.unwrap(), plain.ty)?;
+            let init = plain
+                .init
+                .ok_or_else(|| error(decl.span, "conditional code binding requires initializer"))?;
+            let pattern = this.pattern_code_producer(init, plain.ty)?;
             if pattern {
                 this.pattern_code_binding_mode(&plain, None, true)?;
-            } else {
+            } else if this.code_producer(init)?
+                || plain
+                    .ty
+                    .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
+            {
                 this.code_binding(&plain, None, true)?;
+            } else {
+                this.try_any_code_declaration(&plain, init, None, true)?;
             }
             let condition = this.generator_when_condition(decl.guard)?;
             let bindings = pattern_bindings(&decl.pattern)?
                 .into_values()
                 .map(|id| {
-                    (if pattern {
+                    (if let Some(code) = this.code_values.shared(&id).cloned() {
+                        Some(CodeWitness::Expression(code))
+                    } else {
                         this.pattern_codes
                             .shared(&id)
                             .cloned()
                             .map(CodeWitness::Pattern)
-                    } else {
-                        this.code_values
-                            .shared(&id)
-                            .cloned()
-                            .map(CodeWitness::Expression)
                     })
                     .map(|code| (id, code))
                     .ok_or_else(|| error(decl.span, "conditional code binding has no witness"))
@@ -1254,7 +1483,9 @@ impl Checker<'_, '_> {
             Ok((condition, bindings))
         })?;
         let failure = if self.checking_code_generator || condition == Some(false) {
-            let otherwise = decl.otherwise.unwrap();
+            let otherwise = decl
+                .otherwise
+                .ok_or_else(|| error(decl.span, "conditional code binding requires else arm"))?;
             let failure = self.generator_scope(otherwise.span, |this| {
                 this.generator_statement_with_result(otherwise, interface, depth + 1, loops)
             })?;
@@ -1289,11 +1520,24 @@ impl Checker<'_, '_> {
         }
         match condition {
             Some(true) => Ok(Control::Next),
-            Some(false) => Ok(failure.unwrap()),
+            Some(false) => failure.ok_or_else(|| {
+                error(
+                    decl.span,
+                    "conditional code binding missing else branch result",
+                )
+            }),
             None if self.checking_code_generator => {
+                let failure_flow = failure
+                    .ok_or_else(|| {
+                        error(
+                            decl.span,
+                            "conditional code binding missing else branch result",
+                        )
+                    })?
+                    .flow();
                 Ok(Control::Abstract(self.join_generator_flows(
                     Control::Next.flow(),
-                    failure.unwrap().flow(),
+                    failure_flow,
                     decl.span,
                 )?))
             }
