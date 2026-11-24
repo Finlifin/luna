@@ -1164,7 +1164,7 @@ impl<'a> Interpreter<'a> {
             let concrete =
                 implementation.type_parameters.is_empty() && implementation.requirements.is_empty();
             let Some(interface) = implementation.interface_instance() else {
-                if implementation.phases.comptime {
+                if implementation.phases.runtime && implementation.phases.comptime {
                     return Err(invalid());
                 }
                 continue;

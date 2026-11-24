@@ -456,8 +456,21 @@ impl Checker<'_, '_> {
             || fixed.len() > count
             || args.is_empty()
             || args.len() >= count - fixed.len()
-            || self.has_optional_type_clauses(owner)
             || !args.iter().all(|arg| matches!(arg, Arg::Positional(_)))
+        {
+            return Ok(None);
+        }
+        let offset = fixed.len() - inherited;
+        let remaining = &clauses[offset..];
+        let is_mandatory_positional = |clause: &hir::clause::ClauseParam<'_>| {
+            !matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+                    | hir::clause::ClauseParamKind::Varadic(..)
+            )
+        };
+        if !remaining[..args.len()].iter().all(is_mandatory_positional)
+            || !remaining[args.len()..].iter().any(is_mandatory_positional)
         {
             return Ok(None);
         }
@@ -554,37 +567,69 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan<'src>) -> Result<R, Error>,
     ) -> Result<Option<R>, Error> {
+        let prefix = self.lexical_function_arguments(owner, site.span)?;
+        self.with_partial_named_call_plan_with_prefix(
+            owner,
+            args,
+            site,
+            ordinary,
+            &[],
+            prefix,
+            expected,
+            partial,
+            finish,
+        )
+    }
+
+    pub(super) fn with_partial_named_call_plan_with_prefix<'src, R>(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'src>],
+        site: &Expr<'_>,
+        ordinary: &[Arg<'_>],
+        receiver_types: &[Option<Term>],
+        prefix: Vec<Term>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan<'src>) -> Result<R, Error>,
+    ) -> Result<Option<R>, Error> {
         let span = site.span;
-        if !args.iter().any(|arg| matches!(arg, Arg::Named(..)))
-            || self.clause_collector(owner).is_some()
-        {
+        if args.is_empty() {
             return Ok(None);
         }
         let Some(flat) = arguments::literal_spread_arguments(args) else {
             return Ok(None);
         };
         let clauses = self.type_clause_params(owner);
+        let ids = &self.type_parameters[&owner];
+        let inherited = ids.len().saturating_sub(clauses.len());
+        if prefix.len() != inherited {
+            return Ok(None);
+        }
         let positional = flat
             .iter()
             .filter(|arg| matches!(arg, Arg::Positional(_)))
             .count();
-        let omitted: Vec<_> = clauses
+        let mandatory_non_variadic: Vec<_> = clauses
             .iter()
             .enumerate()
             .filter(|(_, clause)| {
                 !matches!(
                     clause.kind.unquoted(),
                     hir::clause::ClauseParamKind::Optional(..)
+                        | hir::clause::ClauseParamKind::Varadic(..)
                 )
             })
-            .skip(positional)
             .map(|(slot, _)| slot)
             .collect();
-        if omitted.is_empty() {
+        if positional >= mandatory_non_variadic.len() {
             return Ok(None);
         }
+        let omitted: Vec<_> = mandatory_non_variadic
+            .into_iter()
+            .skip(positional)
+            .collect();
         let domains = self.trait_domains(owner)?;
-        let prefix = self.lexical_function_arguments(owner, span)?;
         let ids = &self.type_parameters[&owner];
         let missing_types: Vec<_> = omitted
             .into_iter()
@@ -614,8 +659,16 @@ impl Checker<'_, '_> {
             .into_iter()
             .filter(|id| needed.contains(id))
             .collect();
-        let evidence =
-            self.observed_call_clause_types(owner, site, ordinary, expected, partial, &needed)?;
+        let evidence = self.observed_call_clause_types_with_prefix(
+            owner,
+            site,
+            ordinary,
+            &prefix,
+            receiver_types,
+            expected,
+            partial,
+            &needed,
+        )?;
         let mut locals = Vec::new();
         let result = self
             .prepare_clause_arguments(
@@ -829,6 +882,7 @@ impl Checker<'_, '_> {
                             && matches!(
                                 clause.kind.unquoted(),
                                 hir::clause::ClauseParamKind::Optional(..)
+                                    | hir::clause::ClauseParamKind::Varadic(..)
                             )
                     })
                     .ok_or_else(|| error(span, "unknown named trait argument"))?
@@ -837,6 +891,7 @@ impl Checker<'_, '_> {
                     && matches!(
                         clauses[positional].kind.unquoted(),
                         hir::clause::ClauseParamKind::Optional(..)
+                            | hir::clause::ClauseParamKind::Varadic(..)
                     )
                 {
                     positional += 1;

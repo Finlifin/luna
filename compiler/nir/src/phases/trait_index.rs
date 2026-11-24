@@ -11,6 +11,7 @@ pub(super) enum Error {
     Budget,
     Invalid(&'static str),
 }
+
 impl Error {
     pub(super) fn message(self) -> &'static str {
         match self {
@@ -19,19 +20,23 @@ impl Error {
         }
     }
 }
+
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(amount).ok_or(Error::Budget)?;
     Ok(())
 }
+
 struct Entry {
     contract: usize,
     methods: BTreeMap<DeclarationId, usize>,
     associated: BTreeMap<DeclarationId, usize>,
 }
+
 pub(super) struct Index {
     interfaces: BTreeMap<DeclarationId, Entry>,
     methods: BTreeMap<DeclarationId, (usize, usize)>,
 }
+
 impl Index {
     pub(super) fn new(package: &Package, fuel: &mut usize) -> Result<Self, Error> {
         use Error::Invalid;
@@ -103,7 +108,9 @@ impl Index {
                 return Err(Invalid("comptime-only trait has a runtime implementation"));
             }
             if (!definition.phases.runtime && !definition.phases.comptime)
-                || (definition.interface.is_none() && definition.phases.comptime)
+                || (definition.interface.is_none()
+                    && definition.phases.runtime
+                    && definition.phases.comptime)
             {
                 return Err(Invalid("invalid implementation phase availability"));
             }
@@ -127,6 +134,7 @@ impl Index {
             methods: all_methods,
         })
     }
+
     pub(super) fn associated<'a>(
         &self,
         package: &'a Package,
@@ -148,6 +156,7 @@ impl Index {
             &package.traits[entry.contract].associated[*member],
         ))
     }
+
     pub(super) fn method<'a>(
         &self,
         package: &'a Package,
@@ -169,6 +178,7 @@ impl Index {
             &package.traits[entry.contract].methods[*member],
         ))
     }
+
     pub(super) fn retained_method<'a>(
         &self,
         package: &'a Package,
@@ -187,9 +197,11 @@ impl Index {
 mod tests {
     use super::*;
     use crate::{Primitive, Term};
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 88, local }
     }
+
     fn interface(local: u32) -> Trait {
         Trait {
             declaration: id(local),
@@ -205,6 +217,7 @@ mod tests {
             associated: vec![],
         }
     }
+
     fn method() -> MethodContract {
         MethodContract {
             source: crate::program::SourceRange { start: 0, end: 0 },
@@ -230,6 +243,7 @@ mod tests {
             default: None,
         }
     }
+
     #[test]
     fn lookup_cost_is_local_and_member_ownership_survives_world_changes() {
         let mut package = Package {
@@ -294,6 +308,7 @@ mod tests {
             Term::Primitive(Primitive::Char)
         );
     }
+
     #[test]
     fn construction_limits_names_empty_interfaces_and_duplicate_identities() {
         let mut package = Package {

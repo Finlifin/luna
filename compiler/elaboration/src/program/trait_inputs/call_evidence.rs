@@ -3,11 +3,13 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(super) fn observed_call_clause_types(
+    pub(super) fn observed_call_clause_types_with_prefix(
         &mut self,
         owner: OwnerId,
         site: &Expr<'_>,
         args: &[Arg<'_>],
+        fixed_clauses: &[Term],
+        receiver_types: &[Option<Term>],
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
         omitted: &[DeclarationId],
@@ -22,18 +24,38 @@ impl Checker<'_, '_> {
         let charged = nir::type_computations::charge_term(&signature, &mut fuel);
         let signature = charged.map(|()| signature.into_owned());
         self.required_steps = fuel as u64;
-        let signature = signature.map_err(|failure| error(site.span, failure.to_string()))?;
+        let mut signature = signature.map_err(|failure| error(site.span, failure.to_string()))?;
+        let ids = self.type_parameters[&owner].clone();
+        if !fixed_clauses.is_empty() {
+            if fixed_clauses.len() > ids.len() {
+                return Ok(vec![]);
+            }
+            signature = self.instantiate_input_types(
+                &signature,
+                &ids[..fixed_clauses.len()],
+                fixed_clauses,
+                site.span,
+            )?;
+        }
         let Term::Function { parameters, result } = signature.callable_signature() else {
             return Ok(vec![]);
         };
-        let Some(ItemKind::Fn(decl, _) | ItemKind::FnDeclaration(decl)) =
+        let Some(ItemKind::Fn(decl, _) | ItemKind::Case(decl, _) | ItemKind::FnDeclaration(decl)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
             return Ok(vec![]);
         };
-        let (routes, _) = route_arguments(args, Some(decl.params), parameters.len(), site.span)?;
-        let ids = &self.type_parameters[&owner];
-        let other: Vec<_> = ids
+        let offset = receiver_types.len();
+        if offset > parameters.len() || offset > decl.params.len() {
+            return Ok(vec![]);
+        }
+        let (routes, _) = route_arguments(
+            args,
+            Some(&decl.params[offset..]),
+            parameters.len() - offset,
+            site.span,
+        )?;
+        let other: Vec<_> = ids[fixed_clauses.len()..]
             .iter()
             .filter(|id| !omitted.contains(id))
             .copied()
@@ -95,8 +117,18 @@ impl Checker<'_, '_> {
         };
         let scope = self.call_inference_domains();
         let budget = crate::ptc::Budget::default();
+        let initial_types: Vec<_> = source_slots
+            .iter()
+            .map(|&slot| {
+                if slot < offset {
+                    receiver_types[slot].clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
         let Ok(mut candidate) = scheme.infer_sparse_scoped_types_mode(
-            &vec![None; source_slots.len()],
+            &initial_types,
             expected,
             partial,
             &self.context,
@@ -140,6 +172,9 @@ impl Checker<'_, '_> {
             .collect();
         let mut observations = Vec::new();
         for (index, slot) in source_slots.into_iter().enumerate() {
+            if slot < offset {
+                continue;
+            }
             if candidate
                 .parameter_type(index)
                 .map_err(|e| call_inference_error(site.span, e))?
@@ -147,7 +182,7 @@ impl Checker<'_, '_> {
             {
                 continue;
             }
-            let Some(route) = routes.get(&slot) else {
+            let Some(route) = routes.get(&(slot - offset)) else {
                 return Ok(from_result);
             };
             let source = route.expression(site);

@@ -78,12 +78,16 @@ fn inherent_implementation_phase_is_retained_independently_of_members() {
 
 #[test]
 fn staged_implementations_cannot_silently_enter_runtime_selection() {
-    for source in ["struct Subject {} comptime impl Subject {fn value()->bool {true}}"] {
+    for source in [
+        "struct Subject {} comptime impl Subject {fn value()->bool {true}} fn run()->bool {Subject.value()}",
+        "struct Subject {} comptime impl Subject {fn read(self)->bool {true}} fn run()->bool {Subject{}.read()}",
+        "struct Subject {} comptime impl Subject {fn value()->bool {true}} comptime fn build()-> <|-bool> {'(Subject.value())}",
+    ] {
         let error = compile(source, Emit::Nir)
             .err()
-            .expect("phase selection remains unfinished");
+            .expect("comptime inherent impl must not enter runtime selection");
         assert!(
-            error.contains("comptime implementation phase selection is not yet implemented"),
+            error.contains("comptime inherent implementation requires comptime context"),
             "{error}"
         );
     }
@@ -1651,4 +1655,142 @@ fn ambiguous_nontrait_bindings_shadow_an_outer_trait_spelling() {
         Emit::Nir,
     )
     .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn inherent_comptime_impl_executes_static_and_value_reference_self_methods() {
+    let source = "
+        typealias Integer = .Integer'builtin;
+        struct Counter {
+            value: Integer,
+        }
+        comptime impl Counter {
+            comptime fn start() -> Counter {
+                Counter { value: 10 }
+            }
+            comptime fn bump(self, delta: Integer) -> Integer {
+                self.value = self.value + delta;
+                self.value
+            }
+            comptime fn read(self) -> Integer {
+                self.value
+            }
+        }
+        comptime fn run() -> bool {
+            var c = Counter.start();
+            let first = c.bump(5);
+            let second = c.bump(7);
+            first == 15 and second == 22 and c.read() == 22
+        }
+    ";
+    let package = support::compile(source);
+    nir::phases::validate(&package).unwrap();
+    let inherent = package
+        .implementations
+        .iter()
+        .find(|i| i.interface.is_none())
+        .expect("inherent comptime impl present");
+    assert!(inherent.phases.comptime);
+    assert!(!inherent.phases.runtime);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn inherent_comptime_impl_supports_generic_specialization_and_early_comptime_lookup() {
+    let source = "
+        struct Wrapper where T {
+            item: T,
+        }
+        comptime impl Wrapper<T> where T {
+            comptime fn tag(self) -> bool { false }
+            comptime fn flag() -> bool { false }
+        }
+        comptime impl Wrapper<bool> {
+            comptime fn tag(self) -> bool { self.item }
+            comptime fn flag() -> bool { true }
+        }
+        const EARLY: bool = Wrapper<bool>.flag();
+        comptime fn run() -> bool {
+            let b = Wrapper<bool> { item: true };
+            let c = Wrapper<.char'builtin> { item: 'a' };
+            EARLY and b.tag() and not c.tag() and not Wrapper<.char'builtin>.flag()
+        }
+    ";
+    let package = support::compile(source);
+    nir::phases::validate(&package).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn inherent_comptime_impl_shares_coherence_with_runtime_inherent_impl() {
+    let overlap = "
+        struct Subject {}
+        impl Subject {
+            fn value() -> bool { false }
+        }
+        comptime impl Subject {
+            comptime fn value() -> bool { true }
+        }
+    ";
+    let failure = compile(overlap, Emit::Nir)
+        .err()
+        .expect("same-precision inherent overlap across phases must fail");
+    assert!(
+        failure.contains("inherent implementation overlap"),
+        "{failure}"
+    );
+
+    let disjoint_names = "
+        struct Subject { value: bool }
+        impl Subject {
+            fn runtime_value(self) -> bool { self.value }
+        }
+        comptime impl Subject {
+            comptime fn comptime_value(self) -> bool { self.value }
+        }
+        fn runtime_run() -> bool { Subject { value: true }.runtime_value() }
+        comptime fn run() -> bool { Subject { value: true }.comptime_value() }
+    ";
+    let package = support::compile(disjoint_names);
+    nir::phases::validate(&package).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn nir_and_vm_reject_dual_phase_inherent_implementation() {
+    let source = "
+        struct Subject {}
+        comptime impl Subject {
+            comptime fn value() -> bool { true }
+        }
+        comptime fn run() -> bool { Subject.value() }
+    ";
+    let mut forged = support::compile(source);
+    nir::phases::validate(&forged).unwrap();
+    let inherent = forged
+        .implementations
+        .iter_mut()
+        .find(|i| i.interface.is_none())
+        .unwrap();
+    inherent.phases.runtime = true;
+    assert_eq!(
+        nir::phases::validate(&forged).unwrap_err().message,
+        "invalid implementation phase availability"
+    );
+    assert!(
+        comptime_interpretor::Interpreter::for_comptime(
+            &forged,
+            comptime_interpretor::Budget::default()
+        )
+        .is_err()
+    );
 }

@@ -444,12 +444,6 @@ impl Checker<'_, '_> {
             self.signature_owner = Some(owner);
             let (subject, instance, members) = match &item.kind {
                 ItemKind::Impl(def) => {
-                    if def.phase == hir::ImplementationPhase::Comptime && def.trait_ref.is_none() {
-                        return Err(error(
-                            item.span,
-                            "comptime implementation phase selection is not yet implemented",
-                        ));
-                    }
                     let subject = self.type_expr(def.self_ty)?;
                     let instance = def
                         .trait_ref
@@ -481,7 +475,11 @@ impl Checker<'_, '_> {
                         .filter(|member| {
                             matches!(
                                 self.package.item(*member).map(|item| &item.kind),
-                                Some(ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
+                                Some(
+                                    ItemKind::Fn(..)
+                                        | ItemKind::Case(..)
+                                        | ItemKind::FnDeclaration(_)
+                                )
                             )
                         })
                         .collect();
@@ -1918,6 +1916,24 @@ impl Checker<'_, '_> {
             .find(|(method, _)| method == name)
             .map(|(_, body)| *body)
             .ok_or_else(|| error(span, "unknown trait method"))?;
+        if interface.is_none() && !implementation.phases.runtime {
+            let body_owner = self.source_declarations.owner(body);
+            let spliceable_comptime_method = self.protocols.splice.is_some()
+                && self.runtime_value_context()
+                && body_owner.is_some_and(|owner| {
+                    matches!(
+                        self.package.item(owner).map(|item| &item.kind),
+                        Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _))
+                            if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head
+                    )
+                });
+            if !self.comptime_member_context() && !spliceable_comptime_method {
+                return Err(error(
+                    span,
+                    "comptime inherent implementation requires comptime context",
+                ));
+            }
+        }
         if let Some(interface) = interface.as_ref() {
             let contract = self
                 .checked_traits
@@ -2328,6 +2344,35 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<Option<n::Expr>, Error> {
+        if let H::NFApplication(head, clause_args) = callee.kind {
+            let Some((method, prefix)) = self.resolve_receiver(expr, head)? else {
+                return Ok(None);
+            };
+            let mut prefix = Some(prefix);
+            if let Some(call) = self.partial_named_method_call(
+                expr,
+                callee,
+                &method,
+                clause_args,
+                args,
+                &mut prefix,
+                expected,
+                partial,
+            )? {
+                return Ok(Some(call));
+            }
+            let method = self.explicit_method_instance(callee, method, clause_args, None, true)?;
+            return self
+                .finish_call(
+                    expr,
+                    method,
+                    args,
+                    prefix.unwrap_or_default(),
+                    expected,
+                    partial,
+                )
+                .map(Some);
+        }
         let Some((method, prefix)) = self.resolve_receiver(expr, callee)? else {
             return Ok(None);
         };
@@ -2584,7 +2629,9 @@ impl Checker<'_, '_> {
                 declaration: body, ..
             } => {
                 let owner = self.source_declarations.owner(*body).unwrap();
-                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
+                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) =
+                    &self.package.item(owner).unwrap().kind
+                else {
                     unreachable!()
                 };
                 sig.params
@@ -3121,6 +3168,107 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn partial_named_method_call(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        method: &n::Expr,
+        clause_args: &[Arg<'_>],
+        args: &[Arg<'_>],
+        prefix: &mut Option<Vec<n::Expr>>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<Option<n::Expr>, Error> {
+        if !matches!(
+            method.kind,
+            K::FunctionInstance { .. } | K::TraitMethod { .. }
+        ) {
+            return Ok(None);
+        }
+        let Some((owner, fixed)) = self.method_instantiation_inputs(method, callee.span)? else {
+            return Ok(None);
+        };
+        let selected_method = match &method.kind {
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                member,
+                subject,
+                ..
+            } => Some(SelectedMethod {
+                interface: *interface,
+                interface_arguments: interface_arguments.clone(),
+                member: *member,
+                subject: subject.clone(),
+            }),
+            _ => None,
+        };
+        let receiver_types: Vec<_> = prefix
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|value| arguments::inference_type(value).cloned())
+            .collect();
+        let splice = method.ty.is_comptime_callable()
+            && self.protocols.splice.is_some()
+            && self.runtime_value_context();
+        if splice {
+            let value = self.with_staged_input(true, |this| {
+                this.with_partial_named_call_plan_with_prefix(
+                    owner,
+                    clause_args,
+                    expr,
+                    args,
+                    &receiver_types,
+                    fixed,
+                    None,
+                    None,
+                    |this, plan| {
+                        let taken = prefix.take().unwrap_or_default();
+                        this.generic_call_with_plan(
+                            expr,
+                            owner,
+                            args,
+                            None,
+                            None,
+                            taken,
+                            plan,
+                            selected_method,
+                            CallUse::Invocation,
+                        )
+                    },
+                )
+            })?;
+            return value
+                .map(|value| self.deliver_comptime_result(expr, value, expected))
+                .transpose();
+        }
+        self.with_partial_named_call_plan_with_prefix(
+            owner,
+            clause_args,
+            expr,
+            args,
+            &receiver_types,
+            fixed,
+            expected,
+            partial,
+            |this, plan| {
+                let taken = prefix.take().unwrap_or_default();
+                this.generic_call_with_plan(
+                    expr,
+                    owner,
+                    args,
+                    expected,
+                    partial,
+                    taken,
+                    plan,
+                    selected_method,
+                    CallUse::Invocation,
+                )
+            },
+        )
+    }
+
     pub(super) fn explicit_method_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -3137,6 +3285,14 @@ impl Checker<'_, '_> {
                     "explicit instantiation requires a generic method",
                 )
             })?;
+        if allow_optional {
+            if let Some(arguments) =
+                self.partial_positional_clause_prefix(owner, args, &fixed, expr.span)?
+            {
+                let value = self.partial_callable_instance(expr, owner, arguments)?;
+                return Ok(self.retain_method_origin(method, value));
+            }
+        }
         // Dynamic trait packets retain the member declaration, not its body.
         if matches!(
             method.kind,
@@ -3155,14 +3311,6 @@ impl Checker<'_, '_> {
                 } else {
                     self.callable_value_view(value, expected, expr.span)
                 };
-            }
-        }
-        if allow_optional {
-            if let Some(arguments) =
-                self.partial_positional_clause_prefix(owner, args, &fixed, expr.span)?
-            {
-                let value = self.partial_callable_instance(expr, owner, arguments)?;
-                return Ok(self.retain_method_origin(method, value));
             }
         }
         if self.has_optional_type_clauses(owner)

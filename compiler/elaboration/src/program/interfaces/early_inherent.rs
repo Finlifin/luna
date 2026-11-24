@@ -13,7 +13,10 @@ impl Checker<'_, '_> {
             members.iter().any(|member| {
                 self.package.item(*member).is_some_and(|item| {
                     item.ident.name.as_str() == name
-                        && matches!(item.kind, ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
+                        && matches!(
+                            item.kind,
+                            ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_)
+                        )
                 })
             })
         })
@@ -74,6 +77,7 @@ impl Checker<'_, '_> {
         );
         let mut members = BTreeMap::new();
         let mut needs_trait_world = BTreeSet::new();
+        let mut comptime_only_impls = BTreeSet::new();
         // Enumerate all source declarations for this name. An incomplete world
         // must never silently choose the first currently available candidate.
         for (owner, info) in self.package.owners() {
@@ -98,7 +102,10 @@ impl Checker<'_, '_> {
                 .filter(|member| {
                     self.package.item(*member).is_some_and(|item| {
                         item.ident.name.as_str() == name
-                            && matches!(item.kind, ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
+                            && matches!(
+                                item.kind,
+                                ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_)
+                            )
                     })
                 })
                 .collect::<Vec<_>>();
@@ -175,6 +182,12 @@ impl Checker<'_, '_> {
             {
                 needs_trait_world.insert(identity);
             }
+            if matches!(
+                &item.kind,
+                ItemKind::Impl(def) if def.phase == hir::ImplementationPhase::Comptime
+            ) {
+                comptime_only_impls.insert(identity);
+            }
             members.insert(identity, named[0]);
         }
         for (id, domain) in self.implementation_index.parameter_domains() {
@@ -234,6 +247,12 @@ impl Checker<'_, '_> {
             .verify_evidence(name, evidence, &subject, &context, Budget::default())
             .map_err(|e| error(span, format!("inherent method evidence replay failed: {e}")))?;
         let method = members[&selected];
+        if comptime_only_impls.contains(&selected) && !self.comptime_member_context() {
+            return Err(error(
+                span,
+                "comptime inherent implementation requires comptime context",
+            ));
+        }
         self.signature_owner = query_owner;
         self.context = context.clone();
         self.ensure_signature(method, span)?;

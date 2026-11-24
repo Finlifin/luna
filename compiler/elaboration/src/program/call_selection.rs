@@ -82,6 +82,13 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<n::Expr, Error> {
+        if allow_optional {
+            if let Some(arguments) =
+                self.partial_positional_clause_prefix(owner, args, &lexical, expr.span)?
+            {
+                return self.partial_callable_instance(expr, owner, arguments);
+            }
+        }
         if let Some(value) = self.required_collected_callable_instance(
             expr,
             owner,
@@ -95,13 +102,6 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             } else {
                 self.callable_value_view(value, expected, expr.span)
             };
-        }
-        if allow_optional {
-            if let Some(arguments) =
-                self.partial_positional_clause_prefix(owner, args, &lexical, expr.span)?
-            {
-                return self.partial_callable_instance(expr, owner, arguments);
-            }
         }
         if !lexical.is_empty() {
             let arguments =
@@ -240,7 +240,6 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                 );
             }
             if let Some((_, clauses)) = explicit
-                && !comptime
                 && let Some(call) = self.with_partial_named_call_plan(
                     owner,
                     clauses,
@@ -275,6 +274,24 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             }
         }
         let callee = if let Some((head, types)) = explicit {
+            if let H::Projection(base, name) = &head.kind
+                && let Some(method) =
+                    self.static_method(base, name.name.as_str(), head.span, head.hir_id)?
+            {
+                let mut prefix = Some(Vec::new());
+                if let Some(call) = self.partial_named_method_call(
+                    expr,
+                    callee,
+                    &method,
+                    types,
+                    args,
+                    &mut prefix,
+                    expected,
+                    partial,
+                )? {
+                    return Ok(call);
+                }
+            }
             match self.select_explicit_instance(callee, head, types, None, true)? {
                 block_regions::ExplicitInstance::Checking(frame) => {
                     return self.check_invocation_region(expr, args, expected, partial, *frame);
