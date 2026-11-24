@@ -63,10 +63,16 @@ fn subject_pattern_bindings(
             .ok_or_else(|| error(span, "pattern stage provenance budget exhausted"))?;
         match work {
             Work::Bind(binding) => {
-                values.last_mut().unwrap().insert(binding);
+                values
+                    .last_mut()
+                    .ok_or_else(|| error(span, "pattern stage provenance stack underflow"))?
+                    .insert(binding);
             }
             Work::Combine(count, intersect) => {
-                let start = values.len() - count;
+                let start = values
+                    .len()
+                    .checked_sub(count)
+                    .ok_or_else(|| error(span, "pattern stage provenance stack underflow"))?;
                 let mut sets = values.drain(start..);
                 let mut result = sets.next().unwrap_or_default();
                 for set in sets {
@@ -85,7 +91,9 @@ fn subject_pattern_bindings(
                 *fuel = fuel
                     .checked_sub(mapping.len() as u64)
                     .ok_or_else(|| error(span, "pattern stage provenance budget exhausted"))?;
-                let current = values.last_mut().unwrap();
+                let current = values
+                    .last_mut()
+                    .ok_or_else(|| error(span, "pattern stage provenance stack underflow"))?;
                 let moved: Vec<_> = mapping
                     .iter()
                     .map(|(from, to)| (*to, current.contains(from)))
@@ -245,6 +253,25 @@ impl std::fmt::Display for Definition {
     }
 }
 
+impl<'a, 'h> Checker<'a, 'h> {
+    fn open_item(&self, owner: OwnerId, span: Span) -> Result<&'h hir::Item<'h>, Error> {
+        self.package
+            .item(owner)
+            .ok_or_else(|| error(span, "missing open function definition"))
+    }
+
+    fn open_fn_or_case_sig(
+        &self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<&'h hir::item::FnSig<'h>, Error> {
+        match &self.open_item(owner, span)?.kind {
+            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) => Ok(sig),
+            _ => Err(error(span, "expected open function or case definition")),
+        }
+    }
+}
+
 impl Checker<'_, '_> {
     /// The outer definition check still owns validation when a recursive edge
     /// forms an interface. This does not make pending comptime code executable.
@@ -285,9 +312,7 @@ impl Checker<'_, '_> {
         }
         self.check_open_interface_dependency(owner)?;
         self.ensure_contract(owner, expr.span)?;
-        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
-            unreachable!()
-        };
+        let sig = self.open_fn_or_case_sig(owner, expr.span)?;
         arguments::require_function_value_parameters(sig.params, expr.span)?;
         let definition = self.open_functions[&owner].clone();
         if definition
@@ -341,7 +366,12 @@ impl Checker<'_, '_> {
                     let (input, value) = match argument {
                         Arg::Positional(value) => (input_routing::Input::Positional, *value),
                         Arg::Named(name, value) => (input_routing::Input::Named(name.name), *value),
-                        _ => unreachable!(),
+                        _ => {
+                            return Err(error(
+                                expr.span,
+                                "unsupported clause argument in pending function value",
+                            ));
+                        }
                     };
                     let slot = routing
                         .select(&input)
@@ -502,9 +532,7 @@ impl Checker<'_, '_> {
         }
         let result = (|| {
             let definition = self.open_functions[&owner].clone();
-            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
-                unreachable!()
-            };
+            let sig = self.open_fn_or_case_sig(owner, expr.span)?;
             arguments::require_function_value_parameters(sig.params, expr.span)?;
             if definition
                 .parameters
@@ -569,7 +597,12 @@ impl Checker<'_, '_> {
             }
             let signature = Term::Function {
                 parameters,
-                result: result.unwrap(),
+                result: result.ok_or_else(|| {
+                    error(
+                        expr.span,
+                        "open function value is missing result annotation",
+                    )
+                })?,
             };
             let value = self.open_instance_value(owner, &symbols, signature, expr.span)?;
             let generated_id = match &value.kind {
@@ -630,7 +663,9 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn has_staged_body_work(&mut self, owner: OwnerId) -> Result<bool, Error> {
-        let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = self.package.item(owner).map(|item| &item.kind) else {
+        let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
             return Ok(false);
         };
         let Some(body) = self.package.body(*body) else {
@@ -1003,8 +1038,8 @@ impl Checker<'_, '_> {
         let actual = self.with_staged_input(self.in_staged_input || binding.comptime, |this| {
             this.describe_open_expression(init, locals, returns, annotation.as_ref(), depth + 1)
         });
-        let (_, pending_formation) =
-            std::mem::replace(&mut self.pending_initializer, outer).expect("active initializer");
+        let (_, pending_formation) = std::mem::replace(&mut self.pending_initializer, outer)
+            .ok_or_else(|| error(init.span, "missing active initializer scope"))?;
         if pending_formation
             && let Some((scope, pending)) = &mut self.pending_initializer
             && *scope == owner
@@ -1018,12 +1053,12 @@ impl Checker<'_, '_> {
                 | hir::pattern::PatternKind::Wild
         ) && binding.guard.is_none()
             && binding.otherwise.is_none();
-        if !plain && matches!(actual, D::Known(_)) && !matches!(annotation, Some(D::Unknown)) {
+        if !plain
+            && let D::Known(ty) = &actual
+            && !matches!(annotation, Some(D::Unknown))
+        {
             // Reuse pattern protocols, refutability, guard scope and
             // immutable-binding checks in the ordinary checker.
-            let D::Known(ty) = &actual else {
-                unreachable!()
-            };
             let previous_bindings = self.locals.keys().copied().collect::<BTreeSet<_>>();
             let result = if *ty == p(P::Type) || !self.contains_inline_control(init)? {
                 // Preserve concrete pattern evidence when there is no
@@ -1521,11 +1556,11 @@ impl Checker<'_, '_> {
         let H::ResolvedDef { def_id, .. } = head.kind else {
             return false;
         };
-        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = self
-            .package
-            .definition_owner(def_id)
-            .and_then(|owner| self.package.item(owner))
-            .map(|item| &item.kind)
+        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
+            self.package
+                .definition_owner(def_id)
+                .and_then(|owner| self.package.item(owner))
+                .map(|item| &item.kind)
         else {
             return false;
         };
@@ -1583,7 +1618,8 @@ impl Checker<'_, '_> {
             {
                 continue;
             }
-            let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = self.package.item(owner).map(|item| &item.kind)
+            let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) =
+                self.package.item(owner).map(|item| &item.kind)
             else {
                 continue;
             };
@@ -1670,8 +1706,11 @@ impl Checker<'_, '_> {
                 // Only forwarding into a staged slot postpones type formation.
                 // Supplying a known staged value as an ordinary runtime input
                 // must not turn an otherwise closed function into a template.
-                if let Some(ItemKind::Fn(target_sig, _) | ItemKind::Case(target_sig, _) | ItemKind::FnDeclaration(target_sig)) =
-                    self.package.item(target).map(|item| &item.kind)
+                if let Some(
+                    ItemKind::Fn(target_sig, _)
+                    | ItemKind::Case(target_sig, _)
+                    | ItemKind::FnDeclaration(target_sig),
+                ) = self.package.item(target).map(|item| &item.kind)
                 {
                     // Colon properties belong to the collection entrance, not
                     // named parameter slots. Normalize their dependency route
@@ -1901,12 +1940,11 @@ impl Checker<'_, '_> {
             needs_instance.extend(callers.remove(target).unwrap_or_default());
         }
         while let Some(owner) = needs_instance.pop_first() {
-            self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                error(
-                    self.package.item(owner).unwrap().span,
-                    "staged body propagation budget exhausted",
-                )
-            })?;
+            let owner_span = self.open_item(owner, Span::default())?.span;
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(owner_span, "staged body propagation budget exhausted"))?;
             if self.open_functions.contains_key(&owner) {
                 continue;
             }
@@ -1921,7 +1959,7 @@ impl Checker<'_, '_> {
                     .map(|parameter| (parameter.sort, Annotation::Known(parameter.ty)))
                     .collect(),
                 Annotation::Known(*result),
-                self.package.item(owner).unwrap().span,
+                owner_span,
             )?;
             needs_instance.extend(callers.remove(&owner).unwrap_or_default());
         }
@@ -2048,17 +2086,16 @@ impl Checker<'_, '_> {
 
     pub(super) fn check_closed_const_regions(&mut self, owner: OwnerId) -> Result<(), Error> {
         if !self.closed_const_regions.contains_key(&owner) {
+            let owner_span = self.open_item(owner, Span::default())?.span;
             let Term::Function { parameters, result } = self
                 .declared_signature(owner)
-                .ok_or_else(|| {
-                    error(
-                        self.package.item(owner).unwrap().span,
-                        "missing closed source signature",
-                    )
-                })?
+                .ok_or_else(|| error(owner_span, "missing closed source signature"))?
                 .into_owned()
             else {
-                unreachable!("formed source function signature")
+                return Err(error(
+                    owner_span,
+                    "closed source declaration must have a function signature",
+                ));
             };
             let definition = Definition::new(
                 parameters
@@ -2082,20 +2119,20 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         mut definition: Definition,
     ) -> Result<Definition, Error> {
-        let span = self.package.item(owner).unwrap().span;
+        let span = self.open_item(owner, Span::default())?.span;
         self.ensure_contract(owner, span)?;
         if self.active_open_definitions.len() >= 64 || !self.active_open_definitions.insert(owner) {
             return Err(error(
-                self.package.item(owner).unwrap().span,
+                span,
                 "cyclic or excessively deep ordinary open-definition dependency",
             ));
         }
         let checked = self.in_open_function_scope(owner, None, |this| {
-            let item = this.package.item(owner).unwrap();
+            let item = this.open_item(owner, span)?;
             let (sig, body) = match &item.kind {
                 ItemKind::Fn(sig, body) => (sig, Some(*body)),
                 ItemKind::FnDeclaration(sig) if sig.modifiers.is_function_template => (sig, None),
-                _ => unreachable!(),
+                _ => return Err(error(span, "expected open function definition")),
             };
             this.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
             let metadata = n::Package {
@@ -2339,7 +2376,10 @@ impl Checker<'_, '_> {
                 )?;
                 if sig.modifiers.is_pure || this.default_behavior_functions.contains(&owner) {
                     let D::Known(result_type) = declared_result else {
-                        unreachable!()
+                        return Err(error(
+                            span,
+                            "pure open definition behavior check requires known result domain",
+                        ));
                     };
                     this.checking_open_behavior = true;
                     this.in_unselected_inline = true;
@@ -2355,14 +2395,17 @@ impl Checker<'_, '_> {
                         .iter()
                         .map(|(sort, annotation)| {
                             let Annotation::Known(ty) = annotation else {
-                                unreachable!()
+                                return Err(error(
+                                    span,
+                                    "pure open definition behavior check requires known parameter domain",
+                                ));
                             };
-                            Parameter {
+                            Ok(Parameter {
                                 sort: *sort,
                                 ty: ty.clone(),
-                            }
+                            })
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, Error>>()?;
                     let inputs = std::mem::take(&mut this.ordinary_behavior_inputs);
                     parameters.extend(inputs.values().cloned().map(|ty| Parameter {
                         sort: Sort::ComptimeValue,
@@ -2445,12 +2488,12 @@ impl Checker<'_, '_> {
         if let (D::Known(actual), Some(D::Known(expected))) = (actual, expected) {
             if !is_never(actual) && matches!(expected, Term::ErrorResult { .. }) {
                 let mut unwrapped = actual;
-                if self.active_effect_environment().is_some()
+                if let Some(effect_env) = self.active_effect_environment()
                     && let Term::Computation { effects, result } = actual
                 {
                     crate::effects::embed_row(
                         effects,
-                        self.active_effect_environment().unwrap(),
+                        effect_env,
                         &self.context,
                         crate::ptc::Budget::default(),
                     )
@@ -2802,10 +2845,12 @@ impl Checker<'_, '_> {
             }
             H::List(elements) if matches!(expected, Some(D::Known(ty)) if self.list_element_type(ty).is_some()) =>
             {
-                let Some(D::Known(ty)) = expected else {
-                    unreachable!()
+                let Some(D::Known(expected_ty)) = expected else {
+                    return Err(error(expr.span, "expected list domain"));
                 };
-                let element_type = self.list_element_type(ty).unwrap().clone();
+                let Some(element_type) = self.list_element_type(expected_ty).cloned() else {
+                    return Err(error(expr.span, "expected list element domain"));
+                };
                 for element in *elements {
                     self.describe_open_expression(
                         element,
@@ -2815,7 +2860,7 @@ impl Checker<'_, '_> {
                         depth + 1,
                     )?;
                 }
-                expected.unwrap().clone()
+                D::Known(expected_ty.clone())
             }
             H::TyPtr(inner) | H::TyOptional(inner) | H::LiftType(inner) => {
                 self.describe_open_expression(
@@ -2865,7 +2910,7 @@ impl Checker<'_, '_> {
                     ..
                 } = value.kind
                 else {
-                    unreachable!()
+                    return Err(error(expr.span, "expected inline loop expression"));
                 };
                 if let H::TakeTupleEnumerate(input) = iter.kind {
                     return self.describe_open_tuple_iteration(
@@ -3173,7 +3218,10 @@ impl Checker<'_, '_> {
                 self.control.loops.push(identity);
                 let checked = self.describe_open_block(body, locals, returns, None, depth + 1);
                 self.control.loops.pop();
-                let transfers = self.open_loop_transfers.remove(&identity).unwrap();
+                let transfers = self
+                    .open_loop_transfers
+                    .remove(&identity)
+                    .unwrap_or_default();
                 if let Some(previous) = saved_transfer {
                     self.open_loop_transfers.insert(identity, previous);
                 }
@@ -3194,7 +3242,7 @@ impl Checker<'_, '_> {
             {
                 let binding = match target.kind {
                     H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => local(id),
-                    _ => unreachable!(),
+                    _ => return Err(error(target.span, "expected local assignment target")),
                 };
                 if self.in_staged_input && !self.open_staged_locals.contains(&binding) {
                     return Err(error(
@@ -3251,7 +3299,10 @@ impl Checker<'_, '_> {
                 // writes must retain their own transfer/Copy contract checks.
                 let target_type = if let Some(pointer) = self.dereferenced_place(target)? {
                     let Term::Pointer(ty) = pointer.ty else {
-                        unreachable!()
+                        return Err(error(
+                            target.span,
+                            "dereferenced place must have pointer type",
+                        ));
                     };
                     *ty
                 } else {
@@ -3282,7 +3333,10 @@ impl Checker<'_, '_> {
             H::AssignOp(op, target, value) if self.contains_inline_control(value)? => {
                 let target_type = if let Some(pointer) = self.dereferenced_place(target)? {
                     let Term::Pointer(ty) = pointer.ty else {
-                        unreachable!()
+                        return Err(error(
+                            target.span,
+                            "dereferenced place must have pointer type",
+                        ));
                     };
                     *ty
                 } else {
@@ -3428,7 +3482,10 @@ impl Checker<'_, '_> {
             }
             H::TakeAttribute(value) => {
                 if self.runtime_value_context() || self.in_code_body {
-                    return Err(error(expr.span, "attribute view requires comptime invocation"));
+                    return Err(error(
+                        expr.span,
+                        "attribute view requires comptime invocation",
+                    ));
                 }
                 match self.describe_open_expression(value, locals, returns, None, depth + 1)? {
                     D::Known(ty) if is_never(&ty) => D::Known(ty),
@@ -3445,7 +3502,7 @@ impl Checker<'_, '_> {
                             H::TakeBitVec(_) => "bit view requires an established source type",
                             H::TakeTagName(_) => "tag_name requires an established source type",
                             H::Deref(_) => "dereference requires an established pointer type",
-                            _ => unreachable!(),
+                            _ => "unary projection requires an established source type",
                         },
                     ));
                 };
@@ -3463,15 +3520,21 @@ impl Checker<'_, '_> {
                     return Ok(result);
                 }
                 self.with_open_operand(ty, value.span, |this, placeholder| {
+                    let kind = match expr.kind {
+                        H::TakeBitVec(_) => H::TakeBitVec(placeholder),
+                        H::TakeTagName(_) => H::TakeTagName(placeholder),
+                        H::Deref(_) => H::Deref(placeholder),
+                        _ => {
+                            return Err(error(
+                                expr.span,
+                                "unexpected unary projection in open operand probe",
+                            ));
+                        }
+                    };
                     let probe = Expr {
                         hir_id: expr.hir_id,
                         span: expr.span,
-                        kind: match expr.kind {
-                            H::TakeBitVec(_) => H::TakeBitVec(placeholder),
-                            H::TakeTagName(_) => H::TakeTagName(placeholder),
-                            H::Deref(_) => H::Deref(placeholder),
-                            _ => unreachable!(),
-                        },
+                        kind,
                     };
                     this.describe_known_region(&probe, expected)
                 })?
@@ -4031,7 +4094,12 @@ impl Checker<'_, '_> {
             H::If(condition, _, _) => vec![condition],
             H::When(arms) => arms.iter().filter_map(|arm| arm.cond).collect(),
             H::Match(subject, _) => vec![subject],
-            _ => unreachable!(),
+            _ => {
+                return Err(error(
+                    value.span,
+                    "expected conditional or match expression in inline branch probe",
+                ));
+            }
         };
         let mut bindings = Vec::new();
         let checked = (|| {
@@ -4093,18 +4161,28 @@ impl Checker<'_, '_> {
                     let mut conditions = conditions.iter();
                     let arms: Vec<_> = arms
                         .iter()
-                        .map(|arm| hir::expr::CondictionArm {
-                            cond: arm.cond.map(|_| conditions.next().unwrap()),
-                            ..arm.clone()
+                        .map(|arm| {
+                            let cond = arm
+                                .cond
+                                .map(|_| {
+                                    conditions.next().ok_or_else(|| {
+                                        error(value.span, "missing elaborated when arm condition")
+                                    })
+                                })
+                                .transpose()?;
+                            Ok(hir::expr::CondictionArm { cond, ..*arm })
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, Error>>()?;
                     let probe = Expr {
                         kind: H::When(&arms),
                         ..value.clone()
                     };
                     self.expr(&probe, expected)
                 }
-                _ => unreachable!(),
+                _ => Err(error(
+                    value.span,
+                    "expected conditional or match expression in inline branch probe",
+                )),
             }
         })();
         for binding in bindings {
@@ -4589,7 +4667,7 @@ impl Checker<'_, '_> {
             pat, guard, body, ..
         } = expr.kind
         else {
-            unreachable!()
+            return Err(error(expr.span, "expected tuple iteration loop"));
         };
         let indexed_pats = if indexed {
             Some(inline_loops::tuple_indexed_parts(pat)?)
@@ -4764,7 +4842,7 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<D, Error> {
         let H::Let(binding) = expr.kind else {
-            unreachable!()
+            return Err(error(expr.span, "expected staged let binding"));
         };
         if binding.guard.is_some() && binding.otherwise.is_none() {
             return Err(error(
@@ -4810,7 +4888,7 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<D, Error> {
         let H::Let(binding) = expr.kind else {
-            unreachable!()
+            return Err(error(expr.span, "expected staged let binding"));
         };
         let probe_binding = hir::decl::LetDecl {
             // This is a definition-side witness, not a const invocation.
@@ -4865,7 +4943,7 @@ impl Checker<'_, '_> {
                 checked = Some(value);
                 Ok(result)
             })?;
-            checked.unwrap()
+            checked.ok_or_else(|| error(expr.span, "missing staged binding probe expression"))?
         } else {
             self.expr(&probe, expected)?
         };
@@ -5033,7 +5111,8 @@ impl Checker<'_, '_> {
                 });
             }
         }
-        let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _)) = self.package.item(owner).map(|item| &item.kind)
+        let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _)) =
+            self.package.item(owner).map(|item| &item.kind)
         else {
             return self.describe_known_region(expr, expected);
         };
@@ -5427,7 +5506,7 @@ impl Checker<'_, '_> {
         let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
-            unreachable!()
+            return Err(error(span, "expected callable definition for spread check"));
         };
         self.infer_routed_packet_inputs(
             &scheme,
@@ -5746,7 +5825,7 @@ impl Checker<'_, '_> {
                 .or_else(|| self.interface_signatures.get(&owner))
                 .ok_or_else(|| error(expr.span, "missing callable signature"))?;
             let Term::Function { parameters, result } = signature.callable_signature() else {
-                unreachable!()
+                return Err(error(expr.span, "expected callable function signature"));
             };
             (
                 parameters
@@ -5802,7 +5881,10 @@ impl Checker<'_, '_> {
                     D::Known(ty) => {
                         route.require_collection_type(self, ty, expr.span)?;
                         let Term::Tuple(fields) = self.structural_type(ty, expr.span)? else {
-                            unreachable!()
+                            return Err(error(
+                                expr.span,
+                                "variadic collection domain must lower to a tuple structure",
+                            ));
                         };
                         if fields.len() != route.source_inputs().count() {
                             return Err(error(
@@ -5822,7 +5904,12 @@ impl Checker<'_, '_> {
                 }
             } else {
                 inputs.push((
-                    route.single_position().unwrap(),
+                    route.single_position().ok_or_else(|| {
+                        error(
+                            expr.span,
+                            "non-variadic argument route has no source position",
+                        )
+                    })?,
                     route.expression(expr),
                     *sort,
                     expected,
@@ -5831,11 +5918,15 @@ impl Checker<'_, '_> {
         }
         inputs.sort_by_key(|(position, ..)| *position);
         for (position, input, sort, expected) in inputs {
-            while prepared.peek().is_some_and(|(at, _)| *at <= position) {
-                let (_, statement) = prepared.next().unwrap();
+            while let Some((_, statement)) = prepared.next_if(|(at, _)| *at <= position) {
                 let value = match &statement.kind {
                     K::LetPattern { value, .. } | K::Let { value, .. } => value,
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(error(
+                            expr.span,
+                            "unexpected prepared statement fragment in open call",
+                        ));
+                    }
                 };
                 self.with_open_reachability(!diverges, expr.span, |this| {
                     this.check_open_fragment(value, expr.span, false)
@@ -5858,7 +5949,12 @@ impl Checker<'_, '_> {
         for (_, statement) in prepared {
             let value = match &statement.kind {
                 K::LetPattern { value, .. } | K::Let { value, .. } => value,
-                _ => unreachable!(),
+                _ => {
+                    return Err(error(
+                        expr.span,
+                        "unexpected trailing prepared statement fragment in open call",
+                    ));
+                }
             };
             self.with_open_reachability(!diverges, expr.span, |this| {
                 this.check_open_fragment(value, expr.span, false)
@@ -6197,7 +6293,7 @@ impl Checker<'_, '_> {
         }
         if !constrained && unknown.iter().any(|unknown| *unknown) {
             let Term::Function { parameters, .. } = signature.callable_signature() else {
-                unreachable!()
+                return Err(error(expr.span, "expected callable function signature"));
             };
             // One observation per unknown operand domain, not one scan per
             // generic binder. This support belongs only to this description.
@@ -6346,9 +6442,7 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let term = self.in_open_function_scope(owner, None, |this| {
-            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &this.package.item(owner).unwrap().kind else {
-                unreachable!()
-            };
+            let sig = this.open_fn_or_case_sig(owner, call.span)?;
             let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
                 return Err(error(call.span, "missing open contract argument"));
             };
@@ -6664,9 +6758,7 @@ impl Checker<'_, '_> {
     ) -> Result<OpenClauseInference<'src>, Error> {
         self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
-        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
-            unreachable!()
-        };
+        let sig = self.open_fn_or_case_sig(owner, expr.span)?;
         let (routes, assigned) =
             route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let all = self.type_parameters[&owner].clone();
@@ -7042,7 +7134,15 @@ impl Checker<'_, '_> {
                         true,
                         expr.span,
                     )?;
-                    (value, symbol.expect("staged default produces a symbol"))
+                    (
+                        value,
+                        symbol.ok_or_else(|| {
+                            error(
+                                expr.span,
+                                "staged default did not produce an immutable symbol",
+                            )
+                        })?,
+                    )
                 };
                 symbol
                     .check_scope(&[])
@@ -7183,7 +7283,9 @@ impl Checker<'_, '_> {
                 let route = routes
                     .iter()
                     .find(|route| route.parameter == *slot)
-                    .unwrap();
+                    .ok_or_else(|| {
+                        error(expr.span, "missing route for property collection parameter")
+                    })?;
                 let context = route.retained_collection_context(
                     self,
                     values,
@@ -7431,7 +7533,12 @@ impl Checker<'_, '_> {
                         }
                     }
                     if generic.iter().all(|id| supported.contains(id)) {
-                        let (locals, returns, depth) = description.as_mut().unwrap();
+                        let Some((locals, returns, depth)) = description.as_mut() else {
+                            return Err(error(
+                                expr.span,
+                                "missing open call description state for suspended generic call",
+                            ));
+                        };
                         // Inference omits pending domains; ordinary checking
                         // must still inspect every operand before suspending.
                         for route in &routes {
@@ -7560,24 +7667,24 @@ impl Checker<'_, '_> {
         if !self.checking_open_behavior && !self.describing_open_call {
             return Ok(None);
         }
-        if !self.describing_open_call
-            && !self.checking_default_behavior
-            && !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_pure)
-        {
+        let is_pure_item = matches!(
+            &self.open_item(owner, expr.span)?.kind,
+            ItemKind::Fn(sig, _) if sig.modifiers.is_pure
+        );
+        let is_comptime_item = matches!(
+            &self.open_item(owner, expr.span)?.kind,
+            ItemKind::Fn(sig, _) if sig.modifiers.is_comptime
+        );
+        if !self.describing_open_call && !self.checking_default_behavior && !is_pure_item {
             return Ok(None);
         }
-        if self.describing_open_call
-            && !self.checking_default_behavior
-            && matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime)
-        {
+        if self.describing_open_call && !self.checking_default_behavior && is_comptime_item {
             return Ok(None);
         }
         let Some(signature) = self.declared_signature(owner).map(|sig| sig.into_owned()) else {
             return Ok(None);
         };
-        if self.checking_default_behavior
-            && !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime)
-        {
+        if self.checking_default_behavior && !is_comptime_item {
             self.default_behavior_functions.insert(owner);
             if !self.active_open_definitions.contains(&owner) {
                 self.check_open_definition(owner)?;
@@ -7711,7 +7818,10 @@ impl Checker<'_, '_> {
         inferred: OpenClauseInference<'src>,
     ) -> Result<n::Expr, Error> {
         let OpenClauseInference::Ready(arguments, checked, formed) = inferred else {
-            unreachable!("concrete calls cannot suspend inference");
+            return Err(error(
+                expr.span,
+                "concrete open call cannot suspend clause inference",
+            ));
         };
         self.check_type_application(owner, &arguments, expr.span)?;
         let saved = self.alias_substitution.clone();
@@ -7765,10 +7875,7 @@ impl Checker<'_, '_> {
                 };
             }
         }
-        let item = self.package.item(owner).unwrap();
-        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &item.kind else {
-            unreachable!()
-        };
+        let sig = self.open_fn_or_case_sig(owner, expr.span)?;
         let (routes, assigned) =
             route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let mut ordinary_dependencies = BTreeSet::new();
@@ -7895,7 +8002,10 @@ impl Checker<'_, '_> {
                 ty: ty.clone(),
             });
             if pending_inputs.contains(slot) {
-                let route = routes.iter().find(|route| route.parameter == slot).unwrap();
+                let route = routes
+                    .iter()
+                    .find(|route| route.parameter == slot)
+                    .ok_or_else(|| error(expr.span, "missing route for pending open input"))?;
                 let (value, symbol, completed) = pending_inputs.deliver(self, route, &ty, expr)?;
                 values[slot] = Some(value);
                 symbols[slot] = symbol;
@@ -7921,7 +8031,10 @@ impl Checker<'_, '_> {
                     }
                 }
                 if live[slot].is_some() {
-                    self.require_expression(&values[slot].as_ref().unwrap().ty, &ty, expr.span)?;
+                    let value = values[slot].as_ref().ok_or_else(|| {
+                        error(expr.span, "missing materialized live open input expression")
+                    })?;
+                    self.require_expression(&value.ty, &ty, expr.span)?;
                     continue;
                 }
                 if !assigned[slot] && sig.modifiers.is_comptime {
@@ -7942,7 +8055,12 @@ impl Checker<'_, '_> {
                             expr.span,
                             &[],
                         )?
-                        .expect("final invocation has completed declaration arguments");
+                        .ok_or_else(|| {
+                            error(
+                                expr.span,
+                                "final invocation is missing completed declaration default",
+                            )
+                        })?;
                     if self
                         .optional_normal_term(completed.clone(), expr.span)?
                         .is_none()
@@ -7992,7 +8110,12 @@ impl Checker<'_, '_> {
                     )?;
                     (
                         value,
-                        symbol.expect("staged default produces an immutable symbol"),
+                        symbol.ok_or_else(|| {
+                            error(
+                                expr.span,
+                                "staged default did not produce an immutable symbol",
+                            )
+                        })?,
                     )
                 };
                 symbol.check_scope(&[]).map_err(|failure| error(expr.span,
@@ -8064,29 +8187,40 @@ impl Checker<'_, '_> {
             .enumerate()
             .filter_map(|(slot, value)| value.as_ref().map(|_| slot))
             .collect();
-        let (live_bindings, completed) = self.materialize_call_values(
-            live_slots
-                .iter()
-                .map(|slot| (live[*slot].take().unwrap(), parameters[*slot].ty.clone()))
-                .chain(
-                    live_packets
-                        .iter()
-                        .map(|key| self.completed_packet_graph(*key)),
-                )
-                .chain(
-                    live_writes
-                        .values()
-                        .map(|(ty, value)| (value.clone(), ty.clone())),
-                )
-                .collect(),
-            expr.span,
-        )?;
+        let live_inputs = live_slots
+            .iter()
+            .map(|slot| {
+                let value = live[*slot]
+                    .take()
+                    .ok_or_else(|| error(expr.span, "missing live open input value"))?;
+                Ok((value, parameters[*slot].ty.clone()))
+            })
+            .chain(
+                live_packets
+                    .iter()
+                    .map(|key| Ok(self.completed_packet_graph(*key))),
+            )
+            .chain(
+                live_writes
+                    .values()
+                    .map(|(ty, value)| Ok((value.clone(), ty.clone()))),
+            )
+            .collect::<Result<Vec<_>, Error>>()?;
+        let (live_bindings, completed) = self.materialize_call_values(live_inputs, expr.span)?;
         let mut completed = completed.into_iter();
         for slot in live_slots {
-            values[slot] = Some(completed.next().unwrap());
+            values[slot] =
+                Some(completed.next().ok_or_else(|| {
+                    error(expr.span, "materialized live call input count mismatch")
+                })?);
         }
         for key in live_packets {
-            self.set_completed_packet_expression(key, completed.next().unwrap());
+            self.set_completed_packet_expression(
+                key,
+                completed.next().ok_or_else(|| {
+                    error(expr.span, "materialized live packet input count mismatch")
+                })?,
+            );
         }
         let frame_writes: BTreeMap<_, _> = live_writes.into_keys().zip(completed).collect();
         let mut arguments = Vec::new();
@@ -8272,7 +8406,7 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 let Some((declaration, sort)) = pending.pop() else {
-                    unreachable!()
+                    return Err(error(span, "missing pending open capture entry"));
                 };
                 steps = steps
                     .checked_sub(1)
@@ -8492,9 +8626,9 @@ impl Checker<'_, '_> {
         self.open_instantiation_depth += 1;
         let body = self.in_open_function_scope(owner, Some(Arc::clone(&instance)), |this| {
             let signature = &instance.signature;
-            let item = this.package.item(owner).unwrap();
+            let item = this.open_item(owner, span)?;
             let (ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = &item.kind else {
-                unreachable!()
+                return Err(error(span, "expected open function or case definition"));
             };
             this.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
             if sig.modifiers.is_comptime && !local_runtime_ids.is_empty() {
@@ -8504,7 +8638,10 @@ impl Checker<'_, '_> {
                 ));
             }
             let Term::Function { parameters, result } = signature else {
-                unreachable!()
+                return Err(error(
+                    span,
+                    "open function instantiation requires a function signature",
+                ));
             };
             let mut specialized_assumptions =
                 this.specialized_open_binder_assumptions(owner, symbols, span)?;

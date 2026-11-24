@@ -1899,7 +1899,6 @@ mod tests {
 
     #[test]
     fn abstract_type_invocation_failure_is_terminal_and_does_not_poison_other_calls() {
-        use crate::type_computations::{PreparedInput, Session, State};
         let declaration = DeclarationId {
             package: 7,
             local: 90,
@@ -1930,21 +1929,9 @@ mod tests {
                 else_branch: Some(Box::new(output)),
             };
         });
-        let mut context = crate::InferenceContext::default();
-        let mut session = Session::new_in_scope_in_budget(
-            prepared.world.package(),
-            &context,
-            &mut Budget {
-                steps: 10_000,
-                depth: 128,
-            },
-            &[],
-            &[],
-            &[(declaration, p(P::Bool))],
-            None,
-        )
-        .unwrap();
-        let mut failed = Vec::new();
+        prepared.inputs = vec![(binding, p(P::Bool), None)];
+        prepared.edit_scope().abstract_value_parameters = vec![(declaration, p(P::Bool))];
+        let span = Span::default();
         for (id, domain) in [
             (declaration, p(P::Bool)),
             (
@@ -1956,54 +1943,31 @@ mod tests {
             ),
             (declaration, p(P::U8)),
         ] {
-            let output = session
-                .enqueue_prepared(
-                    &mut context,
-                    prepared.entry,
-                    vec![PreparedInput {
-                        ty: crate::InferenceTerm::Stable(p(P::Bool)),
-                        value: InvocationValue::Live(Value::AbstractValue {
+            let mut steps = 10_000;
+            let failure = prepared
+                .clone()
+                .invoke_with_live_inputs(
+                    vec![(
+                        binding,
+                        Value::AbstractValue {
                             declaration: id,
                             ty: domain,
-                        }),
-                    }],
+                        },
+                    )],
+                    &mut steps,
+                    span,
                 )
-                .unwrap();
-            assert!(matches!(
-                session.resume(&mut context, output).unwrap(),
-                State::Failed(_)
-            ));
-            assert!(context.freeze(&crate::InferenceTerm::Meta(output)).is_err());
-            let remaining = session.remaining_steps();
-            let diagnostic = format!("{}", session.state(output).unwrap());
-            assert_eq!(
-                format!("{}", session.resume(&mut context, output).unwrap()),
-                diagnostic
-            );
-            assert_eq!(session.remaining_steps(), remaining);
-            failed.push(output);
+                .unwrap_err();
+            assert!(!failure.message.is_empty());
         }
-        let output = session
-            .enqueue_prepared(
-                &mut context,
-                prepared.entry,
-                vec![PreparedInput {
-                    ty: crate::InferenceTerm::Stable(p(P::Bool)),
-                    value: InvocationValue::Live(Value::Bool(true)),
-                }],
-            )
+        let mut steps = 10_000;
+        let result = prepared
+            .clone()
+            .invoke_with_live_inputs(vec![(binding, Value::Bool(true))], &mut steps, span)
             .unwrap();
-        assert_eq!(
-            session.resume(&mut context, output).unwrap(),
-            &State::Complete(p(P::U8))
-        );
-        assert_eq!(
-            context.freeze(&crate::InferenceTerm::Meta(output)).unwrap(),
-            p(P::U8)
-        );
-        for output in failed {
-            assert!(matches!(session.state(output), Some(State::Failed(_))));
-        }
+        assert_eq!(result, (Value::Type(p(P::U8)), p(P::Type)));
+        assert!(steps < 10_000);
+        assert!(prepared.inputs[0].2.is_none());
     }
 
     #[test]

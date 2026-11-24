@@ -13,6 +13,7 @@ fn request(name: &str, ty: Term) -> StructBuildRequest {
         source: SourceRange { start: 1, end: 2 },
     }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
@@ -66,6 +67,11 @@ fn publisher_retains_checked_results_across_chained_dynamic_types() {
     };
     let (hir, nir) = publisher.finish();
     assert_eq!(hir.num_defs(), 2);
+    for (_, info) in hir.owners() {
+        let item = info.node.expect_item();
+        assert_eq!((item.span.lo().0, item.span.hi().0), (1, 2));
+        assert_eq!((item.ident.span.lo().0, item.ident.span.hi().0), (1, 2));
+    }
     let nir = nir.unwrap();
     assert_eq!(nir.structs.len(), 2);
     let mut fresh = Interpreter::for_comptime(&nir, Budget::default()).unwrap();

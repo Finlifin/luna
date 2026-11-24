@@ -47,7 +47,9 @@ pub struct Session {
     pub config: CompilerConfig,
     /// Source file manager (maps byte positions to files).
     pub source_map: SourceMap,
-    /// The resolved sysroot (builtin + std packages). `None` only when
+    /// The resolved sysroot (`builtin` and `std` base packages loaded by
+    /// `Sysroot::discover`; full multi-package driver sessions also load
+    /// `meta`, `build`, `attrs`, and `verification`). `None` only when
     /// the sysroot could not be discovered (e.g. in bare-metal / no-std
     /// scenarios).
     pub sysroot: Option<Sysroot>,

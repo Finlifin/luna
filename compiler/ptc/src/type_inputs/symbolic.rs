@@ -78,13 +78,14 @@ pub(super) fn candidates(
 /// New proved bindings only expose candidates; they never change this context.
 pub(super) struct Resolver<'a> {
     problem: &'a Context,
-    rejected: HashMap<DeclarationId, std::collections::HashSet<Term>>,
+    rejected: BTreeMap<DeclarationId, BTreeMap<String, Vec<Term>>>,
 }
+
 impl<'a> Resolver<'a> {
     pub(super) fn new(problem: &'a Context) -> Self {
         Self {
             problem,
-            rejected: HashMap::new(),
+            rejected: BTreeMap::new(),
         }
     }
 
@@ -104,7 +105,11 @@ impl<'a> Resolver<'a> {
             ) {
                 return Err(UnknownReason::BudgetExhausted);
             }
-            if rejected.contains(candidate) {
+            let key = candidate.to_string();
+            if rejected
+                .get(&key)
+                .is_some_and(|bucket| bucket.iter().any(|existing| existing == candidate))
+            {
                 continue;
             }
             match self.problem.prove_metered(
@@ -113,7 +118,10 @@ impl<'a> Resolver<'a> {
             ) {
                 Outcome::Entailed(proof) => return Ok(Some((candidate.clone(), proof))),
                 Outcome::NotEntailed(_) => {
-                    rejected.insert(candidate.clone());
+                    let bucket = rejected.entry(key).or_default();
+                    if !bucket.iter().any(|existing| existing == candidate) {
+                        bucket.push(candidate.clone());
+                    }
                 }
                 Outcome::Unknown {
                     reason: UnknownReason::BudgetExhausted,
@@ -168,17 +176,27 @@ pub(super) fn same_ambient(
     // function definitions. Disjoint keys can share one common interpretation;
     // overlapping keys must agree. Requiring identical tables made a changed
     // requested input look like a changed ambient function automatically.
-    let mut applications = HashMap::new();
+    let mut applications: BTreeMap<(DeclarationId, Vec<String>), Vec<(&[Term], &Term)>> =
+        BTreeMap::new();
     for entry in first.applications.iter().chain(&second.applications) {
         budget.steps = budget
             .steps
             .checked_sub(1)
             .ok_or(UnknownReason::BudgetExhausted)?;
-        let key = (entry.head, entry.arguments.as_slice());
-        if let Some(previous) = applications.insert(key, &entry.result) {
-            if previous != &entry.result {
+        let key = (
+            entry.head,
+            entry.arguments.iter().map(ToString::to_string).collect(),
+        );
+        let bucket = applications.entry(key).or_default();
+        if let Some((_, previous)) = bucket
+            .iter()
+            .find(|(args, _)| *args == entry.arguments.as_slice())
+        {
+            if *previous != &entry.result {
                 return Ok(false);
             }
+        } else {
+            bucket.push((entry.arguments.as_slice(), &entry.result));
         }
     }
     Ok(first.bound_types == second.bound_types

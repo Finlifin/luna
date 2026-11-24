@@ -2,7 +2,7 @@
 use super::*;
 use comptime_interpretor::{Error, ErrorKind, PreparedStructBuild, StructBuildRequest};
 use hir::{HirArena, Ident, Symbol};
-use rustc_span::DUMMY_SP;
+use rustc_span::{BytePos, Span};
 use std::{
     cell::{Cell, RefCell},
     sync::Arc,
@@ -27,6 +27,7 @@ pub struct StructPublisher<'hir> {
     structural_fuel: Cell<usize>,
     diagnostic: RefCell<Option<String>>,
 }
+
 impl<'hir> StructPublisher<'hir> {
     pub fn new(
         arena: &'hir HirArena,
@@ -55,19 +56,24 @@ impl<'hir> StructPublisher<'hir> {
             diagnostic: RefCell::new(None),
         })
     }
+
     pub fn remaining_structural_fuel(&self) -> usize {
         self.structural_fuel.get()
     }
+
     pub fn last_diagnostic(&self) -> Option<String> {
         self.diagnostic.borrow().clone()
     }
+
     pub fn published_definition_count(&self) -> usize {
         self.published.borrow().hir.num_defs()
     }
+
     pub fn finish(self) -> (hir::Package<'hir>, Option<nir::program::Package>) {
         let published = self.published.into_inner();
         (published.hir, published.nir)
     }
+
     fn failure(&self, request: &StructBuildRequest, message: impl ToString) -> Error {
         *self.diagnostic.borrow_mut() = Some(message.to_string());
         Error {
@@ -75,6 +81,7 @@ impl<'hir> StructPublisher<'hir> {
             source: Some(request.source),
         }
     }
+
     pub fn prepare<'s>(
         &'s self,
         request: &StructBuildRequest,
@@ -82,6 +89,7 @@ impl<'hir> StructPublisher<'hir> {
     ) -> Result<PreparedStructBuild<'s>, Error> {
         self.prepare_with_defaults(request, invocation_steps, |_, _, _, _| Ok(None))
     }
+
     /// Assemble defaults in the candidate's hygienic field scopes, then run
     /// ordinary elaboration before publication. The callback shares structural
     /// fuel and may use CMTT nodes; it must not capture live checker state.
@@ -108,6 +116,7 @@ impl<'hir> StructPublisher<'hir> {
         self.structural_fuel.set(fuel);
         result
     }
+
     fn prepare_inner<'s>(
         &'s self,
         request: &StructBuildRequest,
@@ -147,21 +156,25 @@ impl<'hir> StructPublisher<'hir> {
         *fuel = fuel
             .checked_sub(request.name.len())
             .ok_or_else(|| self.failure(request, "builder structural budget exhausted"))?;
+        let span = Span::new(
+            BytePos(request.source.start),
+            BytePos(request.source.start.max(request.source.end)),
+        );
         let fields: Vec<_> = request
             .fields
             .iter()
             .map(|field| hir::definitions::TypedField {
-                name: Ident::new(Symbol::intern(&field.name), DUMMY_SP),
+                name: Ident::new(Symbol::intern(&field.name), span),
                 ty: Arc::new(field.ty.clone()),
-                span: DUMMY_SP,
+                span,
             })
             .collect();
         let info = hir::definitions::assemble_struct_with_defaults(
             self.arena,
             owner,
-            Ident::new(Symbol::intern(&request.name), DUMMY_SP),
+            Ident::new(Symbol::intern(&request.name), span),
             &fields,
-            DUMMY_SP,
+            span,
             fuel,
             make_default,
         )
@@ -232,6 +245,7 @@ impl<'hir> StructPublisher<'hir> {
         })
     }
 }
+
 impl std::fmt::Display for StructPublisher<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let published = self.published.borrow();

@@ -438,16 +438,13 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             // Only an already checked static application can use the direct
             // instance and declaration-side default substitution. An observed
             // identity cannot erase producers or complete deferred contracts.
-            return self.function_instance(
-                expr,
-                owner,
-                packet
-                    .bindings
-                    .into_identities()
-                    .expect("formation has no deferred inputs"),
-                expected,
-                allow_optional,
-            );
+            let identities = packet.bindings.into_identities().ok_or_else(|| {
+                error(
+                    expr.span,
+                    "deferred callable packet cannot form a static function instance",
+                )
+            })?;
+            return self.function_instance(expr, owner, identities, expected, allow_optional);
         }
         let signature = packet.bindings.admitted_signature(
             self,
@@ -674,10 +671,11 @@ mod packet_tests {
         let completion = CallableCompletion {
             owner: hir::OwnerId::new(hir::LocalDefId::new(3)),
         };
+        let test_span = Span::new(rustc_span::BytePos(3), rustc_span::BytePos(5));
         let instance = InstanceCompletion {
             expr: Expr {
                 hir_id: hir::HirId::new(completion.owner, hir::ItemLocalId::new(0)),
-                span: Span::default(),
+                span: test_span,
                 kind: H::Unit,
             },
             packet: completion,
@@ -748,7 +746,7 @@ mod packet_tests {
                 &[p(P::Type), p(P::Type)],
                 vec![],
                 &mut 1000,
-                Span::default(),
+                Span::new(rustc_span::BytePos(3), rustc_span::BytePos(5)),
             )
             .unwrap()
             .0,

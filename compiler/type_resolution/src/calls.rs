@@ -20,10 +20,12 @@ pub struct Scheme {
     pub type_parameters: usize,
     pub signature: Term,
 }
+
 pub struct Argument {
     pub value: Term,
     pub ty: Term,
 }
+
 /// Ephemeral checking context; unknown components never become NIR types.
 #[derive(Clone, Debug)]
 pub struct CallableContext {
@@ -37,6 +39,7 @@ pub struct CallableContext {
     /// Used only while the result is incomplete; shares the candidate context budget.
     pub result_context: Option<Box<InputContext>>,
 }
+
 /// Partial structural input checking context. Unresolved inference terms remain private
 /// to the candidate and are never published as NIR types.
 #[derive(Clone, Debug)]
@@ -74,6 +77,7 @@ pub enum InputContext {
     /// Its sort may become Type when the earlier domain input is completed.
     UnknownDependentValue,
 }
+
 pub struct CallCandidate {
     parameter_sorts: Vec<Sort>,
     dependent_value_parameters: Vec<usize>,
@@ -84,8 +88,9 @@ pub struct CallCandidate {
     // The ordinary result or the delivered result after one effect layer.
     // None retains the existing wait for unresolved computation inputs.
     contextual_result: Option<I>,
-    views: std::collections::HashMap<Term, Term>,
+    views: std::collections::BTreeMap<String, Vec<(Term, Term)>>,
 }
+
 #[derive(Debug)]
 pub enum Error {
     NeedsContext,
@@ -103,6 +108,7 @@ pub enum Error {
     },
     TypeView(nir::NominalAdmissionError),
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -115,16 +121,19 @@ impl std::fmt::Display for Error {
         }
     }
 }
+
 impl From<TypeError> for Error {
     fn from(e: TypeError) -> Self {
         Self::Shape(e)
     }
 }
+
 pub struct Instance {
     pub type_arguments: Vec<Term>,
     pub signature: Term,
     pub result: Term,
 }
+
 impl Scheme {
     fn input_sorts(&self) -> Result<Vec<Sort>, Error> {
         if self.parameter_sorts.is_empty() {
@@ -140,6 +149,7 @@ impl Scheme {
         }
         Ok(self.parameter_sorts.clone())
     }
+
     /// Type-only call inference when the signature has no runtime dependencies.
     /// Removing the runtime frame with no arguments deliberately rejects such
     /// dependencies instead of inventing runtime object identities.
@@ -155,6 +165,7 @@ impl Scheme {
             budget,
         )
     }
+
     pub fn infer_partial_types(
         &self,
         actual: &[Option<Term>],
@@ -168,6 +179,7 @@ impl Scheme {
             budget,
         )
     }
+
     pub fn infer_partial_types_in_context(
         &self,
         actual: &[Option<Term>],
@@ -177,6 +189,7 @@ impl Scheme {
     ) -> Result<CallCandidate, Error> {
         self.infer_contextual_types(actual, expected, None, context, budget)
     }
+
     pub fn infer_contextual_types(
         &self,
         actual: &[Option<Term>],
@@ -187,6 +200,7 @@ impl Scheme {
     ) -> Result<CallCandidate, Error> {
         self.infer_contextual_types_mode(actual, expected, partial, context, budget, false)
     }
+
     pub(crate) fn infer_contextual_types_mode(
         &self,
         actual: &[Option<Term>],
@@ -206,6 +220,7 @@ impl Scheme {
             &[],
         )
     }
+
     /// Infer inside an explicitly supplied caller telescope. Returned terms
     /// remain relative to that scope; the callee's own binders cannot escape.
     pub fn infer_scoped_types(
@@ -218,6 +233,7 @@ impl Scheme {
     ) -> Result<CallCandidate, Error> {
         self.infer_scoped_types_mode(actual, expected, None, context, budget, false, scope)
     }
+
     pub(crate) fn infer_scoped_types_mode(
         &self,
         actual: &[Option<Term>],
@@ -479,6 +495,7 @@ impl Scheme {
         }
         Ok(candidate)
     }
+
     pub fn infer(
         &self,
         arguments: &[Argument],
@@ -556,6 +573,7 @@ impl Scheme {
         })
     }
 }
+
 impl CallCandidate {
     /// Import only structural checking information. Unknown components receive
     /// fresh variables in this candidate, never variables owned by its caller.
@@ -1046,12 +1064,18 @@ impl CallCandidate {
                 self.engine
                     .assume_type_equality(before.clone(), after.clone())
                     .map_err(Error::Obligations)?;
-                self.views.insert(before, after);
+                let bucket = self.views.entry(before.to_string()).or_default();
+                if let Some((_, existing)) = bucket.iter_mut().find(|(k, _)| *k == before) {
+                    *existing = after;
+                } else {
+                    bucket.push((before, after));
+                }
             }
             self.engine.advance(count + 2, budget);
         }
         Ok(())
     }
+
     pub fn type_argument(&self, index: usize) -> Result<Option<Term>, Error> {
         self.inspect_component(
             self.types
@@ -1060,6 +1084,7 @@ impl CallCandidate {
                 .clone(),
         )
     }
+
     /// The current candidate's input sort, after dependent-domain staging.
     pub fn type_argument_sort(&self, index: usize) -> Result<Sort, Error> {
         self.parameter_sorts
@@ -1067,6 +1092,7 @@ impl CallCandidate {
             .copied()
             .ok_or(Error::TypeArgumentCount)
     }
+
     pub fn constrain_type_argument(
         &mut self,
         index: usize,
@@ -1172,6 +1198,7 @@ impl CallCandidate {
         self.engine = engine;
         Ok(())
     }
+
     /// Constrain this isolated candidate using equations under its generic
     /// Type-parameter frame. These are obligations, never caller assumptions.
     /// Failure leaves the candidate unchanged.
@@ -1216,9 +1243,11 @@ impl CallCandidate {
         self.engine = engine;
         Ok(())
     }
+
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
+
     /// A settled parameter context may not depend on every inferred Type
     /// parameter. Unrelated unresolved slots must not prevent its use.
     fn parameter_term(&self, index: usize) -> Result<I, Error> {
@@ -1234,26 +1263,39 @@ impl CallCandidate {
             arguments: self.types.clone(),
         })
     }
+
     fn inspect_component(&self, term: I) -> Result<Option<Term>, Error> {
         match self.engine.inspect_type(&term) {
-            Ok(value) => Ok(Some(self.views.get(&value).cloned().unwrap_or(value))),
+            Ok(value) => {
+                let mapped = self
+                    .views
+                    .get(&value.to_string())
+                    .and_then(|bucket| bucket.iter().find(|(k, _)| *k == value))
+                    .map(|(_, after)| after.clone())
+                    .unwrap_or(value);
+                Ok(Some(mapped))
+            }
             Err(ObligationError::Inference(crate::InferenceError::Unresolved(_))) => Ok(None),
             Err(error) => Err(Error::Obligations(error)),
         }
     }
+
     /// A checking context can be available while unrelated proof obligations
     /// still wait. `finish` is the only instance export and checks all of them.
     pub fn parameter_type(&self, index: usize) -> Result<Option<Term>, Error> {
         self.inspect_component(self.parameter_term(index)?)
     }
+
     /// A description may inspect a settled result without exporting a call
     /// instance. Unresolved binders remain private to this candidate.
     pub fn result_type(&self) -> Result<Option<Term>, Error> {
         self.inspect_component(self.result.clone())
     }
+
     pub fn parameter_input_context(&self, index: usize) -> Result<InputContext, Error> {
         self.input_context(self.parameter_term(index)?, &mut 100_000, 0)
     }
+
     fn input_context(
         &self,
         term: I,
@@ -1399,9 +1441,11 @@ impl CallCandidate {
     ) -> Result<Option<CallableContext>, Error> {
         self.callable_context(&self.parameter_term(index)?)
     }
+
     fn callable_context(&self, term: &I) -> Result<Option<CallableContext>, Error> {
         self.callable_context_with_budget(term, &mut 100_000, 0)
     }
+
     fn callable_context_with_budget(
         &self,
         term: &I,
@@ -1544,6 +1588,7 @@ impl CallCandidate {
             result_context,
         }))
     }
+
     /// Obtain stable inferred binders without expanding the whole signature.
     /// Effect formation applies its own expansion budget before that copy.
     pub fn inferred_type_arguments(&self) -> Result<Vec<Term>, Error> {
@@ -1588,6 +1633,7 @@ impl CallCandidate {
         })
     }
 }
+
 impl std::fmt::Display for Instance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(call-instance (type-arguments")?;
