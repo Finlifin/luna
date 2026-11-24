@@ -662,6 +662,7 @@ fn evaluate_not_sized_at(
             | Primitive::Symbol
             | Primitive::Void
             | Primitive::Never
+            | Primitive::Continuation
             | Primitive::I8
             | Primitive::I16
             | Primitive::I32
@@ -997,6 +998,7 @@ fn layout_with_niche_at(
         | Term::ReachabilityType
         | Term::AnyType => Err(LayoutError::ComptimeOnly(ty.clone())),
         Term::Primitive(Primitive::Never) => Err(LayoutError::Unsupported(ty.clone())),
+        Term::Primitive(Primitive::Continuation) => Ok(no_niche(pointer_layout(world, ty)?)),
         Term::Pointer(_) => Ok(LayoutWithNiche {
             layout: pointer_layout(world, ty)?,
             niche: Some(Niche {
@@ -1417,6 +1419,9 @@ fn bit_packed_field_info_at(
         )),
         Term::Primitive(Primitive::Never) => Err(unsupported(
             "Never is not allowed in an attrs.packed.bit struct",
+        )),
+        Term::Primitive(Primitive::Continuation) => Err(unsupported(
+            "Continuation is not allowed in an attrs.packed.bit struct",
         )),
         Term::Primitive(
             Primitive::Type

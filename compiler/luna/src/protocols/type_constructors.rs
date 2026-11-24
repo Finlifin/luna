@@ -20,6 +20,7 @@ pub struct Selectors<'a> {
     pub comptime_list_pattern: Option<&'a str>,
     pub stable_list_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
+    pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
@@ -54,6 +55,7 @@ impl Selectors<'_> {
                 self.comptime_list_pattern,
                 self.stable_list_pattern,
                 self.literal_into,
+                self.handle_error,
                 self.splice,
                 self.meta_list,
                 self.tuple,
@@ -242,6 +244,11 @@ pub(crate) fn resolve_source(
                 "LiteralInto".into(),
                 selectors.literal_into,
                 &mut result.literal_into,
+            ),
+            (
+                "HandleError".into(),
+                selectors.handle_error,
+                &mut result.handle_error,
             ),
             ("Copy".into(), selectors.copy, &mut result.copy),
             ("Drop".into(), selectors.drop, &mut result.drop),
@@ -482,6 +489,7 @@ pub(crate) struct SysrootBindings {
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
+    handle_error: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
@@ -573,6 +581,7 @@ impl SysrootBindings {
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
+                "handle-error-protocol" => &mut result.handle_error,
                 "copy-protocol" => &mut result.copy,
                 "drop-protocol" => &mut result.drop,
                 "add-protocol" => &mut result.arithmetic[0],
@@ -749,6 +758,13 @@ impl SysrootBindings {
                     .literal_into
                     .is_none()
                     .then_some(self.literal_into.as_deref())
+                    .flatten()
+            }),
+            handle_error: explicit.handle_error.or_else(|| {
+                identities
+                    .handle_error
+                    .is_none()
+                    .then_some(self.handle_error.as_deref())
                     .flatten()
             }),
             arithmetic: std::array::from_fn(|index| {

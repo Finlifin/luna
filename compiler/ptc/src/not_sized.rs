@@ -96,6 +96,7 @@ fn evaluate_at(
             | Primitive::Symbol
             | Primitive::Void
             | Primitive::Never
+            | Primitive::Continuation
             | Primitive::I8
             | Primitive::I16
             | Primitive::I32

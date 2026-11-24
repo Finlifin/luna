@@ -965,6 +965,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
+            NodeKind::HandlerApplication => {
+                let value = self.lower_expr(ctx, children[0]);
+                let handler = self.lower_expr(ctx, children[1]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::HandlerApplication(
+                        self.arena.alloc_expr(value),
+                        self.arena.alloc_expr(handler),
+                    ),
+                    span,
+                }
+            }
             NodeKind::PostMatch => self.lower_post_match_expr(ctx, children[0], children[1], span),
             NodeKind::Assign => self.lower_assign_expr(ctx, children[0], children[1], span),
             NodeKind::AddAssign

@@ -71,6 +71,8 @@ pub enum Primitive {
     Unit,
     Void,
     Never,
+    /// Opaque, affine (non-Copy, non-Clone) delimited continuation handle.
+    Continuation,
     I8,
     I16,
     I32,
@@ -2741,6 +2743,7 @@ impl fmt::Display for Primitive {
             Self::Unit => "unit",
             Self::Void => "void",
             Self::Never => "never",
+            Self::Continuation => "Continuation",
             Self::I8 => "i8",
             Self::I16 => "i16",
             Self::I32 => "i32",

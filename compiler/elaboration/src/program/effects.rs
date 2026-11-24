@@ -273,7 +273,13 @@ impl Checker<'_, '_> {
                     "effect request requires one independent operation",
                 ));
             }
-            (operations.into_iter().next().unwrap(), None)
+            let operation = operations.into_iter().next().ok_or_else(|| {
+                error(
+                    expr.span,
+                    "effect request requires one independent operation",
+                )
+            })?;
+            (operation, None)
         };
         let operation = &operation;
         let metadata = self.effect_metadata(operation, expr.span)?;
@@ -388,6 +394,7 @@ impl Checker<'_, '_> {
     pub(super) fn active_effect_environment(&self) -> Option<&[nir::effects::Operation]> {
         self.effect_environment.as_deref()
     }
+
     pub(super) fn computation_body(
         &mut self,
         body: &Expr<'_>,
@@ -395,6 +402,7 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         self.computation_body_with_input(body, expected, None)
     }
+
     pub(super) fn computation_body_with_input(
         &mut self,
         body: &Expr<'_>,
@@ -449,19 +457,20 @@ impl Checker<'_, '_> {
             checked
         })
     }
+
     pub(super) fn require_expression(
         &self,
         actual: &Term,
         expected: &Term,
         span: Span,
     ) -> Result<(), Error> {
-        if self.active_effect_environment().is_some()
+        if let Some(allowed) = self.active_effect_environment()
             && !matches!(expected, Term::Computation { .. })
         {
             if let Term::Computation { effects, result } = actual {
                 crate::effects::embed_row(
                     effects,
-                    self.active_effect_environment().unwrap(),
+                    allowed,
                     &self.context,
                     crate::ptc::Budget::default(),
                 )
@@ -471,6 +480,7 @@ impl Checker<'_, '_> {
         }
         self.require(actual, expected, span)
     }
+
     pub(super) fn run_computation(
         &self,
         value: n::Expr,
@@ -494,8 +504,12 @@ impl Checker<'_, '_> {
         )
         .map_err(|failure| error(span, failure.to_string()))?;
         let slots = (0..effects.len())
-            .map(|i| mapping.target_index(i).unwrap())
-            .collect();
+            .map(|i| {
+                mapping
+                    .target_index(i)
+                    .ok_or_else(|| error(span, "effect row embedding target slot missing"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let ty = result.as_ref().clone();
         if let Some(expected) = expected {
             self.require(&ty, expected, span)?;
@@ -521,17 +535,20 @@ impl Checker<'_, '_> {
             .source_declarations
             .owner(operation.declaration)
             .filter(|owner| {
-                matches!(
-                    self.package.item(*owner).unwrap().kind,
-                    ItemKind::Effect(..)
-                )
+                self.package
+                    .item(*owner)
+                    .is_some_and(|item| matches!(item.kind, ItemKind::Effect(..)))
             })
             .ok_or_else(|| error(span, "missing effect operation metadata"))?;
         // Validate the copy before constructing the owned formation descriptor.
         crate::associated::charge_projection_copy(&self.signatures[&owner], &mut 100_000)
             .map_err(|message| error(span, message))?;
-        let ItemKind::Effect(_, modifiers) = &self.package.item(owner).unwrap().kind else {
-            unreachable!()
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(span, "missing effect operation metadata"))?;
+        let ItemKind::Effect(sig, modifiers) = &item.kind else {
+            return Err(error(span, "missing effect operation metadata"));
         };
         Ok(nir::effects::Declaration {
             declaration: operation.declaration,
@@ -539,7 +556,7 @@ impl Checker<'_, '_> {
                 .effect_parents
                 .get(&owner)
                 .map(|group| declaration(self.package, &self.package_identities, *group)),
-            name: self.package.item(owner).unwrap().ident.name.as_str().into(),
+            name: item.ident.name.as_str().into(),
             type_parameters: self.type_parameters[&owner].clone(),
             parameter_types: self.type_parameters[&owner]
                 .iter()
@@ -555,6 +572,8 @@ impl Checker<'_, '_> {
                 nir::effects::Abi::DirectPassing
             } else if modifiers.is_async {
                 nir::effects::Abi::Async
+            } else if sig.params.iter().any(|param| param.ty.is_catch()) {
+                nir::effects::Abi::Capturing
             } else {
                 nir::effects::Abi::Direct
             },
@@ -635,5 +654,251 @@ impl Checker<'_, '_> {
         )
         .map_err(|failure| error(span, failure.to_string()))?;
         Ok(instance.signature().clone())
+    }
+
+    pub(super) fn handler_application(
+        &mut self,
+        expr: &Expr<'_>,
+        value: &Expr<'_>,
+        handler: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        let handler_expr = self.expr(handler, None)?;
+        let handler_ty = handler_expr.ty.clone();
+        let input = self.expr(value, None)?;
+        if is_never(&input.ty) {
+            let handler_local = self.spread_binding(handler.span)?;
+            return Ok(n::Expr {
+                source: source(expr.span),
+                ty: p(P::Never),
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        source: source(handler.span),
+                        ty: p(P::Void),
+                        kind: K::Let {
+                            binding: handler_local,
+                            value: Box::new(handler_expr),
+                        },
+                    }],
+                    result: Some(Box::new(input)),
+                },
+            });
+        }
+        let Term::ErrorResult { errors, result } = &input.ty else {
+            return Err(error(
+                expr.span,
+                "handler application `.use(...)` requires an error-qualified operand",
+            ));
+        };
+        let success = (**result).clone();
+        let errors = errors.clone();
+        let protocol = self.protocols.handle_error.ok_or_else(|| {
+            error(
+                expr.span,
+                "handler application `.use(...)` requires a bound HandleError protocol",
+            )
+        })?;
+        let handler_return = match expected {
+            Some(Term::ErrorResult { result, .. }) => (**result).clone(),
+            Some(ty) => ty.clone(),
+            None => success.clone(),
+        };
+        let handler_local = self.spread_binding(handler.span)?;
+        let mut handled_arms = Vec::new();
+        let mut residual = Vec::new();
+        for err_ty in &errors {
+            let instance = n::InterfaceInstance {
+                declaration: protocol,
+                arguments: vec![err_ty.clone(), handler_return.clone()],
+            };
+            let has_symbolic = match self.symbolic_interface_evidence(&handler_ty, &instance) {
+                Ok(found) => found,
+                Err(e @ nir::NominalAdmissionError::Unresolved(_)) => {
+                    let resolution = self
+                        .resolve_trait_capability(
+                            &instance,
+                            &handler_ty,
+                            crate::ptc::Budget::default(),
+                        )
+                        .map_err(|query_err| {
+                            error(
+                                expr.span,
+                                format!("HandleError capability query failed: {query_err:?}"),
+                            )
+                        })?;
+                    if matches!(
+                        resolution.selection,
+                        crate::implementation::Selection::NoApplicableCandidate
+                    ) {
+                        return Err(error(expr.span, e.to_string()));
+                    }
+                    true
+                }
+                Err(e) => return Err(error(expr.span, e.to_string())),
+            };
+            if !has_symbolic {
+                let resolution = self
+                    .resolve_trait_capability(&instance, &handler_ty, crate::ptc::Budget::default())
+                    .map_err(|e| {
+                        error(
+                            expr.span,
+                            format!("HandleError capability query failed: {e:?}"),
+                        )
+                    })?;
+                if matches!(
+                    resolution.selection,
+                    crate::implementation::Selection::NoApplicableCandidate
+                ) {
+                    residual.push(err_ty.clone());
+                    continue;
+                }
+            }
+            let callee = self
+                .selected_method(
+                    handler_ty.clone(),
+                    Some(instance),
+                    "handle_error",
+                    expr.span,
+                )?
+                .ok_or_else(|| {
+                    error(
+                        expr.span,
+                        "HandleError.handle_error did not resolve to a callable method",
+                    )
+                })?;
+            let err_binding = self.spread_binding(expr.span)?;
+            let receiver_source = self.error_generated_source(handler.span)?;
+            let receiver = n::Expr {
+                source: receiver_source,
+                ty: Term::Pointer(Box::new(handler_ty.clone())),
+                kind: K::AddressOf(Box::new(n::Expr {
+                    source: receiver_source,
+                    ty: handler_ty.clone(),
+                    kind: K::Local(handler_local),
+                })),
+            };
+            let err_arg = n::Expr {
+                source: self.error_generated_source(expr.span)?,
+                ty: err_ty.clone(),
+                kind: K::Local(err_binding),
+            };
+            let call = self.finish_call(
+                expr,
+                callee,
+                &[],
+                vec![receiver, err_arg],
+                Some(&handler_return),
+                partial,
+            )?;
+            handled_arms.push((err_ty.clone(), err_binding, call));
+        }
+        if handled_arms.is_empty() {
+            return Err(error(
+                expr.span,
+                "handler does not implement HandleError for any error in target result",
+            ));
+        }
+        let target = if residual.is_empty() {
+            handler_return.clone()
+        } else {
+            Term::error_result(residual.clone(), handler_return.clone())
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&target, expected, expr.span)?;
+        }
+        let deliver = |this: &mut Self, node: n::Expr| -> Result<n::Expr, Error> {
+            if is_never(&node.ty) {
+                Ok(node)
+            } else if matches!(target, Term::ErrorResult { .. }) {
+                let conversion = if matches!(node.ty, Term::ErrorResult { .. }) {
+                    nir::error_results::Conversion::Embed
+                } else {
+                    nir::error_results::Conversion::Success
+                };
+                this.convert_error_value(node, &target, conversion, expr.span)
+            } else {
+                this.require(&node.ty, &target, expr.span)?;
+                Ok(node)
+            }
+        };
+        let ok_binding = self.spread_binding(expr.span)?;
+        let ok_value = n::Expr {
+            source: self.error_generated_source(expr.span)?,
+            ty: success,
+            kind: K::Local(ok_binding),
+        };
+        let mut arms = vec![n::MatchArm {
+            pattern: n::Pattern::ErrorResult {
+                label: None,
+                inner: Box::new(n::Pattern::Binding {
+                    binding: ok_binding,
+                    inner: Box::new(n::Pattern::Wild),
+                }),
+            },
+            guard: None,
+            body: deliver(self, ok_value)?,
+        }];
+        for (err_ty, err_binding, call) in handled_arms {
+            arms.push(n::MatchArm {
+                pattern: n::Pattern::ErrorResult {
+                    label: Some(err_ty),
+                    inner: Box::new(n::Pattern::Binding {
+                        binding: err_binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    }),
+                },
+                guard: None,
+                body: deliver(self, call)?,
+            });
+        }
+        for label in residual {
+            let rem_binding = self.spread_binding(expr.span)?;
+            let rem_value = n::Expr {
+                source: self.error_generated_source(expr.span)?,
+                ty: label.clone(),
+                kind: K::Local(rem_binding),
+            };
+            let body = self.convert_error_value(
+                rem_value,
+                &target,
+                nir::error_results::Conversion::Failure,
+                expr.span,
+            )?;
+            arms.push(n::MatchArm {
+                pattern: n::Pattern::ErrorResult {
+                    label: Some(label),
+                    inner: Box::new(n::Pattern::Binding {
+                        binding: rem_binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    }),
+                },
+                guard: None,
+                body,
+            });
+        }
+        let matched = n::Expr {
+            source: source(expr.span),
+            ty: target.clone(),
+            kind: K::Match {
+                value: Box::new(input),
+                arms,
+            },
+        };
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty: target,
+            kind: K::Block {
+                statements: vec![n::Expr {
+                    source: source(handler.span),
+                    ty: p(P::Void),
+                    kind: K::Let {
+                        binding: handler_local,
+                        value: Box::new(handler_expr),
+                    },
+                }],
+                result: Some(Box::new(matched)),
+            },
+        })
     }
 }

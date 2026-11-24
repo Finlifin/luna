@@ -2065,6 +2065,10 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_pattern_arm(ctx, a, None);
                 }
             }
+            ExprKind::HandlerApplication(value, handler) => {
+                self.walk_expr(ctx, value, false);
+                self.walk_expr(ctx, handler, false);
+            }
             ExprKind::Return(opt) | ExprKind::Resume(opt) => {
                 if let Some(v) = opt {
                     self.walk_expr(ctx, v, false);

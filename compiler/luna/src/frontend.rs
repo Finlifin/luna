@@ -602,6 +602,7 @@ pub(crate) fn source_protocols(
         ordering: options.ord_protocol.as_deref(),
         equality: options.eq_protocol.as_deref(),
         literal_into: options.literal_into_protocol.as_deref(),
+        handle_error: None,
         arithmetic: std::array::from_fn(|index| options.arithmetic_protocols[index].as_deref()),
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),

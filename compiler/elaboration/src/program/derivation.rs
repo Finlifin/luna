@@ -1591,6 +1591,7 @@ mod splice_auto {
             | E::ErrorNew(_)
             | E::ErrorPropagate(_)
             | E::ErrorHandle { .. }
+            | E::HandlerApplication(..)
             | E::Closure(..)
             | E::Cast(..)
             | E::DynCast(..)

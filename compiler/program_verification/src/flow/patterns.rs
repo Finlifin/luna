@@ -1636,7 +1636,11 @@ impl Walker<'_> {
         let Term::Function { parameters, .. } = &handler.signature else {
             return Err(Reason::InvalidSignature);
         };
-        let ty = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
+        let mut parameter_types: Vec<Term> = parameters.iter().map(|p| p.ty.clone()).collect();
+        if handler.abi == nir::effects::Abi::Capturing {
+            parameter_types.push(Term::Primitive(nir::Primitive::Continuation));
+        }
+        let ty = Term::Tuple(parameter_types);
         let mut pending = state.fork(self.limits)?;
         pending.havoc_with_private_scalars(self.handler_unstable_locals.as_ref(), self.limits)?;
         let input = self.unknown_value(&ty)?;

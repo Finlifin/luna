@@ -917,6 +917,9 @@ impl<'h> Rebind<'_, 'h> {
             }
             E::TraitBound(a, b) => E::TraitBound(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Cast(a, b) => E::Cast(self.expr(a, depth)?, self.expr(b, depth)?),
+            E::HandlerApplication(a, b) => {
+                E::HandlerApplication(self.expr(a, depth)?, self.expr(b, depth)?)
+            }
             E::DynCast(a, b) => E::DynCast(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Index(a, b) => E::Index(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Range {

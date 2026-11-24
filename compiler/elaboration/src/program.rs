@@ -327,6 +327,7 @@ pub struct Protocols {
     pub comptime_list_pattern: Option<DeclarationId>,
     pub stable_list_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
+    pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
@@ -1779,7 +1780,7 @@ fn elaborate_candidate<'a, 'h>(
     output.function_parameters = checker.function_parameter_metadata();
     for (owner, info) in package.owners() {
         let item = info.node.expect_item();
-        if let ItemKind::Effect(_, modifiers) = &item.kind {
+        if let ItemKind::Effect(sig, modifiers) = &item.kind {
             output.effects.push(nir::effects::Declaration {
                 declaration: declaration(package, package_identities, owner),
                 group: checker
@@ -1806,6 +1807,8 @@ fn elaborate_candidate<'a, 'h>(
                     nir::effects::Abi::DirectPassing
                 } else if modifiers.is_async {
                     nir::effects::Abi::Async
+                } else if sig.params.iter().any(|param| param.ty.is_catch()) {
+                    nir::effects::Abi::Capturing
                 } else {
                     nir::effects::Abi::Direct
                 },
@@ -4598,10 +4601,52 @@ impl Checker<'_, '_> {
             for (parameter_index, parameter) in sig.params.iter().enumerate() {
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
                 if parameter.ty.is_catch() {
-                    return Err(error(
-                        parameter.span,
-                        "catch parameters require continuation binding, which is not yet implemented for function signatures",
-                    ));
+                    let ItemKind::Effect(_, modifiers) = &item.kind else {
+                        return Err(error(
+                            parameter.span,
+                            "catch parameters require continuation binding, which is only supported on effect declarations",
+                        ));
+                    };
+                    if modifiers.is_async {
+                        return Err(error(
+                            parameter.span,
+                            "async effects cannot declare catch continuation parameters",
+                        ));
+                    }
+                    if parameter.ty.flags != hir::common::TPARAM_CATCH
+                        || !matches!(parameter.ty.kind, TyParamKind::Positional(_))
+                    {
+                        return Err(error(
+                            parameter.span,
+                            "catch parameter cannot be combined with other parameter markers",
+                        ));
+                    }
+                    if parameter_index + 1 != sig.params.len() {
+                        return Err(error(
+                            parameter.span,
+                            "catch parameter must be the trailing parameter of an effect operation",
+                        ));
+                    }
+                    let TyParamKind::Positional(ty) = parameter.ty.kind else {
+                        unreachable!()
+                    };
+                    let annotation = self.signature_annotation(ty)?;
+                    self.check_template_parameter_annotation(parameter, &annotation)?;
+                    let open_functions::Annotation::Known(ty) = annotation else {
+                        return Err(error(
+                            parameter.span,
+                            "catch parameter must have concrete type builtin.Continuation",
+                        ));
+                    };
+                    if ty != p(P::Continuation) {
+                        return Err(error(
+                            parameter.span,
+                            "catch parameter must have type builtin.Continuation",
+                        ));
+                    }
+                    // The continuation handle is supplied by the control backend
+                    // at the handler boundary, not by operation request sites.
+                    continue;
                 }
                 if matches!(item.kind, ItemKind::Effect(..))
                     && !matches!(parameter.ty.kind, TyParamKind::Positional(_))
@@ -6204,6 +6249,7 @@ impl Checker<'_, '_> {
                     "Float" => P::Float,
                     "void" => P::Void,
                     "NoReturn" => P::Never,
+                    "Continuation" => P::Continuation,
                     "i8" => P::I8,
                     "i16" => P::I16,
                     "i32" => P::I32,

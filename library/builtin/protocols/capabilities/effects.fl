@@ -1,0 +1,32 @@
+use primitives.Continuation;
+
+{-
+    Direct algebraic-effect capability trait.
+    Handlers answer one operation request with arguments `Args` and deliver
+    the operation result `Output` in the outer environment.
+-}
+pub trait HandleEffect
+where
+    Args,
+    Output,
+{
+    fn handle_effect(*self, args: Args) -> Output;
+}
+
+{-
+    Capturing delimited-continuation capability trait.
+    Handlers receive operation arguments `Args` together with the affine
+    delimited continuation `Continuation` and produce the overall handler
+    boundary result `BodyOutput`.
+-}
+pub trait HandleCapturingEffect
+where
+    Args,
+    BodyOutput,
+{
+    fn handle_capturing_effect(
+        *self,
+        args: Args,
+        continuation: Continuation,
+    ) -> BodyOutput;
+}

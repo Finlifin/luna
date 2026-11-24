@@ -974,6 +974,9 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
                 E::TraitBound(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?)
             }
             E::Cast(a, b) => E::Cast(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?),
+            E::HandlerApplication(a, b) => {
+                E::HandlerApplication(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?)
+            }
             E::Index(a, b) => E::Index(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?),
             E::Range {
                 start,

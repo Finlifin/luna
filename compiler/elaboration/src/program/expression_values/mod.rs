@@ -36,6 +36,9 @@ impl Checker<'_, '_> {
             H::ErrorNew(_) | H::ErrorPropagate(_) | H::OptionPropagate(_) => {
                 self.propagation_value_expression(expr, expected, partial)
             }
+            H::HandlerApplication(value, handler) => {
+                self.handler_application(expr, value, handler, expected, partial)
+            }
             H::SelfValue
             | H::TacticArgument(_)
             | H::PostLambdaBody(_)

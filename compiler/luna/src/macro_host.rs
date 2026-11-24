@@ -285,6 +285,7 @@ struct OwnedSelectors {
     comptime_list_pattern: Option<String>,
     stable_list_pattern: Option<String>,
     literal_into: Option<String>,
+    handle_error: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
@@ -311,6 +312,7 @@ impl OwnedSelectors {
             comptime_list_pattern: s.comptime_list_pattern.map(str::to_owned),
             stable_list_pattern: s.stable_list_pattern.map(str::to_owned),
             literal_into: s.literal_into.map(str::to_owned),
+            handle_error: s.handle_error.map(str::to_owned),
             arithmetic: std::array::from_fn(|i| s.arithmetic[i].map(str::to_owned)),
             splice: s.splice.map(str::to_owned),
             meta_list: s.meta_list.map(str::to_owned),
@@ -337,6 +339,7 @@ impl OwnedSelectors {
             comptime_list_pattern: self.comptime_list_pattern.as_deref(),
             stable_list_pattern: self.stable_list_pattern.as_deref(),
             literal_into: self.literal_into.as_deref(),
+            handle_error: self.handle_error.as_deref(),
             arithmetic: std::array::from_fn(|i| self.arithmetic[i].as_deref()),
             splice: self.splice.as_deref(),
             meta_list: self.meta_list.as_deref(),
@@ -1487,8 +1490,7 @@ fn decode_macro_kind_attribute(
             }
             Term::Symbol(s) if s.as_ref() == "peg" => {
                 let grammar_source = grammar_source.ok_or_else(|| {
-                    "missing `__flurry_macro_grammar` string metadata for `.peg` macro"
-                        .to_string()
+                    "missing `__flurry_macro_grammar` string metadata for `.peg` macro".to_string()
                 })?;
                 return Ok(Some(DecodedMacroKind::Peg { grammar_source }));
             }

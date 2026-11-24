@@ -11,6 +11,7 @@ pub typealias str = .str'builtin;
 pub typealias Symbol = .Symbol'builtin;
 pub typealias void = .void'builtin;
 pub typealias NoReturn = .NoReturn'builtin;
+pub typealias Continuation = .Continuation'builtin;
 
 pub typealias u8 = .u8'builtin;
 pub typealias u16 = .u16'builtin;

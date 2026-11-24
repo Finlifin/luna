@@ -1,0 +1,13 @@
+{-
+    Error-handling capability trait.
+    Installers connect `HandleError<E, R>` implementations at `.use(handler)`
+    sites without altering function signatures or turning error returns
+    into delimited continuations.
+-}
+pub trait HandleError
+where
+    E,
+    R,
+{
+    fn handle_error(*self, value: E) -> R;
+}

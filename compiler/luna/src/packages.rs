@@ -898,6 +898,7 @@ fn all_resolved_protocols_in(
         protocols.comptime_list_pattern,
         protocols.stable_list_pattern,
         protocols.literal_into,
+        protocols.handle_error,
         protocols.splice,
         protocols.meta_list,
         protocols.tuple,

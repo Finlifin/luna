@@ -1009,6 +1009,7 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
             Primitive::Bf16 => digest.u8(21),
             Primitive::F32 => digest.u8(22),
             Primitive::F64 => digest.u8(23),
+            Primitive::Continuation => digest.u8(24),
             Primitive::Type
             | Primitive::Object
             | Primitive::Symbol

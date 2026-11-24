@@ -951,6 +951,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             | H::TyFnArrow(a, b)
             | H::ErrorQualifiedType(a, b)
             | H::EffectQualifiedType(a, b)
+            | H::HandlerApplication(a, b)
             | H::TraitBound(a, b) => {
                 self.expression(a)?;
                 self.expression(b)?;

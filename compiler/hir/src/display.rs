@@ -843,6 +843,9 @@ impl Display for ExprKind<'_> {
             Self::EffectHandle(value, arms) => {
                 form!(f, "effect-handle", "computation" => value, "arms" => List(arms))
             }
+            Self::HandlerApplication(value, handler) => {
+                form!(f, "handler-application", "value" => value, "handler" => handler)
+            }
             Self::Match(value, arms) => form!(f, "match", "value" => value, "arms" => List(arms)),
             Self::Assign(place, value) => form!(f, "assign", "place" => place, "value" => value),
             Self::AssignOp(op, place, value) => {

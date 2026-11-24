@@ -111,6 +111,8 @@ pub enum ExprKind<'hir> {
     /// Install branches around a computation. Branches execute in the outer
     /// effect environment; the computation retains this handler on resumption.
     EffectHandle(&'hir Expr<'hir>, &'hir [PatternArm<'hir>]),
+    /// Apply a capability handler object to an operand (`expr.use(handler)`).
+    HandlerApplication(&'hir Expr<'hir>, &'hir Expr<'hir>),
     Assign(&'hir Expr<'hir>, &'hir Expr<'hir>),
     AssignOp(BinOp, &'hir Expr<'hir>, &'hir Expr<'hir>),
     Assumes(&'hir Expr<'hir>),

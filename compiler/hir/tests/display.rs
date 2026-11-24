@@ -718,6 +718,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
         (
+            ExprKind::HandlerApplication(&a, &b),
+            "handler-application",
+            vec![("value", &a_tree), ("handler", &b_tree)],
+        ),
+        (
             ExprKind::Closure(&params, Some(&b), body_id),
             "closure",
             vec![],
@@ -864,7 +869,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 94);
+    assert_eq!(cases.len(), 95);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);

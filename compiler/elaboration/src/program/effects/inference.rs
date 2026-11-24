@@ -215,7 +215,10 @@ impl Checker<'_, '_> {
                 declaration: declaration(self.package, &self.package_identities, owner),
                 arguments: type_arguments,
             },
-            checked.into_iter().map(Option::unwrap).collect(),
+            checked
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| error(span, "generic effect argument inference incomplete"))?,
         )))
     }
 }
