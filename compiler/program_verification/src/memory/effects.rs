@@ -945,7 +945,13 @@ impl<'a> Infer<'a, '_> {
             return Err("handler memory completion mismatch".into());
         }
         if !effect_transfer_layout(self.package, &result, self.fuel)?
-            && !effect_data_layout(self.package, &result, self.fuel, 0)?
+            && !effect_data_layout_for(
+                self.package,
+                &result,
+                self.round.text_provenance,
+                self.fuel,
+                0,
+            )?
         {
             return Err("handler memory completion needs data-only delivery".into());
         }
@@ -1092,7 +1098,13 @@ impl<'a> Infer<'a, '_> {
             // Pointer and callable origins cross the boundary through the
             // result caches; the computation wrapper grants no extra lifetime.
             if !effect_transfer_layout(self.package, &result, self.fuel)?
-                && !effect_data_layout(self.package, result, self.fuel, 0)?
+                && !effect_data_layout_for(
+                    self.package,
+                    result,
+                    self.round.text_provenance,
+                    self.fuel,
+                    0,
+                )?
             {
                 return Err(
                     "effect memory completion requires data-only delivery or tracked origins"
@@ -1115,7 +1127,13 @@ impl<'a> Infer<'a, '_> {
             K::EffectResume(value) => {
                 let ty = self.ty(&value.ty)?;
                 if !effect_transfer_layout(self.package, &ty, self.fuel)?
-                    && !effect_data_layout(self.package, &ty, self.fuel, 0)?
+                    && !effect_data_layout_for(
+                        self.package,
+                        &ty,
+                        self.round.text_provenance,
+                        self.fuel,
+                        0,
+                    )?
                 {
                     return Err("handler memory resume needs data-only delivery".into());
                 }
@@ -1392,6 +1410,17 @@ pub fn infer_handler_arm_memory(
     arm: &nir::program::MatchArm,
     fuel: &mut usize,
 ) -> Result<HandlerParameterSummary, String> {
+    let mut has_str = term_contains_str(Some(package), &handler.signature, fuel)?
+        || expr_contains_str(Some(package), &arm.body, fuel)?;
+    if !has_str && let Some(guard) = &arm.guard {
+        has_str = expr_contains_str(Some(package), guard, fuel)?;
+    }
+    let provenance = if has_str {
+        text_regions::verify_handler_arm_text_regions(package, handler, arm, fuel)?;
+        TextProvenance::VerifiedByRegionAnalysis
+    } else {
+        TextProvenance::Unchecked
+    };
     infer_handler_arm_memory_with_captures_for(
         package,
         handler,
@@ -1401,7 +1430,7 @@ pub fn infer_handler_arm_memory(
         &BTreeMap::new(),
         &[],
         &[],
-        TextProvenance::Unchecked,
+        provenance,
         fuel,
     )
 }
@@ -1860,7 +1889,7 @@ pub(crate) fn direct_handler_accesses_with_code_for(
         return Ok(None);
     };
     if handler.abi != nir::effects::Abi::Direct
-        || !effect_data_layout(Some(package), result, fuel, 0)?
+        || !effect_data_layout_for(Some(package), result, text_provenance, fuel, 0)?
     {
         return Ok(None);
     }

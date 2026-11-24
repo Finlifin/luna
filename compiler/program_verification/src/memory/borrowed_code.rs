@@ -72,6 +72,47 @@ pub fn infer_with_borrowed_callable_inputs(
     )
 }
 
+fn callable_targets(value: &CallableResult) -> Option<Vec<iir::InstanceKey>> {
+    match value {
+        CallableResult::Known(key) => Some(vec![key.clone()]),
+        CallableResult::Candidates(keys) if !keys.is_empty() => Some(keys.clone()),
+        _ => None,
+    }
+}
+
+fn convert_text_callback_inputs(
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    borrowed: &BorrowedCallableInputs,
+) -> Option<(Vec<TextCallbackInput>, Vec<iir::InstanceKey>)> {
+    let mut converted = Vec::new();
+    let mut instances = Vec::new();
+    for (input, value) in inputs {
+        let targets = callable_targets(value)?;
+        instances.extend(targets.iter().cloned());
+        converted.push(TextCallbackInput::Owned {
+            parameter: input.parameter,
+            fields: input.fields.clone(),
+            targets,
+        });
+    }
+    for (input, fields) in borrowed {
+        for (path, value) in fields {
+            let BorrowedCallableValue::Named(value) = value else {
+                return None;
+            };
+            let targets = callable_targets(value)?;
+            instances.extend(targets.iter().cloned());
+            converted.push(TextCallbackInput::Borrowed {
+                parameter: input.parameter,
+                input_fields: input.fields.clone(),
+                fields: path.clone(),
+                targets,
+            });
+        }
+    }
+    Some((converted, instances))
+}
+
 /// Refine possible cleanup with independent complete-layout memory-effect evidence. The policy
 /// must belong to the caller's immutable Drop selection world. It does not grant
 /// Copy, authorize writes, or validate borrowed storage. Query caches stay local.
@@ -86,6 +127,22 @@ pub fn infer_with_borrowed_callable_inputs_and_cleanup(
     cleanup: Option<&mut dyn super::super::moves::CleanupPolicy>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
+    let mut provenance = TextProvenance::Unchecked;
+    if effects.is_empty()
+        && code_inputs.is_empty()
+        && let Some((function, body_arguments)) = package.runtime_body(declaration, arguments)
+        && let Some((callbacks, extra_instances)) = convert_text_callback_inputs(inputs, borrowed)
+        && reachable_contains_str(
+            package,
+            &[(function, body_arguments)],
+            arguments,
+            &extra_instances,
+            fuel,
+        )?
+    {
+        infer_text_regions_with_callbacks(package, declaration, arguments, &callbacks, fuel)?;
+        provenance = TextProvenance::VerifiedByRegionAnalysis;
+    }
     infer_with_borrowed_callable_inputs_and_cleanup_cached(
         package,
         declaration,
@@ -96,7 +153,7 @@ pub fn infer_with_borrowed_callable_inputs_and_cleanup(
         borrowed,
         cleanup,
         None,
-        TextProvenance::Unchecked,
+        provenance,
         None,
         fuel,
     )

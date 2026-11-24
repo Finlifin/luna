@@ -2,6 +2,7 @@
 //! Layout does not establish backing-storage validity or access permission.
 use super::*;
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 /// One pointer input with distinct symbolic and physical paths. Guards are
 /// ordered outermost first, so an inactive payload is never projected.
@@ -77,7 +78,7 @@ impl fmt::Display for BorrowedInputLeaf {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TextProvenance {
     #[default]
     Unchecked,

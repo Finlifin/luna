@@ -401,7 +401,7 @@ impl Infer<'_, '_> {
         }
         let ty = self.ty(&expr.ty)?;
         bound_type(&ty, self.fuel)?;
-        let Some(reads) = self.round.cleanup_reads.get(&ty) else {
+        let Some(reads) = self.round.cleanup_reads.get(&OrderedTerm(ty.clone())) else {
             return Ok(());
         };
         for read in reads {

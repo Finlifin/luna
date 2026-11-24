@@ -26,11 +26,15 @@ use nir::program::{
 };
 use nir::{DeclarationId, Primitive, Term};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
 };
 pub(crate) use text_regions::infer_text_regions_with_context;
-pub use text_regions::{TextRegionCache, TextRegionOrigin, TextRegionSummary, infer_text_regions};
+pub use text_regions::{
+    TextCallbackInput, TextRegionCache, TextRegionOrigin, TextRegionSummary, infer_text_regions,
+    infer_text_regions_with_callbacks,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParameterPlace {
@@ -1841,14 +1845,14 @@ struct Infer<'a, 'cleanup> {
     borrowed_code_pointers: BTreeMap<usize, std::sync::Arc<BorrowedCaptures>>,
     stable_capture_roots: BTreeSet<LocalId>,
     capture_code_writes: PreparedCaptures,
-    named_code_slots: HashMap<iir::InstanceKey, usize>,
+    named_code_slots: BTreeMap<OrderedInstanceKey, usize>,
     // Source-node addresses are lookup keys only. Candidate ordering uses
     // deterministic first-visit ordinals, never allocator addresses.
-    closure_nodes: HashMap<usize, Vec<usize>>,
-    local_code_results: HashMap<usize, Option<BTreeSet<usize>>>,
-    local_code_fields: HashMap<usize, LocalCodeFields>,
+    closure_nodes: BTreeMap<usize, Vec<usize>>,
+    local_code_results: BTreeMap<usize, Option<BTreeSet<usize>>>,
+    local_code_fields: BTreeMap<usize, LocalCodeFields>,
     type_context: crate::ptc::Context,
-    type_views: HashMap<Term, Term>,
+    type_views: BTreeMap<OrderedTerm, Term>,
     fuel: &'a mut usize,
     package: Option<&'a Package>,
     parameters: &'a [DeclarationId],
@@ -1867,10 +1871,10 @@ struct Infer<'a, 'cleanup> {
     may_reject: bool,
     may_run_cleanup: bool,
     // Ephemeral node identity within this immutable body traversal only.
-    expression_results: HashMap<usize, Targets>,
-    callable_results: HashMap<usize, CallableResult>,
-    aggregate_callees: HashMap<usize, BTreeMap<Vec<usize>, CallableResult>>,
-    aggregate_pointers: HashMap<usize, BTreeMap<Vec<usize>, Targets>>,
+    expression_results: BTreeMap<usize, Targets>,
+    callable_results: BTreeMap<usize, CallableResult>,
+    aggregate_callees: BTreeMap<usize, BTreeMap<Vec<usize>, CallableResult>>,
+    aggregate_pointers: BTreeMap<usize, BTreeMap<Vec<usize>, Targets>>,
     returns: Option<BTreeSet<ParameterPlace>>,
     pointer_field_returns: Option<BTreeMap<Vec<usize>, Option<BTreeSet<ParameterPlace>>>>,
     // Formal input cells are local to an invocation. Only lifted capture slots
@@ -2717,12 +2721,13 @@ impl<'a> Infer<'a, '_> {
     }
 
     fn completed_type_view(&mut self, ty: &Term) -> Result<Term, String> {
-        if let Some(value) = self.type_views.get(ty) {
+        let key = OrderedTerm(ty.clone());
+        if let Some(value) = self.type_views.get(&key) {
             bound_type(value, self.fuel)?;
             return Ok(value.clone());
         }
         bound_type(ty, self.fuel)?;
-        if let Some(value) = self.round.completed_types.get(ty) {
+        if let Some(value) = self.round.completed_types.get(&key) {
             bound_type(value, self.fuel)?;
             return Ok(value.clone());
         }
@@ -2740,8 +2745,10 @@ impl<'a> Infer<'a, '_> {
         // This evidence comes only from immutable package dispatch, without
         // invocation-local assumptions or storage. Reuse successful results
         // across the fixed point; never publish a failed normalization.
-        self.round.completed_types.insert(ty.clone(), value.clone());
-        self.type_views.insert(ty.clone(), value.clone());
+        self.round
+            .completed_types
+            .insert(key.clone(), value.clone());
+        self.type_views.insert(key, value.clone());
         Ok(value)
     }
 
@@ -2756,7 +2763,8 @@ impl<'a> Infer<'a, '_> {
         ) {
             return Ok(ty.clone());
         }
-        if let Some(view) = self.type_views.get(ty) {
+        let key = OrderedTerm(ty.clone());
+        if let Some(view) = self.type_views.get(&key) {
             return Ok(view.clone());
         }
         let steps = (*self.fuel / 4).min(4096);
@@ -2783,7 +2791,7 @@ impl<'a> Infer<'a, '_> {
             // Those need corresponding dependency evidence, not just equality.
             .filter(|ty| matches!(ty, Term::Primitive(_)) && intrinsic_pointer_value(ty))
             .unwrap_or_else(|| ty.clone());
-        self.type_views.insert(ty.clone(), view.clone());
+        self.type_views.insert(key, view.clone());
         Ok(view)
     }
 
@@ -3106,12 +3114,13 @@ impl<'a> Infer<'a, '_> {
                 let mut candidates = BTreeSet::new();
                 for key in named.keys() {
                     self.step(0)?;
-                    let id = if let Some(id) = self.named_code_slots.get(key) {
+                    let ordered_key = OrderedInstanceKey(key.clone());
+                    let id = if let Some(id) = self.named_code_slots.get(&ordered_key) {
                         *id
                     } else {
                         let id = self.local_code.len();
                         self.local_code.push(LocalCode::Named(key.clone()));
-                        self.named_code_slots.insert(key.clone(), id);
+                        self.named_code_slots.insert(ordered_key, id);
                         id
                     };
                     candidates.insert(id);
@@ -3381,7 +3390,13 @@ impl<'a> Infer<'a, '_> {
     fn abstract_capture_data(&mut self, ty: &Term, depth: usize) -> Result<bool, String> {
         self.step(depth)?;
         let ty = self.type_view(ty)?;
-        effect_data_layout(self.package, &ty, self.fuel, depth + 1)
+        effect_data_layout_for(
+            self.package,
+            &ty,
+            self.round.text_provenance,
+            self.fuel,
+            depth + 1,
+        )
     }
 
     // A reusable capture invariant may include code selected from fixed source
@@ -5842,7 +5857,13 @@ impl<'a> Infer<'a, '_> {
     ) -> Result<(), String> {
         self.step(depth)?;
         let subject_ty = self.ty(&value.ty)?;
-        let data_subject = effect_data_layout(self.package, &subject_ty, self.fuel, 0)?;
+        let data_subject = effect_data_layout_for(
+            self.package,
+            &subject_ty,
+            self.round.text_provenance,
+            self.fuel,
+            0,
+        )?;
         let pointer_subject = self.local_pointer_value(&subject_ty)?;
         if !pointer_subject && !data_subject {
             if self.symbolic_pointer_fields(&subject_ty)?.is_empty() {
@@ -6036,18 +6057,19 @@ impl<'a> Infer<'a, '_> {
                     | Term::UnsafeFunction(_)
             ) {
                 bound_type(&ty, self.fuel)?;
-                if self.round.memory_inert_cleanup_types.contains(&ty)
-                    || self.round.cleanup_reads.contains_key(&ty)
+                let key = OrderedTerm(ty.clone());
+                if self.round.memory_inert_cleanup_types.contains(&key)
+                    || self.round.cleanup_reads.contains_key(&key)
                 {
                     return Ok(());
                 }
-                if self.round.non_readonly_cleanup_types.contains(&ty) {
+                if self.round.non_readonly_cleanup_types.contains(&key) {
                     self.may_run_cleanup = true;
                     return Ok(());
                 }
                 if let Some(cleanup) = self.round.cleanup.as_deref_mut() {
                     if cleanup.is_memory_inert(&ty, self.fuel)? {
-                        self.round.memory_inert_cleanup_types.insert(ty);
+                        self.round.memory_inert_cleanup_types.insert(key);
                         return Ok(());
                     }
                     if let Some(reads) = cleanup.cleanup_reads(&ty, self.fuel)? {
@@ -6060,11 +6082,11 @@ impl<'a> Infer<'a, '_> {
                                 return Err("cleanup proof requires receiver-relative reads".into());
                             }
                         }
-                        self.round.cleanup_reads.insert(ty, reads);
+                        self.round.cleanup_reads.insert(key, reads);
                         return Ok(());
                     }
                 }
-                self.round.non_readonly_cleanup_types.insert(ty);
+                self.round.non_readonly_cleanup_types.insert(key);
                 self.may_run_cleanup = true;
             }
         }
@@ -7625,7 +7647,13 @@ impl<'a> Infer<'a, '_> {
                     let values = self.value_callees(value)?;
                     let local_fields = self.local_fields_for(value)?;
                     self.bind_owned_callees(pattern, &ty, &values, &local_fields, depth + 1)?;
-                } else if effect_data_layout(self.package, &ty, self.fuel, 0)? {
+                } else if effect_data_layout_for(
+                    self.package,
+                    &ty,
+                    self.round.text_provenance,
+                    self.fuel,
+                    0,
+                )? {
                     self.bind_data_pattern(pattern, &ty, depth + 1)?;
                 } else {
                     let values = self.value_callees(value)?;
@@ -7948,6 +7976,738 @@ impl<'a> Infer<'a, '_> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OrderedTerm(pub Term);
+
+impl fmt::Display for OrderedTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Ord for OrderedTerm {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_term(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for OrderedTerm {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<Term> for OrderedTerm {
+    fn from(value: Term) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OrderedInstanceKey(pub iir::InstanceKey);
+
+impl fmt::Display for OrderedInstanceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Ord for OrderedInstanceKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_instance_key(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for OrderedInstanceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<iir::InstanceKey> for OrderedInstanceKey {
+    fn from(value: iir::InstanceKey) -> Self {
+        Self(value)
+    }
+}
+
+pub fn term_contains_str(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![(ty.clone(), 0usize)];
+    while let Some((term, depth)) = stack.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("text detection type budget exhausted")?;
+        if depth >= 128 {
+            return Ok(true);
+        }
+        if matches!(term, Term::Primitive(Primitive::Str)) {
+            return Ok(true);
+        }
+        let ordered = OrderedTerm(term.clone());
+        if !visited.insert(ordered) {
+            continue;
+        }
+        if let Some(pkg) = package
+            && let Term::Nominal {
+                declaration,
+                arguments,
+            } = &term
+        {
+            if let Some(def) = pkg.structs.iter().find(|s| s.declaration == *declaration) {
+                if let Ok(fields) = def.instantiate_stored_fields(arguments, &[], fuel) {
+                    for field in fields {
+                        stack.push((field, depth + 1));
+                    }
+                } else {
+                    return Ok(true);
+                }
+            } else if let Some(def) = pkg.enums.iter().find(|e| e.declaration == *declaration) {
+                if let Ok(fields) = def.instantiate_stored_fields(arguments, &[], fuel) {
+                    for field in fields {
+                        stack.push((field, depth + 1));
+                    }
+                } else {
+                    return Ok(true);
+                }
+            } else if let Some(def) = pkg.newtypes.iter().find(|n| n.declaration == *declaration) {
+                if let Ok(rep) = def.representation_budgeted(arguments, &[], fuel) {
+                    stack.push((rep, depth + 1));
+                } else {
+                    return Ok(true);
+                }
+            }
+        }
+        term.visit_children::<String>(|child| {
+            stack.push((child.clone(), depth + 1));
+            Ok(())
+        })?;
+    }
+    Ok(false)
+}
+
+pub fn expr_contains_str(
+    package: Option<&Package>,
+    expr: &Expr,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let mut found = false;
+    nir::visit::expression(expr, fuel, |node, fuel| {
+        if !found && term_contains_str(package, &node.ty, fuel)? {
+            found = true;
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+pub fn reachable_contains_str(
+    package: &Package,
+    roots: &[(&Function, &[Term])],
+    extra_terms: &[Term],
+    extra_instances: &[iir::InstanceKey],
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    for term in extra_terms {
+        if term_contains_str(Some(package), term, fuel)? {
+            return Ok(true);
+        }
+    }
+    let mut visited = BTreeSet::new();
+    let mut queue: Vec<iir::InstanceKey> = extra_instances.to_vec();
+    let mut methods = MethodCallees::default();
+
+    let mut scan_fn = |function: &Function,
+                       args: &[Term],
+                       queue: &mut Vec<iir::InstanceKey>|
+     -> Result<bool, String> {
+        if term_contains_str(Some(package), &function.signature, fuel)? {
+            return Ok(true);
+        }
+        for arg in args {
+            if term_contains_str(Some(package), arg, fuel)? {
+                return Ok(true);
+            }
+        }
+        let mut found = false;
+        nir::visit::expressions(function, fuel, |node, fuel| {
+            if found {
+                return Ok(());
+            }
+            if term_contains_str(Some(package), &node.ty, fuel)? {
+                found = true;
+                return Ok(());
+            }
+            match &node.kind {
+                K::Function(declaration) => queue.push(iir::InstanceKey {
+                    declaration: *declaration,
+                    arguments: vec![].into(),
+                }),
+                K::FunctionInstance {
+                    declaration,
+                    arguments,
+                } => queue.push(iir::InstanceKey {
+                    declaration: *declaration,
+                    arguments: arguments.clone().into(),
+                }),
+                K::TraitMethod {
+                    interface,
+                    interface_arguments,
+                    subject,
+                    member,
+                    method_arguments,
+                } => {
+                    if term_contains_str(Some(package), subject, fuel)? {
+                        found = true;
+                        return Ok(());
+                    }
+                    for arg in interface_arguments.iter().chain(method_arguments) {
+                        if term_contains_str(Some(package), arg, fuel)? {
+                            found = true;
+                            return Ok(());
+                        }
+                    }
+                    match methods.select(package, node, fuel) {
+                        Ok(Expr {
+                            kind:
+                                K::FunctionInstance {
+                                    declaration,
+                                    arguments,
+                                },
+                            ..
+                        }) => queue.push(iir::InstanceKey {
+                            declaration,
+                            arguments: arguments.into(),
+                        }),
+                        Ok(_) => {}
+                        Err(err) if err.contains("exhausted") => return Err(err),
+                        Err(_) => {
+                            // Interface dispatch could not select statically (e.g. predicates);
+                            // check matching impl bodies conservatively.
+                            let member_name = package
+                                .traits
+                                .iter()
+                                .find(|t| t.declaration == *interface)
+                                .and_then(|t| {
+                                    t.methods
+                                        .iter()
+                                        .find(|m| m.declaration == *member)
+                                        .map(|m| m.name.as_str())
+                                });
+                            for imp in package
+                                .implementations
+                                .iter()
+                                .filter(|imp| imp.interface == Some(*interface))
+                            {
+                                for (name, body_decl) in &imp.methods {
+                                    if member_name.is_none_or(|expected| name == expected) {
+                                        queue.push(iir::InstanceKey {
+                                            declaration: *body_decl,
+                                            arguments: vec![].into(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok(found)
+    };
+
+    for (function, args) in roots {
+        if scan_fn(function, args, &mut queue)? {
+            return Ok(true);
+        }
+    }
+    while let Some(key) = queue.pop() {
+        let ordered = OrderedInstanceKey(key.clone());
+        if !visited.insert(ordered) {
+            continue;
+        }
+        let Some((function, body_args)) = package.runtime_body(key.declaration, &key.arguments)
+        else {
+            continue;
+        };
+        if scan_fn(function, body_args, &mut queue)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cmp_slice_by<T>(a: &[T], b: &[T], mut cmp_item: impl FnMut(&T, &T) -> Ordering) -> Ordering {
+    for (lhs, rhs) in a.iter().zip(b.iter()) {
+        let ord = cmp_item(lhs, rhs);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+fn cmp_sort(a: nir::Sort, b: nir::Sort) -> Ordering {
+    let rank = |s: nir::Sort| match s {
+        nir::Sort::Type => 0u8,
+        nir::Sort::ComptimeValue => 1,
+        nir::Sort::Runtime => 2,
+    };
+    rank(a).cmp(&rank(b))
+}
+
+fn cmp_effect_abi(a: nir::effects::Abi, b: nir::effects::Abi) -> Ordering {
+    let rank = |abi: nir::effects::Abi| match abi {
+        nir::effects::Abi::Direct => 0u8,
+        nir::effects::Abi::DirectPassing => 1,
+        nir::effects::Abi::Capturing => 2,
+        nir::effects::Abi::Async => 3,
+    };
+    rank(a).cmp(&rank(b))
+}
+
+fn cmp_effect_operation(a: &nir::effects::Operation, b: &nir::effects::Operation) -> Ordering {
+    a.declaration
+        .cmp(&b.declaration)
+        .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
+}
+
+fn cmp_parameter(a: &nir::Parameter, b: &nir::Parameter) -> Ordering {
+    cmp_sort(a.sort, b.sort).then_with(|| cmp_term(&a.ty, &b.ty))
+}
+
+fn cmp_record_fields(a: &[(String, Term)], b: &[(String, Term)]) -> Ordering {
+    cmp_slice_by(a, b, |(an, at), (bn, bt)| {
+        an.cmp(bn).then_with(|| cmp_term(at, bt))
+    })
+}
+
+fn cmp_option_box_term(a: &Option<Box<Term>>, b: &Option<Box<Term>>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(a), Some(b)) => cmp_term(a, b),
+    }
+}
+
+fn term_rank(term: &Term) -> u8 {
+    match term {
+        Term::Primitive(_) => 0,
+        Term::ErrorResult { .. } => 1,
+        Term::Computation { .. } => 2,
+        Term::AssociatedType { .. } => 3,
+        Term::Nominal { .. } => 4,
+        Term::TraitObject { .. } => 5,
+        Term::NormalForm { .. } => 6,
+        Term::ClosureContextType => 7,
+        Term::EffectRowType => 8,
+        Term::ErrorRowType => 9,
+        Term::ReachabilityType => 10,
+        Term::AnyType => 11,
+        Term::ClosureContextValue(_) => 12,
+        Term::ContextualClosure { .. } => 13,
+        Term::Closure { .. } => 14,
+        Term::Tuple(_) => 15,
+        Term::Record(_) => 16,
+        Term::TupleValue(_) => 17,
+        Term::ListConcat { .. } => 18,
+        Term::RecordValue(_) => 19,
+        Term::NominalValue { .. } => 20,
+        Term::OptionalValue { .. } => 21,
+        Term::ErrorValue { .. } => 22,
+        Term::Optional(_) => 23,
+        Term::Pointer(_) => 24,
+        Term::Lift(_) => 25,
+        Term::ComptimeFunction(_) => 26,
+        Term::NormalFormFunction(_, _) => 27,
+        Term::UnsafeFunction(_) => 28,
+        Term::Function { .. } => 29,
+        Term::Hole { .. } => 30,
+        Term::Bound { .. } => 31,
+        Term::Rigid { .. } => 32,
+        Term::Runtime(_) => 33,
+        Term::RuntimeField { .. } => 34,
+        Term::Unit => 35,
+        Term::Bool(_) => 36,
+        Term::Char(_) => 37,
+        Term::BitVec(_) => 38,
+        Term::Float16(_) => 39,
+        Term::BFloat16(_) => 40,
+        Term::Float32(_) => 41,
+        Term::Float64(_) => 42,
+        Term::String(_) => 43,
+        Term::Symbol(_) => 44,
+        Term::MethodValue(_) => 45,
+        Term::FunctionValue { .. } => 46,
+        Term::ClosureSnapshot { .. } => 47,
+        Term::ClosureValue { .. } => 48,
+        Term::Integer(_) => 49,
+        Term::Float(_) => 50,
+        Term::Value { .. } => 51,
+    }
+}
+
+pub fn cmp_term_slice(a: &[Term], b: &[Term]) -> Ordering {
+    cmp_slice_by(a, b, cmp_term)
+}
+
+pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
+    let ord = term_rank(a).cmp(&term_rank(b));
+    if ord != Ordering::Equal {
+        return ord;
+    }
+    match (a, b) {
+        (Term::Primitive(a), Term::Primitive(b)) => a.cmp(b),
+        (
+            Term::ErrorResult {
+                errors: ae,
+                result: ar,
+            },
+            Term::ErrorResult {
+                errors: be,
+                result: br,
+            },
+        ) => cmp_term_slice(ae, be).then_with(|| cmp_term(ar, br)),
+        (
+            Term::Computation {
+                effects: ae,
+                result: ar,
+            },
+            Term::Computation {
+                effects: be,
+                result: br,
+            },
+        ) => cmp_slice_by(ae, be, cmp_effect_operation).then_with(|| cmp_term(ar, br)),
+        (
+            Term::AssociatedType {
+                origin: ao,
+                arguments: aa,
+                subject: asub,
+            },
+            Term::AssociatedType {
+                origin: bo,
+                arguments: ba,
+                subject: bsub,
+            },
+        ) => ao
+            .interface
+            .cmp(&bo.interface)
+            .then_with(|| ao.member.cmp(&bo.member))
+            .then_with(|| cmp_term_slice(aa, ba))
+            .then_with(|| cmp_term(asub, bsub)),
+        (
+            Term::Nominal {
+                declaration: ad,
+                arguments: aa,
+            },
+            Term::Nominal {
+                declaration: bd,
+                arguments: ba,
+            },
+        ) => ad.cmp(bd).then_with(|| cmp_term_slice(aa, ba)),
+        (
+            Term::TraitObject {
+                interface: ai,
+                arguments: aa,
+            },
+            Term::TraitObject {
+                interface: bi,
+                arguments: ba,
+            },
+        ) => ai.cmp(bi).then_with(|| cmp_term_slice(aa, ba)),
+        (
+            Term::NormalForm {
+                head: ah,
+                sort: asort,
+                arguments: aa,
+            },
+            Term::NormalForm {
+                head: bh,
+                sort: bsort,
+                arguments: ba,
+            },
+        ) => ah
+            .cmp(bh)
+            .then_with(|| cmp_sort(*asort, *bsort))
+            .then_with(|| cmp_term_slice(aa, ba)),
+        (Term::ClosureContextType, Term::ClosureContextType)
+        | (Term::EffectRowType, Term::EffectRowType)
+        | (Term::ErrorRowType, Term::ErrorRowType)
+        | (Term::ReachabilityType, Term::ReachabilityType)
+        | (Term::AnyType, Term::AnyType)
+        | (Term::Unit, Term::Unit) => Ordering::Equal,
+        (Term::ClosureContextValue(a), Term::ClosureContextValue(b))
+        | (Term::Tuple(a), Term::Tuple(b))
+        | (Term::TupleValue(a), Term::TupleValue(b)) => cmp_term_slice(a, b),
+        (
+            Term::ContextualClosure {
+                context: ac,
+                signature: asig,
+            },
+            Term::ContextualClosure {
+                context: bc,
+                signature: bsig,
+            },
+        ) => cmp_term(ac, bc).then_with(|| cmp_term(asig, bsig)),
+        (
+            Term::Closure {
+                environment: ae,
+                signature: asig,
+            },
+            Term::Closure {
+                environment: be,
+                signature: bsig,
+            },
+        ) => cmp_term_slice(ae, be).then_with(|| cmp_term(asig, bsig)),
+        (Term::Record(a), Term::Record(b)) | (Term::RecordValue(a), Term::RecordValue(b)) => {
+            cmp_record_fields(a, b)
+        }
+        (Term::ListConcat { ty: at, parts: ap }, Term::ListConcat { ty: bt, parts: bp }) => {
+            cmp_term(at, bt).then_with(|| cmp_term_slice(ap, bp))
+        }
+        (
+            Term::NominalValue {
+                ty: at,
+                variant: av,
+                fields: af,
+            },
+            Term::NominalValue {
+                ty: bt,
+                variant: bv,
+                fields: bf,
+            },
+        ) => cmp_term(at, bt)
+            .then_with(|| av.cmp(bv))
+            .then_with(|| cmp_term_slice(af, bf)),
+        (Term::OptionalValue { ty: at, value: av }, Term::OptionalValue { ty: bt, value: bv }) => {
+            cmp_term(at, bt).then_with(|| cmp_option_box_term(av, bv))
+        }
+        (
+            Term::ErrorValue {
+                ty: at,
+                label: al,
+                value: av,
+            },
+            Term::ErrorValue {
+                ty: bt,
+                label: bl,
+                value: bv,
+            },
+        ) => cmp_term(at, bt)
+            .then_with(|| cmp_option_box_term(al, bl))
+            .then_with(|| cmp_term(av, bv)),
+        (Term::Optional(a), Term::Optional(b))
+        | (Term::Pointer(a), Term::Pointer(b))
+        | (Term::Lift(a), Term::Lift(b))
+        | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => cmp_term(a, b),
+        (Term::NormalFormFunction(a, ai), Term::NormalFormFunction(b, bi)) => {
+            cmp_term(a, b).then_with(|| ai.cmp(bi))
+        }
+        (
+            Term::Function {
+                parameters: ap,
+                result: ar,
+            },
+            Term::Function {
+                parameters: bp,
+                result: br,
+            },
+        ) => cmp_slice_by(ap, bp, cmp_parameter).then_with(|| cmp_term(ar, br)),
+        (
+            Term::Hole {
+                index: ai,
+                sort: asort,
+            },
+            Term::Hole {
+                index: bi,
+                sort: bsort,
+            },
+        ) => ai.cmp(bi).then_with(|| cmp_sort(*asort, *bsort)),
+        (
+            Term::Bound {
+                depth: ad,
+                index: ai,
+                sort: asort,
+            },
+            Term::Bound {
+                depth: bd,
+                index: bi,
+                sort: bsort,
+            },
+        ) => ad
+            .cmp(bd)
+            .then_with(|| ai.cmp(bi))
+            .then_with(|| cmp_sort(*asort, *bsort)),
+        (
+            Term::Rigid {
+                declaration: ad,
+                sort: asort,
+            },
+            Term::Rigid {
+                declaration: bd,
+                sort: bsort,
+            },
+        ) => ad.cmp(bd).then_with(|| cmp_sort(*asort, *bsort)),
+        (Term::Runtime(a), Term::Runtime(b)) => a.cmp(b),
+        (
+            Term::RuntimeField {
+                base: ab,
+                index: ai,
+            },
+            Term::RuntimeField {
+                base: bb,
+                index: bi,
+            },
+        ) => cmp_term(ab, bb).then_with(|| ai.cmp(bi)),
+        (Term::Bool(a), Term::Bool(b)) => a.cmp(b),
+        (Term::Char(a), Term::Char(b)) => a.cmp(b),
+        (Term::BitVec(a), Term::BitVec(b)) => a
+            .width()
+            .cmp(&b.width())
+            .then_with(|| a.words().cmp(b.words())),
+        (Term::Float16(a), Term::Float16(b)) | (Term::BFloat16(a), Term::BFloat16(b)) => a.cmp(b),
+        (Term::Float32(a), Term::Float32(b)) => a.cmp(b),
+        (Term::Float64(a), Term::Float64(b)) => a.cmp(b),
+        (Term::String(a), Term::String(b)) | (Term::Symbol(a), Term::Symbol(b)) => a.cmp(b),
+        (Term::MethodValue(a), Term::MethodValue(b)) => a
+            .interface
+            .declaration
+            .cmp(&b.interface.declaration)
+            .then_with(|| cmp_term_slice(&a.interface.arguments, &b.interface.arguments))
+            .then_with(|| cmp_term(&a.subject, &b.subject))
+            .then_with(|| a.member.cmp(&b.member))
+            .then_with(|| cmp_term_slice(&a.method_arguments, &b.method_arguments)),
+        (
+            Term::FunctionValue {
+                declaration: ad,
+                arguments: aa,
+            },
+            Term::FunctionValue {
+                declaration: bd,
+                arguments: ba,
+            },
+        ) => ad.cmp(bd).then_with(|| cmp_term_slice(aa, ba)),
+        (
+            Term::ClosureSnapshot {
+                factory: af,
+                arguments: aa,
+            },
+            Term::ClosureSnapshot {
+                factory: bf,
+                arguments: ba,
+            },
+        ) => af.cmp(bf).then_with(|| cmp_term_slice(aa, ba)),
+        (
+            Term::ClosureValue {
+                ty: at,
+                body: ab,
+                captures: ac,
+            },
+            Term::ClosureValue {
+                ty: bt,
+                body: bb,
+                captures: bc,
+            },
+        ) => cmp_term(at, bt)
+            .then_with(|| ab.cmp(bb))
+            .then_with(|| cmp_term_slice(ac, bc)),
+        (Term::Integer(a), Term::Integer(b)) => a.cmp(b),
+        (Term::Float(a), Term::Float(b)) => a
+            .is_negative()
+            .cmp(&b.is_negative())
+            .then_with(|| a.digits().cmp(b.digits()))
+            .then_with(|| a.exponent().cmp(b.exponent())),
+        (
+            Term::Value {
+                store: as_,
+                index: ai,
+            },
+            Term::Value {
+                store: bs,
+                index: bi,
+            },
+        ) => as_.cmp(bs).then_with(|| ai.cmp(bi)),
+        _ => unreachable!("term rank handles mismatched variants"),
+    }
+}
+
+pub fn cmp_instance_key(a: &iir::InstanceKey, b: &iir::InstanceKey) -> Ordering {
+    a.declaration
+        .cmp(&b.declaration)
+        .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
+}
+
+fn cmp_callable_result(a: &CallableResult, b: &CallableResult) -> Ordering {
+    let rank = |value: &CallableResult| match value {
+        CallableResult::NoReturn => 0u8,
+        CallableResult::Known(_) => 1,
+        CallableResult::Candidates(_) => 2,
+        CallableResult::Forwarded { .. } => 3,
+        CallableResult::Unknown => 4,
+    };
+    rank(a).cmp(&rank(b)).then_with(|| match (a, b) {
+        (CallableResult::Known(ak), CallableResult::Known(bk)) => cmp_instance_key(ak, bk),
+        (CallableResult::Candidates(ak), CallableResult::Candidates(bk)) => {
+            cmp_slice_by(ak, bk, cmp_instance_key)
+        }
+        (
+            CallableResult::Forwarded {
+                named: an,
+                inputs: ai,
+            },
+            CallableResult::Forwarded {
+                named: bn,
+                inputs: bi,
+            },
+        ) => cmp_slice_by(an, bn, cmp_instance_key).then_with(|| ai.cmp(bi)),
+        _ => Ordering::Equal,
+    })
+}
+
+fn cmp_borrowed_callable_value(
+    a: &borrowed_code::BorrowedCallableValue,
+    b: &borrowed_code::BorrowedCallableValue,
+) -> Ordering {
+    use borrowed_code::BorrowedCallableValue;
+    match (a, b) {
+        (BorrowedCallableValue::Named(a), BorrowedCallableValue::Named(b)) => {
+            cmp_callable_result(a, b)
+        }
+        (BorrowedCallableValue::Named(_), BorrowedCallableValue::Absent) => Ordering::Less,
+        (BorrowedCallableValue::Absent, BorrowedCallableValue::Named(_)) => Ordering::Greater,
+        (BorrowedCallableValue::Absent, BorrowedCallableValue::Absent) => Ordering::Equal,
+    }
+}
+
+fn cmp_effect_input(a: &EffectInput, b: &EffectInput) -> Ordering {
+    cmp_effect_operation(&a.operation, &b.operation)
+        .then_with(|| cmp_effect_abi(a.abi, b.abi))
+        .then_with(|| cmp_term(&a.signature, &b.signature))
+        .then_with(|| a.forwarded_parameters.cmp(&b.forwarded_parameters))
+        .then_with(|| a.copy_parameters.cmp(&b.copy_parameters))
+        .then_with(|| a.owned_inputs.cmp(&b.owned_inputs))
+        .then_with(|| {
+            cmp_slice_by(
+                &a.parameter_accesses.iter().collect::<Vec<_>>(),
+                &b.parameter_accesses.iter().collect::<Vec<_>>(),
+                |ap, bp| {
+                    ap.parameter
+                        .cmp(&bp.parameter)
+                        .then_with(|| ap.input_fields.cmp(&bp.input_fields))
+                        .then_with(|| ap.read_value.cmp(&bp.read_value))
+                        .then_with(|| ap.write.cmp(&bp.write))
+                },
+            )
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MemoryInstance {
     effects: Vec<EffectInput>,
     instance: iir::InstanceKey,
@@ -7956,16 +8716,54 @@ struct MemoryInstance {
     borrowed: BorrowedCallableInputs,
 }
 
+impl Ord for MemoryInstance {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_slice_by(&self.effects, &other.effects, cmp_effect_input)
+            .then_with(|| cmp_instance_key(&self.instance, &other.instance))
+            .then_with(|| {
+                cmp_slice_by(
+                    &self.inputs.iter().collect::<Vec<_>>(),
+                    &other.inputs.iter().collect::<Vec<_>>(),
+                    |(ak, av), (bk, bv)| ak.cmp(bk).then_with(|| cmp_callable_result(av, bv)),
+                )
+            })
+            .then_with(|| self.prepared.cmp(&other.prepared))
+            .then_with(|| {
+                cmp_slice_by(
+                    &self.borrowed.iter().collect::<Vec<_>>(),
+                    &other.borrowed.iter().collect::<Vec<_>>(),
+                    |(ak, am), (bk, bm)| {
+                        ak.cmp(bk).then_with(|| {
+                            cmp_slice_by(
+                                &am.iter().collect::<Vec<_>>(),
+                                &bm.iter().collect::<Vec<_>>(),
+                                |(ap, av), (bp, bv)| {
+                                    ap.cmp(bp).then_with(|| cmp_borrowed_callable_value(av, bv))
+                                },
+                            )
+                        })
+                    },
+                )
+            })
+    }
+}
+
+impl PartialOrd for MemoryInstance {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 struct CachedSummary {
     summary: std::sync::Arc<Summary>,
-    dependencies: std::sync::Arc<HashSet<iir::InstanceKey>>,
+    dependencies: std::sync::Arc<BTreeSet<OrderedInstanceKey>>,
 }
 
 /// Package-local completed context-free memory summaries. Failed or incomplete
 /// inference attempts never enter this cache.
 #[derive(Default)]
 pub struct SummaryCache {
-    summaries: HashMap<(TextProvenance, iir::InstanceKey), CachedSummary>,
+    summaries: BTreeMap<(TextProvenance, OrderedInstanceKey), CachedSummary>,
 }
 
 impl SummaryCache {
@@ -7975,7 +8773,7 @@ impl SummaryCache {
         key: &iir::InstanceKey,
     ) -> Option<&std::sync::Arc<Summary>> {
         self.summaries
-            .get(&(provenance, key.clone()))
+            .get(&(provenance, OrderedInstanceKey(key.clone())))
             .map(|entry| &entry.summary)
     }
 
@@ -7985,10 +8783,10 @@ impl SummaryCache {
         key: &iir::InstanceKey,
     ) -> Option<(
         &std::sync::Arc<Summary>,
-        &std::sync::Arc<HashSet<iir::InstanceKey>>,
+        &std::sync::Arc<BTreeSet<OrderedInstanceKey>>,
     )> {
         self.summaries
-            .get(&(provenance, key.clone()))
+            .get(&(provenance, OrderedInstanceKey(key.clone())))
             .map(|entry| (&entry.summary, &entry.dependencies))
     }
 
@@ -7998,7 +8796,7 @@ impl SummaryCache {
         key: iir::InstanceKey,
         summary: std::sync::Arc<Summary>,
     ) {
-        let dependencies = std::sync::Arc::new(HashSet::from([key.clone()]));
+        let dependencies = std::sync::Arc::new(BTreeSet::from([OrderedInstanceKey(key.clone())]));
         self.insert_with_dependencies(provenance, key, summary, dependencies);
     }
 
@@ -8007,10 +8805,10 @@ impl SummaryCache {
         provenance: TextProvenance,
         key: iir::InstanceKey,
         summary: std::sync::Arc<Summary>,
-        dependencies: std::sync::Arc<HashSet<iir::InstanceKey>>,
+        dependencies: std::sync::Arc<BTreeSet<OrderedInstanceKey>>,
     ) {
         self.summaries.insert(
-            (provenance, key),
+            (provenance, OrderedInstanceKey(key)),
             CachedSummary {
                 summary,
                 dependencies,
@@ -8024,7 +8822,11 @@ impl SummaryCache {
             return;
         }
         self.summaries.retain(|(_, key), entry| {
-            !changed.contains(key) && entry.dependencies.is_disjoint(changed)
+            !changed.contains(&key.0)
+                && !entry
+                    .dependencies
+                    .iter()
+                    .any(|dep| changed.contains(&dep.0))
         });
     }
 
@@ -8152,10 +8954,10 @@ struct Round<'cleanup> {
     declarations: Option<&'cleanup crate::declarations::Metadata<'cleanup>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'cleanup mut SummaryCache>,
-    touched_instances: HashSet<iir::InstanceKey>,
-    memory_inert_cleanup_types: HashSet<Term>,
-    cleanup_reads: HashMap<Term, Vec<Access>>,
-    non_readonly_cleanup_types: HashSet<Term>,
+    touched_instances: BTreeSet<OrderedInstanceKey>,
+    memory_inert_cleanup_types: BTreeSet<OrderedTerm>,
+    cleanup_reads: BTreeMap<OrderedTerm, Vec<Access>>,
+    non_readonly_cleanup_types: BTreeSet<OrderedTerm>,
     used_external_cleanup: bool,
     mutates_pointer_storage: bool,
     // All instances in one fixed point belong to the same immutable package.
@@ -8164,13 +8966,13 @@ struct Round<'cleanup> {
     parameter_domains: Option<std::sync::Arc<BTreeMap<DeclarationId, Term>>>,
     methods: MethodCalleesStorage<'cleanup>,
     layout_cache: TypeLayoutCacheStorage<'cleanup>,
-    completed_types: HashMap<Term, Term>,
+    completed_types: BTreeMap<OrderedTerm, Term>,
     effects: Vec<EffectInput>,
     complete_calls: bool,
     code: Vec<PreparedCode>,
-    previous: HashMap<MemoryInstance, Summary>,
+    previous: BTreeMap<MemoryInstance, Summary>,
     queue: Vec<MemoryInstance>,
-    discovered: HashMap<MemoryInstance, usize>,
+    discovered: BTreeMap<MemoryInstance, usize>,
     pending: std::collections::VecDeque<usize>,
     scheduled: BTreeSet<usize>,
     dependents: BTreeMap<usize, BTreeSet<usize>>,
@@ -8329,45 +9131,60 @@ pub(crate) fn infer_in_package_with_full_context<'a>(
 
 type MethodKey = (
     bool,
-    Term,
+    OrderedTerm,
     DeclarationId,
-    Vec<Term>,
+    Vec<OrderedTerm>,
     DeclarationId,
-    Term,
-    Vec<Term>,
+    OrderedTerm,
+    Vec<OrderedTerm>,
 );
 
-type PreselectedMethodKey = (DeclarationId, Vec<Term>, Term, DeclarationId, Vec<Term>);
+type PreselectedMethodKey = (
+    DeclarationId,
+    Vec<OrderedTerm>,
+    OrderedTerm,
+    DeclarationId,
+    Vec<OrderedTerm>,
+);
 
 /// Package-local successful dispatch evidence. Runtime arguments and source
 /// locations do not select implementations; the full interface signature does.
 #[derive(Default)]
 pub struct MethodCallees {
-    entries: std::collections::HashMap<MethodKey, Expr>,
+    entries: BTreeMap<MethodKey, Expr>,
     domains: Option<std::sync::Arc<BTreeMap<DeclarationId, Term>>>,
     preselected:
-        Option<std::sync::Arc<HashMap<PreselectedMethodKey, nir::program::MethodInstance>>>,
+        Option<std::sync::Arc<BTreeMap<PreselectedMethodKey, nir::program::MethodInstance>>>,
 }
 
 impl MethodCallees {
     pub(crate) fn with_dispatch(dispatch: &[nir::program::DispatchInstance]) -> Self {
-        let mut preselected = HashMap::new();
+        let mut preselected = BTreeMap::new();
         for item in dispatch {
             for method in &item.methods {
                 preselected.insert(
                     (
                         item.interface,
-                        item.interface_arguments.clone(),
-                        item.subject.clone(),
+                        item.interface_arguments
+                            .iter()
+                            .cloned()
+                            .map(OrderedTerm)
+                            .collect(),
+                        OrderedTerm(item.subject.clone()),
                         method.member,
-                        method.method_arguments.clone(),
+                        method
+                            .method_arguments
+                            .iter()
+                            .cloned()
+                            .map(OrderedTerm)
+                            .collect(),
                     ),
                     method.clone(),
                 );
             }
         }
         Self {
-            entries: std::collections::HashMap::new(),
+            entries: BTreeMap::new(),
             domains: None,
             preselected: Some(std::sync::Arc::new(preselected)),
         }
@@ -8375,7 +9192,7 @@ impl MethodCallees {
 
     pub(crate) fn with_preselected(&self) -> Self {
         Self {
-            entries: std::collections::HashMap::new(),
+            entries: BTreeMap::new(),
             domains: self.domains.clone(),
             preselected: self.preselected.clone(),
         }
@@ -8465,12 +9282,16 @@ impl MethodCallees {
         }
         let key = (
             behavior_only,
-            callee.ty.clone(),
+            OrderedTerm(callee.ty.clone()),
             *interface,
-            interface_arguments.clone(),
+            interface_arguments
+                .iter()
+                .cloned()
+                .map(OrderedTerm)
+                .collect(),
             *member,
-            subject.clone(),
-            method_arguments.clone(),
+            OrderedTerm(subject.clone()),
+            method_arguments.iter().cloned().map(OrderedTerm).collect(),
         );
         if let Some(selected) = self.entries.get(&key) {
             bound_type(&selected.ty, fuel)?;
@@ -8532,7 +9353,7 @@ fn selected_method_callee_with_context(
     package: &Package,
     callee: &Expr,
     source: Option<::materialization::DeclarationSource<'_>>,
-    preselected: Option<&HashMap<PreselectedMethodKey, nir::program::MethodInstance>>,
+    preselected: Option<&BTreeMap<PreselectedMethodKey, nir::program::MethodInstance>>,
     declarations: Option<&crate::declarations::Metadata<'_>>,
     cached_domains: &mut Option<std::sync::Arc<BTreeMap<DeclarationId, Term>>>,
     fuel: &mut usize,
@@ -8582,10 +9403,14 @@ fn selected_method_callee_with_context(
     } else if let Some(method) = preselected.and_then(|map| {
         map.get(&(
             *interface,
-            interface_arguments.clone(),
-            subject.clone(),
+            interface_arguments
+                .iter()
+                .cloned()
+                .map(OrderedTerm)
+                .collect(),
+            OrderedTerm(subject.clone()),
             *member,
-            method_arguments.clone(),
+            method_arguments.iter().cloned().map(OrderedTerm).collect(),
         ))
         .cloned()
     }) {
@@ -9112,7 +9937,12 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
         && let Some(cache) = round.summary_cache.as_deref_mut()
     {
         let mut dependencies = std::mem::take(&mut round.touched_instances);
-        dependencies.extend(round.queue.iter().map(|item| item.instance.clone()));
+        dependencies.extend(
+            round
+                .queue
+                .iter()
+                .map(|item| OrderedInstanceKey(item.instance.clone())),
+        );
         let dependencies = std::sync::Arc::new(dependencies);
         let context_free = |instance: &MemoryInstance| {
             instance.inputs.is_empty()
@@ -9294,7 +10124,7 @@ fn derive_with_borrowed(
         {
             let cached = std::sync::Arc::clone(cached);
             let dependencies = std::sync::Arc::clone(dependencies);
-            round.touched_instances.insert(instance);
+            round.touched_instances.insert(OrderedInstanceKey(instance));
             round.touched_instances.extend(dependencies.iter().cloned());
             charge_cached_summary(&cached, fuel)?;
             return Ok((*cached).clone());
@@ -9511,12 +10341,12 @@ fn validate_code_premise(
         return Err("memory callable premise requires named code identities".into());
     }
     value.charge(fuel)?;
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     for key in value.keys() {
         *fuel = fuel
             .checked_sub(1)
             .ok_or("memory callable validation budget exhausted")?;
-        if !seen.insert(key) {
+        if !seen.insert(OrderedInstanceKey(key.clone())) {
             return Err("duplicate memory callable candidate".into());
         }
         let (function, body_arguments) = package
@@ -9544,7 +10374,8 @@ fn validate_code_premise(
             // after its named body has a concrete signature. Compare completed
             // views from the immutable package, without unfolding normal heads.
             let mut normalize = |ty: &Term| -> Result<Term, String> {
-                if let Some(value) = round.completed_types.get(ty) {
+                let key = OrderedTerm(ty.clone());
+                if let Some(value) = round.completed_types.get(&key) {
                     bound_type(value, fuel)?;
                     return Ok(value.clone());
                 }
@@ -9555,7 +10386,7 @@ fn validate_code_premise(
                     type_resolution::dispatch::normalize_concrete_type(package, ty, &mut remaining);
                 *fuel += remaining;
                 let value = value?;
-                round.completed_types.insert(ty.clone(), value.clone());
+                round.completed_types.insert(key, value.clone());
                 Ok(value)
             };
             if normalize(&signature)? != normalize(expected)? {
@@ -9635,12 +10466,12 @@ fn infer_body(
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
         capture_code_writes: BTreeMap::new(),
-        named_code_slots: HashMap::new(),
-        closure_nodes: HashMap::new(),
-        local_code_results: HashMap::new(),
-        local_code_fields: HashMap::new(),
+        named_code_slots: BTreeMap::new(),
+        closure_nodes: BTreeMap::new(),
+        local_code_results: BTreeMap::new(),
+        local_code_fields: BTreeMap::new(),
         type_context,
-        type_views: HashMap::new(),
+        type_views: BTreeMap::new(),
         fuel,
         package,
         parameters: &function.type_parameters,
@@ -9656,10 +10487,10 @@ fn infer_body(
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        expression_results: HashMap::new(),
-        callable_results: HashMap::new(),
-        aggregate_callees: HashMap::new(),
-        aggregate_pointers: HashMap::new(),
+        expression_results: BTreeMap::new(),
+        callable_results: BTreeMap::new(),
+        aggregate_callees: BTreeMap::new(),
+        aggregate_pointers: BTreeMap::new(),
         returns: Some(BTreeSet::new()),
         pointer_field_returns: None,
         input_pointer_slots: BTreeMap::new(),
@@ -9878,7 +10709,7 @@ pub(crate) fn validate_argument_plan(
     {
         return Err("invalid memory default parameter frame".into());
     }
-    let mut slots = HashSet::new();
+    let mut slots = BTreeSet::new();
     let mut last_default = None;
     for argument in arguments {
         if argument.parameter >= count || !slots.insert(argument.parameter) {
@@ -10053,12 +10884,12 @@ pub(crate) fn infer_argument_full_context<'a>(
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
         capture_code_writes: BTreeMap::new(),
-        named_code_slots: HashMap::new(),
-        closure_nodes: HashMap::new(),
-        local_code_results: HashMap::new(),
-        local_code_fields: HashMap::new(),
+        named_code_slots: BTreeMap::new(),
+        closure_nodes: BTreeMap::new(),
+        local_code_results: BTreeMap::new(),
+        local_code_fields: BTreeMap::new(),
         type_context: crate::ptc::Context::default(),
-        type_views: HashMap::new(),
+        type_views: BTreeMap::new(),
         fuel,
         package: Some(package),
         parameters: &[],
@@ -10075,10 +10906,10 @@ pub(crate) fn infer_argument_full_context<'a>(
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        expression_results: HashMap::new(),
-        callable_results: HashMap::new(),
-        aggregate_callees: HashMap::new(),
-        aggregate_pointers: HashMap::new(),
+        expression_results: BTreeMap::new(),
+        callable_results: BTreeMap::new(),
+        aggregate_callees: BTreeMap::new(),
+        aggregate_pointers: BTreeMap::new(),
         returns: Some(BTreeSet::new()),
         pointer_field_returns: None,
         input_pointer_slots: BTreeMap::new(),
@@ -11147,12 +11978,12 @@ fn infer_closure_pass(
         borrowed_code_pointers: BTreeMap::new(),
         stable_capture_roots: BTreeSet::new(),
         capture_code_writes: BTreeMap::new(),
-        named_code_slots: HashMap::new(),
-        closure_nodes: HashMap::new(),
-        local_code_results: HashMap::new(),
-        local_code_fields: HashMap::new(),
+        named_code_slots: BTreeMap::new(),
+        closure_nodes: BTreeMap::new(),
+        local_code_results: BTreeMap::new(),
+        local_code_fields: BTreeMap::new(),
         type_context: crate::ptc::Context::default(),
-        type_views: HashMap::new(),
+        type_views: BTreeMap::new(),
         fuel,
         package: Some(package),
         parameters: specialization.0,
@@ -11168,10 +11999,10 @@ fn infer_closure_pass(
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
-        expression_results: HashMap::new(),
-        callable_results: HashMap::new(),
-        aggregate_callees: HashMap::new(),
-        aggregate_pointers: HashMap::new(),
+        expression_results: BTreeMap::new(),
+        callable_results: BTreeMap::new(),
+        aggregate_callees: BTreeMap::new(),
+        aggregate_pointers: BTreeMap::new(),
         returns: Some(BTreeSet::new()),
         pointer_field_returns: None,
         input_pointer_slots: BTreeMap::new(),
@@ -12420,23 +13251,26 @@ mod effect_cache_tests {
             TextProvenance::Unchecked,
             direct_caller.clone(),
             std::sync::Arc::new(dummy.clone()),
-            std::sync::Arc::new(HashSet::from([direct_caller.clone(), leaf_changed.clone()])),
+            std::sync::Arc::new(BTreeSet::from([
+                OrderedInstanceKey(direct_caller.clone()),
+                OrderedInstanceKey(leaf_changed.clone()),
+            ])),
         );
         cache.insert_with_dependencies(
             TextProvenance::Unchecked,
             transitive_caller.clone(),
             std::sync::Arc::new(dummy.clone()),
-            std::sync::Arc::new(HashSet::from([
-                transitive_caller.clone(),
-                direct_caller.clone(),
-                leaf_changed.clone(),
+            std::sync::Arc::new(BTreeSet::from([
+                OrderedInstanceKey(transitive_caller.clone()),
+                OrderedInstanceKey(direct_caller.clone()),
+                OrderedInstanceKey(leaf_changed.clone()),
             ])),
         );
         cache.insert_with_dependencies(
             TextProvenance::Unchecked,
             independent.clone(),
             std::sync::Arc::new(dummy),
-            std::sync::Arc::new(HashSet::from([independent.clone()])),
+            std::sync::Arc::new(BTreeSet::from([OrderedInstanceKey(independent.clone())])),
         );
 
         let changed = HashSet::from([leaf_changed.clone()]);

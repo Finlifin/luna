@@ -3,7 +3,7 @@
 mod transfers;
 
 use super::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TextRegionOrigin {
@@ -57,7 +57,7 @@ type DescriptorTargets = BTreeSet<(DescriptorRoot, Vec<usize>)>;
 
 type DescriptorPlaces = BTreeMap<Vec<usize>, Option<DescriptorTargets>>;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Regions {
     text: TextFields,
     // None is unknown code or incompatible closure environments, not absence.
@@ -170,7 +170,7 @@ pub(super) fn type_may_hold_text_or_callable(
         fuel: &mut usize,
         depth: usize,
         visiting: &mut Vec<Term>,
-        clean_false: &mut HashSet<Term>,
+        clean_false: &mut BTreeSet<OrderedTerm>,
     ) -> Result<(bool, bool), String> {
         if depth >= 128 {
             return Ok((true, false));
@@ -191,7 +191,8 @@ pub(super) fn type_may_hold_text_or_callable(
         if visiting.contains(ty) {
             return Ok((false, true));
         }
-        if clean_false.contains(ty) {
+        let ordered_ty = OrderedTerm(ty.clone());
+        if clean_false.contains(&ordered_ty) {
             return Ok((false, false));
         }
         visiting.push(ty.clone());
@@ -249,13 +250,13 @@ pub(super) fn type_may_hold_text_or_callable(
         })();
         visiting.pop();
         if let Ok((false, false)) = &outcome {
-            clean_false.insert(ty.clone());
+            clean_false.insert(ordered_ty);
         }
         outcome
     }
 
     let mut visiting = Vec::new();
-    let mut clean_false = HashSet::new();
+    let mut clean_false = BTreeSet::new();
     Ok(walk(package, ty, fuel, 0, &mut visiting, &mut clean_false)?.0)
 }
 
@@ -266,6 +267,23 @@ struct StorageKey {
     actual: BTreeMap<usize, Regions>,
     storage: BTreeMap<usize, Regions>,
     readonly: Option<&'static str>,
+}
+
+impl Ord for StorageKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.declaration
+            .cmp(&other.declaration)
+            .then_with(|| cmp_term_slice(&self.arguments, &other.arguments))
+            .then_with(|| self.actual.cmp(&other.actual))
+            .then_with(|| self.storage.cmp(&other.storage))
+            .then_with(|| self.readonly.cmp(&other.readonly))
+    }
+}
+
+impl PartialOrd for StorageKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -287,6 +305,34 @@ enum CallbackKey {
     Closure(usize),
     Alternatives(Vec<iir::InstanceKey>),
     ClosureAlternatives(Vec<usize>),
+}
+
+impl Ord for CallbackKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let rank = |value: &Self| match value {
+            Self::Named(_) => 0u8,
+            Self::Closure(_) => 1,
+            Self::Alternatives(_) => 2,
+            Self::ClosureAlternatives(_) => 3,
+        };
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| match (self, other) {
+                (Self::Named(a), Self::Named(b)) => cmp_instance_key(a, b),
+                (Self::Closure(a), Self::Closure(b)) => a.cmp(b),
+                (Self::Alternatives(a), Self::Alternatives(b)) => {
+                    cmp_slice_by(a, b, cmp_instance_key)
+                }
+                (Self::ClosureAlternatives(a), Self::ClosureAlternatives(b)) => a.cmp(b),
+                _ => std::cmp::Ordering::Equal,
+            })
+    }
+}
+
+impl PartialOrd for CallbackKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl fmt::Display for CallbackKey {
@@ -393,6 +439,21 @@ fn index_code_expression(
 struct SummaryKey {
     instance: iir::InstanceKey,
     callbacks: Vec<(usize, Vec<usize>, CallbackKey)>,
+    borrowed_callbacks: Vec<(usize, Vec<usize>, Vec<usize>, CallbackKey)>,
+}
+
+impl Ord for SummaryKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        cmp_instance_key(&self.instance, &other.instance)
+            .then_with(|| self.callbacks.cmp(&other.callbacks))
+            .then_with(|| self.borrowed_callbacks.cmp(&other.borrowed_callbacks))
+    }
+}
+
+impl PartialOrd for SummaryKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl fmt::Display for SummaryKey {
@@ -404,6 +465,20 @@ impl fmt::Display for SummaryKey {
                 write!(f, " {field}")?;
             }
             write!(f, ") {callback})")?;
+        }
+        if !self.borrowed_callbacks.is_empty() {
+            f.write_str(") (borrowed-callbacks")?;
+            for (parameter, input_fields, path, callback) in &self.borrowed_callbacks {
+                write!(f, " (parameter {parameter} (input-fields")?;
+                for field in input_fields {
+                    write!(f, " {field}")?;
+                }
+                f.write_str(") (path")?;
+                for field in path {
+                    write!(f, " {field}")?;
+                }
+                write!(f, ") {callback})")?;
+            }
         }
         f.write_str("))")
     }
@@ -432,7 +507,10 @@ fn join_locals(
         charge_regions(value, fuel)?;
         let mut joined = target.frames.remove(id);
         merge(&mut joined, Some(value.clone()), fuel)?;
-        target.frames.insert(*id, joined.unwrap());
+        target.frames.insert(
+            *id,
+            joined.ok_or("text region frame join produced no state")?,
+        );
     }
     for binding in bindings {
         charge(fuel, 1)?;
@@ -442,7 +520,10 @@ fn join_locals(
         charge_regions(value, fuel)?;
         let mut joined = target.remove(binding);
         merge(&mut joined, Some(value.clone()), fuel)?;
-        target.insert(*binding, joined.unwrap());
+        target.insert(
+            *binding,
+            joined.ok_or("text region local join produced no state")?,
+        );
     }
     Ok(())
 }
@@ -713,7 +794,7 @@ pub fn infer_text_regions(
 /// bounded work from `fuel` so exhausted budgets fail closed.
 #[derive(Default)]
 pub struct TextRegionCache {
-    summaries: HashMap<iir::InstanceKey, Summary>,
+    summaries: BTreeMap<OrderedInstanceKey, Summary>,
 }
 
 impl TextRegionCache {
@@ -778,6 +859,93 @@ pub(crate) fn infer_text_regions_with_metadata(
     )
 }
 
+/// Explicit concrete callback bindings supplied for top-level text-region verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextCallbackInput {
+    Owned {
+        parameter: usize,
+        fields: Vec<usize>,
+        targets: Vec<iir::InstanceKey>,
+    },
+    Borrowed {
+        parameter: usize,
+        input_fields: Vec<usize>,
+        fields: Vec<usize>,
+        targets: Vec<iir::InstanceKey>,
+    },
+}
+
+impl fmt::Display for TextCallbackInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owned {
+                parameter,
+                fields,
+                targets,
+            } => {
+                write!(f, "(text-callback-owned (parameter {parameter}) (fields")?;
+                display_owned_path(fields, f)?;
+                f.write_str(") (targets")?;
+                for target in targets {
+                    write!(f, " {target}")?;
+                }
+                f.write_str("))")
+            }
+            Self::Borrowed {
+                parameter,
+                input_fields,
+                fields,
+                targets,
+            } => {
+                write!(
+                    f,
+                    "(text-callback-borrowed (parameter {parameter}) (input-fields"
+                )?;
+                display_owned_path(input_fields, f)?;
+                f.write_str(") (fields")?;
+                display_owned_path(fields, f)?;
+                f.write_str(") (targets")?;
+                for target in targets {
+                    write!(f, " {target}")?;
+                }
+                f.write_str("))")
+            }
+        }
+    }
+}
+
+fn callback_key_from_targets(targets: &[iir::InstanceKey]) -> Result<CallbackKey, String> {
+    match targets {
+        [] => Err("text region callback requires concrete named target(s)".into()),
+        [single] => Ok(CallbackKey::Named(single.clone())),
+        many => Ok(CallbackKey::Alternatives(many.to_vec())),
+    }
+}
+
+/// Derive conditional return dependencies under explicit concrete callback targets.
+pub fn infer_text_regions_with_callbacks(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    callbacks: &[TextCallbackInput],
+    fuel: &mut usize,
+) -> Result<TextRegionSummary, String> {
+    let declarations = crate::declarations::Metadata::new(Some(package));
+    let mut methods = MethodCallees::default();
+    infer_text_regions_with_callbacks_and_context(
+        package,
+        None,
+        &declarations,
+        &mut methods,
+        None,
+        None,
+        declaration,
+        arguments,
+        callbacks,
+        fuel,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn infer_text_regions_with_context<'a>(
     package: &'a Package,
@@ -790,6 +958,59 @@ pub(crate) fn infer_text_regions_with_context<'a>(
     arguments: &[Term],
     fuel: &mut usize,
 ) -> Result<TextRegionSummary, String> {
+    infer_text_regions_with_callbacks_and_context(
+        package,
+        source,
+        declarations,
+        methods,
+        layout_cache,
+        text_cache,
+        declaration,
+        arguments,
+        &[],
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_text_regions_with_callbacks_and_context<'a>(
+    package: &'a Package,
+    source: Option<::materialization::DeclarationSource<'a>>,
+    declarations: &crate::declarations::Metadata<'a>,
+    methods: &mut MethodCallees,
+    layout_cache: Option<&mut TypeLayoutCache>,
+    text_cache: Option<&mut TextRegionCache>,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    callback_inputs: &[TextCallbackInput],
+    fuel: &mut usize,
+) -> Result<TextRegionSummary, String> {
+    let mut callbacks = Vec::new();
+    let mut borrowed_callbacks = Vec::new();
+    for entry in callback_inputs {
+        match entry {
+            TextCallbackInput::Owned {
+                parameter,
+                fields,
+                targets,
+            } => callbacks.push((
+                *parameter,
+                fields.clone(),
+                callback_key_from_targets(targets)?,
+            )),
+            TextCallbackInput::Borrowed {
+                parameter,
+                input_fields,
+                fields,
+                targets,
+            } => borrowed_callbacks.push((
+                *parameter,
+                input_fields.clone(),
+                fields.clone(),
+                callback_key_from_targets(targets)?,
+            )),
+        }
+    }
     Query {
         package,
         source,
@@ -800,37 +1021,120 @@ pub(crate) fn infer_text_regions_with_context<'a>(
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
         storage_entries: vec![],
-        storage_index: HashMap::new(),
+        storage_index: BTreeMap::new(),
         storage_pending: VecDeque::new(),
-        storage_scheduled: HashSet::new(),
-        storage_dependents: HashMap::new(),
-        storage_cache_dependents: HashMap::new(),
-        storage_outer_dependents: HashMap::new(),
-        storage_outer_dependents_set: HashMap::new(),
+        storage_scheduled: BTreeSet::new(),
+        storage_dependents: BTreeMap::new(),
+        storage_cache_dependents: BTreeMap::new(),
+        storage_outer_dependents: BTreeMap::new(),
+        storage_outer_dependents_set: BTreeMap::new(),
         storage_current: None,
         solving_storage: false,
         next_storage_frame: 0,
         readonly_storage: None,
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
-        scheduled: HashSet::new(),
-        dependents: HashMap::new(),
-        dependents_set: HashMap::new(),
+        scheduled: BTreeSet::new(),
+        dependents: BTreeMap::new(),
+        dependents_set: BTreeMap::new(),
         reads: vec![],
         loops: vec![],
         exits: vec![],
-        cache: HashMap::new(),
+        cache: BTreeMap::new(),
         methods,
         layout_cache: layout_cache.map_or_else(Default::default, TypeLayoutCacheStorage::Borrowed),
         external_cache: text_cache.map_or_else(Default::default, TextRegionCacheStorage::Borrowed),
     }
-    .solve(declaration, arguments)
+    .solve_with_callbacks_and_borrowed(declaration, arguments, &callbacks, &borrowed_callbacks)
     .map(|summary| TextRegionSummary {
         declaration: summary.declaration,
         arguments: summary.arguments,
         reads: summary.reads,
         returned: summary.returned.map(|value| value.text),
     })
+}
+
+pub(crate) fn verify_handler_arm_text_regions(
+    package: &Package,
+    handler: &nir::program::EffectHandler,
+    arm: &nir::program::MatchArm,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let declarations = crate::declarations::Metadata::new(Some(package));
+    let mut methods = MethodCallees::default();
+    let mut query = Query {
+        package,
+        source: None,
+        declarations: &declarations,
+        cached_domains: None,
+        fuel,
+        current: None,
+        local_callables: BTreeMap::new(),
+        closed_closures: vec![],
+        storage_entries: vec![],
+        storage_index: BTreeMap::new(),
+        storage_pending: VecDeque::new(),
+        storage_scheduled: BTreeSet::new(),
+        storage_dependents: BTreeMap::new(),
+        storage_cache_dependents: BTreeMap::new(),
+        storage_outer_dependents: BTreeMap::new(),
+        storage_outer_dependents_set: BTreeMap::new(),
+        storage_current: None,
+        solving_storage: false,
+        next_storage_frame: 0,
+        readonly_storage: None,
+        changed_callables: BTreeSet::new(),
+        pending: VecDeque::new(),
+        scheduled: BTreeSet::new(),
+        dependents: BTreeMap::new(),
+        dependents_set: BTreeMap::new(),
+        reads: vec![],
+        loops: vec![],
+        exits: vec![],
+        cache: BTreeMap::new(),
+        methods: &mut methods,
+        layout_cache: TypeLayoutCacheStorage::default(),
+        external_cache: TextRegionCacheStorage::default(),
+    };
+    let Term::Function { parameters, result } = handler.signature.callable_signature() else {
+        return Err("text effect handler requires a callable signature".into());
+    };
+    for parameter in parameters {
+        if query.type_may_hold_text_or_callable(&parameter.ty)? {
+            return Err("text effect handler cannot transmit text or callables".into());
+        }
+    }
+    if query.type_may_hold_text_or_callable(result)? {
+        return Err("text effect handler cannot return text or callables".into());
+    }
+    let subject_ty = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
+    let mut scope = Locals::new();
+    let mut pattern = &arm.pattern;
+    let mut guards = Vec::new();
+    while let Pattern::Guard {
+        pattern: inner,
+        condition,
+    } = pattern
+    {
+        charge(query.fuel, 1)?;
+        guards.push(condition.as_ref());
+        pattern = inner;
+    }
+    guards.reverse();
+    if let Some(guard) = &arm.guard {
+        guards.push(guard);
+    }
+    query.reads.push(BTreeSet::new());
+    let checked = (|| {
+        query.bind_pattern(pattern, &subject_ty, &Regions::new(), None, &mut scope, 0)?;
+        for guard in guards {
+            query.expr(guard, &mut scope, &mut None, 0)?;
+        }
+        query.expr(&arm.body, &mut scope, &mut None, 0)?;
+        query.run_pending()
+    })();
+    query.reads.pop();
+    checked
 }
 
 struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
@@ -843,26 +1147,26 @@ struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
     storage_entries: Vec<StorageEntry>,
-    storage_index: HashMap<StorageKey, usize>,
+    storage_index: BTreeMap<StorageKey, usize>,
     storage_pending: VecDeque<usize>,
-    storage_scheduled: HashSet<usize>,
-    storage_dependents: HashMap<usize, BTreeSet<usize>>,
-    storage_cache_dependents: HashMap<SummaryKey, BTreeSet<usize>>,
-    storage_outer_dependents: HashMap<usize, Vec<SummaryKey>>,
-    storage_outer_dependents_set: HashMap<usize, HashSet<SummaryKey>>,
+    storage_scheduled: BTreeSet<usize>,
+    storage_dependents: BTreeMap<usize, BTreeSet<usize>>,
+    storage_cache_dependents: BTreeMap<SummaryKey, BTreeSet<usize>>,
+    storage_outer_dependents: BTreeMap<usize, Vec<SummaryKey>>,
+    storage_outer_dependents_set: BTreeMap<usize, BTreeSet<SummaryKey>>,
     storage_current: Option<usize>,
     solving_storage: bool,
     next_storage_frame: usize,
     readonly_storage: Option<&'static str>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
-    scheduled: HashSet<SummaryKey>,
-    dependents: HashMap<SummaryKey, Vec<SummaryKey>>,
-    dependents_set: HashMap<SummaryKey, HashSet<SummaryKey>>,
+    scheduled: BTreeSet<SummaryKey>,
+    dependents: BTreeMap<SummaryKey, Vec<SummaryKey>>,
+    dependents_set: BTreeMap<SummaryKey, BTreeSet<SummaryKey>>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
-    cache: HashMap<SummaryKey, Summary>,
+    cache: BTreeMap<SummaryKey, Summary>,
     methods: &'m mut MethodCallees,
     layout_cache: TypeLayoutCacheStorage<'l>,
     external_cache: TextRegionCacheStorage<'c>,
@@ -888,6 +1192,18 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         self.layout_cache
             .as_mut()
             .owned_callable_paths(Some(self.package), ty, true, self.fuel)
+    }
+
+    pub(super) fn record_reads(
+        &mut self,
+        origins: impl IntoIterator<Item = TextRegionOrigin>,
+    ) -> Result<(), String> {
+        let frame = self
+            .reads
+            .last_mut()
+            .ok_or("text region read frame is unavailable")?;
+        frame.extend(origins);
+        Ok(())
     }
 
     fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
@@ -1421,24 +1737,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         }
     }
 
-    fn solve(&mut self, declaration: DeclarationId, arguments: &[Term]) -> Result<Summary, String> {
-        if let Some(summary) = self
-            .external_cache
-            .as_ref()
-            .summaries
-            .get(&iir::InstanceKey {
-                declaration,
-                arguments: arguments.to_vec().into(),
-            })
-        {
-            charge(self.fuel, arguments.len().saturating_add(1))?;
-            if let Some(returned) = &summary.returned {
-                charge_regions(returned, self.fuel)?;
-            }
-            charge(self.fuel, summary.reads.len())?;
-            return Ok(summary.clone());
-        }
-        self.function(declaration, arguments)?;
+    fn run_pending(&mut self) -> Result<(), String> {
         let mut deferred = Vec::<(SummaryKey, String)>::new();
         while let Some(key) = self.pending.pop_front() {
             charge(self.fuel, 1)?;
@@ -1485,13 +1784,53 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         if let Some((_, error)) = deferred.into_iter().next() {
             return Err(error);
         }
-        let result = self.function(declaration, arguments)?;
+        Ok(())
+    }
+
+    fn solve_with_callbacks_and_borrowed(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        callbacks: &[(usize, Vec<usize>, CallbackKey)],
+        borrowed_callbacks: &[(usize, Vec<usize>, Vec<usize>, CallbackKey)],
+    ) -> Result<Summary, String> {
+        if callbacks.is_empty()
+            && borrowed_callbacks.is_empty()
+            && let Some(summary) = self
+                .external_cache
+                .as_ref()
+                .summaries
+                .get(&OrderedInstanceKey(iir::InstanceKey {
+                    declaration,
+                    arguments: arguments.to_vec().into(),
+                }))
+        {
+            charge(self.fuel, arguments.len().saturating_add(1))?;
+            if let Some(returned) = &summary.returned {
+                charge_regions(returned, self.fuel)?;
+            }
+            charge(self.fuel, summary.reads.len())?;
+            return Ok(summary.clone());
+        }
+        self.function_with_callbacks_and_borrowed(
+            declaration,
+            arguments,
+            callbacks,
+            borrowed_callbacks,
+        )?;
+        self.run_pending()?;
+        let result = self.function_with_callbacks_and_borrowed(
+            declaration,
+            arguments,
+            callbacks,
+            borrowed_callbacks,
+        )?;
         if let Some(cache) = self.external_cache.as_borrowed_mut() {
             for (key, summary) in &self.cache {
-                if key.callbacks.is_empty() {
+                if key.callbacks.is_empty() && key.borrowed_callbacks.is_empty() {
                     cache
                         .summaries
-                        .entry(key.instance.clone())
+                        .entry(OrderedInstanceKey(key.instance.clone()))
                         .or_insert_with(|| summary.clone());
                 }
             }
@@ -1504,7 +1843,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         declaration: DeclarationId,
         arguments: &[Term],
     ) -> Result<Summary, String> {
-        self.function_with_callbacks(declaration, arguments, &[])
+        self.function_with_callbacks_and_borrowed(declaration, arguments, &[], &[])
     }
 
     fn function_with_callbacks(
@@ -1513,20 +1852,41 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         arguments: &[Term],
         callbacks: &[(usize, Vec<usize>, CallbackKey)],
     ) -> Result<Summary, String> {
-        charge(self.fuel, callbacks.len().saturating_add(1))?;
+        self.function_with_callbacks_and_borrowed(declaration, arguments, callbacks, &[])
+    }
+
+    fn function_with_callbacks_and_borrowed(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        callbacks: &[(usize, Vec<usize>, CallbackKey)],
+        borrowed_callbacks: &[(usize, Vec<usize>, Vec<usize>, CallbackKey)],
+    ) -> Result<Summary, String> {
+        charge(
+            self.fuel,
+            callbacks
+                .len()
+                .saturating_add(borrowed_callbacks.len())
+                .saturating_add(1),
+        )?;
         for (_, path, callback) in callbacks {
             charge(self.fuel, path.len())?;
             charge_callback(callback, self.fuel)?;
         }
+        for (_, input_fields, path, callback) in borrowed_callbacks {
+            charge(self.fuel, input_fields.len().saturating_add(path.len()))?;
+            charge_callback(callback, self.fuel)?;
+        }
         if callbacks.is_empty()
+            && borrowed_callbacks.is_empty()
             && let Some(summary) = self
                 .external_cache
                 .as_ref()
                 .summaries
-                .get(&iir::InstanceKey {
+                .get(&OrderedInstanceKey(iir::InstanceKey {
                     declaration,
                     arguments: arguments.to_vec().into(),
-                })
+                }))
         {
             charge(self.fuel, arguments.len().saturating_add(1))?;
             if let Some(returned) = &summary.returned {
@@ -1544,6 +1904,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 arguments: arguments.to_vec().into(),
             },
             callbacks: callbacks.to_vec(),
+            borrowed_callbacks: borrowed_callbacks.to_vec(),
         };
         if let Some(caller) = &self.current {
             charge(self.fuel, 1)?;
@@ -1687,6 +2048,28 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                             fields: leaf.input_fields,
                         }]),
                     );
+                }
+            }
+            let mut borrowed_frames: BTreeMap<Vec<usize>, usize> = BTreeMap::new();
+            for (_, input_fields, path, code) in key
+                .borrowed_callbacks
+                .iter()
+                .filter(|(index, _, _, _)| *index == parameter)
+            {
+                let frame_id = *borrowed_frames
+                    .entry(input_fields.clone())
+                    .or_insert_with(|| {
+                        let frame_id = self.next_storage_frame;
+                        self.next_storage_frame += 1;
+                        locals.frames.insert(frame_id, Regions::new());
+                        regions.places.insert(
+                            input_fields.clone(),
+                            Some(BTreeSet::from([(DescriptorRoot::Frame(frame_id), vec![])])),
+                        );
+                        frame_id
+                    });
+                if let Some(frame) = locals.frames.get_mut(&frame_id) {
+                    frame.code.insert(path.clone(), Some(code.clone()));
                 }
             }
             locals.insert(*id, regions);
@@ -1905,7 +2288,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         charge(self.fuel, summary.reads.len())?;
         self.reads
             .last_mut()
-            .unwrap()
+            .ok_or("text region read frame is unavailable")?
             .extend(summary.reads.iter().cloned());
         let Some(value) = &summary.returned else {
             return Ok(None);
@@ -1970,7 +2353,10 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                     charge_regions(value, self.fuel)?;
                     let mut joined = output.remove(slot);
                     merge(&mut joined, Some(value.clone()), self.fuel)?;
-                    output.insert(*slot, joined.unwrap());
+                    output.insert(
+                        *slot,
+                        joined.ok_or("text storage slot join produced no state")?,
+                    );
                 }
             }
             if next != *previous {
@@ -3706,5 +4092,138 @@ mod tests {
         infer_text_regions_with_metadata(&package, &metadata, caller_fn, &[], &mut fuel)
             .expect("60 distinct storage calls must succeed in linear budget");
         assert!(12_000 - fuel < 10_000, "used {}", 12_000 - fuel);
+    }
+
+    #[test]
+    fn intrinsic_str_grounding_accepts_validated_inputs_and_storage_and_rejects_ungrounded() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let ptr_str_ty = Term::Pointer(Box::new(str_ty.clone()));
+        let package = Package::default();
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut methods = MethodCallees::default();
+        let mut fuel = 20_000;
+
+        let s_param = lid(1);
+        let dead_local = lid(2);
+        let mut locals = Locals::new();
+        locals.insert(
+            s_param,
+            Regions::from(BTreeMap::from([(
+                vec![],
+                BTreeSet::from([TextRegionOrigin::Parameter {
+                    parameter: 0,
+                    fields: vec![],
+                }]),
+            )])),
+        );
+
+        let mut query = Query {
+            package: &package,
+            source: None,
+            declarations: &metadata,
+            cached_domains: None,
+            fuel: &mut fuel,
+            current: None,
+            local_callables: BTreeMap::new(),
+            closed_closures: vec![],
+            storage_entries: vec![],
+            storage_index: BTreeMap::new(),
+            storage_pending: VecDeque::new(),
+            storage_scheduled: BTreeSet::new(),
+            storage_dependents: BTreeMap::new(),
+            storage_cache_dependents: BTreeMap::new(),
+            storage_outer_dependents: BTreeMap::new(),
+            storage_outer_dependents_set: BTreeMap::new(),
+            storage_current: None,
+            solving_storage: false,
+            next_storage_frame: 0,
+            readonly_storage: None,
+            changed_callables: BTreeSet::new(),
+            pending: VecDeque::new(),
+            scheduled: BTreeSet::new(),
+            dependents: BTreeMap::new(),
+            dependents_set: BTreeMap::new(),
+            reads: vec![BTreeSet::new()],
+            loops: vec![],
+            exits: vec![],
+            cache: BTreeMap::new(),
+            methods: &mut methods,
+            layout_cache: TypeLayoutCacheStorage::default(),
+            external_cache: TextRegionCacheStorage::default(),
+        };
+
+        // Grounded directly from a validated `str` input region.
+        let grounded_from_input = query
+            .ground_intrinsic_text_outputs(
+                &[expr(str_ty.clone(), K::Local(s_param))],
+                &str_ty,
+                &mut locals,
+                &mut None,
+                0,
+            )
+            .expect("grounded text input must propagate backing region")
+            .expect("normal completion");
+        assert_eq!(
+            grounded_from_input.text.get(&vec![]),
+            Some(&BTreeSet::from([TextRegionOrigin::Parameter {
+                parameter: 0,
+                fields: vec![],
+            }]))
+        );
+
+        // Grounded from a live local storage descriptor pointing at `s_param`.
+        let grounded_from_storage = query
+            .ground_intrinsic_text_outputs(
+                &[expr(
+                    ptr_str_ty.clone(),
+                    K::AddressOf(Box::new(expr(str_ty.clone(), K::Local(s_param)))),
+                )],
+                &str_ty,
+                &mut locals,
+                &mut None,
+                0,
+            )
+            .expect("grounded storage descriptor must propagate backing region")
+            .expect("normal completion");
+        assert_eq!(
+            grounded_from_storage.text.get(&vec![]),
+            Some(&BTreeSet::from([TextRegionOrigin::Parameter {
+                parameter: 0,
+                fields: vec![],
+            }]))
+        );
+        assert!(query.reads[0].contains(&TextRegionOrigin::Parameter {
+            parameter: 0,
+            fields: vec![],
+        }));
+
+        // Ungrounded `usize` input cannot synthesize `str`.
+        let err = query
+            .ground_intrinsic_text_outputs(
+                &[expr(usize_ty, K::Unit)],
+                &str_ty,
+                &mut locals,
+                &mut None,
+                0,
+            )
+            .expect_err("ungrounded intrinsic output must fail closed");
+        assert!(err.contains("backing-region provenance"), "{err}");
+
+        // Live storage whose `str` has empty/cleared origins cannot synthesize `str`.
+        locals.insert(dead_local, Regions::new());
+        let err = query
+            .ground_intrinsic_text_outputs(
+                &[expr(
+                    ptr_str_ty,
+                    K::AddressOf(Box::new(expr(str_ty.clone(), K::Local(dead_local)))),
+                )],
+                &str_ty,
+                &mut locals,
+                &mut None,
+                0,
+            )
+            .expect_err("empty text storage descriptor must fail closed");
+        assert!(err.contains("backing-region provenance"), "{err}");
     }
 }

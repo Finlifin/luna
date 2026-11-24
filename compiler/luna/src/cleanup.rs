@@ -230,23 +230,7 @@ impl fmt::Display for Executable {
 }
 
 fn term_contains_str(ty: &nir::Term, fuel: &mut usize) -> Result<bool, String> {
-    let mut stack = vec![(ty, 0usize)];
-    while let Some((term, depth)) = stack.pop() {
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("text detection type budget exhausted")?;
-        if depth >= 128 {
-            return Ok(true);
-        }
-        if matches!(term, nir::Term::Primitive(nir::Primitive::Str)) {
-            return Ok(true);
-        }
-        term.visit_children::<String>(|child| {
-            stack.push((child, depth + 1));
-            Ok(())
-        })?;
-    }
-    Ok(false)
+    elaboration::verification::memory::term_contains_str(None, ty, fuel)
 }
 
 fn type_already_in_graph(graph: &iir::Package, ty: &nir::Term, depth: usize) -> bool {
@@ -390,25 +374,40 @@ fn collect_dyn_cleanups(
 
 #[derive(Default)]
 struct InstanceDeps {
-    callees: std::collections::HashSet<iir::InstanceKey>,
+    callees: std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey>,
     dynamic_or_unknown: bool,
 }
 
+fn retain_caches_for_changed(
+    caches: &mut elaboration::verification::SessionCaches,
+    changed: &std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey>,
+) {
+    if changed.is_empty() {
+        return;
+    }
+    let set: std::collections::HashSet<iir::InstanceKey> =
+        changed.iter().map(|key| key.0.clone()).collect();
+    caches.retain_unaffected(&set);
+}
+
 fn affected_cleanup_instances(
-    changed: &std::collections::HashSet<iir::InstanceKey>,
-    instance_deps: &std::collections::HashMap<iir::InstanceKey, InstanceDeps>,
-    schedule_deps: &std::collections::HashMap<
-        iir::InstanceKey,
-        std::collections::HashSet<iir::InstanceKey>,
+    changed: &std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey>,
+    instance_deps: &std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedInstanceKey,
+        InstanceDeps,
+    >,
+    schedule_deps: &std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedInstanceKey,
+        std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey>,
     >,
     borrowed_callables: &[iir::InstanceKey],
-) -> std::collections::HashSet<iir::InstanceKey> {
-    let mut affected = std::collections::HashSet::new();
+) -> std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey> {
+    let mut affected = std::collections::BTreeSet::new();
     if changed.is_empty() {
         return affected;
     }
     let mut worklist = std::collections::VecDeque::new();
-    let mut enqueue = |key: iir::InstanceKey| {
+    let mut enqueue = |key: elaboration::verification::memory::OrderedInstanceKey| {
         if affected.insert(key.clone()) {
             worklist.push_back(key);
         }
@@ -417,7 +416,9 @@ fn affected_cleanup_instances(
         enqueue(key.clone());
     }
     for key in borrowed_callables {
-        enqueue(key.clone());
+        enqueue(elaboration::verification::memory::OrderedInstanceKey(
+            key.clone(),
+        ));
     }
     for (caller, deps) in instance_deps {
         if deps.dynamic_or_unknown {
@@ -425,8 +426,10 @@ fn affected_cleanup_instances(
         }
     }
 
-    let mut callers_of: std::collections::HashMap<&iir::InstanceKey, Vec<&iir::InstanceKey>> =
-        std::collections::HashMap::new();
+    let mut callers_of: std::collections::BTreeMap<
+        &elaboration::verification::memory::OrderedInstanceKey,
+        Vec<&elaboration::verification::memory::OrderedInstanceKey>,
+    > = std::collections::BTreeMap::new();
     for (caller, deps) in instance_deps {
         for callee in &deps.callees {
             callers_of.entry(callee).or_default().push(caller);
@@ -588,10 +591,10 @@ fn prepare_source_impl(
     };
     use nir::program::ExprKind as K;
     let mut roots = vec![entry.clone()];
-    let mut types = vec![];
+    let mut types: Vec<nir::Term> = vec![];
     let mut receivers: Vec<(iir::InstanceKey, nir::Term)> = vec![];
     let mut schedule = Schedule::default();
-    let mut generated_layouts = std::collections::HashSet::new();
+    let mut generated_layouts = std::collections::BTreeSet::new();
     let mut cleanup_accesses: Vec<(iir::InstanceKey, Vec<nir::program::RuntimeCleanupAccess>)> =
         vec![];
     let mut instantiation = elaboration::materialization::InstantiationSession::new(source);
@@ -599,20 +602,23 @@ fn prepare_source_impl(
     // Rebuilding for new destructor roots consumes the same graph allowance;
     // it must not receive a fresh budget on each pass through the loop.
     let mut construction_budget = budget;
-    let mut verified_text_roots = std::collections::HashSet::new();
-    let mut validated_instances = std::collections::HashSet::new();
-    let mut instance_deps: std::collections::HashMap<iir::InstanceKey, InstanceDeps> =
-        std::collections::HashMap::new();
-    let mut schedule_deps: std::collections::HashMap<
-        iir::InstanceKey,
-        std::collections::HashSet<iir::InstanceKey>,
-    > = std::collections::HashMap::new();
-    let mut scheduled_roots: std::collections::HashSet<iir::InstanceKey> =
-        std::collections::HashSet::new();
+    let mut verified_text_roots = std::collections::BTreeSet::new();
+    let mut validated_instances = std::collections::BTreeSet::new();
+    let mut instance_deps: std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedInstanceKey,
+        InstanceDeps,
+    > = std::collections::BTreeMap::new();
+    let mut schedule_deps: std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedInstanceKey,
+        std::collections::BTreeSet<elaboration::verification::memory::OrderedInstanceKey>,
+    > = std::collections::BTreeMap::new();
+    let mut scheduled_roots: std::collections::BTreeSet<
+        elaboration::verification::memory::OrderedInstanceKey,
+    > = std::collections::BTreeSet::new();
     let mut graph_has_text = false;
     let mut retained_caches = elaboration::verification::SessionCaches::default();
     let mut owned_layouts: Option<Package> = None;
-    let mut copy_cache = std::collections::HashMap::new();
+    let mut copy_cache = std::collections::BTreeMap::new();
     let mut cached_graph: Option<(Vec<iir::InstanceKey>, Vec<nir::Term>, iir::Package)> = None;
 
     loop {
@@ -623,7 +629,11 @@ fn prepare_source_impl(
         // an independently materializable source type root.
         let source_types = types
             .iter()
-            .filter(|ty| !generated_layouts.contains(*ty))
+            .filter(|ty| {
+                !generated_layouts.contains(&elaboration::verification::memory::OrderedTerm(
+                    (*ty).clone(),
+                ))
+            })
             .cloned()
             .collect::<Vec<_>>();
         let graph_changed = !matches!(
@@ -663,6 +673,8 @@ fn prepare_source_impl(
             if !generated.is_empty() {
                 // New roots can change the traversal order of late expansions.
                 // Recompute schedules against this graph's identities and sources.
+                // Keep `graph_has_text` monotone across extensions: adding generated
+                // enum layouts never removes text provenance from existing functions.
                 schedule = Schedule::default();
                 copy_cache.clear();
                 retained_caches = Default::default();
@@ -671,10 +683,12 @@ fn prepare_source_impl(
                 instance_deps.clear();
                 schedule_deps.clear();
                 scheduled_roots.clear();
-                graph_has_text = false;
                 let view = owned_layouts.get_or_insert_with(|| package.clone());
                 for (ty, definition) in generated {
                     nir::type_computations::charge_term(&ty, fuel).map_err(|e| e.to_string())?;
+                    if !graph_has_text && term_contains_str(&ty, fuel)? {
+                        graph_has_text = true;
+                    }
                     *fuel = fuel
                         .checked_sub(definition.variants.len().saturating_add(1))
                         .ok_or("generated enum layout budget exhausted")?;
@@ -682,16 +696,21 @@ fn prepare_source_impl(
                         for field in &variant.fields {
                             nir::type_computations::charge_term(field, fuel)
                                 .map_err(|e| e.to_string())?;
+                            if !graph_has_text && term_contains_str(field, fuel)? {
+                                graph_has_text = true;
+                            }
                         }
                     }
-                    generated_layouts.insert(ty);
+                    generated_layouts.insert(elaboration::verification::memory::OrderedTerm(ty));
                     view.enums.push(definition);
                 }
             } else {
                 retained_caches.on_graph_extended();
             }
             for instance in &graph.functions {
-                if !validated_instances.insert(instance.key.clone()) {
+                let ordered_key =
+                    elaboration::verification::memory::OrderedInstanceKey(instance.key.clone());
+                if !validated_instances.insert(ordered_key.clone()) {
                     continue;
                 }
                 nir::type_computations::charge_term(&instance.function.signature, fuel)
@@ -716,19 +735,27 @@ fn prepare_source_impl(
                     }
                     match &expr.kind {
                         K::Function(declaration) => {
-                            deps.callees.insert(iir::InstanceKey {
-                                declaration: *declaration,
-                                arguments: vec![].into(),
-                            });
+                            deps.callees.insert(
+                                elaboration::verification::memory::OrderedInstanceKey(
+                                    iir::InstanceKey {
+                                        declaration: *declaration,
+                                        arguments: vec![].into(),
+                                    },
+                                ),
+                            );
                         }
                         K::FunctionInstance {
                             declaration,
                             arguments,
                         } => {
-                            deps.callees.insert(iir::InstanceKey {
-                                declaration: *declaration,
-                                arguments: arguments.clone().into(),
-                            });
+                            deps.callees.insert(
+                                elaboration::verification::memory::OrderedInstanceKey(
+                                    iir::InstanceKey {
+                                        declaration: *declaration,
+                                        arguments: arguments.clone().into(),
+                                    },
+                                ),
+                            );
                         }
                         K::TraitMethod {
                             interface,
@@ -747,10 +774,14 @@ fn prepare_source_impl(
                                         if method.member == *member
                                             && method.method_arguments == *method_arguments
                                         {
-                                            deps.callees.insert(iir::InstanceKey {
-                                                declaration: method.body,
-                                                arguments: method.arguments.clone().into(),
-                                            });
+                                            deps.callees.insert(
+                                                elaboration::verification::memory::OrderedInstanceKey(
+                                                    iir::InstanceKey {
+                                                        declaration: method.body,
+                                                        arguments: method.arguments.clone().into(),
+                                                    },
+                                                ),
+                                            );
                                             matched = true;
                                         }
                                     }
@@ -775,12 +806,12 @@ fn prepare_source_impl(
                     }
                     Ok(())
                 })?;
-                instance_deps.insert(instance.key.clone(), deps);
+                instance_deps.insert(ordered_key, deps);
             }
         }
         let mut cleanup_changed = false;
-        let mut changed_cleanup_keys = std::collections::HashSet::new();
-        let mut round_affected = std::collections::HashSet::new();
+        let mut changed_cleanup_keys = std::collections::BTreeSet::new();
+        let mut round_affected = std::collections::BTreeSet::new();
         let view = owned_layouts.get_or_insert_with(|| package.clone());
         if graph_changed || view.runtime_instances.len() != graph.functions.len() {
             view.runtime_instances = graph
@@ -823,13 +854,15 @@ fn prepare_source_impl(
             .with_caches(std::mem::take(&mut retained_caches));
         let text_provenance = if graph_has_text {
             for root in &roots {
-                if !verified_text_roots.contains(root) {
+                let ordered_root =
+                    elaboration::verification::memory::OrderedInstanceKey(root.clone());
+                if !verified_text_roots.contains(&ordered_root) {
                     verification_session.infer_text_regions(
                         root.declaration,
                         &root.arguments,
                         fuel,
                     )?;
-                    verified_text_roots.insert(root.clone());
+                    verified_text_roots.insert(ordered_root);
                 }
             }
             elaboration::verification::memory::TextProvenance::VerifiedByRegionAnalysis
@@ -850,10 +883,12 @@ fn prepare_source_impl(
         let mut deferred = false;
         let mut deferred_nested = false;
         'instances: for instance in graph.functions.iter().rev() {
-            if scheduled_roots.contains(&instance.key) {
+            let ordered_instance_key =
+                elaboration::verification::memory::OrderedInstanceKey(instance.key.clone());
+            if scheduled_roots.contains(&ordered_instance_key) {
                 continue;
             }
-            if cleanup_changed && round_affected.contains(&instance.key) {
+            if cleanup_changed && round_affected.contains(&ordered_instance_key) {
                 continue;
             }
             // Higher-order bodies are verified against each call's concrete
@@ -1094,7 +1129,11 @@ fn prepare_source_impl(
                             nir::type_computations::charge_term(&access.ty, fuel)
                                 .map_err(|e| e.to_string())?;
                             effects.push(access);
-                            if changed_cleanup_keys.insert(cleanup_accesses[position].0.clone()) {
+                            if changed_cleanup_keys.insert(
+                                elaboration::verification::memory::OrderedInstanceKey(
+                                    cleanup_accesses[position].0.clone(),
+                                ),
+                            ) {
                                 round_affected = affected_cleanup_instances(
                                     &changed_cleanup_keys,
                                     &instance_deps,
@@ -1413,9 +1452,11 @@ fn prepare_source_impl(
                     }
                     if let Some(target) = recursive_target {
                         schedule_deps
-                            .entry(instance.key.clone())
+                            .entry(ordered_instance_key.clone())
                             .or_default()
-                            .insert(key.clone());
+                            .insert(elaboration::verification::memory::OrderedInstanceKey(
+                                key.clone(),
+                            ));
                         let mut recursive_context = context.clone();
                         recursive_context.push(ContextKey::Function {
                             call: call.source,
@@ -1580,9 +1621,11 @@ fn prepare_source_impl(
                         return Err("named callable context lost its input premises".into());
                     }
                     schedule_deps
-                        .entry(instance.key.clone())
+                        .entry(ordered_instance_key.clone())
                         .or_default()
-                        .insert(key.clone());
+                        .insert(elaboration::verification::memory::OrderedInstanceKey(
+                            key.clone(),
+                        ));
                     let mut child_context = context.clone();
                     child_context.push(ContextKey::Function {
                         call: call.source,
@@ -1776,9 +1819,13 @@ fn prepare_source_impl(
                             let steps=lower(&plan.steps,&plan.receiver,&mut methods,&mut receivers,fuel,0)?;
                             for method in methods {
                                 schedule_deps
-                                    .entry(instance.key.clone())
+                                    .entry(ordered_instance_key.clone())
                                     .or_default()
-                                    .insert(method.clone());
+                                    .insert(
+                                        elaboration::verification::memory::OrderedInstanceKey(
+                                            method.clone(),
+                                        ),
+                                    );
                                 if !roots.contains(&method) {
                                     roots.push(method);
                                 }
@@ -1848,9 +1895,11 @@ fn prepare_source_impl(
                         )?;
                         for method in methods {
                             schedule_deps
-                                .entry(instance.key.clone())
+                                .entry(ordered_instance_key.clone())
                                 .or_default()
-                                .insert(method.clone());
+                                .insert(elaboration::verification::memory::OrderedInstanceKey(
+                                    method.clone(),
+                                ));
                             if !roots.contains(&method) {
                                 roots.push(method);
                             }
@@ -2032,14 +2081,14 @@ fn prepare_source_impl(
                     pattern_orders,
                 });
             }
-            scheduled_roots.insert(instance.key.clone());
+            scheduled_roots.insert(ordered_instance_key);
         }
         if deferred_nested {
             // Every caller must be rechecked against the grown transitive footprint.
             // No schedule from a provisional body-only round is published.
             drop(cleanup_session);
             retained_caches = verification_session.into_caches();
-            retained_caches.retain_unaffected(&changed_cleanup_keys);
+            retain_caches_for_changed(&mut retained_caches, &changed_cleanup_keys);
             schedule = Schedule::default();
             scheduled_roots.clear();
             schedule_deps.clear();
@@ -2050,25 +2099,33 @@ fn prepare_source_impl(
             // Retain unaffected schedules across fixpoint rounds.
             drop(cleanup_session);
             retained_caches = verification_session.into_caches();
-            retained_caches.retain_unaffected(&changed_cleanup_keys);
+            retain_caches_for_changed(&mut retained_caches, &changed_cleanup_keys);
             let affected = affected_cleanup_instances(
                 &changed_cleanup_keys,
                 &instance_deps,
                 &schedule_deps,
                 &schedule.borrowed_callable_functions,
             );
-            schedule
-                .functions
-                .retain(|item| !affected.contains(&item.instance));
-            schedule
-                .closure_definitions
-                .retain(|item| !affected.contains(&item.instance));
-            schedule
-                .aliases
-                .retain(|item| !affected.contains(&item.instance));
-            schedule
-                .borrowed_callable_functions
-                .retain(|key| !affected.contains(key));
+            schedule.functions.retain(|item| {
+                !affected.contains(&elaboration::verification::memory::OrderedInstanceKey(
+                    item.instance.clone(),
+                ))
+            });
+            schedule.closure_definitions.retain(|item| {
+                !affected.contains(&elaboration::verification::memory::OrderedInstanceKey(
+                    item.instance.clone(),
+                ))
+            });
+            schedule.aliases.retain(|item| {
+                !affected.contains(&elaboration::verification::memory::OrderedInstanceKey(
+                    item.instance.clone(),
+                ))
+            });
+            schedule.borrowed_callable_functions.retain(|key| {
+                !affected.contains(&elaboration::verification::memory::OrderedInstanceKey(
+                    key.clone(),
+                ))
+            });
             scheduled_roots.retain(|key| !affected.contains(key));
             schedule_deps.retain(|key, _| !affected.contains(key));
             continue;
@@ -2076,7 +2133,7 @@ fn prepare_source_impl(
         if deferred {
             drop(cleanup_session);
             retained_caches = verification_session.into_caches();
-            retained_caches.retain_unaffected(&changed_cleanup_keys);
+            retain_caches_for_changed(&mut retained_caches, &changed_cleanup_keys);
             continue;
         }
         if previous == (roots.len(), types.len()) {
@@ -2093,7 +2150,7 @@ fn prepare_source_impl(
             if previous != (roots.len(), types.len()) {
                 drop(cleanup_session);
                 retained_caches = verification_session.into_caches();
-                retained_caches.retain_unaffected(&changed_cleanup_keys);
+                retain_caches_for_changed(&mut retained_caches, &changed_cleanup_keys);
                 continue;
             }
             // Contract proofs use the final runtime-instance and cleanup-access
@@ -2119,15 +2176,28 @@ fn prepare_source_impl(
                     })?;
                 }
             }
-            let order: std::collections::HashMap<iir::InstanceKey, usize> = graph
+            let order: std::collections::BTreeMap<
+                elaboration::verification::memory::OrderedInstanceKey,
+                usize,
+            > = graph
                 .functions
                 .iter()
                 .enumerate()
-                .map(|(index, instance)| (instance.key.clone(), index))
+                .map(|(index, instance)| {
+                    (
+                        elaboration::verification::memory::OrderedInstanceKey(instance.key.clone()),
+                        index,
+                    )
+                })
                 .collect();
-            schedule
-                .functions
-                .sort_by_key(|item| order.get(&item.instance).copied().unwrap_or(usize::MAX));
+            schedule.functions.sort_by_key(|item| {
+                order
+                    .get(&elaboration::verification::memory::OrderedInstanceKey(
+                        item.instance.clone(),
+                    ))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
             drop(cleanup_session);
             drop(verification_session);
             let (_, _, mut graph) = cached_graph.take().unwrap();
@@ -2146,7 +2216,7 @@ fn prepare_source_impl(
         }
         drop(cleanup_session);
         retained_caches = verification_session.into_caches();
-        retained_caches.retain_unaffected(&changed_cleanup_keys);
+        retain_caches_for_changed(&mut retained_caches, &changed_cleanup_keys);
     }
 }
 
@@ -2204,14 +2274,17 @@ fn collect_pattern_then_hooks(
 #[cfg(test)]
 mod tests {
     use super::{InstanceDeps, affected_cleanup_instances};
+    use elaboration::verification::memory::OrderedInstanceKey;
     use nir::DeclarationId;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn affected_cleanup_instances_evicts_transitive_dynamic_drop_and_borrowed_keeps_disjoint() {
-        let key = |local| iir::InstanceKey {
-            declaration: DeclarationId { package: 1, local },
-            arguments: vec![].into(),
+        let key = |local| {
+            OrderedInstanceKey(iir::InstanceKey {
+                declaration: DeclarationId { package: 1, local },
+                arguments: vec![].into(),
+            })
         };
         let leaf_changed = key(1);
         let direct_caller = key(2);
@@ -2221,19 +2294,19 @@ mod tests {
         let borrowed_fn = key(6);
         let disjoint_fn = key(7);
 
-        let mut instance_deps = HashMap::new();
+        let mut instance_deps = BTreeMap::new();
         instance_deps.insert(leaf_changed.clone(), InstanceDeps::default());
         instance_deps.insert(
             direct_caller.clone(),
             InstanceDeps {
-                callees: HashSet::from([leaf_changed.clone()]),
+                callees: BTreeSet::from([leaf_changed.clone()]),
                 dynamic_or_unknown: false,
             },
         );
         instance_deps.insert(
             transitive_caller.clone(),
             InstanceDeps {
-                callees: HashSet::from([direct_caller.clone()]),
+                callees: BTreeSet::from([direct_caller.clone()]),
                 dynamic_or_unknown: false,
             },
         );
@@ -2241,16 +2314,16 @@ mod tests {
         instance_deps.insert(
             dynamic_fn.clone(),
             InstanceDeps {
-                callees: HashSet::new(),
+                callees: BTreeSet::new(),
                 dynamic_or_unknown: true,
             },
         );
         instance_deps.insert(disjoint_fn.clone(), InstanceDeps::default());
 
         let schedule_deps =
-            HashMap::from([(drop_caller.clone(), HashSet::from([leaf_changed.clone()]))]);
-        let borrowed_callables = vec![borrowed_fn.clone()];
-        let changed = HashSet::from([leaf_changed.clone()]);
+            BTreeMap::from([(drop_caller.clone(), BTreeSet::from([leaf_changed.clone()]))]);
+        let borrowed_callables = vec![borrowed_fn.0.clone()];
+        let changed = BTreeSet::from([leaf_changed.clone()]);
 
         let affected = affected_cleanup_instances(
             &changed,
@@ -2258,13 +2331,12 @@ mod tests {
             &schedule_deps,
             &borrowed_callables,
         );
-
         assert!(affected.contains(&leaf_changed));
         assert!(affected.contains(&direct_caller));
         assert!(affected.contains(&transitive_caller));
         assert!(affected.contains(&drop_caller));
         assert!(affected.contains(&dynamic_fn));
-        assert!(affected.contains(&borrowed_fn));
+        assert!(affected.contains(&OrderedInstanceKey(borrowed_fn.0)));
         assert!(!affected.contains(&disjoint_fn));
     }
 

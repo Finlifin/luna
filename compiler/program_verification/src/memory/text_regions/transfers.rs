@@ -14,15 +14,15 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let K::Function(declaration) = &expr.kind else {
             unreachable!("checked text transfer variant")
         };
-        let mut empty = Some(Regions::new());
-        empty.as_mut().unwrap().code.insert(
+        let mut regions = Regions::new();
+        regions.code.insert(
             vec![],
             Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
                 arguments: vec![].into(),
             })),
         );
-        Ok(empty)
+        Ok(Some(regions))
     }
 
     #[inline(never)]
@@ -63,15 +63,15 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         else {
             unreachable!("checked text transfer variant")
         };
-        let mut empty = Some(Regions::new());
-        empty.as_mut().unwrap().code.insert(
+        let mut regions = Regions::new();
+        regions.code.insert(
             vec![],
             Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
                 arguments: arguments.clone().into(),
             })),
         );
-        Ok(empty)
+        Ok(Some(regions))
     }
 
     #[inline(never)]
@@ -111,7 +111,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             unreachable!("checked text transfer variant")
         };
         let may_hold = self.type_may_hold_text_or_callable(&place.ty)?;
-        let mut empty = Some(Regions::new());
+        let mut regions = Regions::new();
         let mut place = place.as_ref();
         let mut path = Vec::new();
         while let K::Field { value, index, .. } | K::AnonymousField { value, index, .. } =
@@ -128,18 +128,18 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 }
                 if may_hold {
                     path.reverse();
-                    empty.as_mut().unwrap().places.insert(
+                    regions.places.insert(
                         vec![],
                         Some(BTreeSet::from([(DescriptorRoot::Local(*root), path)])),
                     );
                 }
-                Ok(empty)
+                Ok(Some(regions))
             }
             K::ReadPointer(inner) if !may_hold => {
                 if self.expr(inner, locals, returned, next)?.is_none() {
                     return Ok(None);
                 }
-                Ok(empty)
+                Ok(Some(regions))
             }
             _ => Err("text descriptor address requires local storage".into()),
         }
@@ -270,7 +270,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 // candidate's old value for executions selecting another.
                 let mut joined = Some(target.clone());
                 merge(&mut joined, Some(replacement), self.fuel)?;
-                *target = joined.unwrap();
+                *target = joined.ok_or("text descriptor pointer write join produced no state")?;
             }
         }
         Ok(empty)
@@ -677,7 +677,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 backedges: None,
             });
             let result = self.expr(body, &mut iteration, returned, next);
-            let mut flow = self.loops.pop().unwrap();
+            let mut flow = self.loops.pop().ok_or("text region loop stack underflow")?;
             if result?.is_some() {
                 join_locals(&mut flow.backedges, &iteration, &bindings, self.fuel)?;
             }
@@ -689,7 +689,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             };
             let mut joined = Some(self.locals_copy(&head)?);
             join_locals(&mut joined, &backedges, &bindings, self.fuel)?;
-            let joined = joined.unwrap();
+            let joined = joined.ok_or("text region loop join produced no state")?;
             if joined == head {
                 break;
             }
@@ -858,27 +858,18 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         if *query == nir::program::TextQueryKind::SymbolByte {
             // Symbol names have immutable storage independent of the
             // local scalar that carries the symbol identity.
-            self.reads
-                .last_mut()
-                .unwrap()
-                .insert(TextRegionOrigin::Static);
+            self.record_reads([TextRegionOrigin::Static])?;
         } else if *query == nir::program::TextQueryKind::Byte {
             let origins = value
                 .get(&vec![0])
                 .filter(|origins| !origins.is_empty())
                 .ok_or("text byte read has no backing-region origin")?;
             charge(self.fuel, origins.len())?;
-            self.reads
-                .last_mut()
-                .unwrap()
-                .extend(origins.iter().cloned());
+            self.record_reads(origins.iter().cloned())?;
         } else if *query == nir::program::TextQueryKind::Slice {
             if let Some(origins) = value.get(&vec![0]) {
                 charge(self.fuel, origins.len())?;
-                self.reads
-                    .last_mut()
-                    .unwrap()
-                    .extend(origins.iter().cloned());
+                self.record_reads(origins.iter().cloned())?;
             }
             return Ok(Some(Regions::from(BTreeMap::from([(
                 vec![VARIANT_FIELD, 1, 0],
@@ -888,10 +879,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             for index in [0, 1] {
                 if let Some(origins) = value.get(&vec![index]) {
                     charge(self.fuel, origins.len())?;
-                    self.reads
-                        .last_mut()
-                        .unwrap()
-                        .extend(origins.iter().cloned());
+                    self.record_reads(origins.iter().cloned())?;
                 }
             }
             return Ok(Some(Regions::from(BTreeMap::from([(
@@ -991,8 +979,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let [value] = fields else {
             return Err("text error transport requires one payload".into());
         };
+        let Some(tag) = tag else {
+            return Err("text error constructor requires an explicit variant tag".into());
+        };
         self.expr(value, locals, returned, next)?
-            .map(|value| prefix(value, &[VARIANT_FIELD, tag.unwrap(), 0], self.fuel))
+            .map(|value| prefix(value, &[VARIANT_FIELD, tag, 0], self.fuel))
             .transpose()
     }
 
@@ -1052,12 +1043,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 self.local_callables.insert(binding, previous);
             }
         }
-        empty
-            .as_mut()
-            .unwrap()
+        let mut regions = empty.ok_or("text closure region state is unavailable")?;
+        regions
             .code
             .insert(vec![], code?.and_then(|code| code.key()));
-        Ok(empty)
+        Ok(Some(regions))
     }
 
     #[inline(never)]
@@ -1142,6 +1132,74 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         Ok(empty)
     }
 
+    pub(super) fn ground_intrinsic_text_outputs(
+        &mut self,
+        inputs: &[Expr],
+        out_ty: &Term,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let mut grounded_origins = BTreeSet::new();
+        for input in inputs {
+            let Some(regions) = self.expr(input, locals, returned, next)? else {
+                return Ok(None);
+            };
+            charge_regions(&regions, self.fuel)?;
+            for leaf in self.borrowed_input_layout(&input.ty)? {
+                let BorrowedInputLeaf::Text(leaf) = leaf else {
+                    continue;
+                };
+                if let Some(origins) = regions.get(&leaf.input_fields).filter(|o| !o.is_empty()) {
+                    charge(self.fuel, origins.len())?;
+                    self.record_reads(origins.iter().cloned())?;
+                    grounded_origins.extend(origins.iter().cloned());
+                } else if leaf.guards.is_empty() {
+                    return Err("intrinsic text input has no backing-region origin".into());
+                }
+            }
+            for targets in regions.places.values().flatten() {
+                for (root, path) in targets {
+                    let storage = locals
+                        .get_storage(root)
+                        .ok_or("intrinsic text storage is no longer live")?;
+                    charge_regions(storage, self.fuel)?;
+                    let projected = project(storage.clone(), path, self.fuel)?;
+                    for origins in projected.text.values() {
+                        if origins.is_empty() {
+                            continue;
+                        }
+                        charge(self.fuel, origins.len())?;
+                        self.record_reads(origins.iter().cloned())?;
+                        grounded_origins.extend(origins.iter().cloned());
+                    }
+                }
+            }
+        }
+        let mut output = Regions::new();
+        for leaf in self.borrowed_input_layout(out_ty)? {
+            let BorrowedInputLeaf::Text(leaf) = leaf else {
+                continue;
+            };
+            if grounded_origins.is_empty() {
+                return Err(
+                    "intrinsic cannot synthesize text view without backing-region provenance"
+                        .into(),
+                );
+            }
+            charge(
+                self.fuel,
+                leaf.input_fields
+                    .len()
+                    .saturating_add(grounded_origins.len()),
+            )?;
+            output
+                .text
+                .insert(leaf.input_fields, grounded_origins.clone());
+        }
+        Ok(Some(output))
+    }
+
     #[inline(never)]
     pub(super) fn transfer_intrinsic(
         &mut self,
@@ -1153,35 +1211,10 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let K::Intrinsic { inputs, .. } = &expr.kind else {
             unreachable!("checked text transfer variant")
         };
-        let empty = Some(Regions::new());
         // Admitted operations do not retain text or mutate caller memory.
         // Platform operations may synchronously read their text inputs.
         nir::intrinsics::checked(expr).map_err(|e| e.to_string())?;
-        for input in inputs {
-            let Some(regions) = self.expr(input, locals, returned, next)? else {
-                return Ok(None);
-            };
-            if input.ty == Term::Primitive(Primitive::Str) {
-                let origins = regions
-                    .get(&vec![])
-                    .filter(|origins| !origins.is_empty())
-                    .ok_or("intrinsic text input has no backing-region origin")?;
-                charge(self.fuel, origins.len())?;
-                self.reads
-                    .last_mut()
-                    .unwrap()
-                    .extend(origins.iter().cloned());
-            }
-        }
-        for leaf in self.borrowed_input_layout(&expr.ty)? {
-            if matches!(leaf, BorrowedInputLeaf::Text(_)) {
-                return Err(
-                    "intrinsic cannot synthesize text view without backing-region provenance"
-                        .into(),
-                );
-            }
-        }
-        Ok(empty)
+        self.ground_intrinsic_text_outputs(inputs, &expr.ty, locals, returned, next)
     }
 
     #[inline(never)]
@@ -1211,7 +1244,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                     let bindings: Vec<_> = locals.keys().copied().collect();
                     let mut joined = Some(self.locals_copy(locals)?);
                     join_locals(&mut joined, &taken, &bindings, self.fuel)?;
-                    *locals = joined.unwrap();
+                    *locals = joined.ok_or("text region short-circuit join produced no state")?;
                 }
                 // The short-circuited path still continues even when
                 // evaluating the right operand would return or diverge.
@@ -1245,7 +1278,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             // descriptor. Non-text scalar operands have no regions.
             charge_regions(&regions, self.fuel)?;
             for origins in regions.text.into_values() {
-                self.reads.last_mut().unwrap().extend(origins);
+                self.record_reads(origins)?;
             }
         }
         Ok(empty)
@@ -1423,7 +1456,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 }
             }
 
-            let next_head = next_head.unwrap();
+            let next_head = next_head.ok_or("text region effect handler join produced no state")?;
             if next_head == head {
                 break (exits, result);
             }

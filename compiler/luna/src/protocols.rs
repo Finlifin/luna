@@ -69,14 +69,119 @@ pub(crate) fn copy_delivery_cached(
     items: &LangItems,
     ty: &nir::Term,
     budget: Budget,
-    cache: &mut std::collections::HashMap<nir::Term, elaboration::verification::moves::Delivery>,
+    cache: &mut std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedTerm,
+        elaboration::verification::moves::Delivery,
+    >,
 ) -> Result<elaboration::verification::moves::Delivery, String> {
-    if let Some(delivery) = cache.get(ty) {
+    let key = elaboration::verification::memory::OrderedTerm(ty.clone());
+    if let Some(delivery) = cache.get(&key) {
         return Ok(delivery.clone());
     }
     let delivery = copy_delivery(package, world, items, ty, budget)?;
-    cache.insert(ty.clone(), delivery.clone());
+    cache.insert(key, delivery.clone());
     Ok(delivery)
+}
+
+fn convert_text_callbacks(
+    callables: &[elaboration::verification::moves::CallableParameter],
+) -> Option<(
+    Vec<elaboration::verification::memory::TextCallbackInput>,
+    Vec<iir::InstanceKey>,
+)> {
+    use elaboration::verification::memory::TextCallbackInput;
+    use nir::program::ExprKind as K;
+
+    let expr_key = |expr: &nir::program::Expr| -> Option<iir::InstanceKey> {
+        match &expr.kind {
+            K::Function(declaration) => Some(iir::InstanceKey {
+                declaration: *declaration,
+                arguments: vec![].into(),
+            }),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => Some(iir::InstanceKey {
+                declaration: *declaration,
+                arguments: arguments.clone().into(),
+            }),
+            _ => None,
+        }
+    };
+
+    let mut converted = Vec::with_capacity(callables.len());
+    let mut instances = Vec::new();
+    for callable in callables {
+        if !callable.captures.is_empty() || !callable.enum_captures.is_empty() {
+            return None;
+        }
+        let mut targets = Vec::new();
+        if callable.choices.is_empty() {
+            targets.push(expr_key(&callable.definition)?);
+            for alt in &callable.alternatives {
+                targets.push(expr_key(alt)?);
+            }
+        } else {
+            for choice in &callable.choices {
+                if !choice.captures.is_empty()
+                    || !choice.enum_captures.is_empty()
+                    || !choice.choices.is_empty()
+                {
+                    return None;
+                }
+                targets.push(expr_key(&choice.definition)?);
+                for alt in &choice.alternatives {
+                    targets.push(expr_key(alt)?);
+                }
+            }
+        }
+        if targets.is_empty() {
+            return None;
+        }
+        instances.extend(targets.iter().cloned());
+        converted.push(TextCallbackInput::Owned {
+            parameter: callable.parameter,
+            fields: callable.fields.clone(),
+            targets,
+        });
+    }
+    Some((converted, instances))
+}
+
+fn verify_text_provenance_for_session<'a>(
+    session: &mut elaboration::verification::PackageSession<'a>,
+    declaration: nir::DeclarationId,
+    arguments: &[nir::Term],
+    extra_roots: &[(&nir::program::Function, &[nir::Term])],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    has_unmodeled_context: bool,
+    fuel: &mut usize,
+) -> Result<elaboration::verification::memory::TextProvenance, String> {
+    use elaboration::verification::memory::{
+        TextProvenance, infer_text_regions_with_callbacks, reachable_contains_str,
+    };
+    let package = session.package();
+    if has_unmodeled_context {
+        return Ok(TextProvenance::Unchecked);
+    }
+    let Some((function, body_arguments)) = package.runtime_body(declaration, arguments) else {
+        return Ok(TextProvenance::Unchecked);
+    };
+    let Some((text_callbacks, extra_instances)) = convert_text_callbacks(callables) else {
+        return Ok(TextProvenance::Unchecked);
+    };
+    let mut roots = Vec::with_capacity(1 + extra_roots.len());
+    roots.push((function, body_arguments));
+    roots.extend_from_slice(extra_roots);
+    if !reachable_contains_str(package, &roots, arguments, &extra_instances, fuel)? {
+        return Ok(TextProvenance::Unchecked);
+    }
+    if text_callbacks.is_empty() {
+        session.infer_text_regions(declaration, arguments, fuel)?;
+    } else {
+        infer_text_regions_with_callbacks(package, declaration, arguments, &text_callbacks, fuel)?;
+    }
+    Ok(TextProvenance::VerifiedByRegionAnalysis)
 }
 
 /// Analyze moves using bound protocol identity. Explicit or assumed Copy
@@ -230,6 +335,7 @@ pub fn analyze_cleanup_with_context(
         vec![],
     )
 }
+
 pub fn analyze_cleanup_with_effect_context(
     package: &nir::program::Package,
     world: &World<'_>,
@@ -285,6 +391,72 @@ pub fn analyze_cleanup_with_field_context(
         &[],
     )
 }
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_cleanup_with_session_provenance(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    function: &nir::program::Function,
+    text_region_target: Option<(nir::DeclarationId, &[nir::Term])>,
+    mut fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+    fields: &[elaboration::verification::moves::BorrowedField],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
+    use elaboration::verification::{PackageSession, moves};
+    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+        return Err(moves::Error {
+            source: function.body.source,
+            reason: "Drop language item is not bound to a source trait".into(),
+        });
+    };
+    let mut verification_session = PackageSession::new(package);
+    let has_unmodeled_context = !borrows.is_empty()
+        || !enums.is_empty()
+        || !effects.is_empty()
+        || !fields.is_empty()
+        || !borrowed.is_empty();
+    let text_provenance = if let Some((declaration, arguments)) = text_region_target {
+        verify_text_provenance_for_session(
+            &mut verification_session,
+            declaration,
+            arguments,
+            &[(function, &[])],
+            callables,
+            has_unmodeled_context,
+            &mut fuel,
+        )
+        .map_err(|reason| moves::Error {
+            source: function.body.source,
+            reason,
+        })?
+    } else {
+        elaboration::verification::memory::TextProvenance::Unchecked
+    };
+    let mut cleanup_session = verification_session
+        .cleanup_session(world, protocol, query_budget)
+        .with_text_provenance(text_provenance);
+    moves::analyze_in_package_with_session(
+        &mut verification_session,
+        function,
+        |ty| copy_delivery(package, world, items, ty, query_budget),
+        fuel,
+        Some(&mut cleanup_session),
+        borrows,
+        callables,
+        enums,
+        effects,
+        fields,
+        borrowed,
+        text_provenance,
+    )
+}
+
 pub fn analyze_cleanup_with_borrowed_code_context(
     package: &nir::program::Package,
     world: &World<'_>,
@@ -299,20 +471,18 @@ pub fn analyze_cleanup_with_borrowed_code_context(
     fields: &[elaboration::verification::moves::BorrowedField],
     borrowed: &[elaboration::verification::moves::BorrowedCode],
 ) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
-    use elaboration::verification::{drop::CleanupSession, moves};
-    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
-        return Err(moves::Error {
-            source: function.body.source,
-            reason: "Drop language item is not bound to a source trait".into(),
-        });
-    };
-    let mut session = CleanupSession::new(package, world, protocol, query_budget);
-    moves::analyze_in_package_with_borrowed_code_context(
+    let text_region_target = function
+        .type_parameters
+        .is_empty()
+        .then_some((function.declaration, &[][..]));
+    analyze_cleanup_with_session_provenance(
         package,
+        world,
+        items,
         function,
-        |ty| copy_delivery(package, world, items, ty, query_budget),
+        text_region_target,
         fuel,
-        Some(&mut session),
+        query_budget,
         borrows,
         callables,
         enums,
@@ -326,8 +496,8 @@ pub fn analyze_cleanup_with_borrowed_code_context(
 pub(crate) fn analyze_cleanup_in_session<'a>(
     session: &mut elaboration::verification::PackageSession<'a>,
     cleanup: Option<&mut elaboration::verification::drop::CleanupSession<'a, '_>>,
-    copy_cache: &mut std::collections::HashMap<
-        nir::Term,
+    copy_cache: &mut std::collections::BTreeMap<
+        elaboration::verification::memory::OrderedTerm,
         elaboration::verification::moves::Delivery,
     >,
     world: &World<'_>,
@@ -422,13 +592,26 @@ pub fn infer_borrowed_callable_memory(
     budget: Budget,
     source: nir::program::SourceRange,
 ) -> Result<elaboration::verification::memory::Summary, String> {
-    use elaboration::verification::{drop::CleanupSession, moves};
+    use elaboration::verification::{PackageSession, moves};
     let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
         return Err("Drop language item is not bound to a source trait".into());
     };
-    let mut session = CleanupSession::new(package, world, protocol, budget);
-    moves::infer_callable_memory_with_borrowed_cleanup_context(
-        package,
+    let mut verification_session = PackageSession::new(package);
+    let has_unmodeled_context = !enums.is_empty() || !effects.is_empty() || !borrowed.is_empty();
+    let text_provenance = verify_text_provenance_for_session(
+        &mut verification_session,
+        declaration,
+        arguments,
+        &[],
+        callables,
+        has_unmodeled_context,
+        fuel,
+    )?;
+    let mut session = verification_session
+        .cleanup_session(world, protocol, budget)
+        .with_text_provenance(text_provenance);
+    moves::infer_callable_memory_with_session(
+        &mut verification_session,
         declaration,
         arguments,
         callables,
@@ -436,6 +619,7 @@ pub fn infer_borrowed_callable_memory(
         effects,
         borrowed,
         Some(&mut session),
+        text_provenance,
         fuel,
         source,
     )
@@ -488,6 +672,7 @@ pub struct MethodCleanup {
     pub invocation: elaboration::verification::memory::MethodInvocation,
     pub report: elaboration::verification::moves::Report,
 }
+
 impl std::fmt::Display for MethodCleanup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(method-cleanup {} {})", self.invocation, self.report)
@@ -548,11 +733,15 @@ pub fn analyze_method_cleanup_with_context(
                 source: callee.source,
                 reason,
             })?;
-    let report = analyze_cleanup_with_borrowed_code_context(
+    let report = analyze_cleanup_with_session_provenance(
         package,
         world,
         items,
         &invocation.function,
+        Some((
+            invocation.implementation.declaration,
+            &invocation.implementation.arguments,
+        )),
         fuel,
         query_budget,
         borrows,
