@@ -2,10 +2,41 @@
 use crate::{Error, copy_error};
 use nir::program::{Expr, ExprKind as K, Literal};
 use nir::{DeclarationId, Term};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::hash::BuildHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+
+const FNV_PRIME: u64 = 0x100000001b3;
+
+struct Fnv1aHasher(u64);
+
+impl Default for Fnv1aHasher {
+    fn default() -> Self {
+        Self(FNV_OFFSET_BASIS)
+    }
+}
+
+impl Hasher for Fnv1aHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(FNV_PRIME);
+        }
+    }
+}
+
+fn fnv1a_hash<T: Hash + ?Sized>(value: &T) -> u64 {
+    let mut hasher = Fnv1aHasher::default();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -14,35 +45,43 @@ pub enum Kind {
     Frozen(Term),
     Function(DeclarationId),
 }
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Constant {
     pub ty: Term,
     pub kind: Kind,
 }
+
 /// Stable table-local identity, independent of allocation addresses or hashes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Id(pub usize);
+
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
+
 #[derive(Default)]
 pub(crate) struct Table {
-    ids: HashMap<Arc<Constant>, Id>,
+    ids: BTreeMap<u64, Vec<(Arc<Constant>, Id)>>,
     values: Vec<Arc<Constant>>,
 }
+
 impl Table {
     // Pool::get has already charged the complete identity traversal.
     pub(crate) fn insert(&mut self, value: Arc<Constant>) -> Id {
-        if let Some(id) = self.ids.get(&value) {
+        let hash = fnv1a_hash(&value);
+        let bucket = self.ids.entry(hash).or_default();
+        if let Some((_, id)) = bucket.iter().find(|(existing, _)| *existing == value) {
             return *id;
         }
         let id = Id(self.values.len());
-        self.ids.insert(value.clone(), id);
+        bucket.push((value.clone(), id));
         self.values.push(value);
         id
     }
+
     pub(crate) fn finish(self) -> Vec<Arc<Constant>> {
         self.values
     }
@@ -57,12 +96,15 @@ enum Input<'a> {
     Frozen(&'a Term),
     Function(DeclarationId),
 }
+
 #[derive(Default)]
 pub(crate) struct Pool {
-    entries: HashMap<u64, Weak<Constant>>,
+    entries: BTreeMap<u64, Weak<Constant>>,
     order: VecDeque<u64>,
 }
+
 const MAX_ENTRIES: usize = 4096;
+
 impl Pool {
     pub(crate) fn get(&mut self, expr: &Expr, fuel: &mut usize) -> Result<Arc<Constant>, Error> {
         // Hashing and equality inspect payloads even on hits. Preserve bounded
@@ -77,7 +119,7 @@ impl Pool {
             _ => return Err(Error::Unsupported(expr.source)),
         };
         let key = (&expr.ty, input);
-        let hash = self.entries.hasher().hash_one(&key);
+        let hash = fnv1a_hash(&key);
         if let Some(value) = self.entries.get(&hash).and_then(Weak::upgrade) {
             let stored = match &value.kind {
                 Kind::Literal(v) => Input::Literal(v),
@@ -103,7 +145,9 @@ impl Pool {
         // above is mandatory; existing instructions retain their own payload.
         if !self.entries.contains_key(&hash) {
             if self.order.len() == MAX_ENTRIES {
-                self.entries.remove(&self.order.pop_front().unwrap());
+                if let Some(evicted) = self.order.pop_front() {
+                    self.entries.remove(&evicted);
+                }
             }
             self.order.push_back(hash);
         }
@@ -129,6 +173,7 @@ impl fmt::Display for Constant {
 mod tests {
     use super::*;
     use nir::{Primitive, program::SourceRange};
+
     fn literal(value: u128) -> Expr {
         Expr {
             source: SourceRange { start: 1, end: 2 },
@@ -161,10 +206,7 @@ mod tests {
         let K::Literal(value) = &input.kind else {
             unreachable!()
         };
-        let hash = pool
-            .entries
-            .hasher()
-            .hash_one((&input.ty, Input::Literal(value)));
+        let hash = fnv1a_hash(&(&input.ty, Input::Literal(value)));
         pool.entries.insert(hash, Arc::downgrade(&wrong));
         let correct = pool.get(&input, &mut 1000).unwrap();
         assert!(!Arc::ptr_eq(&wrong, &correct));

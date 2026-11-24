@@ -64,8 +64,18 @@ impl Interpreter<'_> {
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
-        let mut seen = HashSet::new();
-        self.check_comptime_graph_with_seen(value, source, depth, &mut seen)
+        self.check_comptime_graph_in(value, Some(source), depth)
+    }
+
+    pub(super) fn check_comptime_graph_in(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+        depth: usize,
+    ) -> Result<(), Error> {
+        // Only for visited-node deduplication; never iterated.
+        let mut seen = BTreeSet::new();
+        self.check_comptime_graph_with_seen_in(value, source, depth, &mut seen)
     }
 
     pub(super) fn check_comptime_graph_with_seen(
@@ -73,7 +83,17 @@ impl Interpreter<'_> {
         value: &Value,
         source: SourceRange,
         depth: usize,
-        seen: &mut HashSet<(u8, usize)>,
+        seen: &mut BTreeSet<(u8, usize)>,
+    ) -> Result<(), Error> {
+        self.check_comptime_graph_with_seen_in(value, Some(source), depth, seen)
+    }
+
+    pub(super) fn check_comptime_graph_with_seen_in(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+        depth: usize,
+        seen: &mut BTreeSet<(u8, usize)>,
     ) -> Result<(), Error> {
         self.check_comptime_graph_inner(value, source, depth, seen)
     }
@@ -81,16 +101,16 @@ impl Interpreter<'_> {
     fn check_comptime_graph_inner(
         &mut self,
         value: &Value,
-        source: SourceRange,
+        source: Option<SourceRange>,
         depth: usize,
-        seen: &mut HashSet<(u8, usize)>,
+        seen: &mut BTreeSet<(u8, usize)>,
     ) -> Result<(), Error> {
-        self.tick(Some(source))?;
+        self.tick(source)?;
         if depth >= 128 || self.depth.saturating_add(depth) >= self.budget.depth {
-            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+            return Err(self.failure(ErrorKind::DepthExhausted, source));
         }
         match value {
-            Value::Pointer(_) => return Err(self.failure(ErrorKind::PhaseMismatch, Some(source))),
+            Value::Pointer(_) => return Err(self.failure(ErrorKind::PhaseMismatch, source)),
             Value::Storage(storage) => {
                 if !seen.insert((0, Arc::as_ptr(&storage.0) as usize)) {
                     return Ok(());
@@ -100,7 +120,7 @@ impl Interpreter<'_> {
                         &mut self.budget.steps,
                         self.budget.depth.saturating_sub(self.depth + depth),
                     )
-                    .map_err(|kind| self.failure(kind, Some(source)))?;
+                    .map_err(|kind| self.failure(kind, source))?;
                 self.check_comptime_graph_inner(contents.value(), source, depth + 1, seen)?;
             }
             Value::ComptimeReference(reference) => {
@@ -115,13 +135,13 @@ impl Interpreter<'_> {
             }
             Value::IirCallable(handle) => {
                 self.iir_target(handle)?;
-                self.check_comptime_domain(&handle.ty, source)?;
+                self.check_comptime_domain_in(&handle.ty, source)?;
             }
             Value::Closure(closure) => {
                 if !seen.insert((1, Arc::as_ptr(closure) as usize)) {
                     return Ok(());
                 }
-                self.check_comptime_domain(&closure.ty, source)?;
+                self.check_comptime_domain_in(&closure.ty, source)?;
                 for (_, value) in &closure.environment {
                     self.check_comptime_graph_inner(value, source, depth + 1, seen)?;
                 }
@@ -155,10 +175,10 @@ impl Interpreter<'_> {
                                 ErrorKind::DepthExhausted
                             }
                         },
-                        Some(source),
+                        source,
                     )
                 })?;
-                self.check_comptime_domain(
+                self.check_comptime_domain_in(
                     &Term::Nominal {
                         declaration: *declaration,
                         arguments: arguments.clone(),
@@ -167,7 +187,7 @@ impl Interpreter<'_> {
                 )?;
             }
             Value::List { ty, values } => {
-                self.check_comptime_domain(ty, source)?;
+                self.check_comptime_domain_in(ty, source)?;
                 if values
                     .summary()
                     .is_some_and(|summary| summary.scalars.is_some())
@@ -182,14 +202,14 @@ impl Interpreter<'_> {
             }
             Value::Optional { ty, .. }
             | Value::Newtype { ty, .. }
-            | Value::ErrorResult { ty, .. } => self.check_comptime_domain(ty, source)?,
+            | Value::ErrorResult { ty, .. } => self.check_comptime_domain_in(ty, source)?,
             // Type values describe storage; code and function identities do
             // not contain an invocation-local captured payload graph.
             _ => {}
         }
         value.try_for_each_data_field(|domain, child| {
             if let Some(domain) = domain {
-                self.check_comptime_domain(domain, source)?;
+                self.check_comptime_domain_in(domain, source)?;
             }
             self.check_comptime_graph_inner(child, source, depth + 1, seen)
         })

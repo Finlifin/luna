@@ -75,6 +75,7 @@ pub use invocation::{AdmittedCall, SourceCallPrefix, SourceOperandScope, SourceO
 
 mod declaration_inputs;
 mod declaration_plan;
+mod deterministic;
 mod invocation_contracts;
 mod list_append;
 mod list_index;
@@ -166,10 +167,11 @@ mod selected_types;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
+use deterministic::{DeterministicMap, DeterministicSet};
 use nir::program::InterfaceInstance;
 use nir::program::{Expr, ExprKind as K, Literal, LocalId, Package, SourceRange};
 use nir::{DeclarationId, Primitive, Term};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -873,12 +875,12 @@ pub struct Interpreter<'a> {
     effect_values: Option<&'a iir::effect_values::Plan<'a>>,
     graph: Option<&'a iir::Package>,
     cleanup_schedule: Option<&'a iir::cleanup::Schedule>,
-    cleanup_scopes: HashMap<&'a iir::InstanceKey, Vec<&'a iir::cleanup::FunctionSchedule>>,
+    cleanup_scopes: DeterministicMap<&'a iir::InstanceKey, Vec<&'a iir::cleanup::FunctionSchedule>>,
     // Borrowed from the validated, immutable schedule. Preserve all sites at
     // each source position, including distinct contextual instances.
     cleanup_sites:
-        HashMap<(u32, u32), Vec<(&'a iir::cleanup::FunctionSchedule, &'a iir::cleanup::Site)>>,
-    cleanup_effect_context: HashMap<nir::effects::Operation, bool>,
+        BTreeMap<(u32, u32), Vec<(&'a iir::cleanup::FunctionSchedule, &'a iir::cleanup::Site)>>,
+    cleanup_effect_context: DeterministicMap<nir::effects::Operation, bool>,
     cleanup_frame: Option<iir::InstanceKey>,
     cleanup_failed: bool,
     prepared_frames: Vec<cleanup::PreparedFrame>,
@@ -895,23 +897,23 @@ pub struct Interpreter<'a> {
     attribute_resolver: Option<source_values::Resolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
-    method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
+    method_parameters: Arc<BTreeMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     // None records an ambiguous member identity across different interfaces.
-    method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
+    method_origins: Arc<BTreeMap<DeclarationId, Option<DeclarationId>>>,
     method_contracts: method_catalog::Contracts<'a>,
     trait_declarations: declaration_index::Traits<'a>,
-    implemented_interfaces: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
-    assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
+    implemented_interfaces: Arc<DeterministicMap<(InterfaceInstance, Term), DeclarationId>>,
+    assumed_interfaces: DeterministicSet<(InterfaceInstance, Term)>,
     method_bodies:
-        Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
+        Arc<DeterministicMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
     resolved_method_bodies:
-        HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
+        DeterministicMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
     associated_values: associated_catalog::Catalog<'a>,
     associated_initializers: associated_catalog::Catalog<'a>,
-    active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
+    active_associated_initializers: DeterministicSet<(InterfaceInstance, Term, DeclarationId)>,
     // Source specializations retain code, while IIR handles carry VM-local identity.
     instances: function_instances::Instances<Expr>,
-    iir_callables: HashMap<usize, Arc<IirCallable>>,
+    iir_callables: BTreeMap<usize, Arc<IirCallable>>,
     functions: nir::callable_source::Callables<'a>,
 
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
@@ -1135,7 +1137,7 @@ impl<'a> Interpreter<'a> {
         };
         let assumed_interfaces =
             constructor_premises::expand(assumptions, &traits, &mut trait_parameter_fuel)?;
-        let mut method_bodies = HashMap::new();
+        let mut method_bodies = DeterministicMap::new();
         for interface in &package.traits {
             if interface
                 .parents
@@ -1148,14 +1150,14 @@ impl<'a> Interpreter<'a> {
         // Explicit instances contain demanded members only. Index them before
         // considering legacy concrete rows, so an omitted conditional method
         // never enters the executable directory.
-        let mut explicit = HashMap::new();
+        let mut explicit = DeterministicMap::new();
         for instance in dispatch_instances {
             let key = (instance.interface_instance(), instance.subject.clone());
             if explicit.insert(key, instance.implementation).is_some() {
                 return Err(invalid());
             }
         }
-        let mut worlds = HashMap::new();
+        let mut worlds = DeterministicMap::new();
         let mut implementations = BTreeMap::new();
         for implementation in &package.implementations {
             if !implementation.phases.runtime && !implementation.phases.comptime {
@@ -1376,7 +1378,7 @@ impl<'a> Interpreter<'a> {
                 &mut trait_parameter_fuel,
             )?;
 
-            let mut method_keys = HashSet::new();
+            let mut method_keys = DeterministicSet::new();
             for method in &instance.methods {
                 let member = contract
                     .methods
@@ -1526,7 +1528,7 @@ impl<'a> Interpreter<'a> {
         let method_parameters = if let Some(index) = &positions {
             index.method_parameters.clone()
         } else {
-            let method_parameters: HashMap<_, _> = package
+            let method_parameters: BTreeMap<_, _> = package
                 .traits
                 .iter()
                 .flat_map(|t| {
@@ -1537,8 +1539,8 @@ impl<'a> Interpreter<'a> {
                 .collect();
             Arc::new(method_parameters)
         };
-        let mut method_contracts = HashMap::new();
-        let mut method_origins = HashMap::new();
+        let mut method_contracts = BTreeMap::new();
+        let mut method_origins = BTreeMap::new();
         if positions.is_none() {
             for (interface_index, contract) in package.traits.iter().enumerate() {
                 let parameters = contract
@@ -2429,16 +2431,15 @@ impl<'a> Interpreter<'a> {
         value: &Value,
         source: Option<SourceRange>,
     ) -> Result<Value, Error> {
-        let location = source.unwrap_or(SourceRange { start: 0, end: 0 });
         match value {
-            Value::ComptimeReference(reference) => self.read_value_reference(reference, location),
+            Value::ComptimeReference(reference) => self.read_value_reference_in(reference, source),
             Value::Storage(storage) => {
                 if self.comptime_only {
                     let reference = value_reference::ValueReference::root(storage.clone());
                     let contents = reference
                         .borrow(&mut self.budget.steps)
                         .map_err(|kind| self.failure(kind, source))?;
-                    return self.checkpoint_representation(contents.value(), location);
+                    return self.checkpoint_representation_in(contents.value(), source);
                 }
                 // Read the representation, retaining shared nested identities.
                 // Ownership is checked by the actual access/transfer operation;
@@ -2447,9 +2448,9 @@ impl<'a> Interpreter<'a> {
                     .0
                     .try_lock()
                     .map_err(|_| self.failure(ErrorKind::InvalidPointer, source))?;
-                self.checkpoint_representation(&value, location)
+                self.checkpoint_representation_in(&value, source)
             }
-            value => self.checkpoint_representation(value, location),
+            value => self.checkpoint_representation_in(value, source),
         }
     }
 
@@ -3064,6 +3065,16 @@ impl<'a> Interpreter<'a> {
         frames: &[Vec<nir::Sort>],
         source: SourceRange,
     ) -> Result<(), Error> {
+        self.check_normal_requirements_in(metadata, values, frames, Some(source))
+    }
+
+    pub(crate) fn check_normal_requirements_in(
+        &mut self,
+        metadata: &nir::normal_forms::Head,
+        values: &[Term],
+        frames: &[Vec<nir::Sort>],
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
         if metadata.requirements.is_empty() {
             return Ok(());
         }
@@ -3087,11 +3098,11 @@ impl<'a> Interpreter<'a> {
                 } else {
                     ErrorKind::Type
                 },
-                Some(source),
+                source,
             )
         })?;
         for predicate in predicates {
-            self.check_formation_predicate(&predicate, !frames.is_empty(), source)?;
+            self.check_formation_predicate_in(&predicate, !frames.is_empty(), source)?;
         }
         Ok(())
     }
@@ -3282,6 +3293,14 @@ impl<'a> Interpreter<'a> {
         predicate: &nir::program::TypePredicate,
         source: SourceRange,
     ) -> Result<(), Error> {
+        self.check_type_contract_in(predicate, Some(source))
+    }
+
+    fn check_type_contract_in(
+        &mut self,
+        predicate: &nir::program::TypePredicate,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
         let normalized;
         // A resolving VM retains only the associated values already demanded
         // by execution. The declaration solver owns the full projection world.
@@ -3293,7 +3312,7 @@ impl<'a> Interpreter<'a> {
             let result =
                 selected_types::predicate(predicate, &self.associated_values, &mut fuel, 0);
             self.budget.steps = fuel as u64;
-            normalized = result.map_err(|kind| self.failure(kind, Some(source)))?;
+            normalized = result.map_err(|kind| self.failure(kind, source))?;
             &normalized
         } else {
             predicate
@@ -3303,15 +3322,13 @@ impl<'a> Interpreter<'a> {
             Some(false) => ContractOutcome::Rejected,
             None => self
                 .solve_type_predicate(predicate)
-                .map_err(|kind| self.failure(kind, Some(source)))?,
+                .map_err(|kind| self.failure(kind, source))?,
         };
         match outcome {
             ContractOutcome::Satisfied => Ok(()),
-            ContractOutcome::Rejected => {
-                Err(self.failure(ErrorKind::TypeContractRejected, Some(source)))
-            }
+            ContractOutcome::Rejected => Err(self.failure(ErrorKind::TypeContractRejected, source)),
             ContractOutcome::Unknown => {
-                Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
+                Err(self.failure(ErrorKind::TypeContractUnresolved, source))
             }
         }
     }

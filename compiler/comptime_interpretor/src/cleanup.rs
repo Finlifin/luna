@@ -66,7 +66,7 @@ impl Interpreter<'_> {
         let graph = self
             .graph
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
-        let mut signatures = HashMap::new();
+        let mut signatures = DeterministicMap::new();
         self.query_descriptions(None, |this, fuel| {
             for function in &graph.functions {
                 nir::visit::expressions_checked(&function.function, fuel, |expr, fuel| {
@@ -108,7 +108,7 @@ impl Interpreter<'_> {
             }
             Ok(())
         })?;
-        let mut contexts = HashMap::new();
+        let mut contexts = DeterministicMap::new();
         for (operation, signature) in signatures {
             let Term::Function { parameters, result } = signature else {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
@@ -398,20 +398,21 @@ impl<'a> Interpreter<'a> {
             }
             Ok(())
         })?;
-        let count = self
-            .cleanup_scopes
-            .get(self.cleanup_frame.as_ref().unwrap())
-            .map_or(0, Vec::len);
+        let key = self
+            .cleanup_frame
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let count = self.cleanup_scopes.get(key).map_or(0, Vec::len);
         // Only references are copied; still account for the selected contexts.
         self.charge_preparation(count).map_err(|mut error| {
             error.source = Some(source);
             error
         })?;
-        let scopes = self
-            .cleanup_scopes
-            .get(self.cleanup_frame.as_ref().unwrap())
-            .cloned()
-            .unwrap_or_default();
+        let key = self
+            .cleanup_frame
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let scopes = self.cleanup_scopes.get(key).cloned().unwrap_or_default();
         Ok(scopes)
     }
 
@@ -481,37 +482,37 @@ impl<'a> Interpreter<'a> {
     // Code and external pointer targets retain identity. Owned capture storage
     // receives fresh cells, recursively, so copying a callable does not make its
     // receiver state alias the source. Capability checking happens in publication.
-    fn copy_work(&mut self, work: usize, source: SourceRange) -> Result<(), Error> {
-        let work = u64::try_from(work)
-            .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+    fn copy_work(&mut self, work: usize, source: Option<SourceRange>) -> Result<(), Error> {
+        let work =
+            u64::try_from(work).map_err(|_| self.failure(ErrorKind::StepsExhausted, source))?;
         self.budget.steps = self
             .budget
             .steps
             .checked_sub(work)
-            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, source))?;
         Ok(())
     }
 
-    fn copy_type_work(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
-        self.check_closed_type_description(ty, Some(source))
+    fn copy_type_work(&mut self, ty: &Term, source: Option<SourceRange>) -> Result<(), Error> {
+        self.check_closed_type_description(ty, source)
     }
 
     fn copy_invocation_type_work(
         &mut self,
         ty: &Term,
-        source: SourceRange,
+        source: Option<SourceRange>,
         invocation: bool,
     ) -> Result<(), Error> {
         if !invocation {
             return self.copy_type_work(ty, source);
         }
-        self.check_type_description(ty, Some(source))
+        self.check_type_description(ty, source)
     }
 
     fn copy_instance_arguments(
         &mut self,
         arguments: &[Term],
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<Vec<Term>, Error> {
         self.check_instance_arguments(arguments, source)?;
         Ok(arguments.to_vec())
@@ -520,9 +521,9 @@ impl<'a> Interpreter<'a> {
     fn check_instance_arguments(
         &mut self,
         arguments: &[Term],
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<(), Error> {
-        self.query_descriptions(Some(source), |this, fuel| {
+        self.query_descriptions(source, |this, fuel| {
             type_descriptions::spend(fuel, arguments.len())?;
             for argument in arguments {
                 this.inspect_term_description(argument, fuel)?;
@@ -537,6 +538,15 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
         depth: usize,
     ) -> Result<Value, Error> {
+        self.copy_representation_in(value, Some(source), depth)
+    }
+
+    pub(super) fn copy_representation_in(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+        depth: usize,
+    ) -> Result<Value, Error> {
         self.clone_representation(value, source, depth, false)
     }
 
@@ -544,6 +554,14 @@ impl<'a> Interpreter<'a> {
         &mut self,
         value: &Value,
         source: SourceRange,
+    ) -> Result<Value, Error> {
+        self.checkpoint_representation_in(value, Some(source))
+    }
+
+    pub(super) fn checkpoint_representation_in(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
     ) -> Result<Value, Error> {
         self.clone_representation(value, source, 0, true)
     }
@@ -556,18 +574,27 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
+        self.check_borrowed_representation_in(value, Some(source), depth)
+    }
+
+    fn check_borrowed_representation_in(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+        depth: usize,
+    ) -> Result<(), Error> {
         self.check_representation_depth(source, depth)?;
         match value {
             Value::Object(object) => {
                 if !self.comptime_only {
-                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                    return Err(self.failure(ErrorKind::Unsupported, source));
                 }
                 self.copy_work(object.entries().len(), source)?;
                 for entry in object.entries() {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
                     self.copy_invocation_type_work(&entry.value().ty, source, true)?;
-                    self.check_comptime_domain(&entry.value().ty, source)?;
-                    self.check_borrowed_representation(&entry.value().value, source, depth + 1)?;
+                    self.check_comptime_domain_in(&entry.value().ty, source)?;
+                    self.check_borrowed_representation_in(&entry.value().value, source, depth + 1)?;
                 }
             }
             Value::List { ty, values } => {
@@ -582,20 +609,20 @@ impl<'a> Interpreter<'a> {
                 }
                 self.copy_work(values.len(), source)?;
                 for value in values {
-                    self.check_borrowed_representation(value, source, depth + 1)?;
+                    self.check_borrowed_representation_in(value, source, depth + 1)?;
                 }
             }
             Value::Tuple(values) => {
                 self.copy_work(values.len(), source)?;
                 for value in values {
-                    self.check_borrowed_representation(value, source, depth + 1)?;
+                    self.check_borrowed_representation_in(value, source, depth + 1)?;
                 }
             }
             Value::AnonymousRecord(fields) => {
                 self.copy_work(fields.len(), source)?;
                 for (name, value) in fields {
                     self.copy_work(name.len(), source)?;
-                    self.check_borrowed_representation(value, source, depth + 1)?;
+                    self.check_borrowed_representation_in(value, source, depth + 1)?;
                 }
             }
             Value::Record {
@@ -607,18 +634,18 @@ impl<'a> Interpreter<'a> {
                 self.copy_work(fields.len(), source)?;
                 self.check_instance_arguments(arguments, source)?;
                 for field in fields {
-                    self.check_borrowed_representation(field, source, depth + 1)?;
+                    self.check_borrowed_representation_in(field, source, depth + 1)?;
                 }
             }
             Value::Optional { ty, value } => {
                 self.copy_invocation_type_work(ty, source, true)?;
                 if let Some(value) = value {
-                    self.check_borrowed_representation(value, source, depth + 1)?;
+                    self.check_borrowed_representation_in(value, source, depth + 1)?;
                 }
             }
             Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                 self.copy_invocation_type_work(ty, source, true)?;
-                self.check_borrowed_representation(value, source, depth + 1)?;
+                self.check_borrowed_representation_in(value, source, depth + 1)?;
             }
             leaf => self.check_leaf_representation(leaf, source, depth, true)?,
         }
@@ -627,17 +654,17 @@ impl<'a> Interpreter<'a> {
 
     fn check_representation_depth(
         &mut self,
-        source: SourceRange,
+        source: Option<SourceRange>,
         depth: usize,
     ) -> Result<(), Error> {
-        self.tick(Some(source))?;
+        self.tick(source)?;
         if depth >= 128
             || self
                 .depth
                 .checked_add(depth)
                 .is_none_or(|depth| depth >= self.budget.depth)
         {
-            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+            return Err(self.failure(ErrorKind::DepthExhausted, source));
         }
         Ok(())
     }
@@ -648,33 +675,33 @@ impl<'a> Interpreter<'a> {
     fn check_leaf_representation(
         &mut self,
         value: &Value,
-        source: SourceRange,
+        source: Option<SourceRange>,
         depth: usize,
         preserve_identity: bool,
     ) -> Result<(), Error> {
         match value {
-            Value::Code(code) => self.check_code_copy(code, source)?,
+            Value::Code(code) => self.check_code_copy_in(code, source)?,
             Value::ComptimeReference(reference) => {
                 if !self.comptime_only || !preserve_identity {
-                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                    return Err(self.failure(ErrorKind::Unsupported, source));
                 }
                 self.copy_work(reference.metadata_work(), source)?;
             }
             Value::Storage(_) | Value::Closure(_) => {
                 debug_assert!(preserve_identity);
                 if self.comptime_only {
-                    self.check_comptime_graph(value, source, depth)?;
+                    self.check_comptime_graph_in(value, source, depth)?;
                 }
             }
             Value::Pointer(pointer) => {
                 if self.comptime_only {
-                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                    return Err(self.failure(ErrorKind::PhaseMismatch, source));
                 }
                 self.copy_type_work(&pointer.pointee, source)?;
                 self.copy_work(
-                    pointer.copy_metadata_work().ok_or_else(|| {
-                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
-                    })?,
+                    pointer
+                        .copy_metadata_work()
+                        .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, source))?,
                     source,
                 )?;
             }
@@ -684,9 +711,9 @@ impl<'a> Interpreter<'a> {
             Value::NormalForm { term, ty } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 if preserve_identity {
-                    self.check_term_description(term, Some(source))?;
+                    self.check_term_description(term, source)?;
                 } else {
-                    self.check_closed_term_description(term, Some(source))?;
+                    self.check_closed_term_description(term, source)?;
                 }
             }
             Value::FunctionInstance { arguments, .. } => {
@@ -734,7 +761,7 @@ impl<'a> Interpreter<'a> {
     fn clone_representation(
         &mut self,
         value: &Value,
-        source: SourceRange,
+        source: Option<SourceRange>,
         depth: usize,
         preserve_identity: bool,
     ) -> Result<Value, Error> {
@@ -747,7 +774,7 @@ impl<'a> Interpreter<'a> {
                 if !preserve_identity {
                     self.copy_type_work(ty, source)?;
                 }
-                self.check_borrowed_representation(value, source, depth)?;
+                self.check_borrowed_representation_in(value, source, depth)?;
                 return Ok(Value::List {
                     ty: ty.clone(),
                     values: values.clone(),
@@ -758,14 +785,14 @@ impl<'a> Interpreter<'a> {
         Ok(match value {
             Value::Object(object) => {
                 if !self.comptime_only {
-                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                    return Err(self.failure(ErrorKind::Unsupported, source));
                 }
                 self.copy_work(object.entries().len(), source)?;
                 let mut entries = Vec::with_capacity(object.entries().len());
                 for entry in object.entries() {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
                     self.copy_invocation_type_work(&entry.value().ty, source, preserve_identity)?;
-                    self.check_comptime_domain(&entry.value().ty, source)?;
+                    self.check_comptime_domain_in(&entry.value().ty, source)?;
                     let payload = self.clone_representation(
                         &entry.value().value,
                         source,
@@ -793,7 +820,7 @@ impl<'a> Interpreter<'a> {
                     .saturating_sub(self.depth.saturating_add(depth));
                 let contents = storage
                     .contents_for_copy(&mut self.budget.steps, limit)
-                    .map_err(|kind| self.failure(kind, Some(source)))?;
+                    .map_err(|kind| self.failure(kind, source))?;
                 Value::Storage(Storage::new(self.clone_representation(
                     contents.value(),
                     source,
@@ -1385,9 +1412,9 @@ impl<'a> Interpreter<'a> {
         defaults: &mut Environment,
         caller: &mut Environment,
     ) -> Result<Flow, Error> {
-        if self.cleanup_schedule.is_none() {
+        let Some(schedule) = self.cleanup_schedule else {
             return self.eval(&argument.value, defaults);
-        }
+        };
         if self.cleanup_context.len() >= self.budget.depth {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(argument.value.source)));
         }
@@ -1399,7 +1426,7 @@ impl<'a> Interpreter<'a> {
             parameter: argument.parameter,
         };
         let mut found = false;
-        for scope in &self.cleanup_schedule.unwrap().functions {
+        for scope in &schedule.functions {
             self.tick(Some(argument.value.source))?;
             if Some(&scope.instance) == self.cleanup_frame.as_ref()
                 && scope.context.len() == self.cleanup_context.len() + 1
@@ -1618,9 +1645,9 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        let mut scopes: HashMap<&iir::InstanceKey, Vec<&iir::cleanup::FunctionSchedule>> =
-            HashMap::new();
-        let mut sites: HashMap<_, Vec<_>> = HashMap::new();
+        let mut scopes: DeterministicMap<&iir::InstanceKey, Vec<&iir::cleanup::FunctionSchedule>> =
+            DeterministicMap::new();
+        let mut sites: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for function in &schedule.functions {
             self.tick(None)?;
             for argument in function.instance.arguments.iter() {

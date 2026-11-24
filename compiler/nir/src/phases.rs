@@ -911,7 +911,11 @@ impl<'a> PhaseContext<'a> {
                                         "normal-form heads cannot be invoked as ordinary functions or stored at runtime",
                                     ));
                                 }
-                                let signature = descriptor.callable_type_in(inspection_fuel)
+                                let signature = normal_form_callable_type_in(
+                                    descriptor,
+                                    package,
+                                    inspection_fuel,
+                                )
                                     .map_err(|failure| match failure {
                                         crate::type_computations::Error::Budget => Error::budget(
                                             expr.source,
@@ -2299,6 +2303,43 @@ pub fn validate_comptime_storage_with_layouts(
 type NominalStorageResolver<'a> =
     Option<&'a dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>>;
 
+/// Reconstruct the callable telescope for a normal-form head using its declared
+/// result signature when available in `package.functions`.
+pub fn normal_form_callable_type_in(
+    descriptor: &crate::normal_forms::Head,
+    package: &Package,
+    fuel: &mut usize,
+) -> Result<Term, crate::type_computations::Error> {
+    if let Some(function) = package
+        .functions
+        .iter()
+        .find(|function| function.declaration == descriptor.declaration)
+    {
+        let Term::Function { result, .. } = &function.signature else {
+            return Err(crate::type_computations::Error::Scope(
+                crate::TypeError::InvalidNormalFormFunctionSignature,
+            ));
+        };
+        return crate::normal_forms::callable_type_with_result_from_declarations(
+            descriptor.parameters.iter().map(|input| {
+                (
+                    input.declaration,
+                    if input.kind == crate::normal_forms::Kind::Type {
+                        Sort::Type
+                    } else {
+                        Sort::of_comptime_domain(&input.ty)
+                    },
+                    &input.ty,
+                )
+            }),
+            result,
+            descriptor.collector.as_ref().map(|entry| entry.slot),
+            fuel,
+        );
+    }
+    descriptor.callable_type_in(fuel)
+}
+
 fn validate_runtime_storage_inner(
     ty: &Term,
     package: &Package,
@@ -2314,4 +2355,177 @@ fn validate_runtime_storage_inner(
         &storage_domains::Domains::new(package),
         fuel,
     )
+}
+
+#[cfg(test)]
+mod higher_order_nf_tests {
+    use super::*;
+    use crate::normal_forms::{Head, Kind, Parameter as NfParameter, Role};
+    use crate::program::{Function, FunctionDeclaration, LocalId};
+    use crate::{DeclarationId, Parameter};
+
+    #[test]
+    fn normal_form_callable_type_preserves_higher_order_non_type_result() {
+        let helper_decl = DeclarationId {
+            package: 1,
+            local: 9,
+        };
+        let nf_decl = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let input_decl = DeclarationId {
+            package: 1,
+            local: 11,
+        };
+        let caller_decl = DeclarationId {
+            package: 1,
+            local: 12,
+        };
+        let helper_binding = LocalId { owner: 9, index: 0 };
+        let input_binding = LocalId {
+            owner: 10,
+            index: 0,
+        };
+        let inner_callable = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        }));
+        let helper_fn = Function {
+            interface: FunctionDeclaration {
+                source: SourceRange { start: 1, end: 5 },
+                declaration: helper_decl,
+                name: "id_type".to_string(),
+                phase: Phase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: inner_callable.clone(),
+                parameters: vec![helper_binding],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: Expr {
+                source: SourceRange { start: 2, end: 4 },
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::Local(helper_binding),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let outer_sig = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(inner_callable.clone()),
+        };
+        let body_sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(inner_callable.clone()),
+        };
+        let nf_head = Head {
+            collector: None,
+            role: Role::Opaque,
+            declaration: nf_decl,
+            parameters: vec![NfParameter {
+                declaration: input_decl,
+                binding: input_binding,
+                kind: Kind::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            requirements: vec![],
+        };
+        let expected_callable = Term::NormalFormFunction(Box::new(outer_sig), None);
+        let nf_function = Function {
+            interface: FunctionDeclaration {
+                source: SourceRange { start: 6, end: 15 },
+                declaration: nf_decl,
+                name: "ho_nf".to_string(),
+                phase: Phase::NormalForm,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: body_sig,
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![input_decl],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: Expr {
+                source: SourceRange { start: 7, end: 14 },
+                ty: inner_callable,
+                kind: K::Function(helper_decl),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let caller = Function {
+            interface: FunctionDeclaration {
+                source: SourceRange { start: 20, end: 40 },
+                declaration: caller_decl,
+                name: "caller".to_string(),
+                phase: Phase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(expected_callable.clone()),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: Expr {
+                source: SourceRange { start: 25, end: 39 },
+                ty: expected_callable.clone(),
+                kind: K::Function(nf_decl),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let package = Package {
+            functions: vec![helper_fn, nf_function, caller],
+            normal_forms: vec![nf_head.clone()],
+            ..Default::default()
+        };
+        let mut fuel = 10_000;
+        let reconstructed = normal_form_callable_type_in(&nf_head, &package, &mut fuel).unwrap();
+        assert_eq!(reconstructed, expected_callable);
+        let empty = Package::default();
+        assert_eq!(
+            normal_form_callable_type_in(&nf_head, &empty, &mut fuel).unwrap(),
+            nf_head.callable_type_in(&mut fuel).unwrap()
+        );
+        Inspection::new(&package)
+            .check_package(&mut 10_000)
+            .unwrap();
+    }
 }

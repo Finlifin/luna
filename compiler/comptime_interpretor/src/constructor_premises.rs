@@ -1,10 +1,10 @@
 //! Expand caller-established trait premises under the constructor's allowance.
 //! These premises discharge obligations; they do not provide executable methods.
+use crate::deterministic::DeterministicSet;
 use crate::{Error, ErrorKind};
 use nir::Term;
 use nir::program::{InterfaceInstance, TraitRequirement};
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 pub(super) fn failure(reason: nir::type_computations::Error) -> Error {
     Error {
@@ -27,7 +27,7 @@ pub(super) fn expand(
     assumptions: &[TraitRequirement],
     traits: &super::declaration_index::Traits<'_>,
     fuel: &mut usize,
-) -> Result<HashSet<(InterfaceInstance, Term)>, Error> {
+) -> Result<DeterministicSet<(InterfaceInstance, Term)>, Error> {
     use nir::type_computations::charge_term;
     // Borrow initial premises. Reserve each worklist batch before allocating;
     // nested payloads are bounded before cloning or hashing their keys.
@@ -36,7 +36,7 @@ pub(super) fn expand(
         .iter()
         .map(|premise| (Cow::Borrowed(premise), 0usize))
         .collect();
-    let mut established = HashSet::new();
+    let mut established = DeterministicSet::new();
     while let Some((premise, depth)) = pending.pop() {
         if depth >= 64 {
             return Err(Error {

@@ -1,11 +1,12 @@
 //! Exact method positions in an immutable graph, never formation verdicts.
 use super::*;
 
-type Members = HashMap<DeclarationId, HashMap<Vec<Term>, usize>>;
-type Subjects = HashMap<Term, (usize, Members)>;
+type Members = BTreeMap<DeclarationId, DeterministicMap<Vec<Term>, usize>>;
+
+type Subjects = DeterministicMap<Term, (usize, Members)>;
 
 #[derive(Default)]
-pub(crate) struct MethodIndex(HashMap<DeclarationId, HashMap<Vec<Term>, Subjects>>);
+pub(crate) struct MethodIndex(BTreeMap<DeclarationId, DeterministicMap<Vec<Term>, Subjects>>);
 
 impl MethodIndex {
     fn insert<'a>(
@@ -21,7 +22,7 @@ impl MethodIndex {
         for term in std::iter::once(subject).chain(arguments) {
             nir::type_computations::charge_term(term, fuel).map_err(|_| ())?;
         }
-        let mut members: Members = HashMap::new();
+        let mut members: Members = BTreeMap::new();
         for (index, (member, arguments)) in methods.enumerate() {
             *fuel = fuel.checked_sub(1).ok_or(())?;
             for term in arguments {
@@ -97,9 +98,11 @@ impl MethodIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 93, local }
     }
+
     #[test]
     fn exact_keys_keep_all_specialization_axes_independent() {
         let mut index = MethodIndex::default();

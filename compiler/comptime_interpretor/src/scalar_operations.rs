@@ -2,8 +2,10 @@
 //! Signature checks precede operand work. Integer operands are checked in source
 //! order; comparisons preserve their existing evaluate-both-then-check rule.
 use super::*;
+
 #[path = "scalar_conversions.rs"]
 mod conversions;
+
 use comptime_compiler::scalar::{Scalar, ScalarKind};
 use comptime_runtime::machine::{Error as MError, MachineInteger};
 use nir::program::IntegerOp;
@@ -22,6 +24,7 @@ pub(super) enum Plan {
     Compare(IntegerOp),
     Float(Option<nir::program::FloatOp>),
 }
+
 fn machine(value: &Value, signed: bool, width: u32) -> Result<MachineInteger, MError> {
     match value {
         Value::SignedInteger(value) if signed => MachineInteger::from_signed(*value, width as u16),
@@ -31,6 +34,7 @@ fn machine(value: &Value, signed: bool, width: u32) -> Result<MachineInteger, ME
         _ => Err(MError::RepresentationMismatch),
     }
 }
+
 impl Interpreter<'_> {
     pub(super) fn prepare_scalar(
         &self,
@@ -248,39 +252,60 @@ impl Interpreter<'_> {
                 if op.is_some() != right.is_some() {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
-                let value = self
-                    .integer_operation(Some(source), |budget| {
+                let value = if let Some(op) = op {
+                    let right = right.ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+                    if !matches!(
+                        op,
+                        IntegerOp::Add
+                            | IntegerOp::Subtract
+                            | IntegerOp::Multiply
+                            | IntegerOp::DivideTrunc
+                            | IntegerOp::RemainderTrunc
+                    ) {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    self.integer_operation(Some(source), |budget| {
                         Ok(match op {
-                            Some(IntegerOp::Add) => left.add(right.unwrap(), budget),
-                            Some(IntegerOp::Subtract) => left.subtract(right.unwrap(), budget),
-                            Some(IntegerOp::Multiply) => left.multiply(right.unwrap(), budget),
-                            Some(IntegerOp::DivideTrunc) => {
-                                left.div_rem_trunc(right.unwrap(), budget).map(|(q, _)| q)
+                            IntegerOp::Add => left.add(right, budget),
+                            IntegerOp::Subtract => left.subtract(right, budget),
+                            IntegerOp::Multiply => left.multiply(right, budget),
+                            IntegerOp::DivideTrunc => {
+                                left.div_rem_trunc(right, budget).map(|(q, _)| q)
                             }
-                            Some(IntegerOp::RemainderTrunc) => {
-                                left.div_rem_trunc(right.unwrap(), budget).map(|(_, r)| r)
+                            IntegerOp::RemainderTrunc => {
+                                left.div_rem_trunc(right, budget).map(|(_, r)| r)
                             }
-                            None => left.negate(budget),
-                            _ => unreachable!(),
+                            _ => unreachable!("checked above"),
                         })
                     })?
-                    .map_err(|error| {
-                        self.failure(
-                            match error {
-                                MError::Overflow => ErrorKind::MachineOverflow,
-                                MError::DivisionByZero => ErrorKind::DivisionByZero,
-                                MError::Resource(comptime_runtime::Error::BudgetExhausted) => {
-                                    ErrorKind::StepsExhausted
-                                }
-                                _ => ErrorKind::Type,
-                            },
-                            Some(source),
-                        )
-                    })?;
-                Ok(if signed {
-                    Value::SignedInteger(value.signed_value().unwrap())
                 } else {
-                    Value::UnsignedInteger(value.unsigned_value().unwrap())
+                    self.integer_operation(Some(source), |budget| Ok(left.negate(budget)))?
+                }
+                .map_err(|error| {
+                    self.failure(
+                        match error {
+                            MError::Overflow => ErrorKind::MachineOverflow,
+                            MError::DivisionByZero => ErrorKind::DivisionByZero,
+                            MError::Resource(comptime_runtime::Error::BudgetExhausted) => {
+                                ErrorKind::StepsExhausted
+                            }
+                            _ => ErrorKind::Type,
+                        },
+                        Some(source),
+                    )
+                })?;
+                Ok(if signed {
+                    Value::SignedInteger(
+                        value
+                            .signed_value()
+                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?,
+                    )
+                } else {
+                    Value::UnsignedInteger(
+                        value
+                            .unsigned_value()
+                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?,
+                    )
                 })
             }
             Plan::Compare(op) => self.compare_scalar_values(
@@ -319,6 +344,7 @@ impl Interpreter<'_> {
         self.scalar_values(scalar, plan, a, b, expr.source)
             .map(Flow::Value)
     }
+
     fn compare_scalar_values(
         &mut self,
         scalar: Scalar<'_>,
@@ -329,7 +355,10 @@ impl Interpreter<'_> {
     ) -> Result<Value, Error> {
         use std::cmp::Ordering::*;
         self.check_retained_value(&a, scalar.left, Some(source))?;
-        self.check_retained_value(&b, scalar.right.unwrap(), Some(source))?;
+        let right = scalar
+            .right
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.check_retained_value(&b, right, Some(source))?;
         if matches!(a, Value::AbstractValue { .. }) || matches!(b, Value::AbstractValue { .. }) {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
         }

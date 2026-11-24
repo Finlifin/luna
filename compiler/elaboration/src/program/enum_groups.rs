@@ -125,10 +125,38 @@ impl Checker<'_, '_> {
         };
         let observed = self.observed_expression_type(&checked, base.span)?;
         let declaration = if let Some(ty) = observed {
-            let shape = self.structural_type(&ty, base.span)?;
-            self.ensure_nominal_type(&shape, base.span)?;
+            let shape = if matches!(
+                ty,
+                Term::Bound { .. }
+                    | Term::AssociatedType { .. }
+                    | Term::Rigid { .. }
+                    | Term::NormalForm { .. }
+                    | Term::Hole { .. }
+            ) && self.bound_tuple_elements(&ty).is_none()
+                && !self.context.is_list_type(&ty)
+            {
+                match self.context.structural_view_with_heads_metered(
+                    &ty,
+                    crate::ptc::Budget::default(),
+                    |head| Some(head) == self.protocols.tuple,
+                ) {
+                    (Ok(Some((view, _))), _) => view,
+                    (Err(crate::ptc::UnknownReason::BudgetExhausted), _) => {
+                        return Err(error(
+                            base.span,
+                            "structural type view remains unresolved: budget exhausted",
+                        ));
+                    }
+                    (Ok(None) | Err(_), _) => ty,
+                }
+            } else {
+                ty
+            };
             match shape {
-                Term::Nominal { declaration, .. } => Some(declaration),
+                Term::Nominal { declaration, .. } => {
+                    self.ensure_nominal_type(&shape, base.span)?;
+                    Some(declaration)
+                }
                 _ => None,
             }
         } else {

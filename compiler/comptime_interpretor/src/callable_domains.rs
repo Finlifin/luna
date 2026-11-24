@@ -111,7 +111,33 @@ impl Interpreter<'_> {
             *fuel = fuel
                 .checked_sub(head.parameters.len())
                 .ok_or(AdmissionError::Budget)?;
-            return Ok(Some(Cow::Owned(head.callable_type_in(fuel)?)));
+            let signature = match self.functions.formation(&declaration) {
+                Some(formation) => {
+                    let Term::Function { result, .. } = formation.signature else {
+                        return Err(AdmissionError::Invalid(
+                            "normal-form callable declaration has an invalid signature".into(),
+                        ));
+                    };
+                    nir::normal_forms::callable_type_with_result_from_declarations(
+                        head.parameters.iter().map(|input| {
+                            (
+                                input.declaration,
+                                if input.kind == nir::normal_forms::Kind::Type {
+                                    nir::Sort::Type
+                                } else {
+                                    nir::Sort::of_comptime_domain(&input.ty)
+                                },
+                                &input.ty,
+                            )
+                        }),
+                        result,
+                        head.collector.as_ref().map(|entry| entry.slot),
+                        fuel,
+                    )?
+                }
+                None => head.callable_type_in(fuel)?,
+            };
+            return Ok(Some(Cow::Owned(signature)));
         }
         let Some(formation) = self.functions.formation(&declaration) else {
             return Ok(None);

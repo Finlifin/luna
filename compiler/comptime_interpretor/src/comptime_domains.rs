@@ -35,6 +35,14 @@ impl Interpreter<'_> {
         ty: &Term,
         source: SourceRange,
     ) -> Result<(), Error> {
+        self.check_comptime_domain_in(ty, Some(source))
+    }
+
+    pub(super) fn check_comptime_domain_in(
+        &mut self,
+        ty: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
         if !self.comptime_only {
             return Ok(());
         }
@@ -106,13 +114,13 @@ impl Interpreter<'_> {
                         StorageError::Budget => ErrorKind::StepsExhausted,
                         StorageError::Invalid(_) => ErrorKind::PhaseMismatch,
                     },
-                    Some(source),
+                    source,
                 )
             });
         }
         let package = self
             .declaration_world
-            .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, Some(source)))?;
+            .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, source))?;
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let checked = nir::phases::validate_comptime_storage_with_nominals(
@@ -157,7 +165,7 @@ impl Interpreter<'_> {
                     StorageError::Budget => ErrorKind::StepsExhausted,
                     StorageError::Invalid(_) => ErrorKind::PhaseMismatch,
                 },
-                Some(source),
+                source,
             )
         })
     }

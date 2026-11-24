@@ -157,12 +157,15 @@ impl<'world> AssociatedHostRequest<'world> {
     pub fn access(&self) -> &Expr {
         self.request.access()
     }
+
     pub fn source_world(&self) -> &'world Package {
         self.lease.world
     }
+
     pub fn remaining_steps(&self) -> u64 {
         self.lease.remaining
     }
+
     pub fn remaining_steps_mut(&mut self) -> &mut u64 {
         &mut self.lease.remaining
     }
@@ -221,9 +224,11 @@ impl<'world> RejectedHostResponse<'world> {
             response,
         }
     }
+
     pub fn error(&self) -> &Error {
         &self.error
     }
+
     pub fn into_response(self) -> AssociatedHostResponse<'world> {
         self.response
     }
@@ -338,7 +343,7 @@ impl<'world> InvocationSession<'_, 'world> {
             .poll_external(&mut delivered, std::convert::identity)?;
         if let bytecode::OperandPoll::Supplied(site) = delivered {
             Ok(OperandProgress::Supplied(
-                self.session.delivered_operand(site),
+                self.session.delivered_operand(site)?,
             ))
         } else {
             Ok(OperandProgress::Invocation(progress))
@@ -353,24 +358,29 @@ impl<'world> InvocationSession<'_, 'world> {
     ) -> Result<(), RejectedHostResponse<'world>> {
         self.session.receive_host_response(response)
     }
+
     pub fn resume_definition(
         &mut self,
         response: DefinitionHostResponse<'world>,
     ) -> Result<(), RejectedDefinitionResponse<'world>> {
         self.session.receive_definition_response(response)
     }
+
     pub fn resume_method(
         &mut self,
         response: MethodHostResponse<'world>,
     ) -> Result<(), RejectedMethodResponse<'world>> {
         self.session.receive_method_response(response)
     }
+
     pub fn cancel(&mut self) {
         self.session.cancel();
     }
+
     pub fn remaining_steps(&self) -> u64 {
         self.session.remaining_steps()
     }
+
     /// Charge bounded consumer work before publishing an invocation result.
     pub fn charge_preparation(&mut self, steps: usize) -> Result<(), Error> {
         self.session.charge_preparation(steps)
@@ -382,6 +392,7 @@ impl fmt::Display for InvocationSession<'_, '_> {
         self.session.fmt(f)
     }
 }
+
 impl fmt::Display for AssociatedHostRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -391,6 +402,7 @@ impl fmt::Display for AssociatedHostRequest<'_> {
         )
     }
 }
+
 impl fmt::Display for AssociatedHostResponse<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -405,6 +417,7 @@ impl fmt::Display for AssociatedHostResponse<'_> {
         f.write_str(")")
     }
 }
+
 impl fmt::Display for RejectedHostResponse<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -415,6 +428,7 @@ impl fmt::Display for RejectedHostResponse<'_> {
         )
     }
 }
+
 impl<T: fmt::Display> fmt::Display for InvocationProgress<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -433,21 +447,25 @@ impl fmt::Debug for InvocationSession<'_, '_> {
         fmt::Display::fmt(self, f)
     }
 }
+
 impl<T: fmt::Display> fmt::Debug for InvocationProgress<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
+
 impl fmt::Debug for AssociatedHostRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
+
 impl fmt::Debug for AssociatedHostResponse<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
+
 impl fmt::Debug for RejectedHostResponse<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)

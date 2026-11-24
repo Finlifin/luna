@@ -65,7 +65,7 @@ fn copied_instance_inputs_share_fuel_and_accept_ordinary_scoped_values() {
     ];
     vm.budget.steps = 100;
     assert_eq!(
-        vm.copy_instance_arguments(&arguments, SOURCE)
+        vm.copy_instance_arguments(&arguments, Some(SOURCE))
             .unwrap_err()
             .kind,
         ErrorKind::StepsExhausted
@@ -73,7 +73,8 @@ fn copied_instance_inputs_share_fuel_and_accept_ordinary_scoped_values() {
     assert!(vm.remaining_steps() > 0 && vm.remaining_steps() < 95);
     vm.budget.steps = 10_000;
     assert_eq!(
-        vm.copy_instance_arguments(&arguments, SOURCE).unwrap(),
+        vm.copy_instance_arguments(&arguments, Some(SOURCE))
+            .unwrap(),
         arguments
     );
     assert_eq!(

@@ -232,7 +232,7 @@ impl Interpreter<'_> {
                 }
             }
             Value::Function(declaration) => {
-                self.admit_callable_identity(*declaration, &[], SourceRange { start: 0, end: 0 })?;
+                self.admit_callable_identity(*declaration, &[], None)?;
             }
             Value::FunctionInstance {
                 declaration,
@@ -242,11 +242,7 @@ impl Interpreter<'_> {
                 // the receiving graph. Source identities additionally need
                 // the current declaration's input and formation contracts.
                 if self.graph.is_none() {
-                    self.admit_callable_identity(
-                        *declaration,
-                        arguments,
-                        SourceRange { start: 0, end: 0 },
-                    )?;
+                    self.admit_callable_identity(*declaration, arguments, None)?;
                 }
                 for argument in arguments {
                     self.admit_type(argument, depth + 1)?;

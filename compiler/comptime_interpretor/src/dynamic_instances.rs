@@ -84,17 +84,17 @@ impl Interpreter<'_> {
         &mut self,
         declaration: DeclarationId,
         arguments: &[Term],
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<(), Error> {
         if self.normal_forms.contains_key(&declaration) {
             return if arguments.is_empty() {
                 Ok(())
             } else {
-                Err(self.failure(ErrorKind::Type, Some(source)))
+                Err(self.failure(ErrorKind::Type, source))
             };
         }
         if self.graph.is_some() {
-            let admitted = self.query_admission(Some(source), |vm, fuel| {
+            let admitted = self.query_admission(source, |vm, fuel| {
                 Ok(vm
                     .admitted_function_signature(declaration, arguments, &[], fuel)?
                     .is_some())
@@ -102,14 +102,14 @@ impl Interpreter<'_> {
             return if admitted {
                 Ok(())
             } else {
-                Err(self.failure(ErrorKind::UnknownFunction, Some(source)))
+                Err(self.failure(ErrorKind::UnknownFunction, source))
             };
         }
 
         let formation = self
             .functions
             .formation(&declaration)
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, source))?;
         self.check_source_formation(formation, arguments, source)
     }
 
@@ -117,16 +117,16 @@ impl Interpreter<'_> {
         &mut self,
         formation: nir::callable_source::Formation<'_>,
         arguments: &[Term],
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<(), Error> {
-        let frames = [self.ordinary_input_frame(formation.signature, source)?];
-        let inputs = self.admit_function_inputs(
+        let frames = [self.ordinary_input_frame_in(formation.signature, source)?];
+        let inputs = self.admit_function_inputs_in(
             formation.parameters,
             arguments,
             nir::DeclarationInputScope::ClosedInBody(&frames),
             source,
         )?;
-        self.pending_callable_requirements(formation, &inputs.into_substitution(), source)?;
+        self.pending_callable_requirements_in(formation, &inputs.into_substitution(), source)?;
         Ok(())
     }
 
@@ -213,7 +213,15 @@ impl Interpreter<'_> {
         signature: &Term,
         source: SourceRange,
     ) -> Result<Vec<nir::Sort>, Error> {
-        self.query_admission(Some(source), |_, fuel| {
+        self.ordinary_input_frame_in(signature, Some(source))
+    }
+
+    pub(super) fn ordinary_input_frame_in(
+        &mut self,
+        signature: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<Vec<nir::Sort>, Error> {
+        self.query_admission(source, |_, fuel| {
             Ok(nir::function_parameters::ordinary_frame(signature, fuel)?)
         })
     }
@@ -249,6 +257,7 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
         self.trait_method_default_inputs(view)
     }
+
     pub(super) fn trait_method_default_inputs(
         &mut self,
         method: comptime_compiler::methods::View<'_>,
@@ -524,6 +533,7 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn package() -> Package {
         let id = DeclarationId {
             package: 1,
@@ -578,6 +588,7 @@ mod tests {
             ..Default::default()
         }
     }
+
     fn expression(package: &Package) -> Expr {
         let source = SourceRange { start: 3, end: 4 };
         let field = Expr {
@@ -598,6 +609,7 @@ mod tests {
             },
         }
     }
+
     #[test]
     fn nested_clause_scopes_do_work_independent_of_unrelated_caller_locals() {
         let package = package();
@@ -891,6 +903,7 @@ mod tests {
             ErrorKind::PhaseMismatch
         );
     }
+
     #[test]
     fn cached_instance_does_not_skip_current_contract_outcome() {
         let mut package = package();
@@ -975,9 +988,11 @@ mod retained_signature_tests {
             result: Box::new(Term::Primitive(Primitive::Bool)),
         }
     }
+
     fn argument(index: u32) -> Term {
         Term::Integer(comptime_runtime::Integer::from_u128(index as u128))
     }
+
     fn graph(count: u32) -> iir::Package {
         let mut interner = nir::TypeInterner::default();
         iir::Package {
@@ -1012,20 +1027,20 @@ mod retained_signature_tests {
             let source = SourceRange { start: 1, end: 2 };
             vm.budget.steps = 1;
             assert_eq!(
-                vm.admit_callable_identity(key.declaration, &key.arguments, source)
+                vm.admit_callable_identity(key.declaration, &key.arguments, Some(source))
                     .unwrap_err()
                     .kind,
                 ErrorKind::StepsExhausted
             );
             vm.budget.steps = 100;
             assert_eq!(
-                vm.admit_callable_identity(key.declaration, &[argument(count + 1)], source)
+                vm.admit_callable_identity(key.declaration, &[argument(count + 1)], Some(source))
                     .unwrap_err()
                     .kind,
                 ErrorKind::UnknownFunction
             );
             let before = vm.budget.steps;
-            vm.admit_callable_identity(key.declaration, &key.arguments, source)
+            vm.admit_callable_identity(key.declaration, &key.arguments, Some(source))
                 .unwrap();
             costs.push(before - vm.budget.steps);
             assert!(vm.events().is_empty());

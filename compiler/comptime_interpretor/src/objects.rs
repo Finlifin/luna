@@ -33,9 +33,8 @@ impl Interpreter<'_> {
             self.check_type_description(&typed.ty, None)?;
             self.integer_operation(None, |budget| budget.consume(1))?;
             self.admit_type(&typed.ty, 0)?;
-            let source = SourceRange { start: 0, end: 0 };
-            self.check_comptime_domain(&typed.ty, source)?;
-            self.check_comptime_graph(&typed.value, source, 0)?;
+            self.check_comptime_domain_in(&typed.ty, None)?;
+            self.check_comptime_graph_in(&typed.value, None, 0)?;
             self.admit_embedded_type_descriptions(&typed.value, 0)?;
             self.check_value_type(&typed.value, &typed.ty, None)?;
             if let Some(name) = entry.key() {

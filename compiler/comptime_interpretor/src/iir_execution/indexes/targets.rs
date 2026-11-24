@@ -6,8 +6,8 @@ use std::borrow::Cow;
 pub(super) fn instance_positions<'a>(
     entries: impl Iterator<Item = (usize, &'a iir::InstanceKey)>,
     fuel: &mut usize,
-) -> Result<HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>, ()> {
-    let mut positions: HashMap<_, HashMap<_, _>> = HashMap::new();
+) -> Result<BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, usize>>, ()> {
+    let mut positions: BTreeMap<_, DeterministicMap<_, _>> = BTreeMap::new();
     for (index, key) in entries {
         *fuel = fuel.checked_sub(1).ok_or(())?;
         for argument in key.arguments.iter() {

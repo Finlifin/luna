@@ -146,7 +146,10 @@ impl Interpreter<'_> {
             .iter_mut()
             .map(|value| std::mem::replace(value, Value::Unit));
         if matches!(operation, B::Take) {
-            return self.take_bits_value(values.next().unwrap(), types[0], output, source);
+            let operand = values
+                .next()
+                .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+            return self.take_bits_value(operand, types[0], output, source);
         }
         let Some(Value::BitVec(bits)) = values.next() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
@@ -209,7 +212,9 @@ impl Interpreter<'_> {
                 self.bit_operation(source, |budget| bits.concat(&right, budget))?
             }
             B::Index => {
-                let index = values.next().unwrap();
+                let index = values
+                    .next()
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
                 self.check_retained_value(&index, types[1], Some(source))?;
                 if *types[0] != Term::Primitive(Primitive::BitVec(bits.width()))
                     || *output != Term::Primitive(Primitive::BitVec(1))
@@ -228,8 +233,12 @@ impl Interpreter<'_> {
                 self.bit_operation(source, |budget| bits.slice(index, index + 1, budget))?
             }
             B::Window => {
-                let lower = values.next().unwrap();
-                let upper = values.next().unwrap();
+                let lower = values
+                    .next()
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+                let upper = values
+                    .next()
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
                 self.check_retained_value(&lower, types[1], Some(source))?;
                 self.check_retained_value(&upper, types[2], Some(source))?;
                 if *types[0] != Term::Primitive(Primitive::BitVec(bits.width())) {

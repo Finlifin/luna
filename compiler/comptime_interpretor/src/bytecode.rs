@@ -70,12 +70,18 @@ impl Frame {
         self.waiting = None;
     }
 
-    fn prepare_type(&mut self, register: usize, ty: Term) {
-        let slot = self
-            .code
-            .prepared_type_slot(register)
-            .expect("compiled preparation slot");
+    fn prepare_type(
+        &mut self,
+        register: usize,
+        ty: Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let slot = self.code.prepared_type_slot(register).ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: Some(source),
+        })?;
         self.prepared_types[slot] = Some(ty);
+        Ok(())
     }
 
     fn prepared_type(&self, register: usize) -> Option<&Term> {
@@ -129,13 +135,16 @@ impl Frame {
     pub(super) fn delivered_operand(
         &mut self,
         slot: usize,
-    ) -> (&Value, &Value, &mut Option<OperandCall>) {
-        let (_, call) = self.calls.last_mut().expect("suspended call owner");
-        (
-            &call.callee,
-            call.operands.supplied(slot).expect("supplied call slot"),
-            &mut call.operand_identity,
-        )
+    ) -> Result<(&Value, &Value, &mut Option<OperandCall>), Error> {
+        let (_, call) = self.calls.last_mut().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        let operand = call.operands.supplied(slot).ok_or(Error {
+            kind: ErrorKind::InvalidCallPlan,
+            source: None,
+        })?;
+        Ok((&call.callee, operand, &mut call.operand_identity))
     }
 
     fn current_call(&mut self, register: usize) -> Option<&mut PendingCall> {
@@ -572,8 +581,13 @@ impl Frame {
     }
 
     pub(super) fn restore_environment(mut self) -> Environment {
-        while !self.scopes.is_empty() {
-            self.leave_scope().expect("existing scope");
+        while let Ok(Some(_)) | Ok(None) = (!self.scopes.is_empty())
+            .then(|| self.leave_scope())
+            .transpose()
+        {
+            if self.scopes.is_empty() {
+                break;
+            }
         }
         for (binding, slot) in self.imported.bindings(&self.code) {
             if let Some(value) = self.slots[slot].take() {
@@ -607,7 +621,7 @@ enum CodeKey {
 // session cache, this table never outlives or moves between source worlds.
 #[derive(Default)]
 pub(super) struct BorrowedCodeCache<'a> {
-    entries: HashMap<BorrowedBody<'a>, Arc<Program>>,
+    entries: BTreeMap<BorrowedBody<'a>, Arc<Program>>,
     weight: usize,
 }
 
@@ -622,9 +636,15 @@ impl PartialEq for BorrowedBody<'_> {
 
 impl Eq for BorrowedBody<'_> {}
 
-impl std::hash::Hash for BorrowedBody<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.0, state);
+impl PartialOrd for BorrowedBody<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BorrowedBody<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0 as *const Expr as usize).cmp(&(other.0 as *const Expr as usize))
     }
 }
 
@@ -1195,7 +1215,10 @@ impl<'a> Interpreter<'a> {
                             source,
                         )?),
                     };
-                    let scope = frame.scopes.last_mut().expect("instance input scope");
+                    let scope = frame
+                        .scopes
+                        .last_mut()
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
                     scope.instance = Some(Box::new(InstanceConstruction {
                         origin,
                         constructor: constructor.clone(),
@@ -1208,14 +1231,14 @@ impl<'a> Interpreter<'a> {
                         .scopes
                         .last_mut()
                         .and_then(|scope| scope.instance.as_mut())
-                        .expect("instance input scope");
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
                     instance.arguments.retain(value);
                 }
                 Op::FreezeInstanceArgument { domain } => {
                     let instance = frame
                         .finishing_instance
                         .as_mut()
-                        .expect("completed instance input scope");
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
                     instance.arguments.freeze_next(self, domain, source)?;
                 }
                 Op::FinishInstance {
@@ -1229,7 +1252,7 @@ impl<'a> Interpreter<'a> {
                     } = *frame
                         .finishing_instance
                         .take()
-                        .expect("completed instance input scope");
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
                     let arguments = arguments.into_terms();
                     let origin = match origin {
                         InstanceOrigin::Method(interface, count) => (interface, count),
@@ -1583,7 +1606,7 @@ impl<'a> Interpreter<'a> {
                         ty,
                         source,
                     )?;
-                    frame.prepare_type(*local, observed);
+                    frame.prepare_type(*local, observed, source)?;
                 }
                 Op::ListAppend {
                     local,
@@ -1609,7 +1632,7 @@ impl<'a> Interpreter<'a> {
                         &contract.index,
                         source,
                     )?;
-                    frame.prepare_type(*destination, ty);
+                    frame.prepare_type(*destination, ty, source)?;
                 }
                 Op::CheckIndexedList {
                     prepared,
@@ -1677,7 +1700,7 @@ impl<'a> Interpreter<'a> {
                 Op::PrepareList { destination, list } => {
                     let (ty, _) =
                         self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
-                    frame.prepare_type(*destination, ty);
+                    frame.prepare_type(*destination, ty, source)?;
                 }
                 Op::List {
                     destination,
@@ -2231,7 +2254,7 @@ impl<'a> Interpreter<'a> {
                         input.as_ref().map(|(ty, at)| (ty.as_ref(), *at)),
                         source,
                     )?;
-                    frame.prepare_type(*destination, ty);
+                    frame.prepare_type(*destination, ty, source)?;
                 }
                 Op::Optional {
                     destination,
@@ -2280,7 +2303,7 @@ impl<'a> Interpreter<'a> {
 
                 Op::PrepareAggregate { destination, ty } => {
                     let ty = self.prepare_aggregate(ty, source)?;
-                    frame.prepare_type(*destination, ty);
+                    frame.prepare_type(*destination, ty, source)?;
                 }
                 Op::Variant {
                     destination,
@@ -2669,6 +2692,72 @@ impl<'a> Interpreter<'a> {
                         return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
                     }
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                },
+                Op::LogicalLeft {
+                    destination,
+                    is_and,
+                    left,
+                    done_target,
+                } => {
+                    let value = Self::concrete_value(
+                        frame.slots[*left].take().ok_or_else(missing)?,
+                        source,
+                    )?;
+                    match value {
+                        Value::Bool(flag) => {
+                            if (*is_and && !flag) || (!*is_and && flag) {
+                                frame.slots[*destination] = Some(Value::Bool(flag));
+                                frame.pc = *done_target;
+                            } else {
+                                frame.slots[*left] = Some(Value::Bool(flag));
+                            }
+                        }
+                        Value::BitVec(bits) => {
+                            frame.slots[*left] = Some(Value::BitVec(bits));
+                        }
+                        _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                    }
+                }
+                Op::LogicalFinish {
+                    destination,
+                    is_and,
+                    left,
+                    right,
+                    inputs,
+                    output,
+                } => match frame.slots[*left].take().ok_or_else(missing)? {
+                    Value::Bool(_) => {
+                        let rhs = frame.slots[*right].take().ok_or_else(missing)?;
+                        self.check_retained_value(
+                            &rhs,
+                            &Term::Primitive(Primitive::Bool),
+                            Some(source),
+                        )?;
+                        frame.slots[*destination] = Some(rhs);
+                    }
+                    Value::BitVec(left_bits) => {
+                        let Value::BitVec(right_bits) = Self::concrete_value(
+                            frame.slots[*right].take().ok_or_else(missing)?,
+                            source,
+                        )?
+                        else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        let operation = if *is_and {
+                            comptime_compiler::bits::Operation::And
+                        } else {
+                            comptime_compiler::bits::Operation::Or
+                        };
+                        let result = self.bit_values(
+                            operation,
+                            &[inputs[0].as_ref(), inputs[1].as_ref()],
+                            output,
+                            &mut [Value::BitVec(left_bits), Value::BitVec(right_bits)],
+                            source,
+                        )?;
+                        frame.slots[*destination] = Some(result);
+                    }
+                    _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source))),
                 },
                 Op::Finish { value, explicit } => {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
@@ -4428,6 +4517,215 @@ mod tests {
             assert_eq!(compiled_value, Value::Bool(expected));
             assert_eq!(tree_value, Value::Bool(expected));
         }
+    }
+
+    #[test]
+    fn logical_left_executes_symbolic_bool_bitvec_type_error_and_deep_chain_linearly() {
+        let source = SourceRange { start: 1, end: 20 };
+        let sym_ty = Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+        };
+        let assoc_ty = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                member: DeclarationId {
+                    package: 1,
+                    local: 3,
+                },
+            }),
+            subject: Box::new(Term::Primitive(Primitive::Bool)),
+            arguments: vec![],
+        };
+        let slot_a = LocalId { owner: 1, index: 0 };
+        let slot_b = LocalId { owner: 1, index: 1 };
+        let flag = LocalId { owner: 1, index: 2 };
+
+        let local_sym = |id: LocalId, ty: &Term| Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Local(id),
+        };
+        let assign_flag_then = |value_expr: Expr, ty: &Term| Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: flag,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(value_expr)),
+            },
+        };
+
+        let package = Package::default();
+        let run_both = |expr: &Expr, env: &Environment| {
+            let code = Arc::new(comptime_compiler::compile(expr, &mut 50_000).unwrap());
+            let dump = code.to_string();
+            assert!(dump.contains("(logical-left "), "{dump}");
+            assert!(dump.contains("(logical-finish "), "{dump}");
+
+            let mut byte_vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut byte_env = env.clone();
+            let byte_res = byte_vm
+                .execute_code(&code, &mut byte_env)
+                .map(|flow| match flow {
+                    Flow::Value(v) => v,
+                    other => panic!("unexpected bytecode flow: {other:?}"),
+                });
+
+            let mut tree_vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut tree_env = env.clone();
+            let tree_res = tree_vm.eval(expr, &mut tree_env).map(|flow| match flow {
+                Flow::Value(v) => v,
+                other => panic!("unexpected tree flow: {other:?}"),
+            });
+
+            assert_eq!(
+                byte_res.as_ref().map_err(|e| e.kind.clone()),
+                tree_res.as_ref().map_err(|e| e.kind.clone())
+            );
+            assert_eq!(
+                byte_env.get(&flag).cloned(),
+                tree_env.get(&flag).cloned(),
+                "side effects diverged"
+            );
+            (code, byte_res, byte_env)
+        };
+
+        // 1. Symbolic `bool` short-circuit (`and` with false LHS skips RHS, `or` with true LHS skips RHS).
+        let mut bool_env = Environment::new();
+        bool_env.insert(slot_a, Value::Bool(false));
+        bool_env.insert(slot_b, Value::Bool(true));
+        bool_env.insert(flag, Value::Bool(false));
+        let expr_and_short = Expr {
+            source,
+            ty: assoc_ty.clone(),
+            kind: K::And(
+                Box::new(local_sym(slot_a, &assoc_ty)),
+                Box::new(assign_flag_then(local_sym(slot_b, &assoc_ty), &assoc_ty)),
+            ),
+        };
+        let (_, res, env_after) = run_both(&expr_and_short, &bool_env);
+        assert_eq!(res.unwrap(), Value::Bool(false));
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(false)));
+
+        let expr_or_short = Expr {
+            source,
+            ty: assoc_ty.clone(),
+            kind: K::Or(
+                Box::new(local_sym(slot_b, &assoc_ty)),
+                Box::new(assign_flag_then(local_sym(slot_a, &assoc_ty), &assoc_ty)),
+            ),
+        };
+        let (_, res, env_after) = run_both(&expr_or_short, &bool_env);
+        assert_eq!(res.unwrap(), Value::Bool(true));
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(false)));
+
+        // Non-short-circuiting branch evaluates RHS and updates `flag`.
+        let expr_and_eval = Expr {
+            source,
+            ty: assoc_ty.clone(),
+            kind: K::And(
+                Box::new(local_sym(slot_b, &assoc_ty)),
+                Box::new(assign_flag_then(local_sym(slot_a, &assoc_ty), &assoc_ty)),
+            ),
+        };
+        let (_, res, env_after) = run_both(&expr_and_eval, &bool_env);
+        assert_eq!(res.unwrap(), Value::Bool(false));
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(true)));
+
+        // 2. Symbolic `BitVec` evaluates both sides eagerly.
+        let bv_ty = Term::Primitive(Primitive::BitVec(4));
+        let bv4 = |word: u32| {
+            Value::BitVec(
+                comptime_runtime::bitvec::BitVec::from_words(
+                    4,
+                    &[word],
+                    &mut comptime_runtime::Budget::default(),
+                )
+                .unwrap(),
+            )
+        };
+        let mut bv_env = Environment::new();
+        bv_env.insert(slot_a, bv4(0b1100));
+        bv_env.insert(slot_b, bv4(0b1010));
+        bv_env.insert(flag, Value::Bool(false));
+
+        let expr_bv_and = Expr {
+            source,
+            ty: bv_ty.clone(),
+            kind: K::And(
+                Box::new(local_sym(slot_a, &sym_ty)),
+                Box::new(assign_flag_then(local_sym(slot_b, &sym_ty), &sym_ty)),
+            ),
+        };
+        let (_, res, env_after) = run_both(&expr_bv_and, &bv_env);
+        assert_eq!(res.unwrap(), bv4(0b1000));
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(true)));
+
+        let expr_bv_or = Expr {
+            source,
+            ty: bv_ty,
+            kind: K::Or(
+                Box::new(local_sym(slot_a, &sym_ty)),
+                Box::new(assign_flag_then(local_sym(slot_b, &sym_ty), &sym_ty)),
+            ),
+        };
+        let (_, res, env_after) = run_both(&expr_bv_or, &bv_env);
+        assert_eq!(res.unwrap(), bv4(0b1110));
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(true)));
+
+        // 3. Invalid dynamic LHS type rejects with ErrorKind::Type BEFORE evaluating RHS.
+        let mut bad_env = Environment::new();
+        bad_env.insert(slot_a, Value::UnsignedInteger(7));
+        bad_env.insert(slot_b, Value::Bool(true));
+        bad_env.insert(flag, Value::Bool(false));
+        let (_, res, env_after) = run_both(&expr_and_short, &bad_env);
+        assert_eq!(res.unwrap_err().kind, ErrorKind::Type);
+        assert_eq!(env_after.get(&flag), Some(&Value::Bool(false)));
+
+        // 4. 20-deep right-associated symbolic chain stays O(N) linear in instructions and executes cleanly.
+        let mut deep_env = Environment::new();
+        deep_env.insert(flag, Value::Bool(false));
+        let mut chain_locals = Vec::new();
+        for i in 0..20 {
+            let id = LocalId { owner: 2, index: i };
+            deep_env.insert(id, Value::Bool(true));
+            chain_locals.push(id);
+        }
+        let mut deep_expr = local_sym(chain_locals[19], &assoc_ty);
+        for &id in chain_locals[..19].iter().rev() {
+            deep_expr = Expr {
+                source,
+                ty: assoc_ty.clone(),
+                kind: K::And(Box::new(local_sym(id, &assoc_ty)), Box::new(deep_expr)),
+            };
+        }
+        let (code, res, _) = run_both(&deep_expr, &deep_env);
+        assert!(
+            code.instructions().len() <= 120,
+            "expected O(N) linear bytecode for 20-deep symbolic chain, got {} instructions",
+            code.instructions().len()
+        );
+        assert_eq!(res.unwrap(), Value::Bool(true));
     }
 }
 

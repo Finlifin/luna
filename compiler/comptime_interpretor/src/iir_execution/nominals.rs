@@ -7,6 +7,7 @@ pub(crate) enum ConcreteNominal<'a> {
     Enum(generated_enums::EnumDefinition<'a>),
     Newtype(generated_newtypes::NewtypeDefinition<'a>),
 }
+
 impl<'a> ConcreteNominal<'a> {
     pub(super) fn borrowed(definition: &'a iir::NominalDefinition) -> Self {
         match definition {
@@ -28,8 +29,8 @@ impl<'a> ConcreteNominal<'a> {
 pub(super) fn declaration_identities(
     graph: &iir::Package,
     fuel: &mut usize,
-) -> Result<HashSet<DeclarationId>, ()> {
-    let mut result = HashSet::new();
+) -> Result<BTreeSet<DeclarationId>, ()> {
+    let mut result = BTreeSet::new();
     let mut insert = |id| {
         *fuel = fuel.checked_sub(1).ok_or(())?;
         result.insert(id);

@@ -533,6 +533,20 @@ pub enum Op {
         when: bool,
         target: usize,
     },
+    LogicalLeft {
+        destination: Register,
+        is_and: bool,
+        left: Register,
+        done_target: usize,
+    },
+    LogicalFinish {
+        destination: Register,
+        is_and: bool,
+        left: Register,
+        right: Register,
+        inputs: [Arc<Term>; 2],
+        output: Arc<Term>,
+    },
     Finish {
         value: Register,
         explicit: bool,
@@ -1364,6 +1378,27 @@ impl fmt::Display for Program {
                     when,
                     target,
                 } => write!(f, "(branch {condition} {when} {target})")?,
+                Op::LogicalLeft {
+                    destination,
+                    is_and,
+                    left,
+                    done_target,
+                } => write!(
+                    f,
+                    "(logical-left %{destination} (and {is_and}) %{left} (done {done_target}))"
+                )?,
+                Op::LogicalFinish {
+                    destination,
+                    is_and,
+                    left,
+                    right,
+                    inputs,
+                    output,
+                } => write!(
+                    f,
+                    "(logical-finish %{destination} (and {is_and}) %{left} %{right} (left {}) (right {}) (output {output}))",
+                    inputs[0], inputs[1]
+                )?,
                 Op::Finish { value, explicit } => write!(f, "(finish {value} {explicit})")?,
             }
             write!(f, ")")?;
@@ -1589,11 +1624,11 @@ fn compile_root<'a>(
             Work::Label(label) => labels[label] = Some(instructions.len()),
             Work::EndLoop(id) => {
                 let (start, end, scope_depth, call_depth): (usize, usize, usize, usize) =
-                    loops.remove(&id).expect("active lexical loop");
-                let start = labels[start].expect("emitted loop header");
+                    loops.remove(&id).ok_or(Error::InvalidControl(source))?;
+                let start = labels[start].ok_or(Error::InvalidControl(source))?;
                 if last_suspension.is_some_and(|pc| pc >= start) {
                     *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
-                    let end = labels[end].expect("emitted loop exit");
+                    let end = labels[end].ok_or(Error::InvalidControl(source))?;
                     loop_regions.insert(
                         (id, start),
                         LoopRegion {
@@ -1641,7 +1676,7 @@ fn compile_root<'a>(
                     | K::ScalarGreater(..)
                     | K::ScalarGreaterEqual(..) => {
                         let (scalar, left, right) =
-                            Scalar::expression(expr).expect("scalar expression descriptor");
+                            Scalar::expression(expr).ok_or(Error::Unsupported(source))?;
                         let scalar = Arc::new(OwnedScalar::copy(scalar, fuel, source)?);
                         let a = fresh();
                         let b = right.map(|_| fresh());
@@ -3406,8 +3441,44 @@ fn compile_root<'a>(
                             },
                         );
                     }
-                    // Boolean and bit-vector domains were handled above.
-                    K::And(..) | K::Or(..) => return Err(Error::Unsupported(source)),
+                    // Dynamic/symbolic logical domains (Rigid, NormalForm, AssociatedType
+                    // yielding BitVec, etc.) resolve bool vs BitVec at execution time
+                    // while evaluating the right-hand operand at most once (linear O(N)).
+                    K::And(left, right) | K::Or(left, right) => {
+                        let lhs = fresh();
+                        let rhs = fresh();
+                        let done_target = labels.len();
+                        labels.push(None);
+                        let is_and = matches!(expr.kind, K::And(..));
+                        let inputs = [
+                            Arc::new(copy_term(&left.ty, fuel, source)?),
+                            Arc::new(copy_term(&right.ty, fuel, source)?),
+                        ];
+                        let output = Arc::new(copy_term(&expr.ty, fuel, source)?);
+                        work.push(Work::Label(done_target));
+                        emit(
+                            &mut work,
+                            Op::LogicalFinish {
+                                destination: dst,
+                                is_and,
+                                left: lhs,
+                                right: rhs,
+                                inputs,
+                                output,
+                            },
+                        );
+                        work.push(Work::Expression(right, rhs));
+                        emit(
+                            &mut work,
+                            Op::LogicalLeft {
+                                destination: dst,
+                                is_and,
+                                left: lhs,
+                                done_target,
+                            },
+                        );
+                        work.push(Work::Expression(left, lhs));
+                    }
                     // Normal-form calls with parameter bindings still require
                     // a preparation protocol; reference execution rejects them too.
                     K::AddressOf(_)
@@ -3466,11 +3537,16 @@ fn compile_root<'a>(
                     .filter_map(|id| locals.get(id).copied()),
             );
         }
-        let target = match &mut instruction.op {
-            Op::Jump(target) | Op::Branch { target, .. } => target,
-            _ => continue,
-        };
-        *target = labels[*target].ok_or(Error::InvalidControl(instruction.source))?;
+        match &mut instruction.op {
+            Op::Jump(target) | Op::Branch { target, .. } => {
+                *target = labels[*target].ok_or(Error::InvalidControl(instruction.source))?;
+            }
+            Op::LogicalLeft { done_target, .. } => {
+                *done_target =
+                    labels[*done_target].ok_or(Error::InvalidControl(instruction.source))?;
+            }
+            _ => {}
+        }
     }
     Ok((
         Program {

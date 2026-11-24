@@ -4,6 +4,7 @@ use super::*;
 
 mod admitted;
 mod source_prefix;
+
 pub use source_prefix::{SourceCallPrefix, SourceOperandScope, SourceOperandStep};
 
 pub use admitted::AdmittedCall;
@@ -444,7 +445,7 @@ impl<'a> Interpreter<'a> {
                 .declaration(declaration)
                 .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
             self.check_instance_phase(definition)?;
-            self.check_source_formation(definition.into(), arguments, definition.source)?;
+            self.check_source_formation(definition.into(), arguments, Some(definition.source))?;
         }
         Ok(())
     }

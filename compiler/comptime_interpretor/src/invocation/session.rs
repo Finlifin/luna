@@ -1,6 +1,7 @@
 //! One owner for the complete driver continuation and its exclusively borrowed VM.
 //! Associated selection and definition preparation can leave as owned host requests.
 mod services;
+
 use super::*;
 use crate::request_identity::{Authority, Ticket};
 use services::{HostContinuation, Service};
@@ -205,22 +206,25 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
     pub(super) fn delivered_operand(
         &mut self,
         site: bytecode::OperandSite,
-    ) -> DeliveredOperand<'_, 'a> {
+    ) -> Result<DeliveredOperand<'_, 'a>, Error> {
         let frame = self
             .stack
             .last_mut()
             .and_then(StackEntry::code)
             .or_else(|| self.root.code())
-            .expect("operand owner");
-        let (callee, value, identity) = frame.delivered_operand(site.parameter);
-        DeliveredOperand {
+            .ok_or(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: Some(site.source),
+            })?;
+        let (callee, value, identity) = frame.delivered_operand(site.parameter)?;
+        Ok(DeliveredOperand {
             source: site.source,
             parameter: site.parameter,
             identity,
             callee,
             value,
             vm: self.vm,
-        }
+        })
     }
 
     fn step(
@@ -726,23 +730,29 @@ impl fmt::Display for Session<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     mod associated_responses;
     mod definition_preparation;
     mod method_preparation;
+
     use input_collection::InputPlan;
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use nir::program::{NormalFormArgument, NormalFormInputPlan, NormalFormPreparation, Place};
 
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
     fn local(index: u32) -> LocalId {
         LocalId { owner: 95, index }
     }
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 95, local }
     }
+
     fn ty(primitive: Primitive) -> Term {
         Term::Primitive(primitive)
     }
+
     fn expr(ty: Term, kind: K) -> Expr {
         Expr {
             source: SOURCE,
@@ -750,6 +760,7 @@ mod tests {
             kind,
         }
     }
+
     fn mark() -> Expr {
         expr(
             ty(Primitive::Void),

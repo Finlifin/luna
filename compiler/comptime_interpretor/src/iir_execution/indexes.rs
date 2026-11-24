@@ -4,20 +4,22 @@ use super::*;
 
 mod methods;
 mod targets;
+
 use methods::MethodIndex;
 use targets::instance_positions;
 
 pub(crate) struct GraphIndexes {
-    pub(crate) templates: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
-    pub(crate) functions: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
+    pub(crate) templates: BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, usize>>,
+    pub(crate) functions: BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, usize>>,
     pub(crate) contracts: MethodIndex,
     pub(crate) dispatch: MethodIndex,
-    pub(crate) declarations: HashSet<DeclarationId>,
-    pub(crate) nominals: HashMap<Term, usize>,
-    pub(crate) callables: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
+    pub(crate) declarations: BTreeSet<DeclarationId>,
+    pub(crate) nominals: DeterministicMap<Term, usize>,
+    pub(crate) callables: BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, usize>>,
     pub(crate) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
-    pub(crate) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
+    pub(crate) implementations: Arc<DeterministicMap<(InterfaceInstance, Term), DeclarationId>>,
 }
+
 impl GraphIndexes {
     pub(crate) fn new(graph: &iir::Package, budget: &mut Budget) -> Result<Self, Error> {
         let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
@@ -47,7 +49,7 @@ impl GraphIndexes {
                     .flat_map(|(index, table)| table.targets().iter().map(move |key| (index, key))),
                 &mut fuel,
             )?;
-            let mut nominals = HashMap::new();
+            let mut nominals = DeterministicMap::new();
             for (index, instance) in graph.nominals.iter().enumerate() {
                 fuel = fuel.checked_sub(1).ok_or(())?;
                 // Pay for copying and hashing the full instance key once. The
@@ -60,7 +62,7 @@ impl GraphIndexes {
                 fuel = fuel.checked_sub(1).ok_or(())?;
                 normal_forms.insert(head.declaration, index);
             }
-            let mut implementations = HashMap::new();
+            let mut implementations = DeterministicMap::new();
             for dispatch in &graph.dispatch {
                 fuel = fuel.checked_sub(1).ok_or(())?;
                 nir::type_computations::charge_term(&dispatch.subject, &mut fuel)

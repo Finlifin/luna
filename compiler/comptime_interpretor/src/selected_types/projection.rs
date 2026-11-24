@@ -31,7 +31,7 @@ impl From<ErrorKind> for Failure {
 pub(super) struct Observation<'vm, 'p> {
     vm: &'vm mut Interpreter<'p>,
     source: Option<SourceRange>,
-    observed: HashMap<Key, Arc<Expr>>,
+    observed: DeterministicMap<Key, Arc<Expr>>,
     // The VM owns the overall u64 allowance. The structural walk borrows a
     // usize-sized window between initializer executions.
     window: usize,
@@ -47,7 +47,7 @@ impl<'vm, 'p> Observation<'vm, 'p> {
         let mut query = Self {
             vm,
             source,
-            observed: HashMap::new(),
+            observed: DeterministicMap::new(),
             window: fuel,
         };
         let result = walk(ty, &mut query, &mut fuel, 0);

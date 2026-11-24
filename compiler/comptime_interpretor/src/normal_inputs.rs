@@ -13,10 +13,12 @@ pub(super) enum InputKey {
     Node(nir::program::InputPath),
     Register(usize),
 }
+
 impl InputKey {
     pub(super) fn root() -> Self {
         Self::Node(nir::program::InputPath::default())
     }
+
     pub(super) fn child(&self, index: usize) -> Self {
         let Self::Node(path) = self else {
             unreachable!("child of input node")
@@ -24,6 +26,7 @@ impl InputKey {
         Self::Node(path.child(index))
     }
 }
+
 impl fmt::Display for InputKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -129,13 +132,10 @@ impl Interpreter<'_> {
                     pending,
                 } => {
                     if let Some((spread, field_source)) = pending {
-                        Ready::append(
-                            &mut list,
-                            self,
-                            completed.take().unwrap(),
-                            spread,
-                            field_source,
-                        )?;
+                        let value = completed.take().ok_or_else(|| {
+                            self.failure(ErrorKind::InvalidControlFlow, Some(source))
+                        })?;
+                        Ready::append(&mut list, self, value, spread, field_source)?;
                     }
                     if let Some(field) = items.next() {
                         work.push(Work::List {
@@ -157,7 +157,10 @@ impl Interpreter<'_> {
                     pending,
                 } => {
                     if pending {
-                        values.push(completed.take().unwrap());
+                        let value = completed.take().ok_or_else(|| {
+                            self.failure(ErrorKind::InvalidControlFlow, Some(source))
+                        })?;
+                        values.push(value);
                     }
                     if let Some(item) = items.next() {
                         work.push(Work::Tuple {
@@ -174,7 +177,7 @@ impl Interpreter<'_> {
                 }
             }
         }
-        Ok(completed.unwrap())
+        completed.ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))
     }
 }
 

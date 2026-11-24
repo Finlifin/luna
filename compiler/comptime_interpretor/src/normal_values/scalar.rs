@@ -97,12 +97,7 @@ impl Interpreter<'_> {
             ) =>
             {
                 if self.graph.is_some() {
-                    return self.iir_function_value(
-                        *declaration,
-                        arguments,
-                        ty,
-                        SourceRange { start: 0, end: 0 },
-                    );
+                    return self.iir_function_value_in(*declaration, arguments, ty, None);
                 }
                 let source = if let Some(identity) = self.functions.runtime_identity(declaration) {
                     if ty.is_comptime_callable() || identity.signature.is_comptime_callable() {

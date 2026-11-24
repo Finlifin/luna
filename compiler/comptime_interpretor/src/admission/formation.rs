@@ -10,20 +10,20 @@ impl Interpreter<'_> {
 
     // The external proof query accepts propositions in the invocation's
     // world. A callable's local binder must not capture an invocation input.
-    pub(crate) fn check_formation_predicate(
+    pub(crate) fn check_formation_predicate_in(
         &mut self,
         predicate: &nir::program::TypePredicate,
         nested: bool,
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<(), Error> {
-        self.tick(Some(source))?;
+        self.tick(source)?;
         if nested
             && predicate.trivial_truth().is_none()
             && !formation_predicate_is_closed(predicate)
         {
-            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+            return Err(self.failure(ErrorKind::TypeContractUnresolved, source));
         }
-        self.check_type_contract(predicate, source)
+        self.check_type_contract_in(predicate, source)
     }
 
     fn formation_inputs<R>(
@@ -55,16 +55,16 @@ impl Interpreter<'_> {
         &mut self,
         contracts: FormationContracts,
         nested: bool,
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<(), Error> {
         for predicate in contracts.requirements {
-            self.check_formation_predicate(&predicate, nested, source)?;
+            self.check_formation_predicate_in(&predicate, nested, source)?;
         }
         for capability in contracts.capabilities {
             if nested && !formation_capability_is_closed(&capability) {
-                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, source));
             }
-            self.check_capability_contract(&capability, source)?;
+            self.check_capability_contract_in(&capability, source)?;
         }
         Ok(())
     }
@@ -79,7 +79,6 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
         self.tick(None)?;
-        let source = SourceRange { start: 0, end: 0 };
         match ty {
             Term::Nominal {
                 declaration,
@@ -102,10 +101,10 @@ impl Interpreter<'_> {
                     };
                     for predicate in requirements {
                         self.tick(None)?;
-                        self.check_type_contract(predicate, source)?;
+                        self.check_type_contract_in(predicate, None)?;
                     }
                     for predicate in capabilities {
-                        self.check_capability_contract(predicate, source)?;
+                        self.check_capability_contract_in(predicate, None)?;
                     }
                     for argument in arguments {
                         self.admit_in_telescope(argument, depth + 1, frames)?;
@@ -162,7 +161,7 @@ impl Interpreter<'_> {
                         },
                     )
                 })?;
-                self.check_formation_contracts(requirements, !frames.sorts.is_empty(), source)?;
+                self.check_formation_contracts(requirements, !frames.sorts.is_empty(), None)?;
                 for ty in arguments {
                     self.admit_in_telescope(ty, depth + 1, frames)?;
                 }
@@ -180,7 +179,7 @@ impl Interpreter<'_> {
                     })
                     .map_err(type_descriptions::application_error)
                 })?;
-                self.check_normal_requirements(metadata, arguments, &frames.sorts, source)?;
+                self.check_normal_requirements_in(metadata, arguments, &frames.sorts, None)?;
                 for ty in arguments {
                     self.admit_in_telescope(ty, depth + 1, frames)?;
                 }
@@ -195,7 +194,7 @@ impl Interpreter<'_> {
                 declaration,
                 arguments,
             } => {
-                self.admit_callable_identity(*declaration, arguments, source)?;
+                self.admit_callable_identity(*declaration, arguments, None)?;
                 for argument in arguments {
                     self.admit_in_telescope(argument, depth + 1, frames)?;
                 }
@@ -304,17 +303,17 @@ impl Interpreter<'_> {
                         vm.inspect_scoped_term(&signature, &frames.parameters, fuel)
                     })?;
                     for predicate in contracts.requirements {
-                        self.check_formation_predicate(
+                        self.check_formation_predicate_in(
                             &predicate,
                             !frames.sorts.is_empty(),
-                            source,
+                            None,
                         )?;
                     }
                     for capability in contracts.capabilities {
-                        self.check_formation_predicate(
+                        self.check_formation_predicate_in(
                             &nir::program::TypePredicate::Trait(capability),
                             !frames.sorts.is_empty(),
-                            source,
+                            None,
                         )?;
                     }
                     for argument in &operation.arguments {

@@ -186,12 +186,14 @@ pub(super) struct Contents<'a> {
     guard: MutexGuard<'a, Value>,
     fields: &'a [(FieldOwner, usize)],
 }
+
 impl Contents<'_> {
     pub fn value(&self) -> &Value {
         // The path was checked under this guard and cannot change while held.
         locate(&self.guard, self.fields).expect("validated value reference path")
     }
 }
+
 impl fmt::Display for ValueReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(value-reference (fields")?;
@@ -201,6 +203,7 @@ impl fmt::Display for ValueReference {
         write!(f, ") (rebind {}))", self.rebind)
     }
 }
+
 impl fmt::Debug for ValueReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -232,6 +235,7 @@ impl ValueReference {
             rebind: self.rebind || !fields.is_empty(),
         })
     }
+
     /// Preserve a let binding while allowing updates to its fields.
     pub fn prohibit_rebind(&mut self) {
         self.rebind = false;
@@ -311,7 +315,7 @@ impl crate::Interpreter<'_> {
         &mut self,
         reference: &ValueReference,
     ) -> Result<Value, crate::Error> {
-        self.read_value_reference(reference, crate::SourceRange { start: 0, end: 0 })
+        self.read_value_reference_in(reference, None)
     }
 
     /// Snapshot a receiver's entry value for contracts, independently of later
@@ -326,7 +330,7 @@ impl crate::Interpreter<'_> {
         let contents = reference
             .borrow(&mut self.budget.steps)
             .map_err(|kind| self.failure(kind, None))?;
-        self.copy_representation(contents.value(), crate::SourceRange { start: 0, end: 0 }, 0)
+        self.copy_representation_in(contents.value(), None, 0)
     }
 
     pub(super) fn read_value_reference(
@@ -334,13 +338,21 @@ impl crate::Interpreter<'_> {
         reference: &ValueReference,
         source: crate::SourceRange,
     ) -> Result<Value, crate::Error> {
+        self.read_value_reference_in(reference, Some(source))
+    }
+
+    pub(super) fn read_value_reference_in(
+        &mut self,
+        reference: &ValueReference,
+        source: Option<crate::SourceRange>,
+    ) -> Result<Value, crate::Error> {
         if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+            return Err(self.failure(ErrorKind::PhaseMismatch, source));
         }
         let contents = reference
             .borrow(&mut self.budget.steps)
-            .map_err(|kind| self.failure(kind, Some(source)))?;
-        self.checkpoint_representation(contents.value(), source)
+            .map_err(|kind| self.failure(kind, source))?;
+        self.checkpoint_representation_in(contents.value(), source)
     }
 
     /// Preserve the base slot and the complete field path. Computed bases are
@@ -653,6 +665,7 @@ mod invocation_tests {
 mod call_tests {
     use crate::*;
     use nir::program::{ArgumentPassing, CallArgument, Function, FunctionPhase, Place};
+
     fn expr(kind: K) -> Expr {
         Expr {
             kind,
@@ -660,6 +673,7 @@ mod call_tests {
             source: SourceRange { start: 1, end: 2 },
         }
     }
+
     fn setter() -> Function {
         let binding = LocalId { owner: 2, index: 0 };
         Function {
@@ -711,6 +725,7 @@ mod call_tests {
             }),
         }
     }
+
     fn call(target: &Function, passing: ArgumentPassing, value: Expr) -> Expr {
         expr(K::Call {
             callee: Box::new(Expr {
@@ -727,6 +742,7 @@ mod call_tests {
             parameter_bindings: target.parameters.clone(),
         })
     }
+
     #[test]
     fn prepared_reference_inputs_validate_before_writes_and_restore_owned_graphs() {
         let target = setter();
@@ -809,6 +825,7 @@ mod call_tests {
             );
         }
     }
+
     #[test]
     fn forwarded_references_keep_identity_and_computed_receivers_evaluate_once() {
         let target = setter();

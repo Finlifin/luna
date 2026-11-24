@@ -65,7 +65,15 @@ impl Frame {
                     // visible. Values move out of slots, preserving storage and
                     // value-reference identity; no source Copy/Clone is invoked.
                     for &(binding, slot) in exports.bindings() {
-                        let value = self.slots[slot].take().expect("validated export");
+                        let Some(value) = self.slots[slot].take() else {
+                            return (
+                                Err(Error {
+                                    kind: ErrorKind::MissingBinding,
+                                    source: Some(exports.source()),
+                                }),
+                                self.restore_environment(),
+                            );
+                        };
                         self.environment.insert(binding, value);
                     }
                 }

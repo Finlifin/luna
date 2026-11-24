@@ -47,8 +47,16 @@ impl Interpreter<'_> {
         requirement: &nir::program::TraitRequirement,
         source: SourceRange,
     ) -> Result<(), Error> {
-        self.tick(Some(source))?;
-        self.charge_copy_work(Some(source), |fuel| {
+        self.check_capability_contract_in(requirement, Some(source))
+    }
+
+    pub(super) fn check_capability_contract_in(
+        &mut self,
+        requirement: &nir::program::TraitRequirement,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
+        self.tick(source)?;
+        self.charge_copy_work(source, |fuel| {
             for term in
                 std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
             {
@@ -65,9 +73,9 @@ impl Interpreter<'_> {
             // A missing passive selection still permits the ordinary bounded
             // proof query. Resource failure must not start a second attempt.
             Ok(false) | Err(ErrorKind::UnmaterializedDispatch) => {}
-            Err(kind) => return Err(self.failure(kind, Some(source))),
+            Err(kind) => return Err(self.failure(kind, source)),
         }
-        self.check_type_contract(&P::Trait(requirement.clone()), source)
+        self.check_type_contract_in(&P::Trait(requirement.clone()), source)
     }
 
     /// Discharge closed obligations once in the receiving world. Only the
@@ -79,26 +87,35 @@ impl Interpreter<'_> {
         inputs: &nir::DeclarationSubstitution<'_>,
         source: SourceRange,
     ) -> Result<Vec<P>, Error> {
+        self.pending_callable_requirements_in(formation, inputs, Some(source))
+    }
+
+    pub(super) fn pending_callable_requirements_in(
+        &mut self,
+        formation: nir::callable_source::Formation<'_>,
+        inputs: &nir::DeclarationSubstitution<'_>,
+        source: Option<SourceRange>,
+    ) -> Result<Vec<P>, Error> {
         let mut pending = Vec::new();
         for requirement in formation.requirements {
-            let predicate = self.query_admission(Some(source), |_, fuel| {
+            let predicate = self.query_admission(source, |_, fuel| {
                 Ok(inputs.instantiate_predicate_bounded(requirement, fuel)?)
             })?;
             if formation_predicate_is_closed(&predicate) {
-                self.check_type_contract(&predicate, source)?;
+                self.check_type_contract_in(&predicate, source)?;
             } else {
                 pending.push(predicate);
             }
         }
         for capability in formation.capabilities {
-            let requirement = self.query_admission(Some(source), |_, fuel| {
+            let requirement = self.query_admission(source, |_, fuel| {
                 Ok(inputs.instantiate_requirement_bounded(capability, fuel)?)
             })?;
             if !formation_capability_is_closed(&requirement) {
                 pending.push(P::Trait(requirement));
             } else if self.graph.is_none() {
                 // Concrete IIR already carries the producer's closed evidence.
-                self.check_capability_contract(&requirement, source)?;
+                self.check_capability_contract_in(&requirement, source)?;
             }
         }
         Ok(pending)

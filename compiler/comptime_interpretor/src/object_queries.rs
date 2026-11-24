@@ -58,9 +58,9 @@ impl Interpreter<'_> {
                     _ => None,
                 }
             };
-            let mut selectors = selectors.into_iter();
-            let first = self.read_leaf_selector(selectors.next().unwrap())?;
-            let second = self.read_leaf_selector(selectors.next().unwrap())?;
+            let [first, second] = selectors;
+            let first = self.read_leaf_selector(first)?;
+            let second = self.read_leaf_selector(second)?;
             self.tick(Some(source))?;
             let Some(object) = owned_object.as_ref() else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));

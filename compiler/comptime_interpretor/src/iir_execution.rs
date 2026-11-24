@@ -197,9 +197,9 @@ impl<'a> Interpreter<'a> {
             graph: Some(graph),
             target: graph.target,
             cleanup_schedule: None,
-            cleanup_scopes: HashMap::new(),
-            cleanup_sites: HashMap::new(),
-            cleanup_effect_context: HashMap::new(),
+            cleanup_scopes: DeterministicMap::new(),
+            cleanup_sites: BTreeMap::new(),
+            cleanup_effect_context: DeterministicMap::new(),
             cleanup_frame: None,
             cleanup_failed: false,
             prepared_frames: vec![],
@@ -223,14 +223,14 @@ impl<'a> Interpreter<'a> {
             method_parameters: Default::default(),
             method_contracts: Default::default(),
             method_origins: Default::default(),
-            assumed_interfaces: HashSet::new(),
+            assumed_interfaces: DeterministicSet::new(),
             trait_declarations: Default::default(),
             implemented_interfaces: indexes.implementations.clone(),
-            method_bodies: Arc::new(HashMap::new()),
-            resolved_method_bodies: HashMap::new(),
+            method_bodies: Arc::new(DeterministicMap::new()),
+            resolved_method_bodies: DeterministicMap::new(),
             associated_values: Default::default(),
             associated_initializers: Default::default(),
-            active_associated_initializers: HashSet::new(),
+            active_associated_initializers: DeterministicSet::new(),
             instances: Default::default(),
             iir_callables: Default::default(),
             functions: Default::default(),
@@ -363,7 +363,14 @@ impl<'a> Interpreter<'a> {
         {
             return Err(self.failure(ErrorKind::Type, None));
         }
-        Ok(&self.graph.expect("local graph callable").functions[handle.position].function)
+        let graph = self
+            .graph
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
+        let function = graph
+            .functions
+            .get(handle.position)
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
+        Ok(&function.function)
     }
 
     pub(super) fn eval_iir_callable(&mut self, expr: &Expr) -> Result<Flow, Error> {
@@ -376,7 +383,9 @@ impl<'a> Interpreter<'a> {
                 arguments,
             } => self.iir_function_value(*declaration, arguments, &expr.ty, expr.source)?,
             K::TraitMethod { .. } => {
-                self.iir_method_value(comptime_compiler::methods::View::expression(expr).unwrap())?
+                let method = comptime_compiler::methods::View::expression(expr)
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
+                self.iir_method_value(method)?
             }
             _ => return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source))),
         };
@@ -390,7 +399,17 @@ impl<'a> Interpreter<'a> {
         output: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        self.charge_copy_work(Some(source), |fuel| {
+        self.iir_function_value_in(declaration, arguments, output, Some(source))
+    }
+
+    pub(super) fn iir_function_value_in(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        output: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<Value, Error> {
+        self.charge_copy_work(source, |fuel| {
             for term in arguments {
                 nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
             }
@@ -450,7 +469,7 @@ impl<'a> Interpreter<'a> {
             },
             Some(method),
             method.output,
-            method.source,
+            Some(method.source),
         )
     }
 
@@ -459,14 +478,14 @@ impl<'a> Interpreter<'a> {
         key: iir::InstanceKey,
         method: Option<comptime_compiler::methods::View<'_>>,
         output: &Term,
-        source: SourceRange,
+        source: Option<SourceRange>,
     ) -> Result<Value, Error> {
         // A runtime interface member transported through comptime keeps the
         // public member identity even when its selected body is executable.
         let transport = self.comptime_only && !output.is_comptime_callable();
         let value = if transport
             || self
-                .query_admission(Some(source), |vm, fuel| {
+                .query_admission(source, |vm, fuel| {
                     vm.iir_template_type(key.declaration, &key.arguments, fuel)
                 })?
                 .is_some()
@@ -490,7 +509,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.iir_callable(&key)?
         };
-        self.check_value_type(&value, output, Some(source))?;
+        self.check_value_type(&value, output, source)?;
         Ok(value)
     }
 }

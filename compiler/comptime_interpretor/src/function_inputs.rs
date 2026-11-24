@@ -15,6 +15,7 @@ pub struct FunctionInputRejection {
     pub stage: InputAdmissionStage,
     pub reason: String,
 }
+
 impl fmt::Display for FunctionInputRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -24,6 +25,7 @@ impl fmt::Display for FunctionInputRejection {
         )
     }
 }
+
 fn rejection(
     index: usize,
     parameter: DeclarationId,
@@ -97,10 +99,20 @@ impl Interpreter<'_> {
         scope: nir::DeclarationInputScope<'v>,
         source: SourceRange,
     ) -> Result<nir::AdmittedArguments<'v, T>, Error> {
+        self.admit_function_inputs_in(parameters, arguments, scope, Some(source))
+    }
+
+    pub(super) fn admit_function_inputs_in<'v, T: Borrow<Term>>(
+        &mut self,
+        parameters: &[DeclarationId],
+        arguments: &'v [T],
+        scope: nir::DeclarationInputScope<'v>,
+        source: Option<SourceRange>,
+    ) -> Result<nir::AdmittedArguments<'v, T>, Error> {
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
         let checked = self.admitted_function_inputs(parameters, arguments, scope, &mut fuel);
         self.budget.steps -= (before - fuel) as u64;
-        checked.map_err(|kind| self.failure(kind, Some(source)))
+        checked.map_err(|kind| self.failure(kind, source))
     }
 }

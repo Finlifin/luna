@@ -5,6 +5,7 @@ pub(super) struct Declarations<'a, T> {
     declarations: &'a [T],
     pub(super) positions: Arc<BTreeMap<DeclarationId, usize>>,
 }
+
 impl<'a, T> Declarations<'a, T> {
     pub(super) fn new(
         declarations: &'a [T],
@@ -31,11 +32,13 @@ impl<'a, T> Declarations<'a, T> {
             positions,
         })
     }
+
     pub(super) fn get(&self, id: &DeclarationId) -> Option<&'a T> {
         self.positions
             .get(id)
             .map(|position| &self.declarations[*position])
     }
+
     pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
         self.positions.contains_key(id)
     }
@@ -49,7 +52,9 @@ impl<T> Default for Declarations<'_, T> {
         }
     }
 }
+
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
+
 pub(super) type Traits<'a> = Declarations<'a, nir::program::Trait>;
 
 /// Source indexes stay shared across invocations; published additions are local.
@@ -57,12 +62,14 @@ pub(super) struct Newtypes<'a> {
     pub(super) source: Declarations<'a, nir::newtypes::Newtype>,
     local: BTreeMap<DeclarationId, generated_newtypes::NewtypeDefinition<'a>>,
 }
+
 impl<'a> Newtypes<'a> {
     pub(super) fn published(
         &self,
     ) -> &BTreeMap<DeclarationId, generated_newtypes::NewtypeDefinition<'a>> {
         &self.local
     }
+
     pub(super) fn new(
         declarations: &'a [nir::newtypes::Newtype],
         positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
@@ -73,12 +80,14 @@ impl<'a> Newtypes<'a> {
             local: BTreeMap::new(),
         })
     }
+
     pub(super) fn get(&self, id: &DeclarationId) -> Option<&nir::newtypes::Newtype> {
         self.local
             .get(id)
             .map(|definition| &**definition)
             .or_else(|| self.source.get(id))
     }
+
     pub(super) fn handle(
         &self,
         id: &DeclarationId,
@@ -89,9 +98,11 @@ impl<'a> Newtypes<'a> {
                 .map(generated_newtypes::NewtypeDefinition::Borrowed)
         })
     }
+
     pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
         self.source.contains_key(id) || self.local.contains_key(id)
     }
+
     pub(super) fn insert(
         &mut self,
         id: DeclarationId,
@@ -100,10 +111,12 @@ impl<'a> Newtypes<'a> {
         debug_assert!(!self.contains_key(&id));
         self.local.insert(id, definition);
     }
+
     pub(super) fn remove(&mut self, id: &DeclarationId) {
         self.local.remove(id);
     }
 }
+
 impl Default for Newtypes<'_> {
     fn default() -> Self {
         Self {
@@ -112,6 +125,7 @@ impl Default for Newtypes<'_> {
         }
     }
 }
+
 pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
 
 pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;
@@ -181,9 +195,9 @@ pub(super) struct SourceIndexes {
     pub(super) source: Arc<Package>,
     pub(super) phase_inspection: nir::phases::Inspection<'static>,
     pub(super) reserved_declarations: Arc<ReservedDeclarations>,
-    pub(super) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
+    pub(super) implementations: Arc<DeterministicMap<(InterfaceInstance, Term), DeclarationId>>,
     pub(super) methods:
-        Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
+        Arc<DeterministicMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
     pub(super) associated: Arc<associated_catalog::Positions>,
     pub(super) initializers: Arc<associated_catalog::Positions>,
     pub(super) method_contracts: Arc<method_catalog::Entries>,
@@ -192,8 +206,8 @@ pub(super) struct SourceIndexes {
     pub(super) aliases: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) structs: Arc<BTreeMap<DeclarationId, generated_structs::StructDefinition<'static>>>,
     pub(super) enums: Arc<BTreeMap<DeclarationId, generated_enums::EnumDefinition<'static>>>,
-    pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
-    pub(super) method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
+    pub(super) method_parameters: Arc<BTreeMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
+    pub(super) method_origins: Arc<BTreeMap<DeclarationId, Option<DeclarationId>>>,
     pub(super) parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
     pub(super) effects: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) traits: Arc<BTreeMap<DeclarationId, usize>>,
@@ -203,11 +217,13 @@ pub(super) struct SourceIndexes {
 pub(super) trait HeadLookup {
     fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head>;
 }
+
 impl HeadLookup for NormalForms<'_> {
     fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
         self.get(id)
     }
 }
+
 impl HeadLookup for BTreeMap<DeclarationId, &nir::normal_forms::Head> {
     fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
         self.get(id).copied()

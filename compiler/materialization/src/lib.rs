@@ -4605,9 +4605,12 @@ impl Builder<'_, '_> {
                     .iter()
                     .find(|head| head.declaration == *id)
                     .ok_or("normal-form callable declaration is missing")?;
-                if descriptor
-                    .callable_type_in(&mut self.fuel)
-                    .map_err(|error| error.to_string())?
+                if nir::phases::normal_form_callable_type_in(
+                    descriptor,
+                    self.package,
+                    &mut self.fuel,
+                )
+                .map_err(|error| error.to_string())?
                     != expr.ty
                 {
                     return Err("normal-form callable type disagrees with its declaration".into());
@@ -5533,4 +5536,250 @@ fn validate_materialized_bit_convert_safety(
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod higher_order_nf_tests {
+    use super::*;
+    use nir::normal_forms::{Head, Kind, Parameter as NfParameter, Role};
+    use nir::{Parameter, Primitive, Sort};
+
+    struct NoExpansion;
+
+    impl Expansion for NoExpansion {
+        fn quotes(
+            &self,
+            _package: &n::Package,
+            _expression: &mut n::Expr,
+            _caller_env_parameters: &[n::RuntimeEnvParameter],
+            _caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+            _next: &mut u32,
+            _sources: &mut Vec<n::ExpansionSource>,
+            _enums: &mut Vec<n::Enum>,
+            _fuel: &mut usize,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn effects(
+            &self,
+            _package: &n::Package,
+            _inline_effects: &BTreeSet<Id>,
+            _expression: &mut n::Expr,
+            _next: &mut u32,
+            _sources: &mut Vec<n::ExpansionSource>,
+            _enums: &mut Vec<n::Enum>,
+            _fuel: &mut usize,
+        ) -> Result<(usize, usize), String> {
+            Ok((0, 0))
+        }
+
+        fn quote(
+            &self,
+            _package: &n::Package,
+            _template: &n::Function,
+            _expression: &mut n::Expr,
+            _caller_env_parameters: &[n::RuntimeEnvParameter],
+            _caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+            _in_closure: bool,
+            _next: &mut u32,
+            _sources: &mut Vec<n::ExpansionSource>,
+            _enums: &mut Vec<n::Enum>,
+            _fuel: &mut usize,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn inline(
+            &self,
+            _package: &n::Package,
+            _template: &n::Function,
+            _expression: &mut n::Expr,
+            _caller_env_parameters: &[n::RuntimeEnvParameter],
+            _caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+            _in_closure: bool,
+            _next: &mut u32,
+            _sources: &mut Vec<n::ExpansionSource>,
+            _enums: &mut Vec<n::Enum>,
+            _fuel: &mut usize,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn instantiate_accepts_higher_order_non_type_normal_form_function() {
+        let helper_decl = Id {
+            package: 1,
+            local: 19,
+        };
+        let nf_decl = Id {
+            package: 1,
+            local: 20,
+        };
+        let input_decl = Id {
+            package: 1,
+            local: 21,
+        };
+        let root_decl = Id {
+            package: 1,
+            local: 22,
+        };
+        let helper_binding = n::LocalId {
+            owner: 19,
+            index: 0,
+        };
+        let input_binding = n::LocalId {
+            owner: 20,
+            index: 0,
+        };
+        let inner_callable = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        }));
+        let helper_fn = n::Function {
+            interface: n::FunctionDeclaration {
+                source: n::SourceRange { start: 1, end: 5 },
+                declaration: helper_decl,
+                name: "id_type".to_string(),
+                phase: n::FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: inner_callable.clone(),
+                parameters: vec![helper_binding],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: n::Expr {
+                source: n::SourceRange { start: 2, end: 4 },
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::Local(helper_binding),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let outer_sig = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(inner_callable.clone()),
+        };
+        let body_sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(inner_callable.clone()),
+        };
+        let expected_callable = Term::NormalFormFunction(Box::new(outer_sig), None);
+        let nf_head = Head {
+            collector: None,
+            role: Role::Opaque,
+            declaration: nf_decl,
+            parameters: vec![NfParameter {
+                declaration: input_decl,
+                binding: input_binding,
+                kind: Kind::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            requirements: vec![],
+        };
+        let nf_fn = n::Function {
+            interface: n::FunctionDeclaration {
+                source: n::SourceRange { start: 6, end: 15 },
+                declaration: nf_decl,
+                name: "ho_nf".to_string(),
+                phase: n::FunctionPhase::NormalForm,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: body_sig,
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![input_decl],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: n::Expr {
+                source: n::SourceRange { start: 7, end: 14 },
+                ty: inner_callable,
+                kind: K::Function(helper_decl),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let root_fn = n::Function {
+            interface: n::FunctionDeclaration {
+                source: n::SourceRange { start: 20, end: 40 },
+                declaration: root_decl,
+                name: "root".to_string(),
+                phase: n::FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(expected_callable.clone()),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: n::Expr {
+                source: n::SourceRange { start: 25, end: 39 },
+                ty: expected_callable,
+                kind: K::Function(nf_decl),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let package = n::Package {
+            functions: vec![helper_fn, nf_fn, root_fn],
+            normal_forms: vec![nf_head],
+            ..Default::default()
+        };
+        let roots = [iir::InstanceKey {
+            declaration: root_decl,
+            arguments: vec![].into(),
+        }];
+        let dispatched = dispatch_instances_for_invocation(&package, &roots, Budget::default())
+            .expect("dispatch_instances_for_invocation should admit higher-order NF callable");
+        assert!(dispatched.is_empty());
+        let iir_err = instantiate(
+            &package,
+            &roots,
+            BTreeSet::new(),
+            Budget::default(),
+            &NoExpansion,
+        )
+        .expect_err("executable IIR should reject unapplied normal-form callable values");
+        assert!(
+            iir_err.contains("normal-form callable cannot enter executable IIR"),
+            "unexpected error: {iir_err}"
+        );
+    }
 }

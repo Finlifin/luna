@@ -1,7 +1,9 @@
 //! Interpreter storage identity. Pointers retain weak targets, not owners. The
 //! source memory verifier remains responsible for proving accesses statically.
 use super::{ErrorKind, Value};
+
 mod checkpoint;
+
 pub(crate) use checkpoint::charge_retained_clone;
 use nir::{DeclarationId, Term};
 use std::{
@@ -22,6 +24,7 @@ struct Responsibility {
     descendants: bool,
     children: BTreeMap<usize, Responsibility>,
 }
+
 impl Responsibility {
     fn new(present: bool) -> Self {
         Self {
@@ -30,6 +33,7 @@ impl Responsibility {
             children: BTreeMap::new(),
         }
     }
+
     fn position(&mut self, path: &[usize]) -> &mut Self {
         let mut current = self;
         for index in path {
@@ -41,9 +45,11 @@ impl Responsibility {
         }
         current
     }
+
     fn whole(&self) -> bool {
         self.constructed && self.descendants && self.children.values().all(Self::whole)
     }
+
     fn finish_ancestors(&mut self, path: &[usize], arities: &[usize]) {
         for depth in (0..path.len()).rev() {
             let parent = self.position(&path[..depth]);
@@ -58,10 +64,12 @@ impl Responsibility {
         }
     }
 }
+
 pub(crate) struct CopyContents<'a> {
     _responsibility: std::sync::MutexGuard<'a, Responsibility>,
     value: std::sync::MutexGuard<'a, Value>,
 }
+
 impl CopyContents<'_> {
     pub(crate) fn value(&self) -> &Value {
         &self.value
@@ -73,11 +81,13 @@ impl fmt::Debug for Storage {
         f.write_str("Storage")
     }
 }
+
 impl PartialEq for Storage {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
+
 impl Storage {
     pub fn new(value: Value) -> Self {
         Self(
@@ -85,6 +95,7 @@ impl Storage {
             Arc::new(Mutex::new(Responsibility::new(true))),
         )
     }
+
     pub(crate) fn contents_for_copy(
         &self,
         fuel: &mut u64,
@@ -117,6 +128,7 @@ impl Storage {
             value,
         })
     }
+
     /// Inspect readable owned contents without cloning them. The ownership and
     /// payload guards remain live throughout inspection. Recursive acquisition
     /// fails instead of deadlocking; callers account for their own traversal.
@@ -137,6 +149,7 @@ impl Storage {
             .map_err(|_| ErrorKind::InvalidPointer)?
             .clone())
     }
+
     pub(crate) fn pointer(&self, pointee: Term, fields: Vec<Projection>) -> PointerValue {
         PointerValue {
             target: Arc::downgrade(&self.0),
@@ -146,6 +159,7 @@ impl Storage {
             fields,
         }
     }
+
     /// Resolve an elaborated assignment without dropping its nominal owner or
     /// anonymous field-label checks when switching to shared owner storage.
     pub(crate) fn assignment_pointer(
@@ -179,6 +193,7 @@ impl Storage {
         }
         Ok(self.pointer(pointee, projections))
     }
+
     /// Host-side projection for verified cleanup; no source access permission is inferred.
     pub(crate) fn owned_pointer(
         &self,
@@ -187,6 +202,7 @@ impl Storage {
     ) -> Result<PointerValue, ErrorKind> {
         self.owned_pointer_depth(pointee, path, 0)
     }
+
     fn owned_pointer_depth(
         &self,
         pointee: Term,
@@ -284,6 +300,7 @@ impl Storage {
         })
     }
 }
+
 #[derive(Clone, PartialEq)]
 pub(crate) enum Projection {
     /// Cleanup-only descent; ordinary source field projection cannot create it.
@@ -297,6 +314,7 @@ pub(crate) enum Projection {
     AnonymousRecord(String, usize),
     Capture(nir::program::LocalId),
 }
+
 #[derive(Clone)]
 pub struct PointerValue {
     target: Weak<Mutex<Value>>,
@@ -308,6 +326,7 @@ pub struct PointerValue {
     pub(crate) pointee: Term,
     fields: Vec<Projection>,
 }
+
 impl PointerValue {
     pub(crate) fn copy_metadata_work(&self) -> Option<usize> {
         let mut work = self.fields.len().checked_add(self.ownership_guards.len())?;
@@ -330,6 +349,7 @@ impl PointerValue {
         Some(work)
     }
 }
+
 impl PartialEq for PointerValue {
     fn eq(&self, other: &Self) -> bool {
         self.target.ptr_eq(&other.target)
@@ -337,11 +357,13 @@ impl PartialEq for PointerValue {
             && self.pointee == other.pointee
     }
 }
+
 impl fmt::Debug for PointerValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
+
 impl fmt::Display for PointerValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -380,17 +402,20 @@ impl fmt::Display for PointerValue {
         f.write_str("))")
     }
 }
+
 impl PointerValue {
     /// Borrow a live target without cloning its payload or granting write access.
     pub(crate) fn inspect<T>(&self, inspect: impl FnOnce(&Value) -> T) -> Result<T, ErrorKind> {
         self.with_target(|value| Ok(inspect(value)))
     }
+
     fn with_target<T>(
         &self,
         operation: impl FnOnce(&mut Value) -> Result<T, ErrorKind>,
     ) -> Result<T, ErrorKind> {
         self.with_position(|value, _, _| operation(value))
     }
+
     fn with_position<T>(
         &self,
         operation: impl FnOnce(&mut Value, &[usize], &[usize]) -> Result<T, ErrorKind>,
@@ -522,6 +547,7 @@ impl PointerValue {
         }
         operation(target, &path, &arities)
     }
+
     fn with_responsibility<T>(
         &self,
         operation: impl FnOnce(&mut Value, &mut Responsibility) -> Result<T, ErrorKind>,
@@ -537,12 +563,14 @@ impl PointerValue {
             operation(value, responsibility.position(path))
         })
     }
+
     pub(crate) fn is_constructed(&self) -> Result<bool, ErrorKind> {
         if !self.ownership_guards_live()? {
             return Ok(false);
         }
         self.with_responsibility(|_, responsibility| Ok(responsibility.constructed))
     }
+
     fn ownership_guards_live(&self) -> Result<bool, ErrorKind> {
         for (owner, path) in self.ownership_guards.iter().rev() {
             let owner = owner.upgrade().ok_or(ErrorKind::ExpiredPointer)?;
@@ -553,6 +581,7 @@ impl PointerValue {
         }
         Ok(true)
     }
+
     pub(crate) fn transfer(&self) -> Result<(), ErrorKind> {
         if !self.ownership_guards_live()? {
             return Err(ErrorKind::InvalidCallPlan);
@@ -565,6 +594,7 @@ impl PointerValue {
             Ok(())
         })
     }
+
     pub(crate) fn release(&self) -> Result<(), ErrorKind> {
         if !self.ownership_guards_live()? {
             return Err(ErrorKind::InvalidCallPlan);
@@ -578,9 +608,11 @@ impl PointerValue {
             Ok(())
         })
     }
+
     pub(crate) fn read(&self) -> Result<Value, ErrorKind> {
         self.with_target(|value| Ok(value.clone()))
     }
+
     pub(crate) fn write(
         &self,
         value: Value,
@@ -602,6 +634,7 @@ impl PointerValue {
             Ok(())
         })
     }
+
     pub(crate) fn project_anonymous(
         &self,
         name: &str,
@@ -623,6 +656,7 @@ impl PointerValue {
         pointer.pointee = pointee;
         Ok(pointer)
     }
+
     pub(crate) fn project(
         &self,
         declaration: DeclarationId,
@@ -650,11 +684,13 @@ impl PointerValue {
 pub struct OwnedGraphCheckpoint {
     entries: Vec<(Storage, Value, Responsibility)>,
 }
+
 impl fmt::Display for OwnedGraphCheckpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(owned-graph-checkpoint (cells {}))", self.entries.len())
     }
 }
+
 impl OwnedGraphCheckpoint {
     /// Acquire every cell before writing any of them. A conflicting borrow
     /// rejects restoration without partially restoring the graph. The fixed
@@ -689,10 +725,7 @@ impl super::Interpreter<'_> {
         let contents = storage
             .contents_for_copy(&mut self.budget.steps, self.budget.depth)
             .map_err(|kind| self.failure(kind, None))?;
-        self.checkpoint_representation(
-            contents.value(),
-            nir::program::SourceRange { start: 0, end: 0 },
-        )
+        self.checkpoint_representation_in(contents.value(), None)
     }
 
     /// Observe a currently readable, fixed-size scalar without copying ownership
@@ -740,11 +773,7 @@ impl super::Interpreter<'_> {
         let contents = storage
             .contents_for_copy(&mut self.budget.steps, self.budget.depth)
             .map_err(|kind| self.failure(kind, None))?;
-        self.copy_representation(
-            contents.value(),
-            nir::program::SourceRange { start: 0, end: 0 },
-            0,
-        )
+        self.copy_representation_in(contents.value(), None, 0)
     }
 
     /// Capture cells reachable through ownership edges. Weak pointers remain
@@ -757,8 +786,7 @@ impl super::Interpreter<'_> {
         let mut fuel = std::mem::take(&mut self.budget.steps);
         let result = checkpoint::capture(roots, &mut fuel, |value, fuel| {
             self.budget.steps = *fuel;
-            let copied = self
-                .checkpoint_representation(value, nir::program::SourceRange { start: 0, end: 0 });
+            let copied = self.checkpoint_representation_in(value, None);
             *fuel = self.budget.steps;
             copied.map_err(|failure| failure.kind)
         });
@@ -770,6 +798,7 @@ impl super::Interpreter<'_> {
 #[cfg(test)]
 mod record_storage_tests {
     use super::*;
+
     #[test]
     fn local_reads_meter_raw_and_owned_aggregates_without_cloning_cell_identity() {
         let package = nir::program::Package::default();
@@ -1064,6 +1093,7 @@ mod record_storage_tests {
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }
+
     fn nested() -> Value {
         Value::AnonymousRecord(vec![
             ("first".into(), Value::Bool(true)),
@@ -1073,6 +1103,7 @@ mod record_storage_tests {
             ),
         ])
     }
+
     #[test]
     fn record_owned_paths_read_write_and_retire_only_the_selected_field() {
         let storage = Storage::new(nested());
@@ -1102,6 +1133,7 @@ mod record_storage_tests {
             ErrorKind::InvalidPointer
         );
     }
+
     #[test]
     fn record_paths_validate_labels_after_root_replacement_and_do_not_keep_owners_alive() {
         let storage = Storage::new(Value::AnonymousRecord(vec![(
@@ -1127,6 +1159,7 @@ mod record_storage_tests {
         drop(storage);
         assert_eq!(pointer.read(), Err(ErrorKind::ExpiredPointer));
     }
+
     #[test]
     fn record_cleanup_paths_follow_nested_storage_identity() {
         let child = Storage::new(Value::AnonymousRecord(vec![(
@@ -1159,11 +1192,13 @@ mod record_storage_tests {
 #[cfg(test)]
 mod responsibility_tests {
     use super::*;
+
     fn pointer(storage: &Storage, path: &[usize]) -> PointerValue {
         storage
             .owned_pointer(Term::Primitive(nir::Primitive::Void), path)
             .unwrap()
     }
+
     #[test]
     fn unit_payload_is_live_until_its_responsibility_is_transferred() {
         let storage = Storage::new(Value::Unit);
@@ -1179,6 +1214,7 @@ mod responsibility_tests {
         owner.release().unwrap();
         assert!(!owner.is_constructed().unwrap());
     }
+
     #[test]
     fn parent_token_survives_partial_moves_and_whole_transfer_requires_all_fields() {
         let storage = Storage::new(Value::Tuple(vec![Value::Unit, Value::Unit]));
@@ -1195,6 +1231,7 @@ mod responsibility_tests {
         assert!(!first.is_constructed().unwrap());
         assert!(!second.is_constructed().unwrap());
     }
+
     #[test]
     fn reinstalling_all_fields_reconstructs_ancestors_but_not_before() {
         let storage = Storage::new(Value::Tuple(vec![
@@ -1214,6 +1251,7 @@ mod responsibility_tests {
         assert!(parent.is_constructed().unwrap());
         parent.transfer().unwrap();
     }
+
     #[test]
     fn aliases_and_nested_storage_share_tokens_but_new_owners_do_not() {
         let captured = Storage::new(Value::Tuple(vec![Value::Unit]));
@@ -1230,6 +1268,7 @@ mod responsibility_tests {
         drop(captured);
         assert_eq!(local.is_constructed(), Err(ErrorKind::ExpiredPointer));
     }
+
     #[test]
     fn failed_writes_and_invalid_paths_preserve_tokens() {
         let storage = Storage::new(Value::Tuple(vec![Value::Bool(true)]));
@@ -1248,6 +1287,7 @@ mod responsibility_tests {
         );
         assert!(pointer(&storage, &[]).is_constructed().unwrap());
     }
+
     #[test]
     fn enclosing_transfer_hides_shared_cells_only_from_the_previous_owner() {
         let cell = Storage::new(Value::Unit);
@@ -1269,6 +1309,7 @@ mod responsibility_tests {
 #[cfg(test)]
 mod copy_contents_tests {
     use super::*;
+
     #[test]
     fn representation_copy_bounds_ownership_tree_before_borrowing_payload() {
         let storage = Storage::new(Value::Tuple(vec![Value::Bool(true); 64]));
@@ -1312,6 +1353,7 @@ mod copy_contents_tests {
 #[cfg(test)]
 mod newtype_storage_tests {
     use super::*;
+
     fn ty(argument: nir::Primitive) -> Term {
         Term::Nominal {
             declaration: DeclarationId {
@@ -1321,6 +1363,7 @@ mod newtype_storage_tests {
             arguments: vec![Term::Primitive(argument)],
         }
     }
+
     #[test]
     fn cleanup_path_is_private_and_checks_the_complete_wrapper_identity() {
         let storage = Storage::new(Value::Newtype {
@@ -1368,6 +1411,7 @@ mod newtype_storage_tests {
 #[cfg(test)]
 mod error_result_projection_tests {
     use super::*;
+
     #[test]
     fn cleanup_payload_pointer_keeps_result_identity_and_branch() {
         let boolean = Term::Primitive(nir::Primitive::Bool);

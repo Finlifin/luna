@@ -6,12 +6,15 @@ pub(super) struct Entry {
     pub(super) interface: usize,
     pub(super) member: usize,
 }
-pub(super) type Entries = HashMap<(DeclarationId, DeclarationId), Entry>;
+
+pub(super) type Entries = BTreeMap<(DeclarationId, DeclarationId), Entry>;
+
 #[derive(Default)]
 pub(super) struct Contracts<'a> {
     pub(super) traits: &'a [nir::program::Trait],
     pub(super) entries: Arc<Entries>,
 }
+
 impl<'a> Contracts<'a> {
     pub(super) fn get(
         &self,
@@ -32,6 +35,7 @@ pub(super) struct Inputs<T> {
     pub arguments: Vec<T>,
     pub frame: Vec<nir::Sort>,
 }
+
 impl<T: fmt::Display> fmt::Display for Inputs<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(trait-defaults (member {}) (inputs", self.member)?;

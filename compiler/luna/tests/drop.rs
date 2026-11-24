@@ -14143,7 +14143,9 @@ fn conditional_cleanup_plans_preserve_independent_parent_and_field_tokens() {
                 CleanupStep::Release { place, .. } => {
                     assert!(tokens.remove(&place.fields));
                 }
-                CleanupStep::SwitchVariant { .. } | CleanupStep::SelectVariantPlan { .. } => {
+                CleanupStep::SwitchVariant { .. }
+                | CleanupStep::SelectVariantPlan { .. }
+                | CleanupStep::DropTraitObject { .. } => {
                     panic!("non-enum layout")
                 }
             }
@@ -14772,7 +14774,9 @@ fn conditional_decomposed_enum_cleanup_preserves_payloads_outside_the_parent_gua
                 CleanupStep::Release { place, .. } => {
                     assert!(tokens.remove(&place.fields));
                 }
-                CleanupStep::SwitchVariant { .. } | CleanupStep::SelectVariantPlan { .. } => {
+                CleanupStep::SwitchVariant { .. }
+                | CleanupStep::SelectVariantPlan { .. }
+                | CleanupStep::DropTraitObject { .. } => {
                     panic!("selected payload must not dispatch other variants")
                 }
             }

@@ -6,17 +6,20 @@ enum Entry {
     Dependent(Arc<BoundBody>),
     Prepared(Arc<Expr>),
 }
+
 struct BoundBody {
     slots: Arc<BTreeSet<usize>>,
     replacements: Vec<(Term, bool)>,
     body: Arc<Expr>,
 }
+
 #[derive(Default)]
 pub(super) struct Cache {
     entries: BTreeMap<CodeOrigin, (Entry, u64)>,
     owned: BTreeMap<usize, (std::sync::Weak<Expr>, Entry, u64)>,
     weight: u64,
 }
+
 impl Cache {
     fn insert(&mut self, id: CodeOrigin, entry: Entry, weight: u64) {
         const LIMIT: u64 = 100_000;
@@ -34,6 +37,7 @@ impl Cache {
         self.weight += weight;
         self.entries.insert(id, (entry, weight));
     }
+
     fn owned(&mut self, body: &Arc<Expr>) -> Option<Entry> {
         let key = Arc::as_ptr(body) as usize;
         let (source, entry, _) = self.owned.get(&key)?;
@@ -43,8 +47,9 @@ impl Cache {
         {
             return Some(entry.clone());
         }
-        let (_, _, weight) = self.owned.remove(&key).unwrap();
-        self.weight -= weight;
+        if let Some((_, _, weight)) = self.owned.remove(&key) {
+            self.weight -= weight;
+        }
         None
     }
 
@@ -66,6 +71,7 @@ impl Cache {
             .insert(key, (Arc::downgrade(body), entry, weight));
     }
 }
+
 pub(super) enum SourceKey<'a> {
     Named(CodeOrigin),
     Owned(&'a Arc<Expr>),
@@ -246,9 +252,11 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 1, local }
     }
+
     fn body(term: Term) -> Expr {
         Expr {
             source: SourceRange { start: 1, end: 2 },
@@ -256,6 +264,7 @@ mod tests {
             kind: K::TypeValue(term),
         }
     }
+
     fn named(local: u32) -> CodeOrigin {
         CodeOrigin::Declaration(id(local))
     }
@@ -600,6 +609,7 @@ mod tests {
             Some((Entry::Dependent(_), _))
         ));
     }
+
     #[test]
     fn locally_bound_callable_code_is_shared_across_invocation_inputs() {
         let package = Package::default();
@@ -674,6 +684,7 @@ mod tests {
         assert_eq!(held.to_string(), again.to_string());
         assert!(vm.input_body_cache.weight <= 100_000);
     }
+
     #[test]
     fn owned_body_identity_separates_preparation_and_does_not_pin_source() {
         let package = Package::default();

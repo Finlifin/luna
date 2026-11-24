@@ -10,7 +10,8 @@ impl Interpreter<'_> {
         source: SourceRange,
         locked_storage: Option<usize>,
     ) -> Result<(), Error> {
-        let mut seen = HashSet::new();
+        // Only for visited-node deduplication; never iterated.
+        let mut seen = BTreeSet::new();
         if let Some(addr) = locked_storage {
             seen.insert((0, addr));
         }
@@ -22,7 +23,7 @@ impl Interpreter<'_> {
         value: &Value,
         source: SourceRange,
         depth: usize,
-        seen: &mut HashSet<(u8, usize)>,
+        seen: &mut BTreeSet<(u8, usize)>,
     ) -> Result<(), Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));

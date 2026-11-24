@@ -5,20 +5,23 @@ use super::*;
 // an owned tuple key. A source VM retains its specialized expression bodies;
 // only immutable code may also enter the persistent cache below.
 pub(super) struct Instances<T> {
-    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Arc<T>>>,
+    entries: BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, Arc<T>>>,
 }
+
 impl<T> Default for Instances<T> {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
         }
     }
 }
+
 impl<T> Instances<T> {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.entries.values().map(HashMap::len).sum()
+        self.entries.values().map(DeterministicMap::len).sum()
     }
+
     #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -27,6 +30,7 @@ impl<T> Instances<T> {
     pub(super) fn lookup(&self, declaration: DeclarationId, arguments: &[Term]) -> Option<&Arc<T>> {
         self.entries.get(&declaration)?.get(arguments)
     }
+
     pub(super) fn insert(&mut self, key: (DeclarationId, Arc<[Term]>), code: Arc<T>) {
         self.entries.entry(key.0).or_default().insert(key.1, code);
     }
@@ -34,14 +38,16 @@ impl<T> Instances<T> {
 
 #[derive(Default)]
 pub(super) struct Cache {
-    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Retained>>,
+    entries: BTreeMap<DeclarationId, DeterministicMap<Arc<[Term]>, Retained>>,
     count: usize,
     weight: u64,
 }
+
 struct Retained {
     code: Arc<Expr>,
     weight: u64,
 }
+
 impl Cache {
     // Callers preflight the query's term depth and compute its structural work.
     // Charge hashing/comparison before looking up the borrowed input slice.

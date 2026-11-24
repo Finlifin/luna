@@ -109,7 +109,7 @@ impl DeclarationInputPlan {
         expr: &Expr,
         fuel: &mut usize,
     ) -> Result<(Self, BTreeSet<LocalId>), Error> {
-        let view = PlanView::from_expression(expr).expect("declaration inputs");
+        let view = PlanView::from_expression(expr).ok_or(Error::InvalidControl(expr.source))?;
         // The bounded NIR copy walk covers the result, operands, schedule and
         // alias body. It skips the shared callee. Charge its retained signature
         // separately before copying it.
