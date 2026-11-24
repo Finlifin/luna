@@ -208,6 +208,9 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
         "newtype_representation" => K::NewtypeRepresentation(subject),
         "struct_field_types" => K::StructFieldTypes(subject),
         "struct_field_names" => K::StructFieldNames(subject),
+        "record_field_types" => K::RecordFieldTypes(subject),
+        "record_field_names" => K::RecordFieldNames(subject),
+        "reflect_callable" => K::ReflectCallable(subject),
         _ => K::EnumStructure {
             subject,
             query: match name {

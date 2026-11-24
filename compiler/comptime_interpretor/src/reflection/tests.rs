@@ -444,3 +444,167 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
         );
     }
 }
+
+#[test]
+fn record_reflection_and_callable_observation_execute_in_tree_and_bytecode() {
+    let mut package = package();
+    package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
+        declaration: id(10),
+        role: nir::normal_forms::Role::TypeList,
+        requirements: vec![],
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: id(11),
+            binding: LocalId {
+                owner: 10,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Type,
+            ty: p(Primitive::Type),
+        }],
+    });
+    let list_of = |elem: Primitive| Term::NormalForm {
+        head: id(10),
+        sort: Sort::Type,
+        arguments: vec![p(elem)],
+    };
+    let source = SourceRange { start: 30, end: 40 };
+    let record_ty = Term::Record(vec![
+        ("first\n\"".into(), p(Primitive::Bool)),
+        ("nested".into(), nominal(vec![p(Primitive::Char)])),
+    ]);
+    let fn_ty = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: p(Primitive::Bool),
+        }],
+        result: Box::new(p(Primitive::Char)),
+    }
+    .with_comptime_phase(true)
+    .with_unsafe_call_requirement(true);
+
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let reflected = vm.reflect_record(&record_ty).unwrap();
+    assert_eq!(reflected.subject, record_ty);
+    assert_eq!(
+        reflected.fields,
+        vec![
+            ReflectedField {
+                name: "first\n\"".into(),
+                ty: p(Primitive::Bool),
+            },
+            ReflectedField {
+                name: "nested".into(),
+                ty: nominal(vec![p(Primitive::Char)]),
+            },
+        ]
+    );
+    let dump = reflected.to_string();
+    assert!(dump.starts_with("(record-reflection (subject "));
+    assert!(dump.contains("first\\n\\\""), "{dump}");
+    assert!(
+        vm.reflect_record(&nominal(vec![p(Primitive::Bool)]))
+            .is_err()
+    );
+    assert!(vm.reflect_record(&p(Primitive::Bool)).is_err());
+
+    for compiled in [false, true] {
+        let execute = |vm: &mut Interpreter<'_>, expr: &Expr| {
+            if compiled {
+                let code = Arc::new(comptime_compiler::compile(expr, &mut 10000).unwrap());
+                vm.execute_code(&code, &mut Environment::new())
+            } else {
+                vm.eval(expr, &mut Environment::new())
+            }
+        };
+        let names_query = Expr {
+            source,
+            ty: list_of(Primitive::Symbol),
+            kind: K::RecordFieldNames(Box::new(Expr {
+                source,
+                ty: p(Primitive::Type),
+                kind: K::TypeValue(record_ty.clone()),
+            })),
+        };
+        let types_query = Expr {
+            source,
+            ty: list_of(Primitive::Type),
+            kind: K::RecordFieldTypes(Box::new(Expr {
+                source,
+                ty: p(Primitive::Type),
+                kind: K::TypeValue(record_ty.clone()),
+            })),
+        };
+        let callable_query = Expr {
+            source,
+            ty: p(Primitive::Object),
+            kind: K::ReflectCallable(Box::new(Expr {
+                source,
+                ty: p(Primitive::Type),
+                kind: K::TypeValue(fn_ty.clone()),
+            })),
+        };
+        let Flow::Value(names_val) = execute(&mut vm, &names_query).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            names_val,
+            Value::List {
+                ty: list_of(Primitive::Symbol),
+                values: vec![
+                    Value::Symbol("first\n\"".into()),
+                    Value::Symbol("nested".into()),
+                ]
+                .into(),
+            }
+        );
+        let Flow::Value(types_val) = execute(&mut vm, &types_query).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            types_val,
+            Value::List {
+                ty: list_of(Primitive::Type),
+                values: vec![
+                    Value::Type(p(Primitive::Bool)),
+                    Value::Type(nominal(vec![p(Primitive::Char)])),
+                ]
+                .into(),
+            }
+        );
+        let Flow::Value(Value::Object(obj)) = execute(&mut vm, &callable_query).unwrap() else {
+            panic!()
+        };
+        assert_eq!(obj.entries().len(), 5);
+        assert_eq!(
+            obj.entries()[0],
+            ObjectEntry::Property {
+                key: "subject".into(),
+                value: ObjectValue {
+                    ty: p(Primitive::Type),
+                    value: Value::Type(fn_ty.clone()),
+                },
+            }
+        );
+        assert_eq!(
+            obj.entries()[3],
+            ObjectEntry::Property {
+                key: "is_comptime".into(),
+                value: ObjectValue {
+                    ty: p(Primitive::Bool),
+                    value: Value::Bool(true),
+                },
+            }
+        );
+        assert_eq!(
+            obj.entries()[4],
+            ObjectEntry::Property {
+                key: "is_unsafe".into(),
+                value: ObjectValue {
+                    ty: p(Primitive::Bool),
+                    value: Value::Bool(true),
+                },
+            }
+        );
+    }
+}

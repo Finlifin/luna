@@ -7,17 +7,24 @@ pub enum Kind {
     DefinitionAttributes,
     EnumName,
     StructFields { names: bool },
+    RecordFields { names: bool },
+    CallableReflection,
     EnumStructure(nir::program::EnumStructureQuery),
     SymbolName,
     Text(nir::program::TextQueryKind),
     TypeLayout(nir::TypeLayoutQuery),
 }
+
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StructFields { names } => {
                 write!(f, "struct-field-{}", if *names { "names" } else { "types" })
             }
+            Self::RecordFields { names } => {
+                write!(f, "record-field-{}", if *names { "names" } else { "types" })
+            }
+            Self::CallableReflection => write!(f, "reflect-callable"),
             Self::EnumStructure(query) => write!(f, "(enum-structure {query})"),
             Self::NewtypeRepresentation => write!(f, "newtype-representation"),
             Self::DefinitionAttributes => write!(f, "definition-attributes"),
@@ -28,6 +35,7 @@ impl fmt::Display for Kind {
         }
     }
 }
+
 #[derive(Debug)]
 pub struct Observation<T = Term> {
     pub kind: Kind,
@@ -35,6 +43,7 @@ pub struct Observation<T = Term> {
     pub output: T,
     pub operand_source: SourceRange,
 }
+
 impl<T: fmt::Display> fmt::Display for Observation<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

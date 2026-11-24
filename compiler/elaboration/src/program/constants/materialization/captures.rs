@@ -283,6 +283,10 @@ impl Checker<'_, '_> {
                     });
             }
             Value::Type(ty) => return self.check_capture_domain(ty, type_scope, span),
+            Value::NormalForm { term, ty } => {
+                self.check_capture_domain(ty, type_scope, span)?;
+                return self.check_capture_domain(term, type_scope, span);
+            }
             Value::TypeParameter(id) => {
                 return type_scope.contains(id).then_some(()).ok_or_else(|| {
                     error(

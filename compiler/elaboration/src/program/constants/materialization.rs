@@ -668,6 +668,20 @@ impl Checker<'_, '_> {
                     .map_err(|cause| error(span, cause.to_string()))?;
                 K::TypeValue(value.clone())
             }
+            Value::NormalForm { term, ty: actual } => {
+                if actual != &ty {
+                    return Err(error(span, "constant normal form identity mismatch"));
+                }
+                self.charge_constant_type_copy(actual, span)?;
+                self.charge_constant_type_copy(term, span)?;
+                let frames = self.call_input_frames();
+                actual
+                    .check_scope(&frames)
+                    .map_err(|cause| error(span, cause.to_string()))?;
+                term.check_scope(&frames)
+                    .map_err(|cause| error(span, cause.to_string()))?;
+                K::ComptimeValue(term.clone())
+            }
             Value::Description(description) => {
                 if ty != p(P::Type) {
                     return Err(error(span, "type description requires the Type domain"));

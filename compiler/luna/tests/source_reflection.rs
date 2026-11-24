@@ -1030,3 +1030,116 @@ fn fixed_encoding_reflection_keeps_wide_values_and_absent_base_identity() {
         assert!(vm.bytecode_invocations() > before);
     }
 }
+
+#[test]
+fn anonymous_record_reflection_and_callable_reflection_work_through_sysroot() {
+    let source = r#"
+        struct Plain { value: u32 }
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn schema(...properties: T) -> T where T { properties }
+        const COUNT_VAL: u32 = 1;
+        const SAMPLE_RECORD = schema { flag: true, count: COUNT_VAL };
+        typealias SampleRecord = SAMPLE_RECORD'type;
+
+        comptime fn generic_record_field_count() -> Integer
+        where Ps, requires Type.predicates.is_record(Ps)
+        {
+            assumes Type.predicates.is_record(Ps);
+            Ps.record_fields().length()
+        }
+
+        comptime fn run_records() -> bool {
+            let names = SampleRecord.record_field_names();
+            let types = meta.record_field_types(SampleRecord);
+            let fields = SampleRecord.record_fields();
+            let flag_ok = fields.get<Type>(.flag) match {
+                value? => value == bool,
+                null => false,
+            };
+            let count_ok = fields.get<Type>(.count) match {
+                value? => value == u32,
+                null => false,
+            };
+            names.length() == 2
+                and names[0] == .flag
+                and names[1] == .count
+                and types.length() == 2
+                and types[0] == bool
+                and types[1] == u32
+                and flag_ok
+                and count_ok
+                and generic_record_field_count<SampleRecord>() == 2
+        }
+
+        comptime fn bad_struct_as_record() -> meta.List<Symbol> {
+            Plain.record_field_names()
+        }
+
+        comptime fn bad_opaque_record() -> meta.List<Type> {
+            meta.record_field_types(Identity<SampleRecord>)
+        }
+
+        comptime fn run_callables() -> bool {
+            let rt = (fn(u32) -> bool).reflect_callable();
+            let ct = meta.reflect_callable(comptime fn(u32) -> bool);
+            let un = (unsafe fn(u32) -> bool).reflect_callable();
+            let dep = (fn(comptime T: Type, T) -> T).reflect_callable();
+
+            not rt.is_comptime()
+                and not rt.is_unsafe()
+                and rt.Subject() == fn(u32) -> bool
+                and rt.Callable() == fn(u32) -> bool
+                and rt.Signature() == fn(u32) -> bool
+                and ct.is_comptime()
+                and not ct.is_unsafe()
+                and ct.Signature() == fn(u32) -> bool
+                and not un.is_comptime()
+                and un.is_unsafe()
+                and un.Signature() == fn(u32) -> bool
+                and dep.Signature() == fn(comptime T: Type, T) -> T
+        }
+
+        comptime fn bad_non_callable() -> meta.CallableReflection {
+            bool.reflect_callable()
+        }
+
+        comptime fn bad_opaque_callable() -> meta.CallableReflection {
+            meta.reflect_callable(Identity<fn(u32) -> bool>)
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            assert_eq!(
+                vm.invoke(support::id(&package, "run_records"), vec![])
+                    .unwrap(),
+                Value::Bool(true),
+                "reference={reference}"
+            );
+            assert_eq!(
+                vm.invoke(support::id(&package, "run_callables"), vec![])
+                    .unwrap(),
+                Value::Bool(true),
+                "reference={reference}"
+            );
+            for bad in [
+                "bad_struct_as_record",
+                "bad_opaque_record",
+                "bad_non_callable",
+                "bad_opaque_callable",
+            ] {
+                assert_eq!(
+                    vm.invoke(support::id(&package, bad), vec![])
+                        .unwrap_err()
+                        .kind,
+                    comptime_interpretor::ErrorKind::Type,
+                    "{bad}: reference={reference}"
+                );
+            }
+        });
+    }
+    let dump = package.to_string();
+    assert!(dump.contains("(record-field-names "), "{dump}");
+    assert!(dump.contains("(record-field-types "), "{dump}");
+    assert!(dump.contains("(reflect-callable "), "{dump}");
+}

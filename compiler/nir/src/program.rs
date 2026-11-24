@@ -1451,6 +1451,9 @@ pub enum ExprKind {
     DefinitionAttributes(Box<Expr>),
     StructFieldTypes(Box<Expr>),
     StructFieldNames(Box<Expr>),
+    RecordFieldTypes(Box<Expr>),
+    RecordFieldNames(Box<Expr>),
+    ReflectCallable(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
     /// Compiler-private packet: definition name and representation Type.
@@ -3931,6 +3934,8 @@ impl fmt::Display for ExprKind {
             Self::NewtypeRepresentation(subject) => write!(f, "(newtype-representation {subject})"),
             Self::DefinitionAttributes(subject) => write!(f, "(definition-attributes {subject})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
+            Self::RecordFieldTypes(subject) => write!(f, "(record-field-types {subject})"),
+            Self::ReflectCallable(subject) => write!(f, "(reflect-callable {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::BuildNewtype(request) => write!(f, "(build-newtype {request})"),
             Self::BuildEnum(request) => write!(f, "(build-enum {request})"),
@@ -3953,6 +3958,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "(object-query (query {query}) {subject})")
             }
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
+            Self::RecordFieldNames(subject) => write!(f, "(record-field-names {subject})"),
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
@@ -4359,6 +4365,8 @@ impl Expr {
                     | ExprKind::NewtypeRepresentation(_)
                     | ExprKind::DefinitionAttributes(_)
                     | ExprKind::StructFieldTypes(_)
+                    | ExprKind::RecordFieldTypes(_)
+                    | ExprKind::ReflectCallable(_)
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildNewtype(_)
                     | ExprKind::BuildEnum(_)
@@ -4367,6 +4375,7 @@ impl Expr {
                     | ExprKind::ObjectEdit { .. }
                     | ExprKind::ComptimeFunctionInstance { .. }
                     | ExprKind::StructFieldNames(_)
+                    | ExprKind::RecordFieldNames(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
                     | ExprKind::FloatNegate(_)
@@ -4475,6 +4484,8 @@ impl Expr {
                 | ExprKind::NewtypeRepresentation(value)
                 | ExprKind::DefinitionAttributes(value)
                 | ExprKind::StructFieldTypes(value)
+                | ExprKind::RecordFieldTypes(value)
+                | ExprKind::ReflectCallable(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildNewtype(value)
                 | ExprKind::BuildEnum(value)
@@ -4482,6 +4493,7 @@ impl Expr {
                 | ExprKind::ObjectQuery { subject: value, .. }
                 | ExprKind::ObjectEdit { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
+                | ExprKind::RecordFieldNames(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
                 | ExprKind::FloatNegate(value)
@@ -4977,6 +4989,8 @@ impl Expr {
             | ExprKind::NewtypeRepresentation(value)
             | ExprKind::DefinitionAttributes(value)
             | ExprKind::StructFieldTypes(value)
+            | ExprKind::RecordFieldTypes(value)
+            | ExprKind::ReflectCallable(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildNewtype(value)
             | ExprKind::BuildEnum(value)
@@ -4984,6 +4998,7 @@ impl Expr {
             | ExprKind::ObjectQuery { subject: value, .. }
             | ExprKind::ObjectEdit { subject: value, .. }
             | ExprKind::StructFieldNames(value)
+            | ExprKind::RecordFieldNames(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)

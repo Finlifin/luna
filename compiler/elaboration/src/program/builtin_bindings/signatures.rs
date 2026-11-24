@@ -214,10 +214,12 @@ pub(super) fn callable(
             (inputs, p(P::Type))
         }
         "newtype_representation" => (vec![p(P::Type)], p(P::Type)),
-        "struct_field_types" => (vec![p(P::Type)], list(p(P::Type))?),
-        "struct_field_names" | "enum_variant_shapes" | "enum_symbol_values" => {
-            (vec![p(P::Type)], list(p(P::Symbol))?)
-        }
+        "reflect_callable" => (vec![p(P::Type)], p(P::Object)),
+        "struct_field_types" | "record_field_types" => (vec![p(P::Type)], list(p(P::Type))?),
+        "struct_field_names"
+        | "record_field_names"
+        | "enum_variant_shapes"
+        | "enum_symbol_values" => (vec![p(P::Type)], list(p(P::Symbol))?),
         "enum_group_paths" | "enum_variant_paths" | "enum_variant_field_names" => {
             (vec![p(P::Type)], list(list(p(P::Symbol))?)?)
         }

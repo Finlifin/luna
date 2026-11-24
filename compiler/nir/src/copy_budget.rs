@@ -1203,6 +1203,8 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::NewtypeRepresentation(value)
                     | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)
+                    | K::RecordFieldTypes(value)
+                    | K::ReflectCallable(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)
                     | K::BuildEnum(value)
@@ -1210,6 +1212,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::ObjectQuery { subject: value, .. }
                     | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
+                    | K::RecordFieldNames(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)
                     | K::IntegerNegate(value)

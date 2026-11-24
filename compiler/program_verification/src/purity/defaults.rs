@@ -279,6 +279,8 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::NewtypeRepresentation(_)
         | K::DefinitionAttributes(_)
         | K::StructFieldTypes(_)
+        | K::RecordFieldTypes(_)
+        | K::ReflectCallable(_)
         | K::BuildStruct(_)
         | K::BuildNewtype(_)
         | K::BuildEnum(_)
@@ -288,6 +290,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::PlannedFunctionInstance { .. }
         | K::ComptimeFunctionInstance { .. }
         | K::StructFieldNames(_)
+        | K::RecordFieldNames(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)
         | K::NominalType { .. }

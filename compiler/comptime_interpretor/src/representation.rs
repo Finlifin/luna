@@ -4,6 +4,7 @@ use super::*;
 use type_descriptions::spend;
 
 const MAX_SIZE: usize = 100_000;
+
 const MAX_DEPTH: usize = 128;
 
 /// Size of an inspected value for full-content comparison and host cloning.
@@ -207,6 +208,11 @@ impl Inspection<'_> {
             }
             Value::Type(ty) | Value::AbstractValue { ty, .. } => {
                 self.domain(ty)?;
+                0
+            }
+            Value::NormalForm { term, ty } => {
+                self.domain(ty)?;
+                self.term(term)?;
                 0
             }
             Value::FunctionInstance { arguments, .. } => {

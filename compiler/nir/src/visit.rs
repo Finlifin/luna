@@ -762,6 +762,8 @@ fn walk_mut(
                     | K::NewtypeRepresentation(value)
                     | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)
+                    | K::RecordFieldTypes(value)
+                    | K::ReflectCallable(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)
                     | K::BuildMetadata {
@@ -772,6 +774,7 @@ fn walk_mut(
                     | K::ObjectQuery { subject: value, .. }
                     | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
+                    | K::RecordFieldNames(value)
                     | K::BitVecType(value)
                     | K::IntegerNegate(value)
                     | K::FloatNegate(value)

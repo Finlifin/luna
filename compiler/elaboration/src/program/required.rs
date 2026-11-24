@@ -2,7 +2,9 @@
 //! Open signature captures retain unavailable staged inputs explicitly. Completed
 //! invocation uses ordinary NIR comptime semantics without unfolding type heads.
 use super::*;
+use comptime_executor::{Cache, Context, KeyProtocol, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 mod capture;
@@ -87,6 +89,26 @@ impl Invocation {
             &checker.definition_attributes,
             &self.prepared.world.package().definition_attributes,
         );
+        let prepared = match try_memoize_pure_invocation(
+            self.prepared,
+            &self.values,
+            supply_attributes,
+            &checker.protocols,
+            &mut steps,
+            span,
+            self.package,
+            &self.identities,
+        )? {
+            Ok((cached, definitions)) => {
+                checker.required_steps = steps;
+                return Ok(CompletedInvocation {
+                    result: cached,
+                    definitions,
+                    span: self.span,
+                });
+            }
+            Err(prepared) => prepared,
+        };
         let checker = std::cell::RefCell::new(checker);
         let source_failure = std::cell::Cell::new(None);
         let lookup = |implementation, member, remaining: &mut u64| {
@@ -127,7 +149,7 @@ impl Invocation {
                 }
             })
         };
-        let result = self.prepared.invoke_publishing(
+        let result = prepared.invoke_publishing(
             self.values,
             &mut steps,
             span,
@@ -2188,4 +2210,1086 @@ pub(super) fn map_requirement(
             }
         }
     })
+}
+
+struct RequiredHashWriter(u64);
+
+impl RequiredHashWriter {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.0 ^= u64::from(byte);
+        self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+    }
+
+    fn u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.byte(byte);
+        }
+    }
+
+    fn str(&mut self, text: &str) {
+        self.u64(text.len() as u64);
+        for &byte in text.as_bytes() {
+            self.byte(byte);
+        }
+    }
+
+    fn display(&mut self, value: &impl std::fmt::Display) {
+        let _ = std::fmt::Write::write_fmt(self, format_args!("{value}"));
+        self.byte(0xff);
+    }
+}
+
+impl std::fmt::Write for RequiredHashWriter {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for &byte in s.as_bytes() {
+            self.byte(byte);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct RequiredMemoKey {
+    canonical_body: String,
+    inputs: Vec<(n::LocalId, Term, Term)>,
+    result_type: Term,
+}
+
+struct RequiredMemoProtocol;
+
+impl KeyProtocol<RequiredMemoKey> for RequiredMemoProtocol {
+    type Error = Error;
+
+    fn hash(
+        &mut self,
+        value: &RequiredMemoKey,
+        context: &mut Context,
+    ) -> Result<u64, comptime_executor::Error<Error>> {
+        let cost = value
+            .canonical_body
+            .len()
+            .div_ceil(64)
+            .saturating_add(value.inputs.len())
+            .saturating_add(1);
+        context.spend::<Error>(cost)?;
+        let mut writer = RequiredHashWriter::new();
+        writer.str(&value.canonical_body);
+        writer.u64(value.inputs.len() as u64);
+        for (local, domain, val) in &value.inputs {
+            writer.u64(u64::from(local.owner));
+            writer.u64(u64::from(local.index));
+            writer.display(domain);
+            writer.display(val);
+        }
+        writer.display(&value.result_type);
+        Ok(writer.0)
+    }
+
+    fn equivalent(
+        &mut self,
+        left: &RequiredMemoKey,
+        right: &RequiredMemoKey,
+        context: &mut Context,
+    ) -> Result<bool, comptime_executor::Error<Error>> {
+        let cost = left
+            .canonical_body
+            .len()
+            .min(right.canonical_body.len())
+            .div_ceil(64)
+            .saturating_add(left.inputs.len())
+            .saturating_add(1);
+        context.spend::<Error>(cost)?;
+        Ok(left == right)
+    }
+}
+
+struct RequiredMemoState {
+    cache: Cache<RequiredMemoKey, (Value, Term)>,
+    protocol: RequiredMemoProtocol,
+    hits: usize,
+    misses: usize,
+    invalidations: usize,
+}
+
+impl RequiredMemoState {
+    fn new() -> Self {
+        Self {
+            cache: Cache::new(
+                Scope {
+                    definitions: 0,
+                    protocols: 0,
+                    target: 0,
+                },
+                256,
+            ),
+            protocol: RequiredMemoProtocol,
+            hits: 0,
+            misses: 0,
+            invalidations: 0,
+        }
+    }
+}
+
+thread_local! {
+    static REQUIRED_MEMO_CACHE: RefCell<RequiredMemoState> = RefCell::new(RequiredMemoState::new());
+}
+
+fn is_safe_memo_key_term(term: &Term, depth: usize) -> bool {
+    if depth >= 64 {
+        return false;
+    }
+    match term {
+        Term::Primitive(_)
+        | Term::Unit
+        | Term::Bool(_)
+        | Term::Char(_)
+        | Term::Integer(_)
+        | Term::BitVec(_)
+        | Term::String(_)
+        | Term::Symbol(_)
+        | Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => true,
+        Term::Tuple(items) | Term::TupleValue(items) => items
+            .iter()
+            .all(|item| is_safe_memo_key_term(item, depth + 1)),
+        Term::Optional(inner)
+        | Term::Pointer(inner)
+        | Term::Lift(inner)
+        | Term::ComptimeFunction(inner)
+        | Term::UnsafeFunction(inner) => is_safe_memo_key_term(inner, depth + 1),
+        Term::NormalFormFunction(inner, _) => is_safe_memo_key_term(inner, depth + 1),
+        Term::Record(fields) => fields
+            .iter()
+            .all(|(_, ty)| is_safe_memo_key_term(ty, depth + 1)),
+        Term::Nominal { arguments, .. }
+        | Term::NormalForm { arguments, .. }
+        | Term::TraitObject { arguments, .. } => arguments
+            .iter()
+            .all(|arg| is_safe_memo_key_term(arg, depth + 1)),
+        Term::Function { parameters, result } => {
+            parameters
+                .iter()
+                .all(|param| is_safe_memo_key_term(&param.ty, depth + 1))
+                && is_safe_memo_key_term(result, depth + 1)
+        }
+        Term::ErrorResult { result, errors } => {
+            is_safe_memo_key_term(result, depth + 1)
+                && errors
+                    .iter()
+                    .all(|err| is_safe_memo_key_term(err, depth + 1))
+        }
+        _ => false,
+    }
+}
+
+fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
+    use n::ExprKind as K;
+    let pure_fn = |id: DeclarationId| {
+        package.functions.iter().any(|function| {
+            function.declaration == id
+                && function.pure
+                && function.phase == n::FunctionPhase::Comptime
+        })
+    };
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(expr) = stack.pop() {
+        visited += 1;
+        if visited > 2048 {
+            return false;
+        }
+        match &expr.kind {
+            K::BuildStruct(_)
+            | K::BuildNewtype(_)
+            | K::BuildEnum(_)
+            | K::BuildMetadata { .. }
+            | K::DefinitionAttributes(_)
+            | K::AssociatedValue { .. }
+            | K::TraitMethod { .. }
+            | K::EffectResume(_)
+            | K::EffectHandle { .. }
+            | K::EffectRun { .. }
+            | K::EffectComputation { .. }
+            | K::EffectRequest { .. }
+            | K::AddressOf(_)
+            | K::ReadPointer(_)
+            | K::WritePointer { .. }
+            | K::PointerAnonymousField { .. }
+            | K::PointerField { .. }
+            | K::BitWritePointer { .. }
+            | K::DynCast(_)
+            | K::DynCall(_)
+            | K::StagedValue(_)
+            | K::ConstAddress { .. }
+            | K::StaticAddress(_) => return false,
+            K::Call {
+                callee,
+                arguments,
+                env_arguments,
+                ..
+            } => {
+                let allowed_callee = match &callee.kind {
+                    K::Function(id)
+                    | K::FunctionInstance {
+                        declaration: id, ..
+                    } => pure_fn(*id),
+                    _ => false,
+                };
+                if !allowed_callee {
+                    return false;
+                }
+                stack.extend(arguments.iter().map(|arg| &arg.value));
+                stack.extend(env_arguments.iter());
+            }
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                stack.extend(statements.iter());
+                if let Some(result) = result {
+                    stack.push(result);
+                }
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                stack.push(condition);
+                stack.push(then_branch);
+                if let Some(else_branch) = else_branch {
+                    stack.push(else_branch);
+                }
+            }
+            K::Match { value, arms } => {
+                stack.push(value);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        stack.push(guard);
+                    }
+                    stack.push(&arm.body);
+                }
+            }
+            K::Let { value, .. } => stack.push(value),
+            K::LetPattern {
+                value,
+                guard,
+                otherwise,
+                ..
+            } => {
+                stack.push(value);
+                if let Some(guard) = guard {
+                    stack.push(guard);
+                }
+                if let Some(otherwise) = otherwise {
+                    stack.push(otherwise);
+                }
+            }
+            K::IntegerBinary { left, right, .. }
+            | K::FloatBinary { left, right, .. }
+            | K::ScalarLess(left, right)
+            | K::ScalarGreater(left, right)
+            | K::ScalarLessEqual(left, right)
+            | K::ScalarGreaterEqual(left, right)
+            | K::ScalarEqual(left, right)
+            | K::TemplateEqual(left, right)
+            | K::TypeEqual(left, right)
+            | K::ListConcat(left, right)
+            | K::TypeListIndex(left, right)
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right)
+            | K::BitIndex(left, right)
+            | K::And(left, right)
+            | K::Or(left, right) => {
+                stack.push(left);
+                stack.push(right);
+            }
+            K::Tuple(items) | K::TypeList(items) => {
+                stack.extend(items.iter());
+            }
+            K::Intrinsic { .. } => return false,
+            K::Record { fields, .. }
+            | K::AnonymousRecord { fields }
+            | K::Variant { fields, .. } => {
+                stack.extend(fields.iter());
+            }
+            K::Object { fields, .. } => {
+                stack.extend(fields.iter());
+            }
+            K::Return(value) => {
+                if let Some(value) = value {
+                    stack.push(value);
+                }
+            }
+            K::Loop { body, .. } => stack.push(body),
+            K::Assign { value, .. }
+            | K::BitAssign { value, .. }
+            | K::BitUpdate { value, .. }
+            | K::Not(value)
+            | K::Discard(value)
+            | K::UnsafeScope(value)
+            | K::RequirePredicate(value)
+            | K::EnsurePredicate(value)
+            | K::CheckPredicate(value)
+            | K::Field { value, .. }
+            | K::AnonymousField { value, .. }
+            | K::OptionalPresent(value)
+            | K::OptionalType(value)
+            | K::PointerType(value)
+            | K::ErrorConvert { value, .. }
+            | K::BitSlice { value, .. }
+            | K::BitVecType(value)
+            | K::IntegerNegate(value)
+            | K::FloatNegate(value)
+            | K::BitConvert(value)
+            | K::NewtypeConvert(value)
+            | K::Snapshot(value)
+            | K::TakeBits(value)
+            | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
+            | K::ComptimeIntegerConvert(value)
+            | K::ListLength(value)
+            | K::NewtypeRepresentation(value)
+            | K::StructFieldTypes(value)
+            | K::StructFieldNames(value)
+            | K::RecordFieldTypes(value)
+            | K::RecordFieldNames(value)
+            | K::ReflectCallable(value)
+            | K::EnumStructure { subject: value, .. }
+            | K::ObjectQuery { subject: value, .. }
+            | K::ObjectEdit { subject: value, .. }
+            | K::TextQuery { subject: value, .. }
+            | K::SymbolName(value)
+            | K::EnumName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
+            | K::TypeLayout { operand: value, .. } => stack.push(value),
+            K::BitWindow {
+                value, start, end, ..
+            } => {
+                stack.push(value);
+                stack.push(start);
+                stack.push(end);
+            }
+            K::Literal(_)
+            | K::Unit
+            | K::Local(_)
+            | K::TypeValue(_)
+            | K::ComptimeValue(_)
+            | K::Function(_)
+            | K::FunctionInstance { .. }
+            | K::OptionalAbsent
+            | K::Break(_)
+            | K::Continue(_) => {}
+            K::NormalFormType { .. }
+            | K::ApplyNormalForm { .. }
+            | K::ComptimeFunctionInstance { .. }
+            | K::PlannedFunctionInstance { .. }
+            | K::NominalType { .. }
+            | K::CheckTypeAlias { .. }
+            | K::WithTypeInputs { .. }
+            | K::Closure { .. }
+            | K::FunctionType { .. }
+            | K::ClosureType { .. }
+            | K::TraitObjectType { .. }
+            | K::FunctionResultType { .. } => return false,
+        }
+    }
+    true
+}
+
+fn canonical_required_body(expr: &n::Expr) -> Option<String> {
+    use n::ExprKind as K;
+    use std::fmt::Write as _;
+
+    fn write_expr(expr: &n::Expr, out: &mut String, depth: usize) -> Option<()> {
+        if depth >= 64 || out.len() > 16_384 {
+            return None;
+        }
+        match &expr.kind {
+            K::Block { statements, result } | K::CallPreparation { statements, result }
+                if statements.is_empty() =>
+            {
+                if let Some(inner) = result {
+                    return write_expr(inner, out, depth + 1);
+                }
+                out.push_str("(unit)");
+            }
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let _ = write!(out, "(block (ty {})", expr.ty);
+                for stmt in statements {
+                    out.push(' ');
+                    write_expr(stmt, out, depth + 1)?;
+                }
+                if let Some(inner) = result {
+                    out.push_str(" (res ");
+                    write_expr(inner, out, depth + 1)?;
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            K::Call {
+                parameter_bindings,
+                callee,
+                arguments,
+                env_arguments,
+            } if env_arguments.is_empty() => {
+                let _ = write!(out, "(call (ty {}) (bindings", expr.ty);
+                for b in parameter_bindings {
+                    let _ = write!(out, " {}:{}", b.owner, b.index);
+                }
+                out.push_str(") ");
+                write_expr(callee, out, depth + 1)?;
+                for arg in arguments {
+                    let _ = write!(
+                        out,
+                        " (arg {} {} {} ",
+                        arg.parameter, arg.is_default, arg.passing
+                    );
+                    write_expr(&arg.value, out, depth + 1)?;
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            K::Function(id) => {
+                let _ = write!(out, "(fn {id} {})", expr.ty);
+            }
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => {
+                let _ = write!(out, "(fn-inst {declaration} (ty {})", expr.ty);
+                for arg in arguments {
+                    let _ = write!(out, " {arg}");
+                }
+                out.push(')');
+            }
+            K::Literal(lit) => {
+                let _ = write!(out, "(lit {} {lit})", expr.ty);
+            }
+            K::TypeValue(ty) => {
+                let _ = write!(out, "(ty-val {} {ty})", expr.ty);
+            }
+            K::ComptimeValue(val) => {
+                let _ = write!(out, "(ct-val {} {val})", expr.ty);
+            }
+            K::Unit => out.push_str("(unit)"),
+            K::OptionalAbsent => {
+                let _ = write!(out, "(opt-none {})", expr.ty);
+            }
+            K::Local(local) => {
+                let _ = write!(out, "(local {}:{} {})", local.owner, local.index, expr.ty);
+            }
+            K::Let { binding, value } => {
+                let _ = write!(out, "(let {}:{} ", binding.owner, binding.index);
+                write_expr(value, out, depth + 1)?;
+                out.push(')');
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let _ = write!(out, "(if {} ", expr.ty);
+                write_expr(condition, out, depth + 1)?;
+                out.push(' ');
+                write_expr(then_branch, out, depth + 1)?;
+                if let Some(else_branch) = else_branch {
+                    out.push(' ');
+                    write_expr(else_branch, out, depth + 1)?;
+                }
+                out.push(')');
+            }
+            K::Tuple(items) => {
+                let _ = write!(out, "(tuple {}", expr.ty);
+                for item in items {
+                    out.push(' ');
+                    write_expr(item, out, depth + 1)?;
+                }
+                out.push(')');
+            }
+            K::IntegerBinary { op, left, right } => {
+                let _ = write!(out, "(ibin {} {op:?} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::ScalarEqual(left, right) => {
+                let _ = write!(out, "(seq {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::ScalarLess(left, right) => {
+                let _ = write!(out, "(slt {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::ScalarGreater(left, right) => {
+                let _ = write!(out, "(sgt {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::ScalarLessEqual(left, right) => {
+                let _ = write!(out, "(sle {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::ScalarGreaterEqual(left, right) => {
+                let _ = write!(out, "(sge {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::TypeEqual(left, right) => {
+                let _ = write!(out, "(teq {} ", expr.ty);
+                write_expr(left, out, depth + 1)?;
+                out.push(' ');
+                write_expr(right, out, depth + 1)?;
+                out.push(')');
+            }
+            K::Not(value) => {
+                let _ = write!(out, "(not {} ", expr.ty);
+                write_expr(value, out, depth + 1)?;
+                out.push(')');
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    let mut out = String::new();
+    write_expr(expr, &mut out, 0)?;
+    Some(out)
+}
+
+fn scope_for_required(
+    package: &n::Package,
+    entry: DeclarationId,
+    protocols_cfg: &Protocols,
+) -> Scope {
+    let mut defs = RequiredHashWriter::new();
+    defs.u64(u64::from(package.definition_identity_cursor));
+    defs.display(&package.observed_associated_types);
+    defs.display(&package.formed_nullary_nominals);
+    defs.display(&package.refinements);
+    for effect in &package.effects {
+        defs.display(effect);
+    }
+    for identity in &package.runtime_function_identities {
+        defs.display(identity);
+    }
+    for decl in &package.function_parameters {
+        defs.display(decl);
+    }
+    for head in &package.normal_forms {
+        defs.display(head);
+    }
+    for enum_def in &package.enums {
+        defs.display(enum_def);
+    }
+    for contract in &package.alias_contracts {
+        defs.display(contract);
+    }
+    for newtype in &package.newtypes {
+        defs.display(newtype);
+    }
+    for struct_def in &package.structs {
+        defs.display(struct_def);
+    }
+    for function in &package.functions {
+        if function.declaration != entry {
+            defs.display(function);
+        }
+    }
+    for static_def in &package.statics {
+        let _ = std::fmt::Write::write_fmt(&mut defs, format_args!("{static_def:?}"));
+        defs.byte(0xff);
+    }
+    defs.display(&package.definition_attributes);
+    defs.display(&package.volatile_storage);
+
+    let mut protos = RequiredHashWriter::new();
+    for pkg in &protocols_cfg.builtin_implementation_packages {
+        protos.u64(*pkg);
+    }
+    for slot in [
+        protocols_cfg.copy,
+        protocols_cfg.drop,
+        protocols_cfg.index,
+        protocols_cfg.iterator,
+        protocols_cfg.into_iterator,
+        protocols_cfg.ordering,
+        protocols_cfg.equality,
+        protocols_cfg.list_pattern,
+        protocols_cfg.comptime_list_pattern,
+        protocols_cfg.stable_list_pattern,
+        protocols_cfg.splice,
+        protocols_cfg.meta_list,
+        protocols_cfg.tuple,
+    ] {
+        match slot {
+            None => protos.byte(0),
+            Some(id) => {
+                protos.byte(1);
+                protos.u64(id.package);
+                protos.u64(u64::from(id.local));
+            }
+        }
+    }
+    for trait_def in &package.traits {
+        protos.display(trait_def);
+    }
+    for implementation in &package.implementations {
+        protos.display(implementation);
+    }
+    for link in &package.method_links {
+        protos.display(link);
+    }
+    for instance in &package.dispatch_instances {
+        protos.display(instance);
+    }
+
+    let mut target = RequiredHashWriter::new();
+    match &package.target {
+        None => target.byte(0),
+        Some(data) => {
+            target.byte(1);
+            target.display(data);
+        }
+    }
+
+    Scope {
+        definitions: defs.0,
+        protocols: protos.0,
+        target: target.0,
+    }
+}
+
+fn is_exportable_memo_result(value: &Value) -> bool {
+    if matches!(value, Value::TypeParameter(_) | Value::AbstractValue { .. }) {
+        return false;
+    }
+    let mut fuel = 100_000usize;
+    value.inspect_immutable(&mut fuel).is_ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_memoize_pure_invocation(
+    prepared: PreparedRequired,
+    values: &[(n::LocalId, Value)],
+    supply_attributes: bool,
+    protocols: &Protocols,
+    steps: &mut u64,
+    span: Span,
+    package_id: u64,
+    identities: &crate::definitions::DefinitionIdentities,
+) -> Result<
+    Result<((Value, Term), crate::definitions::PublishedDefinitions), PreparedRequired>,
+    Error,
+> {
+    if supply_attributes
+        || !values.is_empty()
+        || !prepared.scope.scoped_parameters.is_empty()
+        || !prepared.scope.abstract_parameters.is_empty()
+        || !prepared.scope.abstract_value_parameters.is_empty()
+        || !prepared.scope.invocation_assumptions.is_empty()
+    {
+        return Ok(Err(prepared));
+    }
+    let (query, key, scope) = {
+        let package = prepared.world.package();
+        if package.functions.iter().any(|f| {
+            f.declaration != prepared.entry && (!f.pure || f.phase != n::FunctionPhase::Comptime)
+        }) {
+            return Ok(Err(prepared));
+        }
+        let Some(entry_fn) = package
+            .functions
+            .iter()
+            .find(|f| f.declaration == prepared.entry)
+        else {
+            return Ok(Err(prepared));
+        };
+        if entry_fn.phase != n::FunctionPhase::Comptime
+            || package
+                .functions
+                .iter()
+                .any(|f| !is_pure_cacheable_expr(&f.body, package))
+        {
+            return Ok(Err(prepared));
+        }
+        let Some(canonical_body) = canonical_required_body(&entry_fn.body) else {
+            return Ok(Err(prepared));
+        };
+        let mut key_inputs = Vec::with_capacity(prepared.inputs.len());
+        for (local, domain, value) in &prepared.inputs {
+            let Some(value) = value else {
+                return Ok(Err(prepared));
+            };
+            if !is_safe_memo_key_term(domain, 0) || !is_safe_memo_key_term(value, 0) {
+                return Ok(Err(prepared));
+            }
+            key_inputs.push((*local, domain.clone(), value.clone()));
+        }
+        if !is_safe_memo_key_term(&prepared.result_type, 0) {
+            return Ok(Err(prepared));
+        }
+        let scope = scope_for_required(package, prepared.entry, protocols);
+        let mut op_hash = RequiredHashWriter::new();
+        op_hash.str(&canonical_body);
+        let query = QueryId {
+            package: package_id,
+            declaration: prepared.entry.local,
+            operation: op_hash.0 as u32,
+        };
+        let key = RequiredMemoKey {
+            canonical_body,
+            inputs: key_inputs,
+            result_type: prepared.result_type.clone(),
+        };
+        (query, key, scope)
+    };
+    let mut pending_prepared = Some(prepared);
+    let mut published_out = None;
+    let cached = REQUIRED_MEMO_CACHE.with(|cell| {
+        let Ok(mut state) = cell.try_borrow_mut() else {
+            return Ok(Err(pending_prepared
+                .take()
+                .expect("pending prepared present on borrow contention")));
+        };
+        if state.cache.scope() != scope {
+            state.invalidations += 1;
+            state.cache.set_scope(scope);
+        }
+        let available = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut context = Context::new(available);
+        let state_ref = &mut *state;
+        let outcome = state_ref.cache.query_pure_admitted(
+            query,
+            vec![key],
+            &mut context,
+            &mut state_ref.protocol,
+            |_, context| {
+                let prepared = pending_prepared
+                    .take()
+                    .expect("pure memo miss invokes prepared once");
+                let evaluated = context
+                    .with_allowance(usize::MAX, |remaining| {
+                        let mut eval_steps = *remaining as u64;
+                        let result = prepared.invoke_publishing(
+                            Vec::new(),
+                            &mut eval_steps,
+                            span,
+                            package_id,
+                            identities.clone(),
+                            None,
+                        );
+                        *remaining = usize::try_from(eval_steps).unwrap_or(usize::MAX);
+                        result
+                    })
+                    .map_err(comptime_executor::Error::Evaluation)?;
+                let (result, definitions) = evaluated;
+                let publish = definitions.is_empty() && is_exportable_memo_result(&result.0);
+                if !definitions.is_empty() {
+                    published_out = Some(definitions);
+                }
+                Ok((result, publish))
+            },
+        );
+        *steps = context.remaining() as u64;
+        match outcome {
+            Ok(outcome) => {
+                if outcome.reused {
+                    state.hits += 1;
+                } else {
+                    state.misses += 1;
+                }
+                Ok(Ok((*outcome.value).clone()))
+            }
+            Err(comptime_executor::Error::Evaluation(err)) => Err(err),
+            Err(comptime_executor::Error::BudgetExhausted) => Err(error(
+                span,
+                "required comptime memoization step budget exhausted",
+            )),
+            Err(other) => Err(error(
+                span,
+                format!("required comptime memoization error: {other}"),
+            )),
+        }
+    })?;
+    Ok(cached.map(|result| (result, published_out.unwrap_or_default())))
+}
+
+#[cfg(test)]
+mod memoization_tests {
+    use super::*;
+    use crate::program::Protocols;
+    use n::{ExprKind as K, Function, FunctionDeclaration, FunctionPhase, Literal, SourceRange};
+    use nir::{Primitive as P, Sort};
+
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 7, local }
+    }
+
+    fn fn_decl(declaration: DeclarationId, pure: bool, body: n::Expr) -> Function {
+        Function {
+            interface: FunctionDeclaration {
+                source: SourceRange { start: 0, end: 0 },
+                declaration,
+                name: format!("f{}", declaration.local),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(P::Bool)),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                defaults: vec![],
+            },
+            body,
+            runtime_deliveries: Default::default(),
+        }
+    }
+
+    #[test]
+    fn required_memo_cache_hits_on_identical_pure_queries_and_invalidates_on_scope() {
+        let entry = id(99);
+        let helper = id(1);
+        let src1 = SourceRange { start: 10, end: 20 };
+        let src2 = SourceRange { start: 40, end: 50 };
+        let make_call = |source| n::Expr {
+            source,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Call {
+                parameter_bindings: vec![],
+                callee: Box::new(n::Expr {
+                    source,
+                    ty: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Primitive(P::Bool)),
+                    }
+                    .with_comptime_phase(true),
+                    kind: K::Function(helper),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+            },
+        };
+        let make_pkg = |pure: bool, helper_val: bool, target| n::Package {
+            target,
+            functions: vec![fn_decl(
+                helper,
+                pure,
+                n::Expr {
+                    source: SourceRange { start: 1, end: 5 },
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::Literal(Literal::Bool(helper_val)),
+                },
+            )],
+            ..Default::default()
+        };
+
+        let pkg_a = make_pkg(true, true, None);
+        let pkg_b = make_pkg(true, false, None);
+        let pkg_target = make_pkg(true, true, Some(nir::target::TargetData::new(64).unwrap()));
+        let pkg_impure = make_pkg(false, true, None);
+        let protocols = Protocols::default();
+
+        let call_a = make_call(src1);
+        let call_b = make_call(src2);
+        assert!(is_pure_cacheable_expr(&call_a, &pkg_a));
+        assert!(!is_pure_cacheable_expr(&call_a, &pkg_impure));
+        assert_eq!(
+            canonical_required_body(&call_a),
+            canonical_required_body(&call_b)
+        );
+
+        let scope_a = scope_for_required(&pkg_a, entry, &protocols);
+        let scope_b = scope_for_required(&pkg_b, entry, &protocols);
+        let scope_target = scope_for_required(&pkg_target, entry, &protocols);
+        assert_ne!(scope_a.definitions, scope_b.definitions);
+        assert_ne!(scope_a.target, scope_target.target);
+
+        let mut proto = RequiredMemoProtocol;
+        let mut cache = Cache::new(scope_a, 8);
+        let key = RequiredMemoKey {
+            canonical_body: canonical_required_body(&call_a).unwrap(),
+            inputs: vec![],
+            result_type: Term::Primitive(P::Bool),
+        };
+        let qid = QueryId {
+            package: 7,
+            declaration: entry.local,
+            operation: 1,
+        };
+        let mut ctx = Context::new(10_000);
+        let first = cache
+            .query_pure_admitted(qid, vec![key.clone()], &mut ctx, &mut proto, |_, _| {
+                Ok(((Value::Bool(true), Term::Primitive(P::Bool)), true))
+            })
+            .unwrap();
+        assert!(!first.reused);
+        let second = cache
+            .query_pure_admitted(qid, vec![key.clone()], &mut ctx, &mut proto, |_, _| {
+                panic!("must hit cache on identical scope and query")
+            })
+            .unwrap();
+        assert!(second.reused);
+        assert_eq!(cache.len(), 1);
+
+        cache.set_scope(scope_b);
+        assert_eq!(cache.len(), 0);
+        let third = cache
+            .query_pure_admitted(qid, vec![key], &mut ctx, &mut proto, |_, _| {
+                Ok(((Value::Bool(false), Term::Primitive(P::Bool)), true))
+            })
+            .unwrap();
+        assert!(!third.reused);
+        assert_eq!(third.value.0, Value::Bool(false));
+
+        // Reordered named arguments and distinct LocalId owners must not collide.
+        let make_sub_call = |first_param: usize, second_param: usize| n::Expr {
+            source: src1,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Call {
+                parameter_bindings: vec![
+                    n::LocalId { owner: 1, index: 0 },
+                    n::LocalId { owner: 1, index: 1 },
+                ],
+                callee: Box::new(n::Expr {
+                    source: src1,
+                    ty: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Primitive(P::Bool)),
+                    }
+                    .with_comptime_phase(true),
+                    kind: K::Function(helper),
+                }),
+                arguments: vec![
+                    n::CallArgument {
+                        passing: n::ArgumentPassing::Value,
+                        parameter: first_param,
+                        value: n::Expr {
+                            source: src1,
+                            ty: Term::Primitive(P::Bool),
+                            kind: K::Literal(Literal::Bool(true)),
+                        },
+                        is_default: false,
+                    },
+                    n::CallArgument {
+                        passing: n::ArgumentPassing::Value,
+                        parameter: second_param,
+                        value: n::Expr {
+                            source: src1,
+                            ty: Term::Primitive(P::Bool),
+                            kind: K::Literal(Literal::Bool(false)),
+                        },
+                        is_default: false,
+                    },
+                ],
+                env_arguments: vec![],
+            },
+        };
+        assert_ne!(
+            canonical_required_body(&make_sub_call(0, 1)),
+            canonical_required_body(&make_sub_call(1, 0))
+        );
+        let local_owner_1 = n::Expr {
+            source: src1,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Local(n::LocalId { owner: 1, index: 0 }),
+        };
+        let local_owner_2 = n::Expr {
+            source: src1,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Local(n::LocalId { owner: 2, index: 0 }),
+        };
+        assert_ne!(
+            canonical_required_body(&local_owner_1),
+            canonical_required_body(&local_owner_2)
+        );
+        let key_owner_1 = RequiredMemoKey {
+            canonical_body: "body".into(),
+            inputs: vec![(
+                n::LocalId { owner: 1, index: 0 },
+                Term::Primitive(P::Bool),
+                Term::Bool(true),
+            )],
+            result_type: Term::Primitive(P::Bool),
+        };
+        let key_owner_2 = RequiredMemoKey {
+            canonical_body: "body".into(),
+            inputs: vec![(
+                n::LocalId { owner: 2, index: 0 },
+                Term::Primitive(P::Bool),
+                Term::Bool(true),
+            )],
+            result_type: Term::Primitive(P::Bool),
+        };
+        assert!(key_owner_1 != key_owner_2);
+
+        // Conservative rejection of intrinsics and helper bodies requiring data::Reader.
+        let intrinsic_expr = n::Expr {
+            source: src1,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Intrinsic {
+                tag: nir::intrinsics::Tag {
+                    family: id(2),
+                    variant: 0,
+                },
+                binding: None,
+                inputs: vec![],
+            },
+        };
+        assert!(!is_pure_cacheable_expr(&intrinsic_expr, &pkg_a));
+        let attr_helper_pkg = n::Package {
+            functions: vec![fn_decl(
+                helper,
+                true,
+                n::Expr {
+                    source: src1,
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::DefinitionAttributes(Box::new(n::Expr {
+                        source: src1,
+                        ty: Term::Primitive(P::Type),
+                        kind: K::TypeValue(Term::Primitive(P::U32)),
+                    })),
+                },
+            )],
+            ..Default::default()
+        };
+        assert!(
+            attr_helper_pkg
+                .functions
+                .iter()
+                .any(|f| !is_pure_cacheable_expr(&f.body, &attr_helper_pkg))
+        );
+        let _ = Sort::Type;
+    }
 }

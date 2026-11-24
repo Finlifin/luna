@@ -725,13 +725,17 @@ impl CodeCache {
             });
         }
         while self.weight + weight > LIMIT {
-            let (_, key) = self.order.pop_first().expect("weighted cache has an entry");
+            let Some((_, key)) = self.order.pop_first() else {
+                break;
+            };
             self.recency.remove(&key);
             let program = match key {
-                CodeKey::Named(id) => self.entries.remove(&id).unwrap(),
-                CodeKey::Owned(id) => self.owned.remove(&id).unwrap().program,
+                CodeKey::Named(id) => self.entries.remove(&id),
+                CodeKey::Owned(id) => self.owned.remove(&id).map(|entry| entry.program),
             };
-            self.weight -= Self::program_weight(&program);
+            if let Some(program) = program {
+                self.weight = self.weight.saturating_sub(Self::program_weight(&program));
+            }
         }
         self.weight += weight;
         true
@@ -752,8 +756,11 @@ impl CodeCache {
             return Some(program);
         }
         self.forget(CodeKey::Owned(key));
-        let expired = self.owned.remove(&key).unwrap();
-        self.weight -= Self::program_weight(&expired.program);
+        if let Some(expired) = self.owned.remove(&key) {
+            self.weight = self
+                .weight
+                .saturating_sub(Self::program_weight(&expired.program));
+        }
         None
     }
 
@@ -913,11 +920,14 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
         depth: usize,
     ) -> Result<Option<InputFrame>, Error> {
-        if !self.bytecode_invocation_available() || depth != 0 {
+        if !self.bytecode_invocation_available() {
             return Ok(None);
         }
         let compiled = self.contextual_input_code(input, None)?;
-        let code = self.start_frame(&compiled, environment)?;
+        let mut code = self.start_frame(&compiled, environment)?;
+        code.staged = Some(Box::new(staged_bytecode::State::at_depth(
+            depth, self.depth,
+        )));
         self.bytecode_staged_inputs += 1;
         Ok(Some(InputFrame {
             code,
@@ -1373,17 +1383,22 @@ impl<'a> Interpreter<'a> {
                     let (lo, hi, expected) = match selection {
                         L::Static { start, end } => (*start, *end, end.saturating_sub(*start)),
                         L::Index(input) => {
-                            let lo = position(inputs.next().unwrap(), input.source)?;
+                            let val = inputs.next().ok_or_else(missing)?;
+                            let lo = position(val, input.source)?;
                             let hi = lo.checked_add(1).ok_or_else(|| {
                                 self.failure(ErrorKind::IndexOutOfBounds, Some(input.source))
                             })?;
                             (lo, hi, 1)
                         }
-                        L::Window { start, end, width } => (
-                            position(inputs.next().unwrap(), start.source)?,
-                            position(inputs.next().unwrap(), end.source)?,
-                            *width,
-                        ),
+                        L::Window { start, end, width } => {
+                            let lo = inputs.next().ok_or_else(missing)?;
+                            let hi = inputs.next().ok_or_else(missing)?;
+                            (
+                                position(lo, start.source)?,
+                                position(hi, end.source)?,
+                                *width,
+                            )
+                        }
                     };
                     if lo > hi || hi > *width {
                         return Err(self.failure(ErrorKind::IndexOutOfBounds, Some(source)));
@@ -1645,8 +1660,13 @@ impl<'a> Interpreter<'a> {
                         *list_source,
                         source,
                         |this| {
-                            this.read_leaf_selector(Some(index))
-                                .map(|value| Flow::Value(value.unwrap()))
+                            this.read_leaf_selector(Some(index)).and_then(|value| {
+                                value
+                                    .ok_or_else(|| {
+                                        this.failure(ErrorKind::InvalidCallPlan, Some(source))
+                                    })
+                                    .map(Flow::Value)
+                            })
                         },
                     )?
                     else {
@@ -1911,6 +1931,20 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] =
                         Some(self.complete_type_equal(left, right, source)?);
+                }
+                Op::CheckTemplateEqual { output, inputs } => {
+                    self.check_template_equal(&inputs[0], &inputs[1], output, source)?;
+                }
+                Op::TemplateEqual {
+                    destination,
+                    left,
+                    right,
+                    inputs,
+                } => {
+                    let a = frame.slots[*left].take().ok_or_else(missing)?;
+                    let b = frame.slots[*right].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_template_equal(a, b, &inputs[0], &inputs[1], source)?);
                 }
                 Op::PrepareTypeKind { ty, operand } | Op::PrepareTypeNotSized { ty, operand } => {
                     self.prepare_type_kind(ty, operand, source)?
@@ -4265,6 +4299,134 @@ mod tests {
                 vm.execute_code(&code, &mut bad_env).unwrap_err().kind,
                 ErrorKind::Type
             );
+        }
+    }
+
+    #[test]
+    fn staged_input_supports_nonzero_initial_depth_and_enforces_limit() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let input = nir::program::NormalFormArgument::Value(Expr {
+            source,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(Literal::Bool(true)),
+        });
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        let before = vm.bytecode_staged_inputs();
+        let std::ops::ControlFlow::Continue(staged) =
+            vm.stage_normal_argument(&input, &mut env, 1).unwrap()
+        else {
+            panic!("expected staged result");
+        };
+        assert_eq!(vm.bytecode_staged_inputs(), before + 1);
+        assert!(matches!(
+            staged,
+            super::normal_inputs::StagedNormalInput::Value(Value::Bool(true))
+        ));
+
+        let mut at_boundary = Environment::new();
+        assert!(matches!(
+            vm.stage_normal_argument(&input, &mut at_boundary, 127)
+                .unwrap(),
+            std::ops::ControlFlow::Continue(super::normal_inputs::StagedNormalInput::Value(
+                Value::Bool(true)
+            ))
+        ));
+        assert_eq!(vm.depth, 0);
+
+        let mut overflow = Environment::new();
+        let Err(err) = vm.stage_normal_argument(&input, &mut overflow, 128) else {
+            panic!("expected depth error");
+        };
+        assert_eq!(err.kind, ErrorKind::DepthExhausted);
+        assert_eq!(vm.depth, 0);
+    }
+
+    #[test]
+    fn template_equal_executes_in_bytecode_and_matches_tree() {
+        let source = SourceRange { start: 3, end: 9 };
+        let fn_a = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let fn_b = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let type_param = DeclarationId {
+            package: 9,
+            local: 10,
+        };
+        let fn_ty = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let args = vec![Term::Primitive(Primitive::Bool)];
+        let mut graph = iir::Package::default();
+        let mut nir_source = nir::program::Package::default();
+        for declaration in [fn_a, fn_b] {
+            nir_source
+                .runtime_function_identities
+                .push(nir::program::RuntimeFunctionIdentity {
+                    source,
+                    requirements: vec![],
+                    capabilities: vec![],
+                    declaration,
+                    type_parameters: vec![type_param],
+                    signature: fn_ty.clone(),
+                });
+            graph.templates.push(
+                iir::template_storage::TemplateStorage::from_package(
+                    fn_ty.clone(),
+                    vec![iir::InstanceKey {
+                        declaration,
+                        arguments: args.clone().into(),
+                    }],
+                    &nir_source,
+                    &mut 100_000,
+                )
+                .unwrap(),
+            );
+        }
+        let instance_a = Expr {
+            source,
+            ty: fn_ty.clone(),
+            kind: K::FunctionInstance {
+                declaration: fn_a,
+                arguments: args.clone(),
+            },
+        };
+        let instance_b = Expr {
+            source,
+            ty: fn_ty,
+            kind: K::FunctionInstance {
+                declaration: fn_b,
+                arguments: args,
+            },
+        };
+        for (rhs, expected) in [(&instance_a, true), (&instance_b, false)] {
+            let expr = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::TemplateEqual(Box::new(instance_a.clone()), Box::new(rhs.clone())),
+            };
+            let code = Arc::new(comptime_compiler::compile(&expr, &mut 10_000).unwrap());
+            assert!(code.to_string().contains("(template-equal "));
+            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+            let Flow::Value(compiled_value) =
+                vm.execute_code(&code, &mut Environment::new()).unwrap()
+            else {
+                panic!("expected value");
+            };
+            let Flow::Value(tree_value) = vm.eval(&expr, &mut Environment::new()).unwrap() else {
+                panic!("expected value");
+            };
+            assert_eq!(compiled_value, Value::Bool(expected));
+            assert_eq!(tree_value, Value::Bool(expected));
         }
     }
 }

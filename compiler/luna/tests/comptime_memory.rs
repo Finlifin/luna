@@ -1,6 +1,7 @@
 //! Comptime mutation uses value-reference receivers, independently of runtime resources.
 #[path = "support/execution.rs"]
 mod execution_support;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 use execution_support::{compile, compile_with_protocols, id};
 
@@ -313,35 +314,95 @@ fn memoized_keys_use_value_snapshots_without_runtime_resources() {
     assert_eq!(unbound.cached_results(), 1);
 }
 
+const KEY_PROTOCOLS: &str = "const eq_key_phase = {__flurry_comptime_phase: true};
+trait Eq { ^eq_key_phase comptime fn eq(self, other: Self) -> bool; }
+const hash_key_phase = {__flurry_comptime_phase: true};
+trait Hash { ^hash_key_phase comptime fn hash(self) -> .u8'builtin; }
+comptime impl Eq for bool { comptime fn eq(self, other: bool) -> bool { self == other } }
+comptime impl Hash for bool { comptime fn hash(self) -> .u8'builtin { if self { 1 } else { 0 } } }";
+
+fn key_items(package: &nir::program::Package) -> intrinsic::LangItems {
+    let mut items = intrinsic::LangItems::new();
+    for (item, name) in [
+        (intrinsic::LangItem::Eq, "Eq"),
+        (intrinsic::LangItem::Hash, "Hash"),
+    ] {
+        let decl = package
+            .traits
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap()
+            .declaration;
+        items.bind_source_traits(package, &[(item, decl)]).unwrap();
+    }
+    items
+}
+
 #[test]
-fn memoization_driver_reuses_code_without_caching_non_type_results() {
-    let package = compile("pure comptime fn invert(flag:bool)->bool {not flag}");
+fn memoization_driver_caches_non_type_pure_results() {
+    let source = format!(
+        "{TYPES}
+        {KEY_PROTOCOLS}
+        pure comptime fn sum_to(flag: bool) -> Integer {{
+            var i: Integer = 0;
+            var total: Integer = 0;
+            let limit: Integer = if flag {{ 80 }} else {{ 60 }};
+            while i < limit {{
+                i = i + 1;
+                total = total + i;
+            }}
+            total
+        }}"
+    );
+    let package = compile(&source);
+    let items = key_items(&package);
     let mut invocation = luna::memoization::Invocation::prepare(
         &package,
-        &intrinsic::LangItems::new(),
-        id(&package, "invert"),
+        &items,
+        id(&package, "sum_to"),
         vec![],
         4,
         Default::default(),
     )
     .unwrap();
+    assert_ne!(
+        invocation.scope(),
+        comptime_executor::Scope {
+            definitions: 0,
+            protocols: 0,
+            target: 0,
+        }
+    );
     let mut costs = Vec::new();
-    for flag in [true, false, true] {
+    for ((flag, expected_reused), expected_cached) in [(true, false), (false, false), (true, true)]
+        .into_iter()
+        .zip([1, 2, 2])
+    {
         let mut context = comptime_executor::Context::new(100_000);
         let result = invocation
             .invoke(vec![Value::Bool(flag)], &mut context)
             .unwrap();
-        assert_eq!(*result.value, Value::Bool(!flag));
-        assert!(!result.reused);
-        assert_eq!(invocation.cached_results(), 0);
+        let expected_sum = if flag { 3240 } else { 1830 };
+        assert_eq!(
+            *result.value,
+            Value::Integer(comptime_runtime::Integer::from_i128(expected_sum))
+        );
+        assert_eq!(result.reused, expected_reused);
+        assert_eq!(invocation.cached_results(), expected_cached);
         costs.push(100_000 - context.remaining());
     }
-    assert!(costs[1] < costs[0], "cold and warm costs: {costs:?}");
-    assert_eq!(costs[1], costs[2]);
+    assert!(
+        costs[2] < costs[0],
+        "cached hit must save execution steps: {costs:?}"
+    );
+    assert!(
+        costs[2] < costs[1],
+        "cached hit must save execution steps: {costs:?}"
+    );
 }
 
 #[test]
-fn memoization_driver_retains_generic_preparation_without_result_memoization() {
+fn memoization_driver_retains_generic_preparation_and_caches_non_type_results() {
     let package = compile("pure comptime fn inspect() -> bool where T {true}");
     let mut invocation = luna::memoization::Invocation::prepare(
         &package,
@@ -353,16 +414,148 @@ fn memoization_driver_retains_generic_preparation_without_result_memoization() {
     )
     .unwrap();
     let mut costs = Vec::new();
-    for _ in 0..3 {
+    for index in 0..3 {
         let mut context = comptime_executor::Context::new(100_000);
         let result = invocation.invoke(vec![], &mut context).unwrap();
         assert_eq!(*result.value, Value::Bool(true));
-        assert!(!result.reused);
-        assert_eq!(invocation.cached_results(), 0);
+        assert_eq!(result.reused, index > 0);
+        assert_eq!(invocation.cached_results(), 1);
         costs.push(100_000 - context.remaining());
     }
     assert!(costs[1] < costs[0], "generic preparation costs: {costs:?}");
     assert_eq!(costs[1], costs[2]);
+}
+
+#[test]
+fn memoization_scope_changes_with_definitions_protocols_and_target_and_invalidates() {
+    let base_source = format!(
+        "{TYPES}
+        {KEY_PROTOCOLS}
+        pure comptime fn compute(flag: bool) -> Integer {{
+            if flag {{ 42 }} else {{ 7 }}
+        }}"
+    );
+    let alt_def_source = format!(
+        "{TYPES}
+        {KEY_PROTOCOLS}
+        pure comptime fn compute(flag: bool) -> Integer {{
+            if flag {{ 99 }} else {{ 7 }}
+        }}"
+    );
+    let proto_source = format!(
+        "{TYPES}
+        {KEY_PROTOCOLS}
+        trait Marker {{}}
+        pure comptime fn compute(flag: bool) -> Integer {{
+            if flag {{ 42 }} else {{ 7 }}
+        }}"
+    );
+    let base = compile(&base_source);
+    let alt_def = compile(&alt_def_source);
+    let proto_pkg = compile(&proto_source);
+    let mut with_target = base.clone();
+    with_target.target = Some(nir::target::TargetData::new(64).unwrap());
+    let base_items = key_items(&base);
+    let alt_def_items = key_items(&alt_def);
+    let proto_base_items = key_items(&proto_pkg);
+    let mut alt_items = key_items(&proto_pkg);
+    let marker = proto_pkg
+        .traits
+        .iter()
+        .find(|t| t.name == "Marker")
+        .unwrap()
+        .declaration;
+    alt_items
+        .bind_source_traits(&proto_pkg, &[(intrinsic::LangItem::Copy, marker)])
+        .unwrap();
+
+    let s_base = luna::memoization::scope_for(&base, &base_items);
+    let s_same = luna::memoization::scope_for(&base, &base_items);
+    let s_def = luna::memoization::scope_for(&alt_def, &alt_def_items);
+    let s_proto = luna::memoization::scope_for(&proto_pkg, &proto_base_items);
+    let s_lang = luna::memoization::scope_for(&proto_pkg, &alt_items);
+    let s_target = luna::memoization::scope_for(&with_target, &base_items);
+
+    assert_eq!(s_base, s_same);
+    assert_ne!(s_base.definitions, s_def.definitions);
+    assert_ne!(s_base.protocols, s_proto.protocols);
+    assert_ne!(s_proto.protocols, s_lang.protocols);
+    assert_ne!(s_base.target, s_target.target);
+
+    let mut invocation = luna::memoization::Invocation::prepare(
+        &base,
+        &base_items,
+        id(&base, "compute"),
+        vec![],
+        4,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(invocation.scope(), s_base);
+    let first = invocation
+        .invoke(
+            vec![Value::Bool(true)],
+            &mut comptime_executor::Context::new(100_000),
+        )
+        .unwrap();
+    assert!(!first.reused);
+    assert_eq!(
+        *first.value,
+        Value::Integer(comptime_runtime::Integer::from_i128(42))
+    );
+    let hit = invocation
+        .invoke(
+            vec![Value::Bool(true)],
+            &mut comptime_executor::Context::new(100_000),
+        )
+        .unwrap();
+    assert!(hit.reused);
+    assert_eq!(invocation.cached_results(), 1);
+
+    assert!(!invocation.set_scope(s_base));
+    assert_eq!(invocation.cached_results(), 1);
+    assert!(invocation.set_scope(s_def));
+    assert_eq!(invocation.cached_results(), 0);
+    let after_invalidation = invocation
+        .invoke(
+            vec![Value::Bool(true)],
+            &mut comptime_executor::Context::new(100_000),
+        )
+        .unwrap();
+    assert!(!after_invalidation.reused);
+    assert_eq!(invocation.cached_results(), 1);
+}
+
+#[test]
+fn elaboration_required_memoizes_pure_non_type_queries_and_invalidates_across_worlds() {
+    let source_a = format!(
+        "{TYPES}
+        pure comptime fn fib_like(n: Integer) -> Integer {{
+            if n <= 1 {{ n }} else {{ n + fib_like(n - 1) }}
+        }}
+        const A: Integer = fib_like(12);
+        const B: Integer = fib_like(12);
+        const C: Integer = fib_like(10);
+        comptime fn run() -> bool {{ A == 78 and B == 78 and C == 55 }}"
+    );
+    let source_b = format!(
+        "{TYPES}
+        pure comptime fn fib_like(n: Integer) -> Integer {{
+            if n <= 1 {{ n }} else {{ n * 2 + fib_like(n - 1) }}
+        }}
+        const A: Integer = fib_like(12);
+        comptime fn run() -> bool {{ A == 155 }}"
+    );
+    let pkg_a = compile(&source_a);
+    assert_eq!(
+        luna::invocation::invoke(&pkg_a, "run", 500_000).unwrap(),
+        Value::Bool(true)
+    );
+    let pkg_b = compile(&source_b);
+    assert_eq!(
+        luna::invocation::invoke(&pkg_b, "run", 500_000).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]

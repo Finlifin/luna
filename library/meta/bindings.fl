@@ -33,6 +33,9 @@ pub const compiler_object_slice: comptime fn(Object, Integer, Integer) -> Object
     .object_slice'builtin;
 const compiler_struct_field_types: comptime fn(Type) -> List<Type> = .struct_field_types'builtin;
 const compiler_struct_field_names: comptime fn(Type) -> List<Symbol> = .struct_field_names'builtin;
+const compiler_record_field_types: comptime fn(Type) -> List<Type> = .record_field_types'builtin;
+const compiler_record_field_names: comptime fn(Type) -> List<Symbol> = .record_field_names'builtin;
+const compiler_reflect_callable: comptime fn(Type) -> Object = .reflect_callable'builtin;
 const compiler_enum_group_paths: comptime fn(Type) -> List<List<Symbol>> =
     .enum_group_paths'builtin;
 const compiler_enum_variant_paths: comptime fn(Type) -> List<List<Symbol>> =
@@ -174,6 +177,18 @@ pub pure comptime fn struct_field_types(subject: Type) -> List<Type> {
 
 pub pure comptime fn struct_field_names(subject: Type) -> List<Symbol> {
     compiler_struct_field_names(subject)
+}
+
+pub pure comptime fn record_field_types(subject: Type) -> List<Type> {
+    compiler_record_field_types(subject)
+}
+
+pub pure comptime fn record_field_names(subject: Type) -> List<Symbol> {
+    compiler_record_field_names(subject)
+}
+
+pub pure comptime fn reflect_callable_object(subject: Type) -> Object {
+    compiler_reflect_callable(subject)
 }
 
 pub pure comptime fn enum_group_paths(subject: Type) -> List<List<Symbol>> {

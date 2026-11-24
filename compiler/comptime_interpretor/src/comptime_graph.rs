@@ -31,6 +31,7 @@ impl Value {
             | Self::Pointer(_)
             | Self::Storage(_)
             | Self::Type(_)
+            | Self::NormalForm { .. }
             | Self::Description(_)
             | Self::TypeParameter(_)
             | Self::AbstractValue { .. }

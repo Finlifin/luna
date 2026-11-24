@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::{Budget, ErrorKind, Interpreter, Value};
 
 #[test]
@@ -370,4 +371,88 @@ fn heap_activations_honor_requested_depth_and_recover_on_small_host_stack() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn non_type_normal_forms_and_general_patterns_execute_in_bytecode() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias u32 = .u32'builtin;
+        typealias Integer = .Integer'builtin;
+
+        pure comptime fn mk_flag<b: bool> -> bool {
+            return b;
+        }
+
+        pure comptime fn choose_val<T: Type, x: T> -> T {
+            return x;
+        }
+
+        comptime fn run_nf_static() -> bool { mk_flag<true> }
+        comptime fn run_nf_dep() -> u32 { choose_val<u32, 7> }
+
+        comptime fn match_general(flag: bool, item: ?Integer) -> Integer {
+            (flag, item) match {
+                (true, value?) if value > 10 => value + 1,
+                (false, value?) or (true, value?) => value,
+                (_, null) => 0,
+            }
+        }",
+    );
+    let integer = |n| Value::Integer(comptime_runtime::Integer::from_i128(n));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+
+    for entry in ["run_nf_static", "run_nf_dep"] {
+        let id = support::id(&package, entry);
+        let before = vm.bytecode_invocations();
+        let vm_val = vm.invoke(id, vec![]).unwrap();
+        assert!(vm.bytecode_invocations() > before, "{entry}");
+        let tree_val = tree.invoke(id, vec![]).unwrap();
+        assert_eq!(vm_val, tree_val, "{entry}");
+        assert!(
+            matches!(vm_val, Value::NormalForm { .. }),
+            "{entry}: {vm_val:?}"
+        );
+    }
+
+    let opt_int = nir::Term::Optional(Box::new(nir::Term::Primitive(nir::Primitive::Integer)));
+    let match_id = support::id(&package, "match_general");
+    for (flag, item, expected) in [
+        (
+            true,
+            Value::Optional {
+                ty: opt_int.clone(),
+                value: Some(Box::new(integer(20))),
+            },
+            integer(21),
+        ),
+        (
+            true,
+            Value::Optional {
+                ty: opt_int.clone(),
+                value: Some(Box::new(integer(5))),
+            },
+            integer(5),
+        ),
+        (
+            false,
+            Value::Optional {
+                ty: opt_int,
+                value: None,
+            },
+            integer(0),
+        ),
+    ] {
+        let before = vm.bytecode_invocations();
+        let vm_val = vm
+            .invoke(match_id, vec![Value::Bool(flag), item.clone()])
+            .unwrap();
+        assert_eq!(vm.bytecode_invocations(), before + 1);
+        let tree_val = tree
+            .invoke(match_id, vec![Value::Bool(flag), item])
+            .unwrap();
+        assert_eq!(vm_val, expected);
+        assert_eq!(tree_val, expected);
+    }
 }

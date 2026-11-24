@@ -99,6 +99,16 @@ impl Interpreter<'_> {
         self.query_descriptions(source, |this, fuel| this.inspect_type_description(ty, fuel))
     }
 
+    pub(super) fn check_term_description(
+        &mut self,
+        term: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
+        self.query_descriptions(source, |this, fuel| {
+            this.inspect_term_description(term, fuel)
+        })
+    }
+
     pub(super) fn check_closed_type_description(
         &mut self,
         ty: &Term,
@@ -468,7 +478,10 @@ pub(super) fn inspect<'signature>(
         } = ty
         {
             if let Some(metadata) = heads.head(head) {
-                if *sort != nir::Sort::Type {
+                if *sort != nir::Sort::Type
+                    && !(*sort == nir::Sort::ComptimeValue
+                        && metadata.role == nir::normal_forms::Role::Opaque)
+                {
                     return Err(ErrorKind::Type);
                 }
                 metadata

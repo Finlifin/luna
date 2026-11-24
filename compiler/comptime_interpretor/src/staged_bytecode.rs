@@ -8,7 +8,20 @@ pub(super) struct State {
     values: BTreeMap<usize, Input>,
     containers: BTreeMap<usize, Vec<ListField>>,
     pub completed: Option<Input>,
+    initial_depth: usize,
+    caller_depth: usize,
 }
+
+impl State {
+    pub(super) fn at_depth(initial_depth: usize, caller_depth: usize) -> Self {
+        Self {
+            initial_depth,
+            caller_depth,
+            ..Self::default()
+        }
+    }
+}
+
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(staged-inputs (values")?;
@@ -30,6 +43,7 @@ impl fmt::Display for State {
         write!(f, "))")
     }
 }
+
 impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -52,6 +66,7 @@ impl fmt::Display for Input {
         }
     }
 }
+
 impl State {
     fn take(
         &mut self,
@@ -67,6 +82,7 @@ impl State {
                 source: Some(source),
             })
     }
+
     pub fn step(
         &mut self,
         op: &Op,
@@ -85,7 +101,16 @@ impl State {
             return Err(vm.failure(ErrorKind::Type, Some(source)));
         }
         match op {
-            Op::Enter => vm.depth += 1,
+            Op::Enter => {
+                if self
+                    .initial_depth
+                    .saturating_add(vm.depth.saturating_sub(self.caller_depth))
+                    >= 128
+                {
+                    return Err(vm.failure(ErrorKind::DepthExhausted, Some(source)));
+                }
+                vm.depth += 1;
+            }
             Op::Leave => {
                 vm.depth = vm
                     .depth

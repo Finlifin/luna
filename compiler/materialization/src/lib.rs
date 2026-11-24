@@ -4427,6 +4427,8 @@ impl Builder<'_, '_> {
                 | K::NewtypeRepresentation(value)
                 | K::DefinitionAttributes(value)
                 | K::StructFieldTypes(value)
+                | K::RecordFieldTypes(value)
+                | K::ReflectCallable(value)
                 | K::BuildStruct(value)
                 | K::BuildNewtype(value)
                 | K::BuildEnum(value)
@@ -4434,6 +4436,7 @@ impl Builder<'_, '_> {
                 | K::ObjectQuery { subject: value, .. }
                 | K::ObjectEdit { subject: value, .. }
                 | K::StructFieldNames(value)
+                | K::RecordFieldNames(value)
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
                 | K::FloatNegate(value)
@@ -5012,6 +5015,8 @@ impl Builder<'_, '_> {
             | K::NewtypeRepresentation(value)
             | K::DefinitionAttributes(value)
             | K::StructFieldTypes(value)
+            | K::RecordFieldTypes(value)
+            | K::ReflectCallable(value)
             | K::BuildStruct(value)
             | K::BuildNewtype(value)
             | K::BuildEnum(value)
@@ -5019,6 +5024,7 @@ impl Builder<'_, '_> {
             | K::ObjectQuery { subject: value, .. }
             | K::ObjectEdit { subject: value, .. }
             | K::StructFieldNames(value)
+            | K::RecordFieldNames(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)
             | K::FloatNegate(value)

@@ -83,6 +83,9 @@ impl Interpreter<'_> {
             K::DefinitionAttributes(operand) => (O::DefinitionAttributes, operand.as_ref()),
             K::StructFieldTypes(operand) => (O::StructFields { names: false }, operand.as_ref()),
             K::StructFieldNames(operand) => (O::StructFields { names: true }, operand.as_ref()),
+            K::RecordFieldTypes(operand) => (O::RecordFields { names: false }, operand.as_ref()),
+            K::RecordFieldNames(operand) => (O::RecordFields { names: true }, operand.as_ref()),
+            K::ReflectCallable(operand) => (O::CallableReflection, operand.as_ref()),
             K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
@@ -148,27 +151,32 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
-            O::DefinitionAttributes => {
+            O::DefinitionAttributes | O::CallableReflection => {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
                 }
                 let never = Term::Primitive(Primitive::Never);
                 let expected = if *input == never {
-                    never
+                    never.clone()
                 } else {
                     Term::Primitive(Primitive::Object)
                 };
-                if *output != expected {
+                if *output != expected
+                    || (matches!(observation.kind, O::CallableReflection)
+                        && *input != never
+                        && *input != Term::Primitive(Primitive::Type))
+                {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
-            O::StructFields { .. } | O::EnumStructure(_) => {
+            O::StructFields { .. } | O::RecordFields { .. } | O::EnumStructure(_) => {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
                 }
                 let never = Term::Primitive(Primitive::Never);
                 let element = Term::Primitive(match observation.kind {
                     O::StructFields { names: false }
+                    | O::RecordFields { names: false }
                     | O::EnumStructure(nir::program::EnumStructureQuery::FieldTypes) => {
                         Primitive::Type
                     }
@@ -395,6 +403,8 @@ impl Interpreter<'_> {
             }
             O::DefinitionAttributes => self.observe_definition_attributes(value, source),
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
+            O::RecordFields { names } => self.observe_record_fields(value, output, names, source),
+            O::CallableReflection => self.observe_callable(value, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {
                 self.check_value_type(&value, input, Some(source))?;

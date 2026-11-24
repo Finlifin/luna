@@ -5,6 +5,8 @@ use nir::program::NormalFormArgument as Argument;
 
 pub(super) struct Source<'a> {
     head: DeclarationId,
+    result: Term,
+    signature_result: Option<Term>,
     domains: Domains<'a>,
     locals: Arc<[LocalId]>,
     plan: Plan<'a>,
@@ -45,6 +47,7 @@ impl Domains<'_> {
             }),
         }
     }
+
     pub(super) fn bind(
         &self,
         vm: &mut Interpreter<'_>,
@@ -90,8 +93,8 @@ impl<'a> Frame<'a> {
     ) -> Result<Self, Error> {
         let view = plan.view();
         let source = view.source;
-        let (head, public_inputs) = match (view.target, selected) {
-            (Target::Normal(head), None) => (head, None),
+        let (head, public_inputs, signature_result) = match (view.target, selected) {
+            (Target::Normal(head), None) => (head, None, None),
             (
                 Target::Selected {
                     signature,
@@ -106,9 +109,9 @@ impl<'a> Frame<'a> {
                 };
                 let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let opened = nir::normal_forms::open_inputs(signature, input_ids, &mut fuel);
+                let opened = nir::normal_forms::open_signature(signature, input_ids, &mut fuel);
                 vm.budget.steps -= (before - fuel) as u64;
-                let opened = opened.map_err(|reason| {
+                let (opened, opened_result) = opened.map_err(|reason| {
                     vm.failure(
                         match reason {
                             nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
@@ -117,7 +120,7 @@ impl<'a> Frame<'a> {
                         Some(source),
                     )
                 })?;
-                (head, Some(opened))
+                (head, Some(opened), Some(opened_result))
             }
             _ => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
@@ -126,14 +129,73 @@ impl<'a> Frame<'a> {
             .normal_forms
             .get(&head)
             .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+        let mut signature_result = signature_result;
         let count = view.arguments.len();
-        let result = if plan.inputs_diverge() {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if *view.ty != Term::Primitive(result)
-            || metadata.parameters.len() != count
+        let diverges = plan.inputs_diverge();
+        if diverges && *view.ty != Term::Primitive(Primitive::Never) {
+            return Err(vm.failure(ErrorKind::Type, Some(source)));
+        }
+        if !diverges {
+            if view.ty.sort() != nir::Sort::Type {
+                return Err(vm.failure(ErrorKind::Type, Some(source)));
+            }
+            if *view.ty != Term::Primitive(Primitive::Type)
+                && (!matches!(metadata.role, nir::normal_forms::Role::Opaque)
+                    || (public_inputs.is_none() && vm.functions.declaration(&head).is_none()))
+            {
+                return Err(vm.failure(ErrorKind::Type, Some(source)));
+            }
+            if public_inputs.is_none()
+                && let Some(function) = vm.functions.declaration(&head)
+                && let Term::Function { result, .. } = &function.signature
+                && result.check_scope(&[]).is_ok()
+            {
+                let mut referenced = BTreeSet::new();
+                let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let checked = nir::type_computations::rigid_declarations_bounded(
+                    result,
+                    &mut fuel,
+                    &mut referenced,
+                );
+                let copied = match checked {
+                    Ok(()) => {
+                        nir::copy_budget::clone_term(result, &mut fuel).map_err(|limit| match limit
+                        {
+                            nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                nir::type_computations::Error::Budget
+                            }
+                            nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                nir::type_computations::Error::Budget
+                            }
+                        })
+                    }
+                    Err(reason) => Err(reason),
+                };
+                vm.budget.steps -= (before - fuel) as u64;
+                let expected_result = copied.map_err(|reason| {
+                    vm.failure(
+                        match reason {
+                            nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
+                            _ => ErrorKind::Type,
+                        },
+                        Some(source),
+                    )
+                })?;
+                if metadata
+                    .parameters
+                    .iter()
+                    .all(|parameter| !referenced.contains(&parameter.declaration))
+                {
+                    if *view.ty != expected_result {
+                        return Err(vm.failure(ErrorKind::Type, Some(source)));
+                    }
+                } else {
+                    signature_result = Some(expected_result);
+                }
+            }
+        }
+        if metadata.parameters.len() != count
             || public_inputs
                 .as_ref()
                 .is_some_and(|inputs| inputs.len() != count)
@@ -150,6 +212,8 @@ impl<'a> Frame<'a> {
         );
         Ok(Self::from_source(Source {
             head,
+            result: view.ty.clone(),
+            signature_result,
             domains,
             locals,
             bindings,
@@ -162,9 +226,11 @@ impl input_collection::Source for Source<'_> {
     fn plan(&self) -> &input_collection::Plan<'_> {
         &self.plan
     }
+
     fn substitutions(&self, _slot: usize) -> Option<&input_bindings::Bindings> {
         Some(&self.bindings)
     }
+
     fn check_input(
         &self,
         _vm: &mut Interpreter<'_>,
@@ -175,6 +241,7 @@ impl input_collection::Source for Source<'_> {
     ) -> Result<(), Error> {
         Ok(())
     }
+
     fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
@@ -198,17 +265,29 @@ impl input_collection::Source for Source<'_> {
     }
 
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
+        let source = self.plan.view().source;
+        if self.result == Term::Primitive(Primitive::Never) {
+            return Err(vm.failure(ErrorKind::Type, Some(source)));
+        }
+        if let Some(expected) = &self.signature_result {
+            let instantiated = self.bindings.instantiate(vm, expected, source)?;
+            if instantiated != self.result {
+                return Err(vm.failure(ErrorKind::Type, Some(source)));
+            }
+        }
         let bindings =
             std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural([]));
         let arguments = bindings
             .finish_normal()
-            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.plan.view().source)))?;
+            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
         Ok(Progress::Complete(Flow::Value(vm.complete_normal_data(
             self.head,
             arguments,
-            self.plan.view().source,
+            &self.result,
+            source,
         )?)))
     }
+
     fn cleanup(&self, environment: &mut Environment) {
         for binding in self.locals.iter() {
             environment.remove(binding);
@@ -243,13 +322,17 @@ mod tests {
     use input_collection::{Completion, InputPlan, Request};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use nir::program::NormalFormInputPlan;
+
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 81, local }
     }
+
     fn local(index: u32) -> LocalId {
         LocalId { owner: 81, index }
     }
+
     fn expr(ty: Primitive, kind: K) -> Expr {
         Expr {
             ty: Term::Primitive(ty),
@@ -641,5 +724,230 @@ mod tests {
         assert!(
             matches!(vm.complete_normal_type(id(0), values, SOURCE).unwrap(), Value::Type(Term::NormalForm { head, .. }) if head == id(0))
         );
+    }
+
+    #[test]
+    fn non_type_normal_form_applications_keep_head_and_value_sort() {
+        let mut package = package();
+        let param_ty = Term::Rigid {
+            declaration: id(1),
+            sort: nir::Sort::Type,
+        };
+        package.functions.push(nir::program::Function {
+            interface: nir::program::FunctionDeclaration {
+                source: SOURCE,
+                declaration: id(0),
+                name: "flag".into(),
+                phase: nir::program::FunctionPhase::NormalForm,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                type_parameters: vec![id(1)],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::ComptimeValue,
+                        ty: param_ty.clone(),
+                    }],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                parameters: vec![local(1)],
+                env_parameters: vec![],
+                defaults: vec![],
+            },
+            body: expr(
+                Primitive::Bool,
+                K::Literal(nir::program::Literal::Bool(false)),
+            ),
+            runtime_deliveries: Default::default(),
+        });
+        let expected_term = Term::NormalForm {
+            head: id(0),
+            sort: nir::Sort::ComptimeValue,
+            arguments: vec![
+                Term::Primitive(Primitive::U8),
+                Term::Integer(comptime_runtime::Integer::from_i128(7)),
+            ],
+        };
+        let expected_value = Value::NormalForm {
+            term: expected_term.clone(),
+            ty: Term::Primitive(Primitive::Bool),
+        };
+        let body = Expr {
+            source: SOURCE,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::NormalFormType {
+                head: id(0),
+                arguments: vec![
+                    Argument::Value(expr(
+                        Primitive::Type,
+                        K::TypeValue(Term::Primitive(Primitive::U8)),
+                    )),
+                    Argument::integer(SOURCE, "7".into(), false),
+                ],
+                plan: None,
+            },
+        };
+        for entry in ["tree", "direct-frame", "bytecode"] {
+            let mut vm = if entry == "tree" {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let mut env = Environment::new();
+            let flow = if entry == "bytecode" {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+                vm.execute_code(&code, &mut env).unwrap()
+            } else if entry == "direct-frame" {
+                let mut frame = Frame::new(&mut vm, Plan::borrowed(&body), &env).unwrap();
+                let flow = vm.run_normal_plan(&mut frame, &mut env).unwrap();
+                input_collection::InputPlan::cleanup(&frame, &mut env);
+                flow
+            } else {
+                vm.eval(&body, &mut env).unwrap()
+            };
+            let Flow::Value(ref value) = flow else {
+                panic!("expected value");
+            };
+            assert_eq!(value, &expected_value, "{entry}");
+            assert!(
+                value
+                    .to_string()
+                    .contains("(normal-form-value (type (primitive bool))")
+            );
+            let mut rt_budget = comptime_runtime::Budget::default();
+            let frozen = value
+                .to_scoped_term(
+                    &mut rt_budget,
+                    &Default::default(),
+                    &Default::default(),
+                    &Default::default(),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(frozen, expected_term);
+            let decoded = vm
+                .normal_pattern_value(&frozen, &Term::Primitive(Primitive::Bool))
+                .unwrap();
+            assert_eq!(decoded, expected_value);
+        }
+    }
+
+    #[test]
+    fn dependent_non_type_normal_form_rejects_mismatched_result_type() {
+        let mut package = package();
+        let param_ty = Term::Rigid {
+            declaration: id(1),
+            sort: nir::Sort::Type,
+        };
+        package.functions.push(nir::program::Function {
+            interface: nir::program::FunctionDeclaration {
+                source: SOURCE,
+                declaration: id(0),
+                name: "choose_val".into(),
+                phase: nir::program::FunctionPhase::NormalForm,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                type_parameters: vec![id(1)],
+                requirements: vec![],
+                capabilities: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::ComptimeValue,
+                        ty: param_ty.clone(),
+                    }],
+                    result: Box::new(param_ty),
+                },
+                parameters: vec![local(1)],
+                env_parameters: vec![],
+                defaults: vec![],
+            },
+            body: expr(Primitive::U32, K::Local(local(1))),
+            runtime_deliveries: Default::default(),
+        });
+        let valid_body = Expr {
+            source: SOURCE,
+            ty: Term::Primitive(Primitive::U32),
+            kind: K::NormalFormType {
+                head: id(0),
+                arguments: vec![
+                    Argument::Value(expr(
+                        Primitive::Type,
+                        K::TypeValue(Term::Primitive(Primitive::U32)),
+                    )),
+                    Argument::integer(SOURCE, "7".into(), false),
+                ],
+                plan: None,
+            },
+        };
+        let forged_body = Expr {
+            source: SOURCE,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: valid_body.kind.clone(),
+        };
+        for entry in ["tree", "direct-frame", "bytecode"] {
+            let mut vm = if entry == "tree" {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let mut env = Environment::new();
+            let valid = if entry == "bytecode" {
+                let code = Arc::new(comptime_compiler::compile(&valid_body, &mut 10_000).unwrap());
+                vm.execute_code(&code, &mut env).unwrap()
+            } else if entry == "direct-frame" {
+                let mut frame = Frame::new(&mut vm, Plan::borrowed(&valid_body), &env).unwrap();
+                let flow = vm.run_normal_plan(&mut frame, &mut env).unwrap();
+                input_collection::InputPlan::cleanup(&frame, &mut env);
+                flow
+            } else {
+                vm.eval(&valid_body, &mut env).unwrap()
+            };
+            let Flow::Value(valid) = valid else {
+                panic!("expected value for {entry}");
+            };
+            assert_eq!(
+                valid,
+                Value::NormalForm {
+                    term: Term::NormalForm {
+                        head: id(0),
+                        sort: nir::Sort::ComptimeValue,
+                        arguments: vec![
+                            Term::Primitive(Primitive::U32),
+                            Term::Integer(comptime_runtime::Integer::from_i128(7)),
+                        ],
+                    },
+                    ty: Term::Primitive(Primitive::U32),
+                },
+                "{entry}"
+            );
+
+            let forged = if entry == "bytecode" {
+                let code = Arc::new(comptime_compiler::compile(&forged_body, &mut 10_000).unwrap());
+                vm.execute_code(&code, &mut env)
+            } else if entry == "direct-frame" {
+                let mut frame = Frame::new(&mut vm, Plan::borrowed(&forged_body), &env).unwrap();
+                let flow = vm.run_normal_plan(&mut frame, &mut env);
+                input_collection::InputPlan::cleanup(&frame, &mut env);
+                flow
+            } else {
+                vm.eval(&forged_body, &mut env)
+            };
+            assert_eq!(forged.unwrap_err().kind, ErrorKind::Type, "{entry}");
+        }
     }
 }

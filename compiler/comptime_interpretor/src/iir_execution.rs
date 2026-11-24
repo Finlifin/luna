@@ -8,40 +8,42 @@ pub(super) use indexes::GraphIndexes;
 pub(super) use nominals::ConcreteNominal;
 
 impl<'a> Interpreter<'a> {
-    pub(super) fn eval_template_equal(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let K::TemplateEqual(left, right) = &expr.kind else {
-            unreachable!()
-        };
+    pub(super) fn check_template_equal(
+        &self,
+        left_ty: &Term,
+        right_ty: &Term,
+        output_ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
         if self.graph.is_none()
             || self.comptime_only
-            || left.ty != right.ty
-            || expr.ty != nir::Term::Primitive(nir::Primitive::Bool)
+            || left_ty != right_ty
+            || *output_ty != nir::Term::Primitive(nir::Primitive::Bool)
         {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        let a = match self.eval(left, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
-        };
-        let b = match self.eval(right, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
-        };
-        self.check_retained_value(&a, &left.ty, Some(expr.source))?;
-        self.check_retained_value(&b, &right.ty, Some(expr.source))?;
+        Ok(())
+    }
+
+    pub(super) fn complete_template_equal(
+        &mut self,
+        a: Value,
+        b: Value,
+        left_ty: &Term,
+        right_ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        self.check_retained_value(&a, left_ty, Some(source))?;
+        self.check_retained_value(&b, right_ty, Some(source))?;
         if [&a, &b].iter().any(|value| {
             !matches!(
                 value,
                 Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
             )
         }) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        self.charge_copy_work(Some(expr.source), |fuel| {
+        self.charge_copy_work(Some(source), |fuel| {
             for value in [&a, &b] {
                 match value {
                     Value::FunctionInstance { arguments, .. } => {
@@ -76,9 +78,30 @@ impl<'a> Interpreter<'a> {
             (Value::RuntimeTraitMethod(a), Value::RuntimeTraitMethod(b)) => a == b,
             (Value::FunctionInstance { .. }, Value::RuntimeTraitMethod(_))
             | (Value::RuntimeTraitMethod(_), Value::FunctionInstance { .. }) => false,
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
         };
-        Ok(Flow::Value(Value::Bool(equal)))
+        Ok(Value::Bool(equal))
+    }
+
+    pub(super) fn eval_template_equal(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::TemplateEqual(left, right) = &expr.kind else {
+            unreachable!()
+        };
+        self.check_template_equal(&left.ty, &right.ty, &expr.ty, expr.source)?;
+        let a = match self.eval(left, environment)? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        let b = match self.eval(right, environment)? {
+            Flow::Value(value) => value,
+            flow => return Ok(flow),
+        };
+        self.complete_template_equal(a, b, &left.ty, &right.ty, expr.source)
+            .map(Flow::Value)
     }
 
     /// Execute concrete staged instances without granting runtime functions

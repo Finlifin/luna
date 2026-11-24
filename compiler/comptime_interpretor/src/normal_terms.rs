@@ -178,6 +178,10 @@ impl Value {
                     }
                 }
                 Value::Type(ty) => ty.drop_iteratively(),
+                Value::NormalForm { term, ty } => {
+                    term.drop_iteratively();
+                    ty.drop_iteratively();
+                }
                 Value::Optional { ty, value } => {
                     ty.drop_iteratively();
                     if let Some(value) = value {
@@ -624,6 +628,12 @@ impl Value {
                     scope.inspect_type(ty, budget)?;
                     ty.clone()
                 }
+                Value::NormalForm { term, ty } => {
+                    charge(budget, 1)?;
+                    scope.inspect_type(ty, budget)?;
+                    scope.inspect_term(term, budget)?;
+                    term.clone()
+                }
 
                 scalar => return scalar.freeze_scalar_term(budget),
             })
@@ -656,6 +666,7 @@ impl Value {
 #[cfg(test)]
 mod borrowed_input_tests {
     use super::*;
+
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
 
     #[test]

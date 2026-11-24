@@ -1,10 +1,16 @@
 //! Structure observation for comptime library adapters, independent of layout.
 use super::*;
+
 mod newtypes;
+
 pub use newtypes::NewtypeReflection;
+
 mod enums;
+
 pub use enums::{EnumReflection, ReflectedVariant};
+
 mod callables;
+
 pub use callables::CallableReflection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +27,14 @@ pub struct StructReflection {
     pub fields: Vec<ReflectedField>,
 }
 
+/// An observation of an anonymous record Type, not a replacement for its type identity.
+/// This carries no access, Copy or layout permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordReflection {
+    pub subject: Term,
+    pub fields: Vec<ReflectedField>,
+}
+
 impl fmt::Display for ReflectedField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -31,6 +45,7 @@ impl fmt::Display for ReflectedField {
         )
     }
 }
+
 impl fmt::Display for StructReflection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(struct-reflection (subject {}) (fields", self.subject)?;
@@ -41,7 +56,44 @@ impl fmt::Display for StructReflection {
     }
 }
 
+impl fmt::Display for RecordReflection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(record-reflection (subject {}) (fields", self.subject)?;
+        for field in &self.fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 impl Interpreter<'_> {
+    fn reflected_field_list(
+        &mut self,
+        fields: Vec<ReflectedField>,
+        output: &Term,
+        names: bool,
+    ) -> Result<Value, Error> {
+        let value = if names {
+            Value::List {
+                ty: output.clone(),
+                values: fields
+                    .into_iter()
+                    .map(|field| Value::Symbol(field.name.into()))
+                    .collect(),
+            }
+        } else {
+            Value::List {
+                ty: output.clone(),
+                values: fields
+                    .into_iter()
+                    .map(|field| Value::Type(field.ty))
+                    .collect(),
+            }
+        };
+        self.validate_immutable_input(&value, output)?;
+        Ok(value)
+    }
+
     pub(super) fn observe_struct_fields(
         &mut self,
         subject: Value,
@@ -58,26 +110,84 @@ impl Interpreter<'_> {
             }
             error
         })?;
-        let value = if names {
-            Value::List {
-                ty: output.clone(),
-                values: reflected
-                    .fields
-                    .into_iter()
-                    .map(|field| Value::Symbol(field.name.into()))
-                    .collect(),
-            }
-        } else {
-            Value::List {
-                ty: output.clone(),
-                values: reflected
-                    .fields
-                    .into_iter()
-                    .map(|field| Value::Type(field.ty))
-                    .collect(),
-            }
+        self.reflected_field_list(reflected.fields, output, names)
+    }
+
+    pub(super) fn observe_record_fields(
+        &mut self,
+        subject: Value,
+        output: &Term,
+        names: bool,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::Type(subject) = subject else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         };
-        self.validate_immutable_input(&value, output)?;
+        let reflected = self.reflect_record(&subject).map_err(|mut error| {
+            if error.source.is_none() {
+                error.source = Some(source);
+            }
+            error
+        })?;
+        self.reflected_field_list(reflected.fields, output, names)
+    }
+
+    pub(super) fn observe_callable(
+        &mut self,
+        subject: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::Type(subject) = subject else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let reflected = self.reflect_callable(&subject).map_err(|mut error| {
+            if error.source.is_none() {
+                error.source = Some(source);
+            }
+            error
+        })?;
+        let signature = reflected.signature().clone();
+        let is_comptime = reflected.is_comptime();
+        let is_unsafe = reflected.is_unsafe();
+        let CallableReflection { subject, callable } = reflected;
+        let value = Value::Object(Object::from_entries(vec![
+            ObjectEntry::Property {
+                key: "subject".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Type),
+                    value: Value::Type(subject),
+                },
+            },
+            ObjectEntry::Property {
+                key: "callable".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Type),
+                    value: Value::Type(callable),
+                },
+            },
+            ObjectEntry::Property {
+                key: "signature".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Type),
+                    value: Value::Type(signature),
+                },
+            },
+            ObjectEntry::Property {
+                key: "is_comptime".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: Value::Bool(is_comptime),
+                },
+            },
+            ObjectEntry::Property {
+                key: "is_unsafe".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: Value::Bool(is_unsafe),
+                },
+            },
+        ]));
+        self.validate_immutable_input(&value, &Term::Primitive(Primitive::Object))?;
         Ok(value)
     }
 
@@ -87,6 +197,35 @@ impl Interpreter<'_> {
         self.admit_type(&ty, 0)?;
         Ok(ty)
     }
+
+    /// Inspect an anonymous record Type in this invocation's declaration world.
+    /// Formation predicates and nested field descriptions are checked under the
+    /// invocation budget; opaque normal-form heads are not unfolded.
+    pub fn reflect_record(&mut self, ty: &Term) -> Result<RecordReflection, Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
+        let subject = ty;
+        let selected = self.reflection_type(ty)?;
+        let Term::Record(raw_fields) = &selected else {
+            return Err(self.failure(ErrorKind::Type, None));
+        };
+        self.integer_operation(None, |budget| budget.consume(raw_fields.len()))?;
+        let mut fields = Vec::with_capacity(raw_fields.len());
+        for (name, field_ty) in raw_fields {
+            self.integer_operation(None, |budget| budget.consume(name.len().saturating_add(1)))?;
+            let ty = self.reflection_type(field_ty)?;
+            fields.push(ReflectedField {
+                name: name.clone(),
+                ty,
+            });
+        }
+        Ok(RecordReflection {
+            subject: subject.clone(),
+            fields,
+        })
+    }
+
     /// Inspect a completed struct application in this invocation's declaration
     /// world. Formation predicates are checked even for phantom parameters and
     /// empty structs. All substitution/copy work consumes the invocation budget.

@@ -101,6 +101,10 @@ fn charge_clone(value: &Value, fuel: &mut u64, depth: usize) -> Result<(), Error
         Value::Type(ty) | Value::AbstractValue { ty, .. } | Value::List { ty, .. } => {
             term(ty, fuel)?
         }
+        Value::NormalForm { term: value, ty } => {
+            term(ty, fuel)?;
+            term(value, fuel)?;
+        }
         Value::Tuple(fields) => {
             charge(fuel, fields.len())?;
             for field in fields {

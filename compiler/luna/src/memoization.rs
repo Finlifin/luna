@@ -1,9 +1,9 @@
 //! Reusable invocation of one concrete pure comptime function in an owned
-//! compilation snapshot. Result caching is temporarily limited to calls whose
-//! bound output type is Type; other calls bypass key preparation and lookup.
-//! Callers supply fully prepared arguments; defaults and
-//! input evaluation are outside this cache. Runtime resource protocols do not
-//! authorize comptime value-reference operations or cache admission.
+//! compilation snapshot. Pure results whose representation is exportable are
+//! memoized under versioned `(definitions, protocols, target)` scope fingerprints;
+//! callers supply prepared arguments, while defaults and input evaluation remain
+//! outside this cache. Runtime resource protocols do not authorize comptime
+//! value-reference operations or cache admission.
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{AdmittedCall, Budget, Interpreter, Value};
@@ -27,6 +27,7 @@ pub struct Invocation {
     results: Results,
     budget: ptc::Budget,
 }
+
 struct Results {
     items: LangItems,
     schemas: Vec<Schema>,
@@ -34,11 +35,13 @@ struct Results {
     protocols: ExactInputs,
     cache: Cache<Snapshot, Value>,
 }
+
 struct Schema {
     inputs: Vec<Term>,
     result: Term,
     protocols: Vec<usize>,
 }
+
 impl std::fmt::Display for Schema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(binding (inputs")?;
@@ -52,7 +55,9 @@ impl std::fmt::Display for Schema {
         f.write_str("))")
     }
 }
+
 struct ExactInputs(Vec<Protocol>);
+
 impl ExactInputs {
     fn protocol(
         &mut self,
@@ -70,11 +75,14 @@ impl ExactInputs {
         ))
     }
 }
+
 impl KeyProtocol<Snapshot> for ExactInputs {
     type Error = String;
+
     fn hash(&mut self, value: &Snapshot, context: &mut Context) -> Result<u64, Error<String>> {
         self.protocol(value, context)?.hash(value, context)
     }
+
     fn equivalent(
         &mut self,
         a: &Snapshot,
@@ -91,6 +99,7 @@ impl KeyProtocol<Snapshot> for ExactInputs {
         Ok(a.value() == b.value())
     }
 }
+
 impl Invocation {
     /// Capture and prepare one invocation under a shared construction allowance.
     /// Later execution uses its own cumulative Context and retained query limits.
@@ -225,7 +234,8 @@ impl Invocation {
                     .map_err(nir::NominalAdmissionError::from)?;
                 check_requirement(TypePredicate::Trait(bound), &mut work)?;
             }
-            let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
+            let cacheable = closed;
+            let scope = scope_for(source.package(), items);
             let code_session = comptime_interpretor::CodeSession::new(source.package().clone());
             let protocols = if cacheable {
                 parameters
@@ -283,14 +293,7 @@ impl Invocation {
                     schemas,
                     capacity,
                     protocols: ExactInputs(protocols),
-                    cache: Cache::new(
-                        Scope {
-                            definitions: 0,
-                            protocols: 0,
-                            target: 0,
-                        },
-                        capacity,
-                    ),
+                    cache: Cache::new(scope, capacity),
                 },
                 budget,
             })
@@ -298,12 +301,29 @@ impl Invocation {
         *remaining -= before - work.steps;
         prepared
     }
+
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
         self.stats
     }
+
     pub fn cached_results(&self) -> usize {
         self.results.cache.len()
     }
+
+    pub fn scope(&self) -> Scope {
+        self.results.cache.scope()
+    }
+
+    pub fn set_scope(&mut self, scope: Scope) -> bool {
+        let changed = self.results.cache.scope() != scope;
+        if changed {
+            self.results.cache.set_scope(scope);
+            self.results.schemas.clear();
+            self.results.protocols.0.clear();
+        }
+        changed
+    }
+
     pub fn invoke(
         &mut self,
         values: Vec<Value>,
@@ -347,15 +367,6 @@ impl Invocation {
                 vm.admit_source_call(self.declaration, arguments, values, remaining)
                     .map_err(admission_error)
             })?;
-            if entry.result_type() != &Term::Primitive(nir::Primitive::Type) {
-                let value = context
-                    .with_allowance(usize::MAX, |remaining| entry.resume(remaining))
-                    .map_err(evaluation_error)?;
-                return Ok(Outcome {
-                    value: std::sync::Arc::new(value),
-                    reused: false,
-                });
-            }
             self.results.lookup(
                 entry,
                 self.declaration,
@@ -421,12 +432,14 @@ impl Results {
                 .map(|(value, protocol)| protocol.admit_borrowed(value, context))
                 .collect::<Result<Vec<_>, _>>()?;
             if self.schemas.len() < self.capacity && self.schemas.len() < u32::MAX as usize {
-                let types = context
+                let (types, result) = context
                     .with_allowance(usize::MAX, |work| {
-                        types
+                        let types = types
                             .iter()
                             .map(|ty| nir::copy_budget::clone_term(ty, work))
-                            .collect::<Result<Vec<_>, _>>()
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let result = nir::copy_budget::clone_term(entry.result_type(), work)?;
+                        Ok::<_, nir::copy_budget::CopyBudgetExhausted>((types, result))
                     })
                     .map_err(|_| Error::BudgetExhausted)?;
                 let operation = self.schemas.len() as u32;
@@ -435,7 +448,7 @@ impl Results {
                 self.protocols.0.extend(protocols);
                 self.schemas.push(Schema {
                     inputs: types,
-                    result: Term::Primitive(nir::Primitive::Type),
+                    result,
                     protocols: slots,
                 });
                 (operation, inputs)
@@ -451,14 +464,7 @@ impl Results {
         };
         let mut uncached;
         let (cache, protocols) = if let Some(ref mut protocols) = transient {
-            uncached = Cache::new(
-                Scope {
-                    definitions: 0,
-                    protocols: 0,
-                    target: 0,
-                },
-                0,
-            );
+            uncached = Cache::new(self.cache.scope(), 0);
             (&mut uncached, protocols)
         } else {
             (&mut self.cache, &mut self.protocols)
@@ -516,4 +522,172 @@ fn evaluation_error(error: comptime_interpretor::Error) -> Error<String> {
         return Error::BudgetExhausted;
     }
     Error::Evaluation(error.to_string())
+}
+
+struct HashWriter(u64);
+
+impl HashWriter {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.0 ^= u64::from(byte);
+        self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+    }
+
+    fn u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.byte(byte);
+        }
+    }
+
+    fn display(&mut self, value: &impl std::fmt::Display) {
+        let _ = std::fmt::Write::write_fmt(self, format_args!("{value}"));
+        self.byte(0xff);
+    }
+}
+
+impl std::fmt::Write for HashWriter {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for &byte in s.as_bytes() {
+            self.byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Compute versioned `(definitions, protocols, target)` scope fingerprints for a
+/// compilation snapshot and language-item registry.
+pub fn scope_for(package: &Package, items: &LangItems) -> Scope {
+    use intrinsic::{LangItem, LangItemDef};
+
+    let mut defs = HashWriter::new();
+    defs.u64(u64::from(package.definition_identity_cursor));
+    defs.display(&package.observed_associated_types);
+    defs.display(&package.formed_nullary_nominals);
+    defs.display(&package.refinements);
+    for effect in &package.effects {
+        defs.display(effect);
+    }
+    for identity in &package.runtime_function_identities {
+        defs.display(identity);
+    }
+    for decl in &package.function_parameters {
+        defs.display(decl);
+    }
+    for head in &package.normal_forms {
+        defs.display(head);
+    }
+    for enum_def in &package.enums {
+        defs.display(enum_def);
+    }
+    for contract in &package.alias_contracts {
+        defs.display(contract);
+    }
+    for newtype in &package.newtypes {
+        defs.display(newtype);
+    }
+    for struct_def in &package.structs {
+        defs.display(struct_def);
+    }
+    for function in &package.functions {
+        defs.display(function);
+    }
+    for static_def in &package.statics {
+        let _ = std::fmt::Write::write_fmt(&mut defs, format_args!("{static_def:?}"));
+        defs.byte(0xff);
+    }
+    defs.display(&package.definition_attributes);
+    defs.display(&package.volatile_storage);
+
+    let mut protos = HashWriter::new();
+    const ALL_ITEMS: [LangItem; 29] = [
+        LangItem::AnyType,
+        LangItem::U8,
+        LangItem::U16,
+        LangItem::U32,
+        LangItem::U64,
+        LangItem::U128,
+        LangItem::Usize,
+        LangItem::I8,
+        LangItem::I16,
+        LangItem::I32,
+        LangItem::I64,
+        LangItem::I128,
+        LangItem::Isize,
+        LangItem::Integer,
+        LangItem::F16,
+        LangItem::Bf16,
+        LangItem::F32,
+        LangItem::F64,
+        LangItem::Real,
+        LangItem::Bool,
+        LangItem::Char,
+        LangItem::Str,
+        LangItem::Void,
+        LangItem::NoReturn,
+        LangItem::Type,
+        LangItem::Tuple,
+        LangItem::Undefined,
+        LangItem::AnyValue,
+        LangItem::Once,
+    ];
+    const TRAIT_ITEMS: [LangItem; 13] = [
+        LangItem::Copy,
+        LangItem::Clone,
+        LangItem::Drop,
+        LangItem::Debug,
+        LangItem::Display,
+        LangItem::Eq,
+        LangItem::Ord,
+        LangItem::Hash,
+        LangItem::Iter,
+        LangItem::IntoIterator,
+        LangItem::Into,
+        LangItem::From,
+        LangItem::Splice,
+    ];
+    for (index, item) in ALL_ITEMS.into_iter().chain(TRAIT_ITEMS).enumerate() {
+        protos.u64(index as u64);
+        match items.get(item) {
+            None => protos.byte(0),
+            Some(LangItemDef::Builtin) => protos.byte(1),
+            Some(LangItemDef::UserDef(id)) => {
+                protos.byte(2);
+                protos.u64(id.package);
+                protos.u64(u64::from(id.local));
+            }
+        }
+    }
+    for pkg in &package.builtin_implementation_packages {
+        protos.u64(*pkg);
+    }
+    for trait_def in &package.traits {
+        protos.display(trait_def);
+    }
+    for implementation in &package.implementations {
+        protos.display(implementation);
+    }
+    for link in &package.method_links {
+        protos.display(link);
+    }
+    for instance in &package.dispatch_instances {
+        protos.display(instance);
+    }
+
+    let mut target = HashWriter::new();
+    match &package.target {
+        None => target.byte(0),
+        Some(data) => {
+            target.byte(1);
+            target.display(data);
+        }
+    }
+
+    Scope {
+        definitions: defs.0,
+        protocols: protos.0,
+        target: target.0,
+    }
 }

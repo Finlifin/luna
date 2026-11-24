@@ -215,6 +215,12 @@ pub enum Value {
     ComptimeReference(ValueReference),
     /// Concrete or scoped type identity.
     Type(Term),
+    /// Completed opaque non-Type normal-form application result, retaining its
+    /// comptime-value term and declared output domain.
+    NormalForm {
+        term: Term,
+        ty: Term,
+    },
     /// Completed gradual Type data without a concrete type identity.
     Description(nir::program::DescriptionLiteral),
     /// Opaque declaration Type input, admitted only by a comptime scope.
@@ -2786,6 +2792,9 @@ impl<'a> Interpreter<'a> {
             | K::DefinitionAttributes(_)
             | K::StructFieldTypes(_)
             | K::StructFieldNames(_)
+            | K::RecordFieldTypes(_)
+            | K::RecordFieldNames(_)
+            | K::ReflectCallable(_)
             | K::TypeLayout { .. } => self.eval_observation(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),
@@ -2911,8 +2920,19 @@ impl<'a> Interpreter<'a> {
         &mut self,
         head: DeclarationId,
         inputs: Vec<nir::described_applications::DataArgument>,
+        result_ty: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        if *result_ty != Term::Primitive(Primitive::Type) {
+            if inputs.iter().any(|input| !input.is_concrete()) {
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+            }
+            let arguments = inputs
+                .into_iter()
+                .map(|input| input.into_concrete().expect("concrete input"))
+                .collect();
+            return self.complete_normal_value(head, arguments, result_ty, source);
+        }
         if inputs.iter().all(|input| input.is_concrete()) {
             return self.complete_normal_type(
                 head,
@@ -2999,6 +3019,44 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Type(ty))
     }
 
+    fn complete_normal_value(
+        &mut self,
+        head: DeclarationId,
+        arguments: Vec<Term>,
+        result_ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let metadata = self
+            .normal_forms
+            .get(&head)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        if metadata.role != nir::normal_forms::Role::Opaque {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        self.check_type_description(result_ty, Some(source))?;
+        self.admit_type(result_ty, 0)?;
+        let term = Term::NormalForm {
+            head,
+            sort: nir::Sort::ComptimeValue,
+            arguments,
+        };
+        self.check_term_description(&term, Some(source))?;
+        let Term::NormalForm {
+            arguments: values, ..
+        } = &term
+        else {
+            unreachable!()
+        };
+        self.check_normal_requirements(metadata, values, &[], source)?;
+        Ok(Value::NormalForm {
+            term,
+            ty: result_ty.clone(),
+        })
+    }
+
     fn check_normal_requirements(
         &mut self,
         metadata: &nir::normal_forms::Head,
@@ -3077,6 +3135,7 @@ impl<'a> Interpreter<'a> {
                 | Value::Float64(_)
                 | Value::BitVec(_)
                 | Value::Type(_)
+                | Value::NormalForm { .. }
                 | Value::TypeParameter(_) => continue,
                 _ => return Ok(false),
             };
@@ -4885,6 +4944,9 @@ impl fmt::Display for Value {
             Self::Storage(_) => f.write_str("(internal-storage)"),
             Self::ComptimeReference(reference) => reference.fmt(f),
             Self::Type(ty) => write!(f, "(type-value {ty})"),
+            Self::NormalForm { term, ty } => {
+                write!(f, "(normal-form-value (type {ty}) (term {term}))")
+            }
             Self::Description(description) => description.fmt(f),
             Self::TypeParameter(id) => write!(f, "(abstract-type-input {id})"),
             Self::AbstractValue { declaration, ty } => {

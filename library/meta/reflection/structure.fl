@@ -19,8 +19,76 @@ pub use bindings.enum_variant_field_names;
 pub use bindings.enum_variant_field_types;
 pub use bindings.enum_variant_paths;
 pub use bindings.enum_variant_shapes;
+pub use bindings.record_field_names;
+pub use bindings.record_field_types;
 pub use bindings.struct_field_names;
 pub use bindings.struct_field_types;
+
+{-
+    Observation of an applied callable Type without exposing closure
+    environment storage or executing user code. `Signature()` returns the
+    unwrapped `fn(...) -> ...` signature Type, while `Callable()` retains
+    comptime/unsafe modifiers and resolved closure environment metadata.
+-}
+pub struct CallableReflection {
+    raw_subject: Type,
+    raw_callable: Type,
+    raw_signature: Type,
+    raw_is_comptime: bool,
+    raw_is_unsafe: bool,
+}
+
+impl CallableReflection {
+    pub pure comptime fn Subject(self) -> Type {
+        self.raw_subject
+    }
+
+    pub pure comptime fn Callable(self) -> Type {
+        self.raw_callable
+    }
+
+    pub pure comptime fn Signature(self) -> Type {
+        self.raw_signature
+    }
+
+    pub pure comptime fn is_comptime(self) -> bool {
+        self.raw_is_comptime
+    }
+
+    pub pure comptime fn is_unsafe(self) -> bool {
+        self.raw_is_unsafe
+    }
+}
+
+pure comptime fn build_callable_reflection(subject: Type) -> CallableReflection {
+    let data = bindings.reflect_callable_object(subject);
+    CallableReflection {
+        raw_subject: data.get<Type>(.subject) match {
+            value? => value,
+            null => subject,
+        },
+        raw_callable: data.get<Type>(.callable) match {
+            value? => value,
+            null => subject,
+        },
+        raw_signature: data.get<Type>(.signature) match {
+            value? => value,
+            null => subject,
+        },
+        raw_is_comptime: data.get<bool>(.is_comptime) match {
+            value? => value,
+            null => false,
+        },
+        raw_is_unsafe: data.get<bool>(.is_unsafe) match {
+            value? => value,
+            null => false,
+        },
+    }
+}
+
+pub pure comptime fn reflect_callable(subject: Type) -> CallableReflection {
+    build_callable_reflection(subject)
+}
 
 {-
     Compose the checked parallel reflection lists into ordered field entries.
@@ -73,6 +141,22 @@ impl Type {
 
     pub pure comptime fn struct_fields(self) -> Object {
         field_object(self.struct_field_names(), self.struct_field_types())
+    }
+
+    pub pure comptime fn record_field_names(self) -> List<Symbol> {
+        bindings.record_field_names(self)
+    }
+
+    pub pure comptime fn record_field_types(self) -> List<Type> {
+        bindings.record_field_types(self)
+    }
+
+    pub pure comptime fn record_fields(self) -> Object {
+        field_object(self.record_field_names(), self.record_field_types())
+    }
+
+    pub pure comptime fn reflect_callable(self) -> CallableReflection {
+        build_callable_reflection(self)
     }
 
     {-
@@ -129,14 +213,7 @@ impl Type {
                     null
                 }
             },
-            null => {
-                self'attribute.get<bool>(.packed) match {
-                    value? => {
-                        if value { .byte } else { null }
-                    },
-                    null => null,
-                }
-            },
+            null => null,
         }
     }
 

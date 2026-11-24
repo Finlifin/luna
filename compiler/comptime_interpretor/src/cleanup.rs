@@ -681,6 +681,14 @@ impl<'a> Interpreter<'a> {
             Value::Type(ty) | Value::AbstractValue { ty, .. } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
             }
+            Value::NormalForm { term, ty } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                if preserve_identity {
+                    self.check_term_description(term, Some(source))?;
+                } else {
+                    self.check_closed_term_description(term, Some(source))?;
+                }
+            }
             Value::FunctionInstance { arguments, .. } => {
                 self.check_instance_arguments(arguments, source)?
             }

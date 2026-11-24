@@ -1809,7 +1809,10 @@ impl<'a> PhaseContext<'a> {
                         | K::NewtypeRepresentation(value)
                         | K::DefinitionAttributes(value)
                         | K::StructFieldTypes(value)
-                        | K::StructFieldNames(value) => {
+                        | K::StructFieldNames(value)
+                        | K::RecordFieldTypes(value)
+                        | K::RecordFieldNames(value)
+                        | K::ReflectCallable(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,

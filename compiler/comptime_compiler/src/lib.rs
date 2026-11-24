@@ -309,6 +309,16 @@ pub enum Op {
         left: Register,
         right: Register,
     },
+    CheckTemplateEqual {
+        output: Arc<Term>,
+        inputs: [Arc<Term>; 2],
+    },
+    TemplateEqual {
+        destination: Register,
+        left: Register,
+        right: Register,
+        inputs: [Arc<Term>; 2],
+    },
     PrepareTypeKind {
         ty: Arc<Term>,
         operand: Arc<Term>,
@@ -998,6 +1008,17 @@ impl fmt::Display for Program {
                     left,
                     right,
                 } => write!(f, "(type-equal %{destination} %{left} %{right})")?,
+                Op::CheckTemplateEqual { output, inputs } => write!(
+                    f,
+                    "(check-template-equal (output {output}) (left {}) (right {}))",
+                    inputs[0], inputs[1]
+                )?,
+                Op::TemplateEqual {
+                    destination,
+                    left,
+                    right,
+                    ..
+                } => write!(f, "(template-equal %{destination} %{left} %{right})")?,
                 Op::PrepareTypeKind { ty, operand } => {
                     write!(f, "(prepare-type-kind (type {ty}) (operand {operand}))")?
                 }
@@ -1396,8 +1417,9 @@ impl CompilationSession {
         input: &nir::program::NormalFormArgument,
         fuel: &mut usize,
     ) -> Result<(Program, normal_types::Shape), Error> {
-        compile_root(Root::Staged(input), fuel, self)
-            .map(|(program, shape)| (program, shape.unwrap()))
+        let (program, shape) = compile_root(Root::Staged(input), fuel, self)?;
+        let shape = shape.ok_or(Error::InvalidControl(input.source()))?;
+        Ok((program, shape))
     }
 
     pub fn compile_contextual_input(
@@ -1795,6 +1817,9 @@ fn compile_root<'a>(
                     | K::DefinitionAttributes(_)
                     | K::StructFieldTypes(_)
                     | K::StructFieldNames(_)
+                    | K::RecordFieldTypes(_)
+                    | K::RecordFieldNames(_)
+                    | K::ReflectCallable(_)
                     | K::EnumStructure { .. }
                     | K::TypeLayout { .. } => {
                         use observations::{Kind as O, Observation};
@@ -1810,6 +1835,15 @@ fn compile_root<'a>(
                             }
                             K::StructFieldNames(operand) => {
                                 (O::StructFields { names: true }, operand.as_ref())
+                            }
+                            K::RecordFieldTypes(operand) => {
+                                (O::RecordFields { names: false }, operand.as_ref())
+                            }
+                            K::RecordFieldNames(operand) => {
+                                (O::RecordFields { names: true }, operand.as_ref())
+                            }
+                            K::ReflectCallable(operand) => {
+                                (O::CallableReflection, operand.as_ref())
                             }
                             K::EnumStructure { subject, query } => {
                                 (O::EnumStructure(*query), subject.as_ref())
@@ -2501,6 +2535,10 @@ fn compile_root<'a>(
                         let left_slot = local.unwrap_or_else(&mut fresh);
                         if let Some(right) = right {
                             let right_slot = fresh();
+                            let right_ty = operation
+                                .right
+                                .as_ref()
+                                .ok_or(Error::InvalidControl(source))?;
                             emit(
                                 &mut work,
                                 Op::ListConcat {
@@ -2515,7 +2553,7 @@ fn compile_root<'a>(
                                     right: true,
                                     prepared: dst,
                                     value: right_slot,
-                                    ty: Arc::new(operation.right.as_ref().unwrap().clone()),
+                                    ty: Arc::new(right_ty.clone()),
                                 },
                             );
                             work.push(Work::Expression(right, right_slot));
@@ -3050,7 +3088,8 @@ fn compile_root<'a>(
                         for (index, selection) in plan.selections.iter().enumerate().rev() {
                             emit(&mut work, Op::SelectBitRange { identity, index });
                             for _ in selection.inputs() {
-                                let (expr, slot) = operands.pop().unwrap();
+                                let (expr, slot) =
+                                    operands.pop().ok_or(Error::InvalidControl(source))?;
                                 work.push(Work::Expression(expr, slot));
                             }
                         }
@@ -3343,6 +3382,30 @@ fn compile_root<'a>(
                             emit(&mut work, Op::Unit(src));
                         }
                     }
+                    K::TemplateEqual(left, right) => {
+                        let left_slot = fresh();
+                        let right_slot = fresh();
+                        let left_ty = Arc::new(copy_term(&left.ty, fuel, source)?);
+                        let right_ty = Arc::new(copy_term(&right.ty, fuel, source)?);
+                        emit(
+                            &mut work,
+                            Op::TemplateEqual {
+                                destination: dst,
+                                left: left_slot,
+                                right: right_slot,
+                                inputs: [Arc::clone(&left_ty), Arc::clone(&right_ty)],
+                            },
+                        );
+                        work.push(Work::Expression(right, right_slot));
+                        work.push(Work::Expression(left, left_slot));
+                        emit(
+                            &mut work,
+                            Op::CheckTemplateEqual {
+                                output: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                                inputs: [left_ty, right_ty],
+                            },
+                        );
+                    }
                     // Boolean and bit-vector domains were handled above.
                     K::And(..) | K::Or(..) => return Err(Error::Unsupported(source)),
                     // Normal-form calls with parameter bindings still require
@@ -3362,8 +3425,7 @@ fn compile_root<'a>(
                     | K::ConstAddress { .. }
                     | K::StaticAddress(_)
                     | K::DynCast(_)
-                    | K::DynCall(_)
-                    | K::TemplateEqual(..) => return Err(Error::Unsupported(source)),
+                    | K::DynCall(_) => return Err(Error::Unsupported(source)),
                 }
             }
         }

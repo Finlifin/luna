@@ -1,5 +1,6 @@
 //! Transport invocation results into a caller telescope without mutating their VM.
 use super::*;
+
 mod packets;
 
 impl Value {
@@ -35,6 +36,7 @@ struct Restore<'a> {
     closures: BTreeMap<usize, Option<Arc<Closure>>>,
     codes: BTreeMap<(u8, usize), CodeValue>,
 }
+
 impl Restore<'_> {
     fn spend(&mut self, count: usize) -> Result<(), ErrorKind> {
         *self.steps = self
@@ -43,6 +45,7 @@ impl Restore<'_> {
             .ok_or(ErrorKind::StepsExhausted)?;
         Ok(())
     }
+
     fn ty(&mut self, ty: &Term) -> Result<Term, ErrorKind> {
         let mut fuel = usize::try_from(*self.steps).unwrap_or(usize::MAX);
         let before = fuel;
@@ -57,10 +60,12 @@ impl Restore<'_> {
         ty.instantiate_parameters_in_scope(self.parameters, self.arguments, self.frames)
             .map_err(|_| ErrorKind::Type)
     }
+
     fn types(&mut self, values: &[Term]) -> Result<Vec<Term>, ErrorKind> {
         self.spend(values.len())?;
         values.iter().map(|ty| self.ty(ty)).collect()
     }
+
     #[inline(never)]
     fn code(&mut self, code: &CodeValue) -> Result<Value, ErrorKind> {
         use nir::code_values::{ExpressionCode, PatternCode};
@@ -125,6 +130,10 @@ impl Restore<'_> {
                 sort: nir::Sort::Type,
             })?),
             Value::Type(ty) => Value::Type(self.ty(ty)?),
+            Value::NormalForm { term, ty } => Value::NormalForm {
+                term: self.ty(term)?,
+                ty: self.ty(ty)?,
+            },
             Value::AbstractValue { declaration, ty } => {
                 let symbol = self.ty(&Term::Rigid {
                     declaration: *declaration,
@@ -191,6 +200,7 @@ impl Restore<'_> {
         })
     }
 }
+
 fn copy_error(error: nir::copy_budget::CopyBudgetExhausted) -> ErrorKind {
     match error {
         nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
@@ -201,6 +211,7 @@ fn copy_error(error: nir::copy_budget::CopyBudgetExhausted) -> ErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn inputs() -> (Vec<nir::DeclarationParameter>, Vec<Term>) {
         (
             vec![nir::DeclarationParameter {
@@ -213,6 +224,7 @@ mod tests {
             vec![Term::Primitive(Primitive::Bool)],
         )
     }
+
     #[test]
     fn shared_cells_remain_shared_but_do_not_alias_the_producer() {
         let (parameters, arguments) = inputs();
@@ -243,6 +255,7 @@ mod tests {
         assert_eq!(restore(&mut (used - 1)), Err(ErrorKind::StepsExhausted));
         assert!(restore(&mut used.clone()).is_ok());
     }
+
     #[test]
     fn closure_body_signature_and_shared_capture_are_restored_together() {
         let (parameters, arguments) = inputs();
@@ -448,6 +461,7 @@ mod tests {
         *cell.0.lock().unwrap() = Value::Unit;
         assert_eq!(cell.read().unwrap(), Value::Unit);
     }
+
     #[test]
     fn locked_cells_respect_the_same_depth_limit_and_release_their_guards() {
         let (parameters, arguments) = inputs();
@@ -529,9 +543,11 @@ mod tests {
 #[cfg(test)]
 mod method_identity_tests {
     use super::*;
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 98, local }
     }
+
     #[test]
     fn method_results_restore_every_input_into_the_caller_telescope() {
         let parameters = [

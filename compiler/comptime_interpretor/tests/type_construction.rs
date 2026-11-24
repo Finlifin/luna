@@ -5,9 +5,11 @@ use nir::{DeclarationId, Primitive as P, Sort, Term};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn p(value: P) -> Term {
     Term::Primitive(value)
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         ty,
@@ -15,9 +17,11 @@ fn expr(ty: Term, kind: K) -> Expr {
         source: SourceRange { start: 1, end: 2 },
     }
 }
+
 fn value(ty: Term) -> Expr {
     expr(p(P::Type), K::TypeValue(ty))
 }
+
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
@@ -49,6 +53,7 @@ fn function(local: u32, body: Expr) -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn construction(fields: Vec<Expr>) -> Expr {
     expr(
         p(P::Type),
@@ -62,6 +67,7 @@ fn construction(fields: Vec<Expr>) -> Expr {
         },
     )
 }
+
 fn result(fields: Vec<Term>) -> Term {
     Term::NormalForm {
         head: id(100),
@@ -69,8 +75,39 @@ fn result(fields: Vec<Term>) -> Term {
         arguments: fields,
     }
 }
-fn world(functions: Vec<Function>, arity: usize) -> Package {
+
+fn world(mut functions: Vec<Function>, arity: usize) -> Package {
     use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let head_type_parameters: Vec<_> = (0..arity).map(|index| id(200 + index as u32)).collect();
+    functions.push(Function {
+        interface: nir::program::FunctionDeclaration {
+            source: SourceRange { start: 0, end: 0 },
+            declaration: id(100),
+            name: "Head100".into(),
+            phase: FunctionPhase::NormalForm,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
+            entry_snapshots: vec![],
+            type_parameters: head_type_parameters,
+            requirements: vec![],
+            capabilities: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(p(P::Type)),
+            },
+            parameters: vec![],
+            env_parameters: vec![],
+            defaults: vec![],
+        },
+        body: value(p(P::Type)),
+        runtime_deliveries: Default::default(),
+    });
     Package {
         functions,
         normal_forms: vec![Head {
@@ -93,6 +130,7 @@ fn world(functions: Vec<Function>, arity: usize) -> Package {
         ..Default::default()
     }
 }
+
 fn call(local: u32) -> Expr {
     let signature = Term::Function {
         parameters: vec![],

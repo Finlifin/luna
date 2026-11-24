@@ -1,6 +1,7 @@
 //! Decode canonical inputs without carrying unrelated representation branches
 //! through recursive calls. Entry checks and budget/depth order are shared.
 use super::*;
+
 mod containers;
 mod scalar;
 
@@ -8,6 +9,7 @@ impl Interpreter<'_> {
     pub(super) fn normal_pattern_value(&mut self, term: &Term, ty: &Term) -> Result<Value, Error> {
         self.normal_pattern_value_at(term, ty, 0, true)
     }
+
     #[inline(never)]
     pub(super) fn normal_pattern_value_at(
         &mut self,
@@ -103,6 +105,18 @@ impl Interpreter<'_> {
                 }
                 Term::TupleValue(_) => {
                     self.decode_tuple_normal_value(term, ty, depth, reconstruct_callables)?
+                }
+                Term::NormalForm {
+                    sort: nir::Sort::ComptimeValue,
+                    ..
+                } => {
+                    self.check_term_description(term, None)?;
+                    self.check_type_description(ty, None)?;
+                    self.admit_type(ty, depth)?;
+                    Value::NormalForm {
+                        term: term.clone(),
+                        ty: ty.clone(),
+                    }
                 }
                 _ => self.decode_scalar_normal_value(term, ty)?,
             }

@@ -18,6 +18,7 @@ struct ValueChecks<'a> {
     remaining: &'a mut usize,
     failure: Option<ErrorKind>,
 }
+
 impl ValueChecks<'_> {
     fn admit<T>(
         &mut self,
@@ -31,9 +32,11 @@ impl ValueChecks<'_> {
             })
         })
     }
+
     fn defers_contracts(&self) -> bool {
         self.obligations.is_some()
     }
+
     fn observe<T>(
         &mut self,
         operation: impl FnOnce(&mut usize) -> Result<T, ErrorKind>,
@@ -49,6 +52,7 @@ impl ValueChecks<'_> {
             }
         }
     }
+
     fn visit(&mut self) -> bool {
         self.observe(|fuel| {
             *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
@@ -56,6 +60,7 @@ impl ValueChecks<'_> {
         })
         .is_some()
     }
+
     fn record_nominal(&mut self, ty: &Term) -> bool {
         if self.obligations.is_none() {
             return true;
@@ -74,6 +79,7 @@ impl ValueChecks<'_> {
             .push(ValueObligation::Nominal(ty.clone()));
         true
     }
+
     fn record_method(&mut self, method: &TraitMethodIdentity) -> bool {
         if !self.defers_contracts() {
             return true;
@@ -270,6 +276,7 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
+
     /// Inspect retained evidence without dispatching a proof or running code.
     pub(super) fn check_retained_value(
         &mut self,
@@ -788,6 +795,13 @@ impl Interpreter<'_> {
             }
             (Value::Closure(closure), ty) => {
                 checks.callable_matches(&closure.ty, ty, &self.associated_values)
+            }
+            (Value::NormalForm { term, ty: actual }, expected) => {
+                self.comptime_only
+                    && checks.same(actual, expected, &self.associated_values)
+                    && checks
+                        .observe(|fuel| self.inspect_term_description(term, fuel))
+                        .is_some()
             }
             _ => false,
         }

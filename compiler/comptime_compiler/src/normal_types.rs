@@ -8,11 +8,13 @@ pub enum Input {
     Value(Term),
     Literal(nir::program::ContextualLiteral),
 }
+
 impl Input {
     pub fn diverges(&self) -> bool {
         matches!(self, Self::Value(Term::Primitive(Primitive::Never)))
     }
 }
+
 impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -29,6 +31,7 @@ pub struct Shape {
     pub diverges: bool,
     pub kind: ShapeKind,
 }
+
 #[derive(Debug)]
 pub enum ShapeKind {
     Scalar(Input),
@@ -47,11 +50,13 @@ pub enum ShapeKind {
         items: Vec<Shape>,
     },
 }
+
 #[derive(Debug)]
 pub struct ArmShape {
     pub guard: Option<(Term, SourceRange)>,
     pub body: Shape,
 }
+
 impl fmt::Display for Shape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -159,7 +164,7 @@ pub(super) fn compile_input<'a>(
         match task {
             Task::Code(work) => code.push(work),
             Task::Transfer(destination, forced, source) => {
-                let child: &Shape = shapes.last().unwrap();
+                let child: &Shape = shapes.last().ok_or(Error::InvalidControl(source))?;
                 code.push(Work::Emit(
                     source,
                     transfer(destination, child.slot, forced || child.diverges),
@@ -200,8 +205,16 @@ pub(super) fn compile_input<'a>(
             }
             Task::Choice(argument, slot, start) => {
                 let mut items: Vec<Shape> = shapes.split_off(start);
-                let else_input = Box::new(items.pop().unwrap());
-                let then_input = Box::new(items.pop().unwrap());
+                let else_input = Box::new(
+                    items
+                        .pop()
+                        .ok_or(Error::InvalidControl(argument.source()))?,
+                );
+                let then_input = Box::new(
+                    items
+                        .pop()
+                        .ok_or(Error::InvalidControl(argument.source()))?,
+                );
                 let A::If { condition, .. } = argument else {
                     unreachable!()
                 };
@@ -223,7 +236,15 @@ pub(super) fn compile_input<'a>(
                 let A::Block { result, .. } = argument else {
                     unreachable!()
                 };
-                let result = result.as_ref().map(|_| Box::new(shapes.pop().unwrap()));
+                let result = if result.is_some() {
+                    Some(Box::new(
+                        shapes
+                            .pop()
+                            .ok_or(Error::InvalidControl(argument.source()))?,
+                    ))
+                } else {
+                    None
+                };
                 let diverges = forced || result.as_ref().is_some_and(|result| result.diverges);
                 if let Some(result) = &result {
                     code.push(Work::Emit(
@@ -253,7 +274,7 @@ pub(super) fn compile_input<'a>(
                 });
             }
             Task::Append(parent, spread, source) => {
-                let child: &Shape = shapes.last().unwrap();
+                let child: &Shape = shapes.last().ok_or(Error::InvalidControl(source))?;
                 code.push(Work::Emit(
                     source,
                     if staged {
@@ -490,13 +511,17 @@ pub(super) fn compile_input<'a>(
             }
         }
     }
-    Ok((shapes.pop().unwrap(), code))
+    Ok((
+        shapes.pop().ok_or(Error::InvalidControl(root.source()))?,
+        code,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use nir::program::NormalFormArgument as A;
+
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
 
     #[test]
