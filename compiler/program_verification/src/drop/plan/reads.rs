@@ -336,7 +336,7 @@ impl CleanupSession<'_, '_> {
                 self.mark_active_read_queries_provisional();
                 return Ok(None);
             }
-            let package = self.package;
+            let package = self.package()?;
             if self.require_runtime_instances {
                 let mut missing_instance = false;
                 for reader in &readers {
@@ -436,7 +436,7 @@ impl CleanupSession<'_, '_> {
         let frame = self
             .read_footprint_stack
             .pop()
-            .expect("balanced read footprint stack");
+            .ok_or_else(|| "unbalanced cleanup read footprint stack".to_string())?;
         if frame.provisional || result.is_err() {
             self.mark_active_read_queries_provisional();
         }

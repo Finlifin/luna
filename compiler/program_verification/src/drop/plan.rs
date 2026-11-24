@@ -450,8 +450,8 @@ fn same_layout(actual: &Layout<Term>, bound: &Layout<AcquiredCleanup>) -> bool {
     }
 }
 
-/// Capture before destruction. Moves retain this artifact. Runtime environment
-/// acquisition is not implemented and environment-bearing selections fail.
+/// Capture before destruction. Moves retain this artifact along with captured
+/// runtime environment evidence when applicable.
 pub fn acquire_cleanup(
     package: &Package,
     world: &World<'_>,
@@ -1198,7 +1198,7 @@ pub struct CleanupSession<'a, 'w> {
     methods: crate::memory::MethodCallees,
     summaries: crate::memory::SummaryCache,
     text_provenance: crate::memory::TextProvenance,
-    package: &'a Package,
+    package: Option<&'a Package>,
     world: &'a World<'w>,
     protocol: DeclarationId,
     budget: Budget,
@@ -1262,9 +1262,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         protocol: DeclarationId,
         budget: Budget,
     ) -> Self {
-        let package = declarations
-            .package()
-            .expect("cleanup session requires package metadata");
+        let package = declarations.package();
         Self {
             declarations,
             source,
@@ -1315,9 +1313,10 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
     /// Plan complete cleanup for an owned subject type without a enclosing local
     /// variable, recording any unmaterialized runtime `Drop` instances.
     pub fn plan_subject(&mut self, ty: &Term, fuel: &mut usize) -> Result<CleanupPlan, String> {
+        let package = self.package()?;
         <Self as crate::moves::CleanupPolicy>::acquire(self, ty, fuel)?;
         let mut shape_cache = crate::moves::OwnershipShapeCache::default();
-        let shape = shape_cache.shape(self.package, ty, fuel)?;
+        let shape = shape_cache.shape(package, ty, fuel)?;
         let place = Place {
             root: crate::PlaceId { owner: 0, local: 0 },
             fields: vec![],
@@ -1428,7 +1427,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
 
         let mut root_path = Vec::new();
         populate_pointers(
-            self.package,
+            package,
             &mut shape_cache,
             &mut state,
             &mut types,
@@ -1469,6 +1468,11 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         for frame in &mut self.memory_inert_stack {
             frame.provisional = true;
         }
+    }
+
+    fn package(&self) -> Result<&'a Package, String> {
+        self.package
+            .ok_or_else(|| "cleanup session requires package metadata".to_string())
     }
 
     fn find<'b>(
@@ -1550,10 +1554,11 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             provisional: false,
         });
         let result = (|| {
+            let package = self.package()?;
             let Some(footprint) = self.read_footprint(ty, fuel)? else {
                 return Ok(false);
             };
-            for access in footprint.root_accesses(self.package, fuel)? {
+            for access in footprint.root_accesses(package, fuel)? {
                 step(fuel, 0)?;
                 // Only receiver-local reads can omit external caller mapping.
                 // Actual cleanup still checks field availability and Copy.
@@ -1566,7 +1571,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         let frame = self
             .memory_inert_stack
             .pop()
-            .expect("balanced memory inert stack");
+            .ok_or_else(|| "unbalanced cleanup memory inert stack".to_string())?;
         if frame.provisional || result.is_err() {
             self.mark_active_read_queries_provisional();
         }
@@ -1589,8 +1594,9 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<Option<Vec<crate::memory::Access>>, String> {
+        let package = self.package()?;
         self.read_footprint(ty, fuel)?
-            .map(|footprint| footprint.root_accesses(self.package, fuel))
+            .map(|footprint| footprint.root_accesses(package, fuel))
             .transpose()
     }
 
@@ -1658,10 +1664,10 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             return Ok(true);
         }
         if self.require_runtime_instances {
+            let package = self.package()?;
             let mut missing_instance = false;
             for (method, arguments, subject) in &methods {
-                if self
-                    .package
+                if package
                     .runtime_instance_body_checked(*method, arguments)
                     .map_err(str::to_owned)?
                     .is_none()
@@ -1683,7 +1689,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         }
         self.rejection_stack.push(ty.clone());
         let result = (|| {
-            let package = self.package;
+            let package = self.package()?;
             // Keep the contextual memory summary: it can resolve code identities
             // which the structural rejection scan intentionally leaves unknown.
             // If retirement is its only uncertainty, inspect nested cleanup
@@ -1731,14 +1737,9 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
 
     fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
         if self.find(ty, fuel)?.is_none() {
-            let binding = acquire_cleanup(
-                self.package,
-                self.world,
-                self.protocol,
-                ty,
-                self.budget,
-                fuel,
-            )?;
+            let package = self.package()?;
+            let binding =
+                acquire_cleanup(package, self.world, self.protocol, ty, self.budget, fuel)?;
             // Build the index transactionally: an exhausted indexing budget
             // must not publish a partially registered acquisition.
             fn index(
@@ -1810,6 +1811,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         pointers: Option<PointerMemory<'_>>,
         fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
+        let package = self.package()?;
         let binding = Self::find_in_bindings(&self.bindings, &self.binding_paths, ty, fuel)?
             .ok_or("cleanup responsibility has no acquired binding")?;
         let access_context = super::access::AccessContext {
@@ -1821,7 +1823,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             text_provenance: self.text_provenance,
         };
         plan_cleanup_with_domains_internal(
-            self.package,
+            package,
             self.world,
             binding,
             state,
@@ -1846,6 +1848,43 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
         self.plan_with_domains(ty, state, place, variants, &BTreeMap::new(), pointers, fuel)
+    }
+
+    fn field_env_requirements(
+        &mut self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<BTreeMap<Vec<usize>, Vec<super::DropEnvRequirement>>, String> {
+        fn collect(
+            binding: &AcquiredCleanup,
+            path: &mut Vec<usize>,
+            out: &mut BTreeMap<Vec<usize>, Vec<super::DropEnvRequirement>>,
+            fuel: &mut usize,
+            depth: usize,
+        ) -> Result<(), String> {
+            step(fuel, depth)?;
+            if let Resolution::Selected(selected) = &binding.resolution
+                && !selected.env_requirements.is_empty()
+            {
+                out.insert(path.clone(), selected.env_requirements.clone());
+            }
+            match &binding.layout {
+                Layout::Atomic | Layout::Variants(_) => Ok(()),
+                Layout::Fields(fields) => {
+                    for (index, field) in fields.iter().enumerate() {
+                        path.push(index);
+                        collect(field, path, out, fuel, depth + 1)?;
+                        path.pop();
+                    }
+                    Ok(())
+                }
+            }
+        }
+        self.acquire(ty, fuel)?;
+        let binding = self.find(ty, fuel)?.ok_or("missing acquired cleanup")?;
+        let mut out = BTreeMap::new();
+        collect(binding, &mut Vec::new(), &mut out, fuel, 0)?;
+        Ok(out)
     }
 }
 

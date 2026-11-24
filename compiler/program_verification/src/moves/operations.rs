@@ -342,6 +342,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     ..Default::default()
                 };
                 self.predeclare_const_globals(&mut inner, source)?;
+                let mut capture_envs_for_closure = BTreeMap::new();
                 self.pending_frame(source, |this| {
                     for (slot, (capture, expected)) in
                         captures.iter().zip(expected_captures).enumerate()
@@ -366,6 +367,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
                         if !flow.live {
                             return Ok(());
+                        }
+                        let capture_slot_envs = flow.value_captured_envs.clone();
+                        for (path, envs) in &capture_slot_envs {
+                            let mut shifted = vec![slot];
+                            shifted.extend(path);
+                            capture_envs_for_closure.insert(shifted, envs.clone());
                         }
                         for (mut path, mut entries) in
                             std::mem::take(&mut flow.value_pointer_guards)
@@ -444,6 +451,17 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         )?;
                         this.remember_pending_origins(value, slot, flow, origins)?;
                         this.declare(&mut inner, capture.binding, &capture.ty, source)?;
+                        if !capture_slot_envs.is_empty() {
+                            this.install_value_captured_envs(
+                                &mut inner,
+                                &Place {
+                                    root: root(capture.binding),
+                                    fields: vec![],
+                                },
+                                capture_slot_envs,
+                                source,
+                            )?;
+                        }
                         let fields = this.declare_input_field_borrows(
                             &mut inner,
                             capture.binding,
@@ -632,6 +650,17 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 let outer_effect_memory = std::mem::take(&mut self.effect_memory_inputs);
                 let outer_effect_results = std::mem::take(&mut self.effect_result_inputs);
                 let outer_completions = std::mem::take(&mut self.handler_completions);
+                let mut outer_active_envs = self.active_env_parameters.clone();
+                for env in &closure_envs {
+                    outer_active_envs.push(nir::program::RuntimeEnvParameter {
+                        declaration: env.declaration,
+                        runtime_id: env.runtime_id,
+                        binding: env.binding,
+                        ty: env.ty.clone(),
+                    });
+                }
+                let outer_active_envs =
+                    std::mem::replace(&mut self.active_env_parameters, outer_active_envs);
                 let outer_defer = std::mem::replace(&mut self.defer_unknown_calls, true);
                 let result = self.in_temporary_scope(
                     body.source,
@@ -656,6 +685,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         Ok(())
                     }
                 });
+                self.active_env_parameters = outer_active_envs;
                 self.pending = outer_pending;
                 let invocation = std::mem::replace(&mut self.report, outer_report);
                 self.persistent_roots = outer_persistent;
@@ -679,6 +709,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 flow.value_callable = Some(construction);
                 flow.constructed_capture_origins = capture_origins;
                 flow.value_pointer_guards = capture_guards;
+                flow.value_captured_envs = capture_envs_for_closure;
             }
             _ => unreachable!("expr_closure dispatcher"),
         }
@@ -740,12 +771,6 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .filter(|c| !c.alternatives.is_empty())
                         .cloned()
                 {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            source,
-                            "move analysis does not yet support runtime environment arguments on local callable candidates",
-                        ));
-                    }
                     self.observe_named_callee(callee, flow)?;
                     if !flow.live {
                         return Ok(());
@@ -755,6 +780,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                             expr,
                             &callable,
                             arguments,
+                            env_arguments,
                             parameter_bindings,
                             flow,
                             depth + 1,
@@ -762,12 +788,6 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .map(|_| ());
                 }
                 if let Some(resolved) = self.indirect_named_call(expr, flow) {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            source,
-                            "move analysis does not yet support runtime environment arguments on indirect named calls",
-                        ));
-                    }
                     self.observe_named_callee(callee, flow)?;
                     if !flow.live {
                         return Ok(());
@@ -1103,10 +1123,13 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     let next = self.stored_enum_domains(flow, target, source)?;
                     let next_code = self.stored_code(flow, target, source)?;
                     code = Some(if let Some(previous) = code {
+                        let previous_domains = domains.as_ref().ok_or_else(|| {
+                            error(source, "missing enum domain during pointer read")
+                        })?;
                         join_guarded_callables(
                             &previous,
                             &next_code,
-                            domains.as_ref().unwrap(),
+                            previous_domains,
                             &next,
                             &mut self.fuel,
                             source,
@@ -1196,6 +1219,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                         format!("bit writeback target unavailable: {reason:?}"),
                                     )
                                 })?;
+                                this.invalidate_captured_env_local(flow, target.root);
                             }
                         }
                         Ok(())
@@ -1324,6 +1348,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                     format!("bit writeback target unavailable: {reason:?}"),
                                 )
                             })?;
+                            this.invalidate_captured_env_local(flow, destination.root);
                         }
                         // This updates scalar contents only. It neither initializes
                         // an absent owner nor replaces ownership/alias identities.
@@ -1390,6 +1415,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     flow,
                     |this, flow| {
                         let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                        let captured_envs = std::mem::take(&mut flow.value_captured_envs);
                         let pointer_guards =
                             this.copy_value_pointer_guards(&flow.value_pointer_guards, source)?;
                         let callable = flow.value_callable.clone().or(callable);
@@ -1410,14 +1436,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                 &flow.state,
                                 destination.clone(),
                                 &value.ty,
-                                crate::drop::PointerMemory {
-                                    types: &flow.types,
-                                    slots: &flow.pointers,
-                                    enum_domains: &flow.enum_domains,
-                                    pointer_conditions: &flow.pointer_guards,
-                                    retired: &[],
-                                    env: Some(this.drop_env_context()),
-                                },
+                                flow,
+                                &[],
                                 &variants,
                                 &domains,
                                 source,
@@ -1460,6 +1480,13 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                     availability,
                                 });
                             }
+                            this.install_value_captured_envs(
+                                flow,
+                                &destination,
+                                captured_envs,
+                                source,
+                            )?;
+                            this.invalidate_captured_env_local(flow, destination.root);
                         }
                         Ok(())
                     },

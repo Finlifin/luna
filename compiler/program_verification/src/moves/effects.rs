@@ -802,6 +802,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .is_some_and(|indices| indices.contains(&slot))
                 {
                     returned_guards = Some(if let Some(previous) = &returned_guards {
+                        let previous_domains = returned_domains.as_ref().ok_or_else(|| {
+                            error(expr.source, "missing forwarded handler result domains")
+                        })?;
                         this.join_result_pointer_guards(
                             previous,
                             &returned_origins,
@@ -810,7 +813,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             expr.source,
                             Some((
                                 completion_type(&expr.ty),
-                                returned_domains.as_ref().expect("forwarded result domains"),
+                                previous_domains,
                                 &flow.value_variants,
                             )),
                         )?
@@ -1388,12 +1391,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                     &mut self.fuel,
                                 )
                                 .map_err(|reason| error(installation, reason))?;
+                                let owned_callable = owned.remove(&input).ok_or_else(|| {
+                                    error(installation, "missing handler callable input")
+                                })?;
                                 capture_memory_code.insert(
                                     super::super::memory::CallablePlace {
                                         binding: *binding,
                                         fields: fields.clone(),
                                     },
-                                    owned.remove(&input).unwrap(),
+                                    owned_callable,
                                 );
                             }
                             capture_callables.insert(code_place, callable.clone());
@@ -1524,9 +1530,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         }
                         addressed_roots = Some(addressed);
                     }
-                    if free
-                        .iter()
-                        .any(|binding| addressed_roots.as_ref().unwrap().contains(&root(*binding)))
+                    if let Some(addressed) = addressed_roots.as_ref()
+                        && free
+                            .iter()
+                            .any(|binding| addressed.contains(&root(*binding)))
                     {
                         return Err(error(
                             installation,

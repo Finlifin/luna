@@ -154,7 +154,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             K::ReadPointer(pointer)
                 if !self.pointer_input_layout(&expr.ty, expr.source)?.is_empty() =>
             {
-                self.read_aggregate_origins(expr, pointer, flow, depth + 1)
+                let origins = self.read_aggregate_origins(expr, pointer, flow, depth + 1)?;
+                self.capture_envs_for_type(completion_type(&expr.ty), flow, false, expr.source)?;
+                Ok(origins)
             }
             K::Call {
                 callee,
@@ -187,11 +189,14 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     depth,
                 )?;
                 flow.value_pointer_guards = guards;
+                self.capture_envs_for_type(completion_type(&expr.ty), flow, false, expr.source)?;
                 Ok(origins)
             }
             K::Closure { .. } => {
                 flow.constructed_capture_origins.clear();
+                flow.value_captured_envs.clear();
                 self.expr(expr, flow, depth + 1)?;
+                self.capture_envs_for_type(completion_type(&expr.ty), flow, true, expr.source)?;
                 Ok(std::mem::take(&mut flow.constructed_capture_origins))
             }
             K::TraitObjectType { .. } => self.trait_object_type_origins(expr, flow, depth),
@@ -223,7 +228,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             _ => {
                 let mut origins = BTreeMap::new();
                 let mut leaves = BTreeMap::new();
-                if let Some(source) = expression_place(expr) {
+                let place_source = expression_place(expr);
+                let place_envs = if let Some(source) = &place_source {
                     for (slot, callable) in &flow.callable_fields {
                         self.fuel = self
                             .fuel
@@ -249,12 +255,25 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                             );
                         }
                     }
-                }
+                    flow.state
+                        .captured_envs_under(source, &mut self.fuel)
+                        .map_err(|e| error(expr.source, format!("captured env extract: {e:?}")))?
+                } else {
+                    BTreeMap::new()
+                };
+                flow.value_captured_envs.clear();
                 self.expr(expr, flow, depth + 1)?;
-                if expression_place(expr).is_some() {
+                if place_source.is_some() {
                     flow.value_callables = leaves;
+                    flow.value_captured_envs = place_envs;
                 } else {
                     flow.value_pointer_guards.clear();
+                    self.capture_envs_for_type(
+                        completion_type(&expr.ty),
+                        flow,
+                        false,
+                        expr.source,
+                    )?;
                 }
                 Ok(origins)
             }
@@ -501,6 +520,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 let mut callables = BTreeMap::new();
                 let mut domains = EnumDomains::new();
                 let mut pointer_guards = ValuePointerGuards::new();
+                let mut captured_envs = BTreeMap::new();
                 if let Some(tag) = variant {
                     domains.insert(vec![], BTreeSet::from([tag]));
                 }
@@ -508,6 +528,18 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     let children = this.evaluate_value_origins(field, flow, depth + 1)?;
                     if !flow.live {
                         return Ok(BTreeMap::new());
+                    }
+                    let child_envs = flow.value_captured_envs.clone();
+                    for (path, envs) in child_envs {
+                        this.fuel = this
+                            .fuel
+                            .checked_sub(path.len().saturating_add(1))
+                            .ok_or_else(|| {
+                                error(expr.source, "constructed captured env budget exhausted")
+                            })?;
+                        let mut nested = vec![index];
+                        nested.extend(path);
+                        captured_envs.insert(nested, envs);
                     }
                     for (mut slot, mut entries) in std::mem::take(&mut flow.value_pointer_guards) {
                         this.fuel = this
@@ -579,6 +611,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 flow.value_callables = callables;
                 flow.value_variants = domains;
                 flow.value_pointer_guards = pointer_guards;
+                flow.value_captured_envs = captured_envs;
+                this.capture_envs_for_type(completion_type(&expr.ty), flow, true, expr.source)?;
                 Ok(origins)
             }),
             _ => unreachable!("constructed_value_origins dispatcher"),
@@ -608,6 +642,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     flow.value_callable = None;
                     flow.value_callables.clear();
                     flow.value_variants.clear();
+                    flow.value_captured_envs.clear();
                     BTreeMap::new()
                 };
                 if flow.live {

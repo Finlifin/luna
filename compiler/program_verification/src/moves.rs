@@ -4,7 +4,10 @@
 use super::pattern_facts::{constant_bool, irrefutable_shape, known_pattern, outer_guards};
 use super::{
     PlaceId,
-    ownership::{Availability, CleanupTree, Place, Shape, State},
+    ownership::{
+        Availability, CapturedEnv, CapturedEnvTarget, CleanupTree, Place, Shape, State,
+        join_captured_env_lists,
+    },
 };
 use nir::{
     Term,
@@ -46,6 +49,15 @@ pub enum Delivery {
     Copy,
 }
 
+impl fmt::Display for Delivery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Move => "move",
+            Self::Copy => "copy",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub source: SourceRange,
@@ -72,6 +84,16 @@ pub struct Cleanup {
     pub availability: Availability,
 }
 
+impl fmt::Display for Cleanup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(cleanup (source {}) (place {}) (availability {}))",
+            self.source, self.place, self.availability
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporaryBoundary {
     FullExpression,
@@ -82,6 +104,19 @@ pub enum TemporaryBoundary {
     DefaultArgument,
 }
 
+impl fmt::Display for TemporaryBoundary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::FullExpression => "full-expression",
+            Self::Condition => "condition",
+            Self::Match => "match",
+            Self::ReturnValue => "return-value",
+            Self::FunctionResult => "function-result",
+            Self::DefaultArgument => "default-argument",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TemporaryScope {
     pub source: SourceRange,
@@ -90,18 +125,10 @@ pub struct TemporaryScope {
 
 impl fmt::Display for TemporaryScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.boundary {
-            TemporaryBoundary::FullExpression => "full-expression",
-            TemporaryBoundary::Condition => "condition",
-            TemporaryBoundary::Match => "match",
-            TemporaryBoundary::ReturnValue => "return-value",
-            TemporaryBoundary::FunctionResult => "function-result",
-            TemporaryBoundary::DefaultArgument => "default-argument",
-        };
         write!(
             f,
-            "(temporary-scope (kind {kind}) (source {}))",
-            self.source
+            "(temporary-scope (kind {}) (source {}))",
+            self.boundary, self.source
         )
     }
 }
@@ -112,6 +139,20 @@ pub struct TemporaryCleanup {
     pub source: SourceRange,
     pub ty: Term,
     pub fields: Vec<usize>,
+}
+
+impl fmt::Display for TemporaryCleanup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(temporary-cleanup (scope {}) (source {}) (ty {}) (fields",
+            self.scope, self.source, self.ty
+        )?;
+        for field in &self.fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str("))")
+    }
 }
 
 /// One completed component, before ownership reaches the enclosing operation.
@@ -127,10 +168,21 @@ pub struct PendingValue {
     pub locals_before: Vec<PlaceId>,
 }
 
+impl fmt::Display for PendingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(pending-value (sequence {}) (source {}) (scope {}) (ty {}) (slot {}))",
+            self.sequence, self.source, self.scope, self.ty, self.slot
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingFrame {
     conditions: BTreeMap<u64, ValueConditions>,
     origins: BTreeMap<u64, ValueOrigins>,
+    captured_envs: BTreeMap<u64, BTreeMap<Vec<usize>, Vec<CapturedEnv>>>,
     source: SourceRange,
     values: Vec<PendingValue>,
 }
@@ -142,6 +194,20 @@ pub struct IncompleteCleanup {
     /// Completed components only, in reverse acquisition order. No Drop of the
     /// unfinished enclosing object is implied.
     pub values: Vec<PendingValue>,
+}
+
+impl fmt::Display for IncompleteCleanup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(incomplete-cleanup (exit {}) (construction {}) (values",
+            self.exit, self.construction
+        )?;
+        for value in &self.values {
+            write!(f, " {value}")?;
+        }
+        f.write_str("))")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,6 +629,7 @@ type ValuePointerGuards = BTreeMap<Vec<usize>, PointerTargetGuards>;
 
 struct PatternPreparation<'a> {
     origins: &'a ValueOrigins,
+    captured_envs: &'a BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
     pointer_guards: ValuePointerGuards,
     selected_pointer_variants: Vec<VariantSelection>,
     domains: EnumDomains,
@@ -710,6 +777,16 @@ pub struct TemporaryOwner {
     pub remaining: State,
 }
 
+impl fmt::Display for TemporaryOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(temporary-owner (scope {}) (source {}) (ty {}) (remaining {}))",
+            self.scope, self.source, self.ty, self.remaining
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct ClosureReport {
     pub definition: Expr,
@@ -719,6 +796,19 @@ pub struct ClosureReport {
     pub invocation: Report,
 }
 
+impl fmt::Display for ClosureReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(closure-report (invoked {}) (source {}) (captures {}) {})",
+            self.invoked,
+            self.source,
+            self.captures.len(),
+            self.invocation
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct LoopReport {
     pub source: SourceRange,
@@ -726,10 +816,32 @@ pub struct LoopReport {
     pub breaks: Vec<State>,
 }
 
+impl fmt::Display for LoopReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(loop-report (source {}) (header {}) (breaks {}))",
+            self.source,
+            self.header,
+            self.breaks.len()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct CallPreparation {
     pub source: SourceRange,
     pub parameters: State,
+}
+
+impl fmt::Display for CallPreparation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(call-preparation (source {}) (parameters {}))",
+            self.source, self.parameters
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -739,10 +851,32 @@ pub struct MatchArmReport {
     pub exit: Option<State>,
 }
 
+impl fmt::Display for MatchArmReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(match-arm-report (pattern {}) (guards {}) (exited {}))",
+            self.pattern,
+            self.guards.len(),
+            self.exit.is_some()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct MatchReport {
     pub source: SourceRange,
     pub arms: Vec<MatchArmReport>,
+}
+
+impl fmt::Display for MatchReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(match-report (source {}) (arms", self.source)?;
+        for arm in &self.arms {
+            write!(f, " {arm}")?;
+        }
+        f.write_str("))")
+    }
 }
 
 #[derive(Debug)]
@@ -753,6 +887,24 @@ pub struct Decomposition {
     pub variant: Option<usize>,
 }
 
+impl fmt::Display for Decomposition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(decomposition (source {}) (ty {}) (fields",
+            self.source, self.ty
+        )?;
+        for field in &self.fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str(")")?;
+        if let Some(variant) = self.variant {
+            write!(f, " (variant {variant})")?;
+        }
+        f.write_str(")")
+    }
+}
+
 #[derive(Debug)]
 pub struct LetReport {
     pub source: SourceRange,
@@ -760,6 +912,20 @@ pub struct LetReport {
     pub guards: Vec<Expr>,
     pub success: bool,
     pub failure: bool,
+}
+
+impl fmt::Display for LetReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(let-report (source {}) (pattern {}) (guards {}) (success {}) (failure {}))",
+            self.source,
+            self.pattern,
+            self.guards.len(),
+            self.success,
+            self.failure
+        )
+    }
 }
 
 /// Default-local obligations live in a separate parameter environment. Its
@@ -1862,6 +2028,7 @@ struct ClosureArguments {
     callables: BTreeMap<usize, Callable>,
     fields: BTreeMap<usize, BTreeMap<Vec<usize>, Callable>>,
     domains: BTreeMap<usize, EnumDomains>,
+    captured_envs: BTreeMap<usize, BTreeMap<Vec<usize>, Vec<CapturedEnv>>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1951,6 +2118,7 @@ struct Flow {
     value_callables: BTreeMap<Vec<usize>, Callable>,
     value_variants: EnumDomains,
     value_pointer_guards: ValuePointerGuards,
+    value_captured_envs: BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
     enum_domains: BTreeMap<PlaceId, EnumDomains>,
     effect_mutable_roots: BTreeSet<PlaceId>,
     pointers: BTreeMap<Place, BTreeSet<Place>>,
@@ -2093,6 +2261,14 @@ pub trait CleanupPolicy {
         fuel: &mut usize,
     ) -> Result<super::drop::CleanupPlan, String> {
         self.plan(ty, state, place, variants, fuel)
+    }
+
+    fn field_env_requirements(
+        &mut self,
+        _ty: &Term,
+        _fuel: &mut usize,
+    ) -> Result<BTreeMap<Vec<usize>, Vec<super::drop::DropEnvRequirement>>, String> {
+        Ok(BTreeMap::new())
     }
 }
 
@@ -2384,6 +2560,8 @@ struct Analyzer<'a, F, G> {
     plan_cleanup: bool,
     package: Option<&'a Package>,
     function_env_parameters: &'a [nir::program::RuntimeEnvParameter],
+    active_env_parameters: Vec<nir::program::RuntimeEnvParameter>,
+    env_copy_types: std::collections::HashMap<Term, bool>,
     function_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, Expr>,
     global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
     function_source: SourceRange,
@@ -2429,23 +2607,336 @@ struct Analyzer<'a, F, G> {
     pending: Vec<PendingFrame>,
 }
 
+fn build_drop_env_context<'a>(
+    env_parameters: &'a [nir::program::RuntimeEnvParameter],
+    runtime_deliveries: &'a BTreeMap<nir::RuntimeId, Expr>,
+    global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
+    package: Option<&'a Package>,
+    fallback_source: SourceRange,
+    copy_types: Option<&'a std::collections::HashMap<Term, bool>>,
+) -> super::drop::DropEnvContext<'a> {
+    static EMPTY_DELIVERIES: BTreeMap<nir::RuntimeId, Expr> = BTreeMap::new();
+    super::drop::DropEnvContext {
+        env_parameters,
+        runtime_deliveries,
+        global_runtime_deliveries: global_runtime_deliveries
+            .or_else(|| package.map(|package| &package.global_runtime_deliveries))
+            .unwrap_or(&EMPTY_DELIVERIES),
+        fallback_source,
+        copy_types,
+    }
+}
+
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
     Analyzer<'a, F, G>
 {
-    fn drop_env_context(&self) -> super::drop::DropEnvContext<'a> {
-        static EMPTY_DELIVERIES: BTreeMap<nir::RuntimeId, Expr> = BTreeMap::new();
-        super::drop::DropEnvContext {
-            env_parameters: self.function_env_parameters,
-            runtime_deliveries: self.function_runtime_deliveries,
-            global_runtime_deliveries: self
-                .global_runtime_deliveries
-                .or_else(|| {
-                    self.package
-                        .map(|package| &package.global_runtime_deliveries)
-                })
-                .unwrap_or(&EMPTY_DELIVERIES),
-            fallback_source: self.function_source,
+    fn cache_drop_env_copy_types(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
+        let Some(policy) = self
+            .plan_cleanup
+            .then_some(())
+            .and_then(|_| self.cleanup.as_mut())
+        else {
+            return Ok(());
+        };
+        let reqs = policy
+            .field_env_requirements(ty, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        for list in reqs.into_values() {
+            for req in list {
+                if !matches!(req.ty, Term::Pointer(_)) && !self.env_copy_types.contains_key(&req.ty)
+                {
+                    let is_copy =
+                        (self.delivery)(&req.ty).map_err(|e| error(source, e))? == Delivery::Copy;
+                    self.env_copy_types.insert(req.ty, is_copy);
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn invalidate_captured_env_local(&mut self, flow: &mut Flow, root_id: PlaceId) {
+        flow.state.invalidate_captured_env_local(root_id);
+        for envs in flow.value_captured_envs.values_mut() {
+            for env in envs {
+                if env.delivery_locals.contains(&root_id) {
+                    env.delivery_invalidated = true;
+                }
+            }
+        }
+    }
+
+    fn resolve_flow_env_delivery(
+        &mut self,
+        req: &super::drop::DropEnvRequirement,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<Option<CapturedEnv>, Error> {
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        let Ok((root_term, fields)) = nir::runtime_fields::path(&req.identity, &mut self.fuel)
+        else {
+            return Ok(None);
+        };
+        let global_deliveries = self
+            .global_runtime_deliveries
+            .unwrap_or(&package.global_runtime_deliveries);
+        let Some(delivered) = self
+            .active_env_parameters
+            .iter()
+            .find(|ep| match root_term {
+                Term::Runtime(id) => ep.runtime_id == Some(*id),
+                Term::Rigid {
+                    declaration,
+                    sort: nir::Sort::Runtime,
+                } => ep.declaration == *declaration,
+                _ => false,
+            })
+            .map(|ep| Expr {
+                source: self.function_source,
+                ty: ep.ty.clone(),
+                kind: K::Local(ep.binding),
+            })
+            .or_else(|| {
+                let Term::Runtime(id) = root_term else {
+                    return None;
+                };
+                self.function_runtime_deliveries
+                    .get(id)
+                    .or_else(|| global_deliveries.get(id))
+                    .cloned()
+            })
+        else {
+            return Ok(None);
+        };
+        let invalid = |reason: String| CapturedEnv {
+            identity: req.identity.clone(),
+            ty: req.ty.clone(),
+            deliveries: vec![],
+            delivery_locals: BTreeSet::new(),
+            delivery_invalidated: true,
+            target: CapturedEnvTarget::Invalid { reason },
+            conditional: false,
+        };
+        let delivered = match nir::runtime_fields::address(
+            delivered,
+            &fields,
+            source,
+            &mut self.fuel,
+            |ty, index, fuel| {
+                nir::runtime_fields::struct_field(ty, index, Some(package), &[], fuel)
+            },
+        ) {
+            Ok(delivered) => delivered,
+            Err(reason) => return Ok(Some(invalid(reason.to_string()))),
+        };
+        if delivered.ty != req.ty {
+            return Ok(Some(invalid(
+                "Drop runtime environment argument type disagrees with requirement".into(),
+            )));
+        }
+        if let Some(reason) = nir::program::pointer_operation_error_in(&delivered, package.target) {
+            return Ok(Some(invalid(reason.into())));
+        }
+        let mut locals = Vec::new();
+        let supported = match super::drop::access::collect_delivery_locals(
+            &delivered,
+            &mut locals,
+            &mut self.fuel,
+            0,
+        ) {
+            Ok(supported) => supported,
+            Err(reason) => return Ok(Some(invalid(reason))),
+        };
+        let mut delivery_locals = BTreeSet::new();
+        if supported {
+            for id in locals {
+                delivery_locals.insert(root(id));
+            }
+        }
+        if !matches!(req.ty, Term::Pointer(_)) && !self.env_copy_types.contains_key(&req.ty) {
+            let is_copy = (self.delivery)(&req.ty).map_err(|e| error(source, e))? == Delivery::Copy;
+            self.env_copy_types.insert(req.ty.clone(), is_copy);
+        }
+        let variant_layouts = BTreeMap::new();
+        let env_ctx = build_drop_env_context(
+            &self.active_env_parameters,
+            self.function_runtime_deliveries,
+            self.global_runtime_deliveries,
+            self.package,
+            self.function_source,
+            Some(&self.env_copy_types),
+        );
+        let pointers = super::drop::PointerMemory {
+            types: &flow.types,
+            slots: &flow.pointers,
+            enum_domains: &flow.enum_domains,
+            pointer_conditions: &flow.pointer_guards,
+            retired: &[],
+            env: Some(env_ctx),
+        };
+        let target = match &req.ty {
+            Term::Pointer(pointee) => {
+                match super::drop::access::resolve_env_pointer_targets(
+                    package,
+                    &delivered,
+                    pointee,
+                    &flow.state,
+                    pointers,
+                    &variant_layouts,
+                    &mut self.fuel,
+                ) {
+                    Ok(targets) => CapturedEnvTarget::Pointer {
+                        pointee: (**pointee).clone(),
+                        targets,
+                    },
+                    Err(reason) => return Ok(Some(invalid(reason))),
+                }
+            }
+            _ => {
+                if self.env_copy_types.get(&req.ty) != Some(&true) {
+                    return Ok(Some(invalid(
+                        "Drop non-pointer runtime environment handle requires Copy permission"
+                            .into(),
+                    )));
+                }
+                if !supported {
+                    return Ok(Some(invalid(
+                        "captured Drop non-pointer runtime environment delivery reads through a pointer or unsupported expression"
+                            .into(),
+                    )));
+                }
+                match super::drop::access::resolve_nonpointer_env_value(
+                    package,
+                    req,
+                    &delivered,
+                    &flow.state,
+                    pointers,
+                    env_ctx,
+                    &variant_layouts,
+                    &mut self.fuel,
+                ) {
+                    Ok(pointer_fields) => CapturedEnvTarget::Value { pointer_fields },
+                    Err(reason) => return Ok(Some(invalid(reason))),
+                }
+            }
+        };
+        Ok(Some(CapturedEnv {
+            identity: req.identity.clone(),
+            ty: req.ty.clone(),
+            deliveries: if supported { vec![delivered] } else { vec![] },
+            delivery_locals,
+            delivery_invalidated: !supported,
+            target,
+            conditional: false,
+        }))
+    }
+
+    fn capture_envs_for_type(
+        &mut self,
+        ty: &Term,
+        flow: &mut Flow,
+        fill_root_only: bool,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if !flow.live || !self.plan_cleanup || self.cleanup.is_none() {
+            return Ok(());
+        }
+        let Some(policy) = self.cleanup.as_mut() else {
+            return Ok(());
+        };
+        let reqs = match policy.field_env_requirements(ty, &mut self.fuel) {
+            Ok(reqs) => reqs,
+            Err(_) => return Ok(()),
+        };
+        if reqs.is_empty() {
+            return Ok(());
+        }
+        for (path, list) in reqs {
+            if fill_root_only && !path.is_empty() {
+                continue;
+            }
+            if flow.value_captured_envs.contains_key(&path) {
+                continue;
+            }
+            let mut captured = Vec::with_capacity(list.len());
+            for req in list {
+                if let Some(entry) = self.resolve_flow_env_delivery(&req, flow, source)? {
+                    captured.push(entry);
+                }
+            }
+            if !captured.is_empty() {
+                flow.value_captured_envs.insert(path, captured);
+            }
+        }
+        Ok(())
+    }
+
+    fn capture_place_envs(
+        &mut self,
+        flow: &mut Flow,
+        place: &Place,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let saved = std::mem::take(&mut flow.value_captured_envs);
+        let result = (|| {
+            self.capture_envs_for_type(ty, flow, false, source)?;
+            let captured = std::mem::take(&mut flow.value_captured_envs);
+            self.install_value_captured_envs(flow, place, captured, source)
+        })();
+        flow.value_captured_envs = saved;
+        result
+    }
+
+    fn install_value_captured_envs(
+        &mut self,
+        flow: &mut Flow,
+        destination: &Place,
+        envs: BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        flow.state
+            .set_captured_envs_under(destination, envs, &mut self.fuel)
+            .map_err(|e| error(source, format!("captured env install: {e:?}")))
+    }
+
+    fn join_captured_env_maps(
+        &mut self,
+        left: &mut BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
+        right: &BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let paths: BTreeSet<Vec<usize>> = left.keys().chain(right.keys()).cloned().collect();
+        for path in paths {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len().saturating_add(1))
+                .ok_or_else(|| error(source, "captured env join budget exhausted"))?;
+            match (left.get(&path), right.get(&path)) {
+                (Some(a), Some(b)) => {
+                    let merged = join_captured_env_lists(a, b, &mut self.fuel)
+                        .map_err(|e| error(source, format!("captured env join: {e:?}")))?;
+                    left.insert(path, merged);
+                }
+                (None, Some(b)) => {
+                    let mut copied = b.clone();
+                    for item in &mut copied {
+                        item.conditional = true;
+                    }
+                    left.insert(path, copied);
+                }
+                (Some(a), None) => {
+                    let mut copied = a.clone();
+                    for item in &mut copied {
+                        item.conditional = true;
+                    }
+                    left.insert(path, copied);
+                }
+                (None, None) => {}
+            }
+        }
+        Ok(())
     }
 
     fn check_const_global_writes(
@@ -3440,17 +3931,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut state = State::default();
         flow.memory_exposed |= matches!(ty, Term::Pointer(_));
         let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
+        let place = Place {
+            root: PlaceId {
+                owner: u64::MAX,
+                local: 0,
+            },
+            fields: vec![],
+        };
         state
-            .declare(
-                PlaceId {
-                    owner: u64::MAX,
-                    local: 0,
-                },
-                &shape,
-                true,
-                &mut self.fuel,
-            )
+            .declare(place.root, &shape, true, &mut self.fuel)
             .map_err(|e| error(source, format!("temporary shape: {e:?}")))?;
+        let captured_envs = std::mem::take(&mut flow.value_captured_envs);
+        state
+            .set_captured_envs_under(&place, captured_envs, &mut self.fuel)
+            .map_err(|e| error(source, format!("temporary captured env: {e:?}")))?;
         self.report.temporaries.push(description.clone());
         let conditions = self.value_conditions(flow, source)?;
         self.retain_temporary(description, state, origins, conditions, flow)
@@ -3694,11 +4188,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         };
         self.predeclare_const_globals(&mut snapshot, source)?;
         self.prepare_cleanup_origins(&mut snapshot, place.root, ty, source)?;
-        let env = self.drop_env_context();
+        self.cache_drop_env_copy_types(ty, source)?;
+        let env = build_drop_env_context(
+            &self.active_env_parameters,
+            self.function_runtime_deliveries,
+            self.global_runtime_deliveries,
+            self.package,
+            self.function_source,
+            Some(&self.env_copy_types),
+        );
         let plan = self
             .cleanup
             .as_mut()
-            .expect("cleanup policy was checked")
+            .ok_or_else(|| error(source, "cleanup planner is missing"))?
             .plan_with_memory(
                 ty,
                 &snapshot.state,
@@ -3760,7 +4262,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         state: &State,
         place: Place,
         ty: &Term,
-        pointers: super::drop::PointerMemory<'_>,
+        flow: &Flow,
+        retired: &[Place],
         variants: &[VariantSelection],
         domains: &EnumDomains,
         source: SourceRange,
@@ -3775,13 +4278,30 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ty: ty.clone(),
             remaining,
         };
-        let Some(policy) = self
-            .plan_cleanup
-            .then_some(())
-            .and_then(|_| self.cleanup.as_mut())
-        else {
+        if !self.plan_cleanup || self.cleanup.is_none() {
             return Ok(Some(candidate));
+        }
+        self.cache_drop_env_copy_types(ty, source)?;
+        let env = build_drop_env_context(
+            &self.active_env_parameters,
+            self.function_runtime_deliveries,
+            self.global_runtime_deliveries,
+            self.package,
+            self.function_source,
+            Some(&self.env_copy_types),
+        );
+        let pointers = super::drop::PointerMemory {
+            types: &flow.types,
+            slots: &flow.pointers,
+            enum_domains: &flow.enum_domains,
+            pointer_conditions: &flow.pointer_guards,
+            retired,
+            env: Some(env),
         };
+        let policy = self
+            .cleanup
+            .as_mut()
+            .ok_or_else(|| error(source, "cleanup planner is missing"))?;
         let plan = policy
             .plan_with_domains(
                 ty,
@@ -3842,10 +4362,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             if established {
                 if tags.len() == 1 {
-                    selections.push(VariantSelection {
-                        fields,
-                        index: *tags.first().unwrap(),
-                    });
+                    let Some(index) = tags.first().copied() else {
+                        return Err(error(source, "empty variant domain"));
+                    };
+                    selections.push(VariantSelection { fields, index });
                 } else {
                     allowed.insert(fields, tags.clone());
                 }
@@ -3897,14 +4417,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 fields: vec![],
             },
             &ty,
-            super::drop::PointerMemory {
-                types: &flow.types,
-                slots: &flow.pointers,
-                enum_domains: &flow.enum_domains,
-                pointer_conditions: &flow.pointer_guards,
-                retired: &possible_retired,
-                env: Some(self.drop_env_context()),
-            },
+            flow,
+            &possible_retired,
             &variants,
             &domains,
             source,
@@ -3950,7 +4464,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut retired = vec![];
         for (identity, anchors, action) in events {
             while locals.last().is_some_and(|id| !anchors.contains(id)) {
-                let id = locals.pop().unwrap();
+                let Some(id) = locals.pop() else {
+                    break;
+                };
                 if let Some(local) = self.local_action(flow, id, &retired, source)? {
                     actions.push(local);
                 }
@@ -3984,6 +4500,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     state
                         .declare(place.root, &shape, true, &mut self.fuel)
                         .map_err(|e| error(source, format!("prepared cleanup shape: {e:?}")))?;
+                    let captured_envs = self
+                        .pending
+                        .iter()
+                        .find_map(|frame| frame.captured_envs.get(&value.sequence))
+                        .cloned()
+                        .unwrap_or_default();
+                    state
+                        .set_captured_envs_under(&place, captured_envs, &mut self.fuel)
+                        .map_err(|e| error(source, format!("prepared cleanup env: {e:?}")))?;
                     let origins = self
                         .pending
                         .iter()
@@ -4045,11 +4570,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.pending.push(PendingFrame {
             conditions: BTreeMap::new(),
             origins: BTreeMap::new(),
+            captured_envs: BTreeMap::new(),
             source,
             values: vec![],
         });
         let result = run(self);
-        self.pending.pop().expect("active preparation frame");
+        self.pending
+            .pop()
+            .ok_or_else(|| error(source, "missing active preparation frame"))?;
         result
     }
 
@@ -4057,7 +4585,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         &mut self,
         expr: &Expr,
         slot: usize,
-        flow: &Flow,
+        flow: &mut Flow,
         origins: ValueOrigins,
     ) -> Result<(), Error> {
         let ty = completion_type(&expr.ty);
@@ -4074,28 +4602,26 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             let sequence = self.sequence(expr.source)?;
             let conditions = self.value_conditions(flow, expr.source)?;
-            self.pending
+            let captured_envs = std::mem::take(&mut flow.value_captured_envs);
+            let active = self
+                .pending
                 .last_mut()
-                .expect("active preparation frame")
-                .conditions
-                .insert(sequence, conditions);
-            self.pending
-                .last_mut()
-                .expect("active preparation frame")
-                .origins
-                .insert(sequence, origins);
-            self.pending
-                .last_mut()
-                .expect("active preparation frame")
-                .values
-                .push(PendingValue {
-                    sequence,
-                    source: expr.source,
-                    scope: self.temporary_scope,
-                    ty: ty.clone(),
-                    slot,
-                    locals_before: flow.order.clone(),
-                });
+                .ok_or_else(|| error(expr.source, "missing active preparation frame"))?;
+            active.conditions.insert(sequence, conditions);
+            active.origins.insert(sequence, origins);
+            if !captured_envs.is_empty() {
+                active.captured_envs.insert(sequence, captured_envs);
+            }
+            active.values.push(PendingValue {
+                sequence,
+                source: expr.source,
+                scope: self.temporary_scope,
+                ty: ty.clone(),
+                slot,
+                locals_before: flow.order.clone(),
+            });
+        } else {
+            flow.value_captured_envs.clear();
         }
         Ok(())
     }
@@ -4191,7 +4717,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut failed = flow.clone();
         let first = self.report.cleanup_sites.len();
         self.pending_frame(result.source, |this| {
-            this.remember_pending_origins(result, slot, &failed, BTreeMap::new())?;
+            this.remember_pending_origins(result, slot, &mut failed, BTreeMap::new())?;
             this.exit(&mut failed, result.source, CleanupReason::PredicateFailure)
         })?;
         if self.report.cleanup_sites.len() == first {
@@ -4384,6 +4910,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .state
             .join(&right.state, &mut self.fuel)
             .map_err(|e| error(source, format!("ownership join: {e:?}")))?;
+        let right_envs = right.value_captured_envs.clone();
+        let mut left_envs = std::mem::take(&mut left.value_captured_envs);
+        self.join_captured_env_maps(&mut left_envs, &right_envs, source)?;
+        left.value_captured_envs = left_envs;
         left.value_callable = match (&left.value_callable, &right.value_callable) {
             (Some(a), Some(b))
                 if same_callable_definition(&a.definition, &b.definition)
@@ -4623,7 +5153,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 },
             );
             let mut iteration = std::mem::replace(&mut self.report, outer_report);
-            let mut frame = self.loops.pop().expect("active loop frame");
+            let mut frame = self
+                .loops
+                .pop()
+                .ok_or_else(|| error(source, "missing active loop frame"))?;
             result?;
             if current.live {
                 frame.continues.push(current);
@@ -5022,6 +5555,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.roots.insert(root(id));
         flow.order.push(root(id));
         flow.types.insert(root(id), ty.clone());
+        self.invalidate_captured_env_local(flow, root(id));
         Ok(())
     }
 
@@ -6272,12 +6806,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         K::Function(_) | K::FunctionInstance { .. }
                     )
                 {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            expr.source,
-                            "move analysis does not yet support runtime environment arguments on indirect named calls",
-                        ));
-                    }
                     bound_callable_copy(&callable, &mut self.fuel, callee.source, 0)?;
                     self.observe_named_callee(callee, flow)?;
                     if !callable.alternatives.is_empty() {
@@ -6285,6 +6813,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             expr,
                             &callable,
                             arguments,
+                            env_arguments,
                             parameter_bindings,
                             flow,
                             depth + 1,
@@ -6314,6 +6843,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok((None, BTreeMap::new(), BTreeMap::new()));
         }
         let guards = std::mem::take(&mut flow.value_pointer_guards);
+        let captured_envs = std::mem::take(&mut flow.value_captured_envs);
         let callable = flow.value_callable.take().ok_or_else(|| {
             error(
                 callee.source,
@@ -6353,6 +6883,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             guards,
             callee.source,
         )?;
+        self.install_value_captured_envs(
+            flow,
+            &Place {
+                root: id,
+                fields: vec![],
+            },
+            captured_envs,
+            callee.source,
+        )?;
         self.store_callable(flow, id, callable, callee.source)?;
         let callable = flow.callables[&id].clone();
         self.report.callee_temporaries.push((id, callee.source));
@@ -6360,17 +6899,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut result_origins = BTreeMap::new();
         let mut result_guards = BTreeMap::new();
         if !callable.alternatives.is_empty() {
-            if !env_arguments.is_empty() {
-                return Err(error(
-                    expr.source,
-                    "move analysis does not yet support runtime environment arguments on indirect named calls",
-                ));
-            }
             (pointer_result, result_origins, result_guards) = self
                 .call_named_candidates_with_origins(
                     expr,
                     &callable,
                     arguments,
+                    env_arguments,
                     parameter_bindings,
                     flow,
                     depth + 1,
@@ -6389,12 +6923,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 depth + 1,
             )?;
         } else {
-            if !env_arguments.is_empty() {
-                return Err(error(
-                    expr.source,
-                    "move analysis does not yet support runtime environment arguments on indirect named calls",
-                ));
-            }
             let mut target = callable.definition;
             target.source = callee.source;
             let declaration = match target.kind {
@@ -6418,7 +6946,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 kind: K::Call {
                     callee: Box::new(target),
                     arguments: arguments.to_vec(),
-                    env_arguments: vec![],
+                    env_arguments: env_arguments.to_vec(),
                     parameter_bindings: bindings,
                 },
             };
@@ -6813,7 +7341,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         )?;
                         result_origins
                             .get_mut(storage)
-                            .expect("validated result path")
+                            .ok_or_else(|| error(source, "missing validated result pointer path"))?
                             .extend(actual);
                     }
                     self.memory_accesses(
@@ -6979,6 +7507,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut argument_callables = BTreeMap::new();
         let mut argument_fields = BTreeMap::new();
         let mut argument_domains = BTreeMap::new();
+        let mut argument_captured_envs = BTreeMap::new();
         let expected_envs = if let Some(package) = self.package {
             let globals = self
                 .global_runtime_deliveries
@@ -7036,7 +7565,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if !flow.live {
                     break;
                 }
+                let captured_arg_envs = flow.value_captured_envs.clone();
                 this.remember_pending_origins(&argument.value, argument.parameter, flow, origins)?;
+                if !captured_arg_envs.is_empty() {
+                    argument_captured_envs.insert(argument.parameter, captured_arg_envs);
+                }
                 if let Some(callable) = callable {
                     argument_callables.insert(argument.parameter, callable);
                 }
@@ -7090,6 +7623,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callables: argument_callables,
             fields: argument_fields,
             domains: argument_domains,
+            captured_envs: argument_captured_envs,
         }))
     }
 
@@ -7439,6 +7973,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callables: mut argument_callables,
             fields: mut argument_fields,
             domains: mut argument_domains,
+            captured_envs: mut argument_captured_envs,
         } = prepared;
         let mut inner = Flow {
             pointer_slot_exposures: Some(self.pointer_slot_exposures(definition)?),
@@ -7696,6 +8231,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     source,
                 )?;
             }
+            if let Some(captured_envs) = argument_captured_envs.remove(&index) {
+                self.install_value_captured_envs(
+                    &mut inner,
+                    &Place {
+                        root: root(*parameter),
+                        fields: vec![],
+                    },
+                    captured_envs,
+                    source,
+                )?;
+            }
         }
         let closure_envs = if let Some(package) = self.package {
             let globals = self
@@ -7829,6 +8375,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let outer_effect_memory = std::mem::take(&mut self.effect_memory_inputs);
         let outer_effect_results = std::mem::take(&mut self.effect_result_inputs);
         let outer_completions = std::mem::take(&mut self.handler_completions);
+        let mut outer_active_envs = self.active_env_parameters.clone();
+        for env in &closure_envs {
+            outer_active_envs.push(nir::program::RuntimeEnvParameter {
+                declaration: env.declaration,
+                runtime_id: env.runtime_id,
+                binding: env.binding,
+                ty: env.ty.clone(),
+            });
+        }
+        let outer_active_envs =
+            std::mem::replace(&mut self.active_env_parameters, outer_active_envs);
         self.effect_memory_inputs = memory_inputs;
         self.effect_result_inputs = effect_inputs;
         self.report.effect_parameters = self.copy_effect_result_inputs(source)?;
@@ -7838,6 +8395,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             &mut inner,
             |this, inner| this.expr(body, inner, depth + 1),
         );
+        self.active_env_parameters = outer_active_envs;
         self.loops = outer_loops;
         self.exit_contract = outer_contract;
         self.handler_result = outer_handler;
@@ -8192,8 +8750,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
             let prepared = std::mem::replace(&mut self.report, outer_report);
-            let observed =
-                std::mem::replace(&mut self.candidate_observations, outer_observations).unwrap();
+            let observed = std::mem::replace(&mut self.candidate_observations, outer_observations)
+                .ok_or_else(|| error(source, "missing candidate observation report"))?;
             self.report.append(observed);
             if guard_known != Some(false) {
                 self.report.append(prepared);
@@ -8307,7 +8865,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let observed = std::mem::replace(&mut self.report, prepared);
         self.candidate_observations
             .as_mut()
-            .unwrap()
+            .ok_or_else(|| error(expr.source, "missing candidate observation report"))?
             .append(observed);
         result
     }
@@ -8899,11 +9457,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let pointer_match =
             matches!(expr.kind, K::Match { .. }) && matches!(expr.ty, Term::Pointer(_));
         if (matches!(expr.kind, K::Block { .. }) || pointer_match || owned_observation)
-            && self.package.is_some()
+            && let Some(package) = self.package
         {
-            let locals =
-                super::observation_region::check(expr, self.package.unwrap(), &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?;
+            let locals = super::observation_region::check(expr, package, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
             if locals
                 .iter()
                 .any(|local| flow.roots.contains(&root(*local)))
@@ -9479,12 +10036,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 selected = self.select_method_callee(callee, source)?;
                 vec![&selected]
             } else {
-                if !env_arguments.is_empty() {
-                    return Err(error(
-                        source,
-                        "guard calls do not yet support runtime environment arguments",
-                    ));
-                }
                 if !self.observation_value_type(&callee.ty, source)? {
                     return Err(error(
                         source,
@@ -9672,8 +10223,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let prepared = std::mem::replace(&mut self.report, outer_report);
             // Candidate computations ran even when its guard is false. Keep
             // their calls/temporary cleanup separately from successful binds.
-            let observed =
-                std::mem::replace(&mut self.candidate_observations, outer_observations).unwrap();
+            let observed = std::mem::replace(&mut self.candidate_observations, outer_observations)
+                .ok_or_else(|| error(source, "missing candidate observation report"))?;
             self.report.append(observed);
             if guard_known == Some(false) {
                 continue;
@@ -9698,7 +10249,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     exit: Some(branch.state.clone()),
                 });
                 let result_guards = if let Some(merged) = &result_origins {
-                    let previous = continuation.as_ref().expect("live result continuation");
+                    let previous = continuation
+                        .as_ref()
+                        .ok_or_else(|| error(source, "missing live match continuation"))?;
                     self.join_result_pointer_guards(
                         &previous.value_pointer_guards,
                         merged,
@@ -9715,7 +10268,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.copy_value_pointer_guards(&branch.value_pointer_guards, source)?
                 };
                 if let Some(merged) = &mut result_origins {
-                    let previous = continuation.as_ref().expect("live result continuation");
+                    let previous = continuation
+                        .as_ref()
+                        .ok_or_else(|| error(source, "missing live match continuation"))?;
                     self.join_value_origins(
                         &arm.body.ty,
                         merged,
@@ -9734,7 +10289,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 continuation
                     .as_mut()
-                    .expect("live continuation")
+                    .ok_or_else(|| error(source, "missing live match continuation"))?
                     .value_pointer_guards = result_guards;
             } else {
                 report.arms.push(MatchArmReport {
@@ -9872,9 +10427,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut merged: Option<Flow> = None;
         let mut layouts: Vec<ResidualLayout> = vec![];
         let mut orders: Vec<Vec<PlaceId>> = vec![];
+        let subject_captured_envs = std::mem::take(&mut flow.value_captured_envs);
         for (index, candidate) in candidates.iter().enumerate() {
             let mut preparation = PatternPreparation {
                 origins,
+                captured_envs: &subject_captured_envs,
                 pointer_guards: self.copy_value_pointer_guards(pointer_guards, source)?,
                 selected_pointer_variants: vec![],
                 domains: flow.value_variants.clone(),
@@ -9907,6 +10464,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             state
                 .declare(root, &shape, true, &mut self.fuel)
                 .map_err(|e| error(source, format!("pattern subject shape: {e:?}")))?;
+            state
+                .set_captured_envs_under(
+                    &Place {
+                        root,
+                        fields: vec![],
+                    },
+                    subject_captured_envs.clone(),
+                    &mut self.fuel,
+                )
+                .map_err(|e| error(source, format!("pattern subject env: {e:?}")))?;
             for fields in preparation.transfers {
                 state
                     .take(&Place { root, fields })
@@ -10249,7 +10816,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 );
                 self.candidate_observations
                     .as_mut()
-                    .unwrap()
+                    .ok_or_else(|| error(value.source, "missing candidate observation report"))?
                     .append(observed);
             }
             let (observed, origins) = result?;
@@ -10490,6 +11057,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let observed = self.observe_pattern_value(value, flow, preparation, depth + 1);
                 self.allow_owned_then_result = previous_allow_owned;
                 let (callable, origins) = observed?;
+                let captured_envs = std::mem::take(&mut flow.value_captured_envs);
                 let mut callables = BTreeMap::new();
                 if let Some(callable) = callable {
                     callables.insert(vec![], callable);
@@ -10499,6 +11067,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     // retain their targets; binders never subtract subject fields.
                     let mut computed = PatternPreparation {
                         origins: &origins,
+                        captured_envs: &captured_envs,
                         pointer_guards: BTreeMap::new(),
                         selected_pointer_variants: vec![],
                         domains: BTreeMap::new(),
@@ -10535,6 +11104,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .declare(full_root, &temp_shape, true, &mut self.fuel)
                         .map_err(|e| {
                             error(value.source, format!("computed temporary shape: {e:?}"))
+                        })?;
+                    full_state
+                        .set_captured_envs_under(
+                            &Place {
+                                root: full_root,
+                                fields: vec![],
+                            },
+                            captured_envs.clone(),
+                            &mut self.fuel,
+                        )
+                        .map_err(|e| {
+                            error(value.source, format!("computed temporary env: {e:?}"))
                         })?;
                     if full_state
                         .cleanup_tree(
@@ -10587,6 +11168,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         std::mem::replace(&mut flow.value_callables, callables);
                     let previous_variants =
                         std::mem::replace(&mut flow.value_variants, EnumDomains::new());
+                    let previous_envs =
+                        std::mem::replace(&mut flow.value_captured_envs, captured_envs);
                     let bound = self.bind_pattern_with_pointer_guards_and_remaps(
                         next,
                         &value.ty,
@@ -10600,6 +11183,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     );
                     flow.value_callables = previous_callables;
                     flow.value_variants = previous_variants;
+                    flow.value_captured_envs = previous_envs;
                     bound?;
                 }
                 return Ok(shape);
@@ -10896,6 +11480,25 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     domains,
                     source,
                 )?;
+                let bound_envs: BTreeMap<Vec<usize>, Vec<CapturedEnv>> = preparation
+                    .captured_envs
+                    .iter()
+                    .filter_map(|(leaf, envs)| {
+                        leaf.strip_prefix(path.as_slice())
+                            .map(|rest| (rest.to_vec(), envs.clone()))
+                    })
+                    .collect();
+                if !bound_envs.is_empty() {
+                    self.install_value_captured_envs(
+                        flow,
+                        &Place {
+                            root: root(binding),
+                            fields: vec![],
+                        },
+                        bound_envs,
+                        source,
+                    )?;
+                }
                 if let Some(callable) = preparation.callables.get(path).cloned() {
                     self.store_callable(flow, root(binding), callable, source)?;
                 }
@@ -11511,7 +12114,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let callable = flow.value_callable.clone().or(callable);
         if flow.live {
             let leaves = flow.value_callables.clone();
+            let captured_envs = std::mem::take(&mut flow.value_captured_envs);
             self.declare(flow, *binding, &value.ty, expr.source)?;
+            self.install_value_captured_envs(
+                flow,
+                &Place {
+                    root: root(*binding),
+                    fields: vec![],
+                },
+                captured_envs,
+                expr.source,
+            )?;
             self.install_callable_fields(
                 flow,
                 &Place {
@@ -11659,9 +12272,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         else {
             return None;
         };
-        if !env_arguments.is_empty() {
-            return None;
-        }
         let place = expression_place(callee)?;
         let callable = if place.fields.is_empty() {
             flow.callables.get(&place.root)?
@@ -11694,7 +12304,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             kind: K::Call {
                 callee: Box::new(target),
                 arguments: arguments.clone(),
-                env_arguments: vec![],
+                env_arguments: env_arguments.clone(),
                 parameter_bindings: bindings,
             },
         })
@@ -11705,12 +12315,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         expr: &Expr,
         callable: &Callable,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
-        self.call_named_candidates_with_origins(expr, callable, arguments, bindings, flow, depth)
-            .map(|(pointer, _, _)| pointer)
+        self.call_named_candidates_with_origins(
+            expr,
+            callable,
+            arguments,
+            env_arguments,
+            bindings,
+            flow,
+            depth,
+        )
+        .map(|(pointer, _, _)| pointer)
     }
 
     fn call_named_candidates_with_origins(
@@ -11718,6 +12337,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         expr: &Expr,
         callable: &Callable,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
@@ -11755,7 +12375,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let (result, summary, origins, guards) = self.memory_call(
             &target,
             arguments,
-            &[],
+            env_arguments,
             bindings,
             &callable.alternatives,
             &mut prepared_callables,
@@ -11796,7 +12416,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         }
                     },
                 };
-                let next = callable_source(&definition, &Flow::default(), &mut self.fuel)?.unwrap();
+                let next = callable_source(&definition, &Flow::default(), &mut self.fuel)?
+                    .ok_or_else(|| error(expr.source, "missing returned callable definition"))?;
                 result = if let Some(previous) = result {
                     merge_named_callables(&previous, &next, &mut self.fuel, expr.source)?
                 } else {
@@ -12339,13 +12960,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .extend(borrowed.iter().cloned());
             if !leaf.guards.is_empty() {
                 self.charge_pointer_conditions(&leaf.guards, source)?;
-                flow.pointer_guards
-                    .entry(Place {
-                        root: root(binding),
-                        fields: leaf.storage_fields.clone(),
-                    })
-                    .or_default()
-                    .insert(borrowed.iter().next().unwrap().clone(), leaf.guards);
+                if let Some(target) = borrowed.iter().next().cloned() {
+                    flow.pointer_guards
+                        .entry(Place {
+                            root: root(binding),
+                            fields: leaf.storage_fields,
+                        })
+                        .or_default()
+                        .insert(target, leaf.guards);
+                }
             }
             targets.insert(input, borrowed);
             flow.memory_exposed = true;
@@ -12696,6 +13319,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     if target.fields.is_empty() {
                         flow.callables.remove(&target.root);
                     }
+                    self.invalidate_captured_env_local(flow, target.root);
                 }
             }
         }
@@ -14322,12 +14946,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if matches!(callee.kind, K::Local(_)) {
             // Resolve identity before arguments while retaining the observed code slot.
             if let Some(resolved) = self.indirect_named_call(expr, flow) {
-                if !env_arguments.is_empty() {
-                    return Err(error(
-                        expr.source,
-                        "move analysis does not yet support runtime environment call arguments",
-                    ));
-                }
                 self.observe_named_callee(callee, flow)?;
                 let origins = self.evaluate_value_origins(&resolved, flow, depth + 1)?;
                 return Ok((origins, std::mem::take(&mut flow.value_pointer_guards)));
@@ -14356,12 +14974,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     )
                     .map(|(_, origins, guards)| (origins, guards));
             }
-            if !env_arguments.is_empty() {
-                return Err(error(
-                    expr.source,
-                    "move analysis does not yet support runtime environment call arguments",
-                ));
-            }
             let callable = flow
                 .callables
                 .get(&root(binding))
@@ -14382,6 +14994,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     expr,
                     &callable,
                     arguments,
+                    env_arguments,
                     parameter_bindings,
                     flow,
                     depth + 1,
@@ -14711,12 +15324,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .filter(|c| !c.alternatives.is_empty())
                             .cloned()
                     {
-                        if !env_arguments.is_empty() {
-                            return Err(error(
-                                expr.source,
-                                "move analysis does not yet support runtime environment call arguments",
-                            ));
-                        }
                         self.observe_named_callee(callee, flow)?;
                         if !flow.live {
                             return Ok(None);
@@ -14725,6 +15332,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             expr,
                             &callable,
                             arguments,
+                            env_arguments,
                             parameter_bindings,
                             flow,
                             depth + 1,
@@ -14748,12 +15356,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         );
                     }
                     if let Some(resolved) = self.indirect_named_call(expr, flow) {
-                        if !env_arguments.is_empty() {
-                            return Err(error(
-                                expr.source,
-                                "move analysis does not yet support runtime environment call arguments",
-                            ));
-                        }
                         self.observe_named_callee(callee, flow)?;
                         if !flow.live {
                             return Ok(None);
@@ -15103,6 +15705,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 self.install_callable_fields(flow, slot, code, source)?;
                 self.install_enum_domains(flow, slot, domains, source)?;
+                self.invalidate_captured_env_local(flow, slot.root);
                 if !aggregate_layout.is_empty() {
                     // Replace the entire value, not individual layout leaves:
                     // distinct enum alternatives can share a physical slot.
@@ -15402,6 +16005,8 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         plan_cleanup,
         package,
         function_env_parameters: &function.env_parameters,
+        active_env_parameters: function.env_parameters.clone(),
+        env_copy_types: std::collections::HashMap::new(),
         function_runtime_deliveries: &function.runtime_deliveries,
         global_runtime_deliveries,
         function_source: source,
@@ -15780,6 +16385,17 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         if let Some(callable) = scalar {
             analyzer.store_callable(&mut flow, root, callable, source)?;
         }
+    }
+    for (parameter, signature) in function.parameters.iter().zip(parameters) {
+        analyzer.capture_place_envs(
+            &mut flow,
+            &Place {
+                root: root(*parameter),
+                fields: vec![],
+            },
+            &signature.ty,
+            source,
+        )?;
     }
     for snapshot in &function.entry_snapshots {
         if !function.parameters.contains(&snapshot.parameter) {
@@ -16272,7 +16888,8 @@ fn ownership_shape_with_cache(
     let (shape, rel_depth) = match ty {
         Term::NormalForm { .. } if nir::normal_forms::tuple_fields(Some(package), ty).is_some() => {
             super::memory::bound_type(ty, fuel)?;
-            let fields = nir::normal_forms::tuple_fields(Some(package), ty).unwrap();
+            let fields = nir::normal_forms::tuple_fields(Some(package), ty)
+                .ok_or_else(|| "missing tuple fields in ownership shape".to_string())?;
             ownership_shape_fields(package, fields, cache.as_deref_mut(), fuel, depth)?
         }
         Term::Record(fields) => {
@@ -16648,12 +17265,15 @@ fn memory_code_definitions_at<'a>(
                                         fuel,
                                     )
                                     .map_err(|e| error(source, e))?;
+                                    let owned_callable = owned.remove(&input).ok_or_else(|| {
+                                        error(source, "missing captured callable input")
+                                    })?;
                                     prepared_captures.insert(
                                         CallablePlace {
                                             binding: capture.binding,
                                             fields: place.fields.clone(),
                                         },
-                                        owned.remove(&input).unwrap(),
+                                        owned_callable,
                                     );
                                 }
                             }
@@ -17441,7 +18061,8 @@ fn import_callable_evidence(
             value
         });
     }
-    let mut result = result.expect("a representative is always present");
+    let mut result =
+        result.ok_or_else(|| error(source, "missing representative callable candidate"))?;
     for (binding, evidence) in captures {
         let K::Closure {
             captures: fields, ..
@@ -17721,7 +18342,7 @@ fn callable_value_paths(
         Term::NormalForm { .. } if nir::normal_forms::tuple_fields(package, ty).is_some() => {
             super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
             nir::normal_forms::tuple_fields(package, ty)
-                .unwrap()
+                .ok_or_else(|| error(source, "missing tuple fields in ownership type"))?
                 .to_vec()
         }
         Term::Tuple(fields) => {
@@ -18350,7 +18971,7 @@ fn owned_field_type(
             {
                 super::memory::bound_type(&current, fuel).map_err(|e| error(source, e))?;
                 nir::normal_forms::tuple_fields(package, &current)
-                    .unwrap()
+                    .ok_or_else(|| error(source, "missing tuple fields in temporary field type"))?
                     .to_vec()
             }
             Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
@@ -20202,6 +20823,8 @@ mod env_parameter_frame_tests {
             plan_cleanup: true,
             package: None,
             function_env_parameters: env_parameters,
+            active_env_parameters: env_parameters.to_vec(),
+            env_copy_types: std::collections::HashMap::new(),
             function_runtime_deliveries: deliveries,
             global_runtime_deliveries: None,
             function_source: SourceRange { start: 0, end: 1 },
@@ -20602,5 +21225,371 @@ mod env_parameter_frame_tests {
             .cleanup_memory_accesses(&dummy_package, &mut 1_000)
             .unwrap();
         assert_eq!(delivery_exported.len(), 2);
+    }
+
+    #[test]
+    fn indirect_candidate_temporary_and_guard_calls_accept_env_arguments() {
+        let source = SourceRange { start: 0, end: 1 };
+        let i32_ty = Term::Primitive(nir::Primitive::I32);
+        let bool_ty = Term::Primitive(nir::Primitive::Bool);
+        let void_ty = Term::Primitive(nir::Primitive::Void);
+        let ptr_ty = Term::Pointer(Box::new(i32_ty.clone()));
+        let env_runtime = nir::RuntimeId {
+            instance: 1,
+            local: 0,
+        };
+        let fn_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: i32_ty.clone(),
+            }],
+            result: Box::new(i32_ty.clone()),
+        };
+        let guard_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: i32_ty.clone(),
+            }],
+            result: Box::new(bool_ty.clone()),
+        };
+
+        let make_fn = |id_local: u32, param_local: u32, env_local: u32, ret_bool: bool| {
+            let decl = nir::DeclarationId {
+                package: 0,
+                local: id_local,
+            };
+            let param = LocalId {
+                owner: id_local,
+                index: param_local,
+            };
+            let env_binding = LocalId {
+                owner: id_local,
+                index: env_local,
+            };
+            nir::program::Function {
+                interface: nir::program::FunctionDeclaration {
+                    source,
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: decl,
+                    name: format!("f_{id_local}"),
+                    parameters: vec![param],
+                    env_parameters: vec![nir::program::RuntimeEnvParameter {
+                        declaration: nir::DeclarationId {
+                            package: 0,
+                            local: 90,
+                        },
+                        runtime_id: Some(env_runtime),
+                        binding: env_binding,
+                        ty: ptr_ty.clone(),
+                    }],
+                    defaults: vec![],
+                    signature: if ret_bool {
+                        guard_sig.clone()
+                    } else {
+                        fn_sig.clone()
+                    },
+                },
+                body: Expr {
+                    source,
+                    ty: if ret_bool {
+                        bool_ty.clone()
+                    } else {
+                        i32_ty.clone()
+                    },
+                    kind: if ret_bool {
+                        K::Literal(nir::program::Literal::Bool(true))
+                    } else {
+                        K::Literal(nir::program::Literal::SignedInteger(1))
+                    },
+                },
+                runtime_deliveries: Default::default(),
+            }
+        };
+
+        let f1 = make_fn(1, 10, 11, false);
+        let f2 = make_fn(2, 20, 21, false);
+        let g1 = make_fn(3, 30, 31, true);
+
+        let runner_id = nir::DeclarationId {
+            package: 0,
+            local: 4,
+        };
+        let target_local = LocalId { owner: 4, index: 0 };
+        let ptr_local = LocalId { owner: 4, index: 1 };
+        let flag_local = LocalId { owner: 4, index: 2 };
+        let ind_local = LocalId { owner: 4, index: 3 };
+        let cand_local = LocalId { owner: 4, index: 4 };
+        let guard_local = LocalId { owner: 4, index: 5 };
+
+        let env_arg = Expr {
+            source,
+            ty: ptr_ty.clone(),
+            kind: K::Local(ptr_local),
+        };
+        let arg_one = nir::program::CallArgument {
+            passing: nir::program::ArgumentPassing::Value,
+            parameter: 0,
+            value: Expr {
+                source,
+                ty: i32_ty.clone(),
+                kind: K::Literal(nir::program::Literal::SignedInteger(1)),
+            },
+            is_default: false,
+        };
+
+        let runner = nir::program::Function {
+            interface: nir::program::FunctionDeclaration {
+                source,
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: runner_id,
+                name: "runner".into(),
+                parameters: vec![flag_local],
+                env_parameters: vec![],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: bool_ty.clone(),
+                    }],
+                    result: Box::new(i32_ty.clone()),
+                },
+            },
+            body: Expr {
+                source,
+                ty: i32_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: target_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: i32_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::SignedInteger(42)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: ptr_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: ptr_ty.clone(),
+                                    kind: K::AddressOf(Box::new(Expr {
+                                        source,
+                                        ty: i32_ty.clone(),
+                                        kind: K::Local(target_local),
+                                    })),
+                                }),
+                            },
+                        },
+                        // 1. Indirect named call with env_arguments
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: ind_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: fn_sig.clone(),
+                                    kind: K::Function(f1.interface.declaration),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: i32_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_sig.clone(),
+                                    kind: K::Local(ind_local),
+                                }),
+                                arguments: vec![arg_one.clone()],
+                                env_arguments: vec![env_arg.clone()],
+                                parameter_bindings: vec![],
+                            },
+                        },
+                        // 2. Local callable candidate with env_arguments
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: cand_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: fn_sig.clone(),
+                                    kind: K::If {
+                                        condition: Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(flag_local),
+                                        }),
+                                        then_branch: Box::new(Expr {
+                                            source,
+                                            ty: fn_sig.clone(),
+                                            kind: K::Function(f1.interface.declaration),
+                                        }),
+                                        else_branch: Some(Box::new(Expr {
+                                            source,
+                                            ty: fn_sig.clone(),
+                                            kind: K::Function(f2.interface.declaration),
+                                        })),
+                                    },
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: i32_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_sig.clone(),
+                                    kind: K::Local(cand_local),
+                                }),
+                                arguments: vec![arg_one.clone()],
+                                env_arguments: vec![env_arg.clone()],
+                                parameter_bindings: vec![],
+                            },
+                        },
+                        // 3. Temporary call with env_arguments
+                        Expr {
+                            source,
+                            ty: i32_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_sig.clone(),
+                                    kind: K::If {
+                                        condition: Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(flag_local),
+                                        }),
+                                        then_branch: Box::new(Expr {
+                                            source,
+                                            ty: fn_sig.clone(),
+                                            kind: K::Function(f1.interface.declaration),
+                                        }),
+                                        else_branch: Some(Box::new(Expr {
+                                            source,
+                                            ty: fn_sig.clone(),
+                                            kind: K::Function(f2.interface.declaration),
+                                        })),
+                                    },
+                                }),
+                                arguments: vec![arg_one.clone()],
+                                env_arguments: vec![env_arg.clone()],
+                                parameter_bindings: vec![],
+                            },
+                        },
+                        // 4. Indirect guard call with env_arguments
+                        Expr {
+                            source,
+                            ty: void_ty,
+                            kind: K::Let {
+                                binding: guard_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: guard_sig.clone(),
+                                    kind: K::Function(g1.interface.declaration),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: i32_ty.clone(),
+                            kind: K::Match {
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: i32_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::SignedInteger(1)),
+                                }),
+                                arms: vec![
+                                    nir::program::MatchArm {
+                                        pattern: Pattern::Wild,
+                                        guard: Some(Expr {
+                                            source,
+                                            ty: bool_ty,
+                                            kind: K::Call {
+                                                callee: Box::new(Expr {
+                                                    source,
+                                                    ty: guard_sig,
+                                                    kind: K::Local(guard_local),
+                                                }),
+                                                arguments: vec![arg_one],
+                                                env_arguments: vec![env_arg],
+                                                parameter_bindings: vec![],
+                                            },
+                                        }),
+                                        body: Expr {
+                                            source,
+                                            ty: i32_ty.clone(),
+                                            kind: K::Literal(nir::program::Literal::SignedInteger(
+                                                1,
+                                            )),
+                                        },
+                                    },
+                                    nir::program::MatchArm {
+                                        pattern: Pattern::Wild,
+                                        guard: None,
+                                        body: Expr {
+                                            source,
+                                            ty: i32_ty.clone(),
+                                            kind: K::Literal(nir::program::Literal::SignedInteger(
+                                                0,
+                                            )),
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                    result: Some(Box::new(Expr {
+                        source,
+                        ty: i32_ty,
+                        kind: K::Literal(nir::program::Literal::SignedInteger(0)),
+                    })),
+                },
+            },
+            runtime_deliveries: Default::default(),
+        };
+
+        let package = Package {
+            functions: vec![f1, f2, g1, runner.clone()],
+            ..Package::default()
+        };
+        let report = analyze_in_package(&package, &runner, |_| Ok(Delivery::Copy), 200_000)
+            .expect("env_arguments across indirect/candidate/temporary/guard calls should pass");
+        assert!(report.deferred_calls.is_empty());
     }
 }

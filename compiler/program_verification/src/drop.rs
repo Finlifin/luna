@@ -13,7 +13,9 @@ use nir::{
     program::{FunctionPhase, LocalId, MethodContract, MethodInstance, Package, TraitRequirement},
 };
 use std::fmt;
+
 mod evidence;
+
 pub use evidence::SelectionEvidence;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +25,7 @@ pub struct DropEnvRequirement {
     pub binding: LocalId,
     pub ty: Term,
 }
+
 impl fmt::Display for DropEnvRequirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(drop-env (declaration {})", self.declaration)?;
@@ -48,6 +51,7 @@ pub struct SelectedDrop {
     /// applicability evidence cannot be replaced independently by consumers.
     evidence: SelectionEvidence,
 }
+
 #[derive(Clone, Debug)]
 pub enum Resolution {
     /// No user destructor in this query world. Automatic field cleanup remains.
@@ -59,17 +63,21 @@ pub enum Resolution {
     Selected(SelectedDrop),
     Pending(String),
 }
+
 impl SelectedDrop {
     pub fn selection(&self) -> &TypeResolution {
         self.evidence.type_selection()
     }
+
     pub fn qualification(&self) -> &[Witness] {
         self.evidence.qualification()
     }
+
     pub fn capabilities(&self) -> &[TraitRequirement] {
         &self.capabilities
     }
 }
+
 impl fmt::Display for SelectedDrop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -105,6 +113,7 @@ impl fmt::Display for SelectedDrop {
         write!(f, ") {})", self.evidence)
     }
 }
+
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -124,6 +133,7 @@ impl fmt::Display for Resolution {
         }
     }
 }
+
 fn signature(subject: Term) -> Term {
     Term::Function {
         parameters: vec![Parameter {
@@ -133,6 +143,7 @@ fn signature(subject: Term) -> Term {
         result: Box::new(Term::Primitive(Primitive::Void)),
     }
 }
+
 fn instantiate_contract(
     member: &MethodContract,
     self_parameter: DeclarationId,
@@ -205,6 +216,7 @@ fn instantiate_contract(
             .map_err(|e| e.to_string())?,
     })
 }
+
 /// Source spelling never designates the protocol. The caller must supply its
 /// trusted language-item identity and the immutable package/world that owns it.
 /// No result is cached across implementation worlds or assumption changes.
@@ -469,12 +481,14 @@ pub fn select(
     }))
 }
 
-mod access;
+pub(crate) mod access;
+
 pub use access::{
     AccessCheck, DropEnvContext, PointerMemory, check_access, check_access_with_memory,
 };
 
 mod plan;
+
 pub use plan::{
     AcquiredCleanup, CleanupPlan, CleanupReadFootprint, CleanupReader, CleanupSession, CleanupStep,
     RequiredDropInstance, VariantCleanup, acquire_cleanup, plan_cleanup, plan_cleanup_with_memory,
