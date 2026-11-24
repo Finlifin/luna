@@ -77,6 +77,7 @@ struct BodySummary {
 struct GraphIndex<'a> {
     graph: &'a iir::Package,
     schedule: Option<&'a iir::cleanup::Schedule>,
+    // Lookup-only tables keyed by `Term` (`Term: Eq + Hash`, not `Ord`); never iterated.
     by_key: HashMap<(DeclarationId, &'a [Term]), usize>,
     dispatch: HashMap<
         (
@@ -358,61 +359,79 @@ fn collect_cleanup_steps(
 }
 
 /// Tarjan strongly connected components in topological callee-before-caller order.
+/// Uses an explicit heap-allocated DFS stack to prevent call-stack overflow on
+/// large or deeply coupled call graphs.
 fn tarjan_sccs(n: usize, edges: &[BTreeSet<usize>]) -> Vec<Vec<usize>> {
-    struct State<'a> {
-        edges: &'a [BTreeSet<usize>],
-        index: usize,
-        indices: Vec<Option<usize>>,
-        lowlink: Vec<usize>,
-        on_stack: Vec<bool>,
-        stack: Vec<usize>,
-        sccs: Vec<Vec<usize>>,
+    struct Frame<'a> {
+        v: usize,
+        iter: std::collections::btree_set::Iter<'a, usize>,
+        child: Option<usize>,
     }
 
-    fn strongconnect(v: usize, st: &mut State<'_>) {
-        st.indices[v] = Some(st.index);
-        st.lowlink[v] = st.index;
-        st.index += 1;
-        st.stack.push(v);
-        st.on_stack[v] = true;
+    let mut index = 0usize;
+    let mut indices = vec![None; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack = Vec::new();
+    let mut sccs = Vec::new();
+    let mut dfs: Vec<Frame<'_>> = Vec::new();
 
-        for &w in &st.edges[v] {
-            if st.indices[w].is_none() {
-                strongconnect(w, st);
-                st.lowlink[v] = st.lowlink[v].min(st.lowlink[w]);
-            } else if st.on_stack[w] {
-                st.lowlink[v] = st.lowlink[v].min(st.indices[w].unwrap());
-            }
+    for root in 0..n {
+        if indices[root].is_some() {
+            continue;
         }
+        indices[root] = Some(index);
+        lowlink[root] = index;
+        index += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        dfs.push(Frame {
+            v: root,
+            iter: edges[root].iter(),
+            child: None,
+        });
 
-        if Some(st.lowlink[v]) == st.indices[v] {
-            let mut scc = Vec::new();
-            while let Some(w) = st.stack.pop() {
-                st.on_stack[w] = false;
-                scc.push(w);
-                if w == v {
-                    break;
+        while let Some(frame) = dfs.last_mut() {
+            if let Some(w) = frame.child.take() {
+                lowlink[frame.v] = lowlink[frame.v].min(lowlink[w]);
+            }
+            if let Some(&w) = frame.iter.next() {
+                if indices[w].is_none() {
+                    frame.child = Some(w);
+                    indices[w] = Some(index);
+                    lowlink[w] = index;
+                    index += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    dfs.push(Frame {
+                        v: w,
+                        iter: edges[w].iter(),
+                        child: None,
+                    });
+                } else if on_stack[w]
+                    && let Some(w_index) = indices[w]
+                {
+                    lowlink[frame.v] = lowlink[frame.v].min(w_index);
+                }
+            } else {
+                let v = frame.v;
+                dfs.pop();
+                if Some(lowlink[v]) == indices[v] {
+                    let mut scc = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(scc);
                 }
             }
-            st.sccs.push(scc);
         }
     }
 
-    let mut st = State {
-        edges,
-        index: 0,
-        indices: vec![None; n],
-        lowlink: vec![0; n],
-        on_stack: vec![false; n],
-        stack: Vec::new(),
-        sccs: Vec::new(),
-    };
-    for v in 0..n {
-        if st.indices[v].is_none() {
-            strongconnect(v, &mut st);
-        }
-    }
-    st.sccs
+    sccs
 }
 
 struct Analyzer<'a, 'b> {
@@ -2271,5 +2290,31 @@ mod tests {
             !b_caller.pointer_params[0].readonly,
             "passing param to MemoryEffect::Unknown non-readonly param must clear caller readonly"
         );
+    }
+
+    #[test]
+    fn iterative_tarjan_sccs_handles_deep_20000_node_chain_and_cycles_without_stack_overflow() {
+        let chain_len = 20_000usize;
+        let mut edges = vec![BTreeSet::new(); chain_len];
+        for i in 0..chain_len - 1 {
+            edges[i].insert(i + 1);
+        }
+        let sccs = tarjan_sccs(chain_len, &edges);
+        assert_eq!(sccs.len(), chain_len);
+        for (pos, scc) in sccs.iter().enumerate() {
+            assert_eq!(scc.as_slice(), &[chain_len - 1 - pos]);
+        }
+
+        // Add a backedge from the tail to node 10_000, creating a 10,000-node cycle
+        // reachable from a 10,000-node prefix chain; verify callee-before-caller order.
+        edges[chain_len - 1].insert(10_000);
+        let sccs = tarjan_sccs(chain_len, &edges);
+        assert_eq!(sccs.len(), 10_001);
+        assert_eq!(sccs[0].len(), 10_000);
+        let cycle_members: BTreeSet<usize> = sccs[0].iter().copied().collect();
+        assert_eq!(cycle_members, (10_000..chain_len).collect());
+        for pos in 1..sccs.len() {
+            assert_eq!(sccs[pos].as_slice(), &[10_000 - pos]);
+        }
     }
 }

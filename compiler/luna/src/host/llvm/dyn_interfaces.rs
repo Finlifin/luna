@@ -114,6 +114,7 @@ fn make_emitter<'a>(
         loops: BTreeMap::new(),
         prologue: String::new(),
         body: String::new(),
+        emitted_effects: attributes::EmittedBodyEffects::default(),
         declarations,
         text_constants,
         attr_table: Some(attr_table),
@@ -430,7 +431,7 @@ impl Emitter<'_> {
         let oom = self.fresh();
         self.line(format!("br i1 {}, label %{ready}, label %{oom}", ok.text));
         self.label(&oom);
-        self.line("call void @llvm.trap()");
+        self.emit_trap();
         self.line("unreachable");
         self.label(&ready);
         let box_ptr = self.instruction(Ty::Pointer, format!("inttoptr i64 {} to ptr", addr.text));

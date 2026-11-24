@@ -283,6 +283,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             loops: BTreeMap::new(),
             prologue: String::new(),
             body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
             declarations: &mut declarations,
             text_constants: &mut strings::TextConstants::default(),
             attr_table: None,

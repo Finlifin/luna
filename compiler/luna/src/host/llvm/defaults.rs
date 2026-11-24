@@ -199,6 +199,7 @@ mod tests {
                 loops: BTreeMap::new(),
                 prologue: String::new(),
                 body: String::new(),
+                emitted_effects: attributes::EmittedBodyEffects::default(),
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
                 attr_table: None,

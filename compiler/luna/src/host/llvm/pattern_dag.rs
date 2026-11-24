@@ -1543,7 +1543,7 @@ impl Emitter<'_> {
             let err_env = &v.active_error_branches[&node_id];
             match &v.plan.dag.nodes[node_id.0] {
                 DagNode::Fail => {
-                    self.line("call void @llvm.trap()");
+                    self.emit_trap();
                     self.line("unreachable");
                     self.terminated = true;
                 }

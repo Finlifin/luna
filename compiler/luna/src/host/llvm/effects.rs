@@ -790,6 +790,7 @@ impl Emitter<'_> {
             loops: BTreeMap::new(),
             prologue: String::new(),
             body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
             declarations: self.declarations,
             text_constants: self.text_constants,
             attr_table: self.attr_table.as_deref_mut(),
@@ -975,7 +976,9 @@ impl Emitter<'_> {
             child.prologue,
             child.body
         );
+        let child_effects = child.emitted_effects;
         child.declarations.insert(definition);
+        self.emitted_effects.merge(child_effects);
         Ok((format!("@{symbol}"), env.pointer))
     }
 }

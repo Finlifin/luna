@@ -912,6 +912,7 @@ struct Emitter<'a> {
     loops: BTreeMap<LocalId, frames::LoopTarget>,
     prologue: String,
     body: String,
+    emitted_effects: attributes::EmittedBodyEffects,
     declarations: &'a mut BTreeSet<String>,
     text_constants: &'a mut strings::TextConstants,
     attr_table: Option<&'a mut attributes::AttributeTable>,
@@ -960,6 +961,11 @@ impl Emitter<'_> {
         self.body.push('\n');
     }
 
+    pub(super) fn emit_trap(&mut self) {
+        self.emitted_effects.has_trap_or_unwind = true;
+        self.line("call void @llvm.trap()");
+    }
+
     fn instruction(&mut self, ty: Ty, rhs: String) -> Value {
         let name = self.fresh();
         self.line(format!("%{name} = {rhs}"));
@@ -999,6 +1005,7 @@ impl Emitter<'_> {
                 .or_else(|| matches!(value.ty, Ty::PackedRecord(_)).then_some(1));
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             let op = if slot.volatile {
+                self.emitted_effects.has_volatile = true;
                 "store volatile"
             } else {
                 "store"
@@ -1022,6 +1029,7 @@ impl Emitter<'_> {
                 .or_else(|| matches!(slot.ty, Ty::PackedRecord(_)).then_some(1));
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             let op = if slot.volatile {
+                self.emitted_effects.has_volatile = true;
                 "load volatile"
             } else {
                 "load"
@@ -1240,7 +1248,7 @@ impl Emitter<'_> {
         if cleanup.is_some() && self.checked {
             self.control_return(control::FAILURE);
         } else {
-            self.line("call void @llvm.trap()");
+            self.emit_trap();
             self.line("unreachable");
         }
         self.label(&good);
@@ -1899,7 +1907,7 @@ impl Emitter<'_> {
                 // but never execute its callback without that evidence.
                 // In particular, do not borrow another call's frame or
                 // fall back to the canonical unchecked lambda body.
-                self.line("call void @llvm.trap()");
+                self.emit_trap();
                 self.line("unreachable");
                 self.terminated = true;
                 return Ok(Value::unit());
@@ -3425,6 +3433,7 @@ pub(super) fn emit_with_entry_mode(
         prologue: String,
         body: String,
         behavior: Option<iir::BehaviorAttributes>,
+        effects: attributes::EmittedBodyEffects,
     }
     let mut emitted_bodies = Vec::with_capacity(bodies.len());
     for (symbol, signature, bindings, body, metadata, closure, closure_scope) in bodies {
@@ -3495,6 +3504,7 @@ pub(super) fn emit_with_entry_mode(
             loops: BTreeMap::new(),
             prologue: String::new(),
             body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
             declarations: &mut declarations,
             text_constants: &mut text_constants,
             attr_table: Some(&mut attr_table),
@@ -3625,7 +3635,7 @@ pub(super) fn emit_with_entry_mode(
                     )?
             );
         if trap_unscoped_closure {
-            e.line("call void @llvm.trap()");
+            e.emit_trap();
             e.line("unreachable");
             e.terminated = true;
         } else {
@@ -3676,6 +3686,7 @@ pub(super) fn emit_with_entry_mode(
             prologue: e.prologue,
             body: e.body,
             behavior: base_behavior,
+            effects: e.emitted_effects,
         });
     }
     // Layer 2 machine-IR soundness pass: strip unsafe attrs on any body or transitive
@@ -3711,7 +3722,7 @@ pub(super) fn emit_with_entry_mode(
         .collect();
     for b in &mut emitted_bodies {
         if let Some(attrs) = &mut b.behavior {
-            attributes::sanitize_for_emitted_body(attrs, &b.prologue, &b.body);
+            attributes::sanitize_for_emitted_body(attrs, b.effects);
         }
     }
     loop {
@@ -4469,6 +4480,81 @@ mod layout_budget_tests {
         assert_eq!(
             abi_calling_convention(CallingConvention::System, t32),
             expected_system_32
+        );
+    }
+
+    #[test]
+    fn structured_emitted_effects_ignore_trap_and_volatile_in_string_literals() {
+        use iir::{BehaviorAttributes, FunctionInstance, InstanceKey, MemoryEffect};
+        let source = nir::program::SourceRange { start: 1, end: 10 };
+        let decl = nir::DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        let str_ty = Term::Primitive(P::Str);
+        let sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(str_ty.clone()),
+        };
+        let func = Function {
+            interface: nir::program::FunctionDeclaration {
+                source,
+                declaration: decl,
+                name: "literal_only".into(),
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                type_parameters: vec![],
+                parameters: vec![],
+                env_parameters: vec![],
+                defaults: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                signature: sig,
+            },
+            body: Expr {
+                source,
+                ty: str_ty,
+                kind: K::Literal(Literal::String(
+                    "call void @llvm.trap() load volatile".into(),
+                )),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let graph = iir::Package {
+            roots: vec![InstanceKey {
+                declaration: decl,
+                arguments: vec![].into(),
+            }],
+            functions: vec![FunctionInstance {
+                key: InstanceKey {
+                    declaration: decl,
+                    arguments: vec![].into(),
+                },
+                function: func,
+                behavior: Some(BehaviorAttributes {
+                    memory: MemoryEffect::None,
+                    terminates: true,
+                    no_trap_or_unwind: true,
+                    no_free: true,
+                    no_sync: true,
+                    pointer_params: vec![],
+                }),
+                callsite_behaviors: vec![],
+            }],
+            ..Default::default()
+        };
+        let ir = emit(&graph, 100_000, false, None, None).unwrap();
+        assert!(
+            ir.contains("nounwind willreturn nosync nofree memory(none) speculatable"),
+            "string literal content must not falsely downgrade emitted behavior attributes:\n{ir}"
         );
     }
 }

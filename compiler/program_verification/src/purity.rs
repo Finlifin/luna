@@ -704,22 +704,26 @@ pub fn validate_runtime_promises_incremental(
     protocols: &Protocols,
     verified: &crate::flow::VerifiedUpstream,
 ) -> Result<(), Error> {
-    let mut analysis = Analysis::with_fuel(package, false, package_preparation_fuel(package));
-    analysis.protocols = protocols.clone();
-    if analysis.parameter_sorts.is_none() {
-        return Err(error(
-            n::SourceRange { start: 0, end: 0 },
-            "invalid declaration parameter sorts in purity analysis",
-        ));
-    }
-    let has_unverified_runtime_pure = package.functions.iter().any(|function| {
+    let Some(first_unverified) = package.functions.iter().find(|function| {
         function.phase == n::FunctionPhase::Runtime
             && function.pure
             && !verified.functions.contains(&function.declaration)
-    });
-    if !has_unverified_runtime_pure {
+    }) else {
         return Ok(());
-    }
+    };
+    let mut analysis = Analysis::with_fuel(package, false, package_preparation_fuel(package));
+    analysis.protocols = protocols.clone();
+    let Some(parameter_sorts) = analysis.parameter_sorts.clone() else {
+        let source = first_unverified
+            .body
+            .source
+            .original(&package.expansion_sources)
+            .unwrap_or(first_unverified.body.source);
+        return Err(error(
+            source,
+            "invalid declaration parameter sorts in purity analysis",
+        ));
+    };
     if protocols.drop.is_some() {
         // Prepare and cache the immutable resource world under package-scaled fuel
         // before assigning an independent budget to each runtime pure function.
@@ -738,10 +742,7 @@ pub fn validate_runtime_promises_incremental(
             .iter()
             .map(|declaration| Term::Rigid {
                 declaration: *declaration,
-                sort: analysis
-                    .parameter_sorts
-                    .as_ref()
-                    .unwrap()
+                sort: parameter_sorts
                     .get(declaration)
                     .copied()
                     .unwrap_or(Sort::Type),
@@ -782,8 +783,8 @@ struct Analysis<'a> {
     protocols: Protocols,
     // Only immutable declarations are shared; each query supplies its own assumptions.
     resource_world: Option<ResourceWorld>,
-    functions: HashMap<DeclarationId, &'a n::Function>,
-    tuple_heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
+    functions: BTreeMap<DeclarationId, &'a n::Function>,
+    tuple_heads: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     parameter_sorts: Option<std::sync::Arc<BTreeMap<DeclarationId, Sort>>>,
     staged_parameters: BTreeSet<n::LocalId>,
@@ -799,6 +800,7 @@ struct Analysis<'a> {
     result_code: Option<Codes>,
     result_addresses: Option<Vec<n::Expr>>,
     result_fields: BTreeMap<Vec<usize>, Codes>,
+    // Lookup/memo tables containing `Term` (`Term: Eq + Hash`, not `Ord`).
     active: HashSet<Key>,
     proven: HashMap<Key, bool>,
     fuel: usize,
@@ -878,7 +880,26 @@ impl<'a> Analysis<'a> {
         let Ok(inputs) = nir::free_bindings::collect(value, &mut self.fuel) else {
             return false;
         };
-        !inputs.is_empty() && inputs.is_subset(&self.staged_parameters)
+        if !inputs.is_subset(&self.staged_parameters) {
+            return false;
+        }
+        if !inputs.is_empty() {
+            return true;
+        }
+        let mut has_rigid = false;
+        let visited = nir::visit::expression(value, &mut self.fuel, |node, fuel| {
+            if let K::TypeValue(ty) = &node.kind {
+                let mut rigids = BTreeSet::new();
+                nir::type_computations::rigid_declarations_bounded(ty, fuel, &mut rigids).map_err(
+                    |_| nir::visit::Error::Budget("purity rigid type inspection budget exhausted"),
+                )?;
+                if !rigids.is_empty() {
+                    has_rigid = true;
+                }
+            }
+            Ok(())
+        });
+        visited.is_ok() && has_rigid
     }
 
     fn default_expression(&mut self, value: &n::Expr) -> bool {
@@ -935,8 +956,16 @@ impl<'a> Analysis<'a> {
         }
         // A synthetic resource boundary may own fresh argument temporaries,
         // but must not acquire a caller's affine owner. Preserve the existing
-        // observation-only path for non-Copy external bindings.
-        if types.len() != free.len() || !self.default_inputs_are_copy(types.values().copied()) {
+        // observation-only path for non-Copy external runtime bindings; staged
+        // parameters carry compile-time inputs and need no runtime Copy witness.
+        let runtime_input_types: Vec<&Term> = types
+            .iter()
+            .filter(|(binding, _)| !self.staged_parameters.contains(binding))
+            .map(|(_, ty)| *ty)
+            .collect();
+        if types.len() != free.len()
+            || !self.default_inputs_are_copy(runtime_input_types.into_iter())
+        {
             return self.expression(value, &mut BTreeSet::new(), false, 0);
         }
         let declaration = DeclarationId {
@@ -975,9 +1004,17 @@ impl<'a> Analysis<'a> {
                 requirements: vec![],
                 signature: Term::Function {
                     parameters: types
-                        .values()
-                        .map(|ty| nir::Parameter {
-                            sort: Sort::Runtime,
+                        .iter()
+                        .map(|(binding, ty)| nir::Parameter {
+                            sort: if self.staged_parameters.contains(binding) {
+                                if matches!(ty, Term::Primitive(P::Type)) {
+                                    Sort::Type
+                                } else {
+                                    Sort::ComptimeValue
+                                }
+                            } else {
+                                Sort::Runtime
+                            },
                             ty: (*ty).clone(),
                         })
                         .collect(),
@@ -1052,20 +1089,18 @@ impl<'a> Analysis<'a> {
     }
 
     fn copy_type(&self, ty: &Term) -> bool {
-        // Staged immutable scalar inputs have no runtime cleanup identity.
-        // P3 default validation keeps its runtime-only domain restriction.
-        if !self.finite && matches!(ty, Term::Primitive(P::Type | P::Integer | P::Float)) {
-            return true;
-        }
+        // Pure comptime-only primitive domains (`Type`, `Integer`, `Float`) have
+        // no runtime cleanup identity or Drop responsibility in either P3 or P4.
         fn inspect(
             ty: &Term,
-            heads: &HashMap<DeclarationId, &nir::normal_forms::Head>,
+            heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
             depth: usize,
         ) -> bool {
             if depth >= 128 {
                 return false;
             }
             match ty {
+                Term::Primitive(P::Type | P::Integer | P::Float) => true,
                 Term::Tuple(fields) => fields.iter().all(|ty| inspect(ty, heads, depth + 1)),
                 Term::Record(fields) => fields.iter().all(|(_, ty)| inspect(ty, heads, depth + 1)),
                 Term::NormalForm { head, .. } => heads
@@ -1158,7 +1193,9 @@ impl<'a> Analysis<'a> {
                 Ok(Some(_))
             ) {
             match &value.kind {
-                K::Local(_) | K::AddressOf(_) => self.private_targets(value, private, depth + 1),
+                K::Local(_) | K::AddressOf(_) | K::ConstAddress { .. } => {
+                    self.private_targets(value, private, depth + 1)
+                }
                 K::If { .. }
                 | K::Match { .. }
                 | K::Block { .. }
@@ -1557,7 +1594,9 @@ impl<'a> Analysis<'a> {
                         .collect::<Vec<_>>();
                     let mut address_branch = BTreeMap::new();
                     for key in address_keys {
-                        address_branch.insert(key, self.private_addresses.remove(&key).unwrap());
+                        if let Some(targets) = self.private_addresses.remove(&key) {
+                            address_branch.insert(key, targets);
+                        }
                     }
                     joined_addresses = Some(match joined_addresses {
                         None => address_branch,
@@ -1578,10 +1617,7 @@ impl<'a> Analysis<'a> {
                     });
                     let mut branch = keys
                         .into_iter()
-                        .map(|key| {
-                            let value = self.callables.remove(&key).unwrap();
-                            (key, value)
-                        })
+                        .filter_map(|key| self.callables.remove(&key).map(|value| (key, value)))
                         .collect::<BTreeMap<_, _>>();
                     joined = Some(match joined {
                         None => branch,
@@ -2003,7 +2039,10 @@ impl<'a> Analysis<'a> {
                     fields.insert(place.fields.clone(), codes);
                 }
                 self.result_fields = fields;
-                !self.finite || self.resource_scope || self.copy_type(&value.ty)
+                !self.finite
+                    || self.resource_scope
+                    || self.staged_parameters.contains(binding)
+                    || self.copy_type(&value.ty)
             }
             // A default's observation interval is this one finite evaluation.
             // Every transitive call is inspected below; pointer writes, external
@@ -2055,6 +2094,8 @@ impl<'a> Analysis<'a> {
                     .is_some_and(|free| free.is_empty())
                     && self.expression(value, private, returns, depth + 1)
             }
+            // Flurry `static` globals are mutable shared runtime storage (`docs/resource-management/bindings.md`).
+            // Immutable globals use `const` (`K::ConstAddress`), which is handled above.
             K::StaticAddress(_) => false,
             K::WritePointer {
                 pointer,
@@ -2068,6 +2109,12 @@ impl<'a> Analysis<'a> {
                 let Some(places) = self.result_addresses.take() else {
                     return false;
                 };
+                if !places
+                    .iter()
+                    .all(|place| self.private_owned_place(place, private))
+                {
+                    return false;
+                }
                 // Data-only replacement cannot change callable identity or
                 // pointer reachability. Resource analysis checks Copy legality,
                 // cleanup responsibility and initialized storage separately.
@@ -2131,6 +2178,7 @@ impl<'a> Analysis<'a> {
             }
             K::ComptimeValue(_)
             | K::StagedValue(_)
+            | K::TypeValue(_)
             | K::Literal(_)
             | K::Unit
             | K::AssociatedValue { .. } => self.copy_type(&value.ty),
@@ -2378,6 +2426,7 @@ impl<'a> Analysis<'a> {
                 let mut inputs = BTreeMap::new();
                 // Snapshot identities at each argument's preparation point.
                 for arg in arguments {
+                    let mut staged_arg = false;
                     if self.finite {
                         let Term::Function { parameters, .. } = callee.ty.callable_signature()
                         else {
@@ -2386,23 +2435,28 @@ impl<'a> Analysis<'a> {
                         let Some(parameter) = parameters.get(arg.parameter) else {
                             return false;
                         };
-                        if parameter.sort != Sort::Runtime
+                        if parameter.sort != Sort::Runtime {
+                            staged_arg = self.has_staged_input_evidence(&arg.value);
                             // A declaration's staged parameter has a value at
                             // invocation even when this definition-side proof
                             // does not know it. Inspect every callee branch;
                             // phase validation still owns actual availability.
-                            && !self.has_staged_input_evidence(&arg.value)
-                            && iir::staging::canonical_input_with_layouts(
-                                iir::staging::Layouts::from(self.package),
-                                &arg.value,
-                                &mut self.fuel,
-                            )
-                            .is_err()
-                        {
-                            return false;
+                            if !staged_arg
+                                && iir::staging::canonical_input_with_layouts(
+                                    iir::staging::Layouts::from(self.package),
+                                    &arg.value,
+                                    &mut self.fuel,
+                                )
+                                .is_err()
+                            {
+                                return false;
+                            }
                         }
                     }
-                    if (self.finite && !self.resource_scope && !self.copy_type(&arg.value.ty))
+                    if (self.finite
+                        && !self.resource_scope
+                        && !staged_arg
+                        && !self.copy_type(&arg.value.ty))
                         || !self.expression(&arg.value, private, returns, depth + 1)
                     {
                         return false;
@@ -2657,6 +2711,7 @@ impl<'a> Analysis<'a> {
             | K::ScalarGreater(a, b)
             | K::ScalarGreaterEqual(a, b)
             | K::ScalarEqual(a, b)
+            | K::TypeEqual(a, b)
             | K::BitEqual(a, b)
             | K::BitConcat(a, b)
             | K::FloatBinary {
@@ -3097,6 +3152,16 @@ impl<'a> Analysis<'a> {
                 })
                 .ok()?;
                 Some(vec![(**place).clone()])
+            }
+            K::ConstAddress { value, .. } => {
+                if value.ty != subject {
+                    return None;
+                }
+                nir::visit::expression(value, &mut self.fuel, |node, fuel| {
+                    crate::memory::bound_type(&node.ty, fuel)
+                })
+                .ok()?;
+                Some(vec![(**value).clone()])
             }
             _ => None,
         }
@@ -4679,7 +4744,10 @@ impl<'a> Analysis<'a> {
                 .iter()
                 .any(|predicate| !matches!(predicate.kind, K::Literal(n::Literal::Bool(true)))))
             || parameters.iter().any(|parameter| {
-                self.finite && self.protocols.drop.is_none() && !self.copy_type(&parameter.ty)
+                parameter.sort == Sort::Runtime
+                    && self.finite
+                    && self.protocols.drop.is_none()
+                    && !self.copy_type(&parameter.ty)
             })
             || function
                 .env_parameters

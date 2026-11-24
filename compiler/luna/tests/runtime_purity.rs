@@ -1,7 +1,9 @@
 //! Runtime pure promises are P4; termination is a separate obligation.
 use comptime_interpretor::{Budget, Interpreter, Value};
+
 #[path = "support/execution.rs"]
 mod execution_support;
+
 use execution_support::{calls, compile, compile_with_protocols, id};
 
 #[test]
@@ -1629,4 +1631,113 @@ fn proven_program_checks_preserve_runtime_purity_without_granting_assumptions() 
         assert!(failure.contains("P4 evidence"), "{failure}");
     }
     compile(source);
+}
+
+#[test]
+fn p3_defaults_exempt_comptime_type_parameters_without_sysroot() {
+    let package = compile(
+        "typealias Type = .Type'builtin;
+        typealias Int = .Integer'builtin;
+        typealias Flt = .Float'builtin;
+        fn accept_type(comptime _t: Type) -> bool { true }
+        fn pair_ok(comptime a: Type, comptime b: Type) -> bool {
+            accept_type(a) and accept_type(b)
+        }
+        fn accept_int_float(comptime _n: Int, comptime _x: Flt) -> bool { true }
+        fn staged_ok(comptime t: Type, comptime n: Int, comptime x: Flt) -> bool {
+            accept_type(t) and accept_int_float(n, x)
+        }
+        fn take(comptime t: Type, .flag: bool = accept_type(t)) -> bool { flag }
+        fn take_pair(comptime t: Type, .flag: bool = pair_ok(t, t)) -> bool { flag }
+        fn take_staged(
+            comptime t: Type,
+            comptime n: Int,
+            comptime x: Flt,
+            .flag: bool = staged_ok(t, n, x),
+        ) -> bool {
+            flag
+        }
+        fn take_clause(.flag: bool = accept_type(t)) -> bool where t: Type { flag }
+        fn run() -> bool {
+            take(bool)
+                and take(.u8'builtin)
+                and take_pair(bool)
+                and take_staged(bool, 7, 1.5)
+                and take_clause<bool>()
+                and take_clause<.u8'builtin>()
+        }",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    // Real runtime nominal values without Copy evidence must remain strictly rejected in P3 defaults.
+    let error = compile_with_protocols(
+        "struct NonCopy { flag: bool }
+        pure fn read_flag(v: NonCopy) -> bool { v.flag }
+        fn take(v: NonCopy, .flag: bool = read_flag(v)) -> bool { flag }",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("P3 stability/termination"), "{error}");
+}
+
+#[test]
+fn pure_functions_allow_const_globals_and_reject_static_and_volatile_globals() {
+    let package = execution_support::compile_with_bindings(
+        "typealias Type = .Type'builtin;
+        trait Splice {
+            assoc RuntimeTarget: Type;
+            fn splice(comptime data: Self) -> RuntimeTarget;
+        }
+        impl Splice for .u8'builtin {
+            assoc RuntimeTarget: Type = .u8'builtin;
+            fn splice(comptime data: .u8'builtin) -> .u8'builtin { data }
+        }
+        const LIMIT: .u8'builtin = 7;
+        pure fn read_const() -> .u8'builtin { LIMIT }
+        pure fn read_const_ref() -> .u8'builtin { LIMIT.ref.* }
+        fn take(.v: .u8'builtin = read_const_ref()) -> .u8'builtin { v }
+        fn run() -> bool {
+            read_const() == 7
+        }",
+        &Default::default(),
+        Some("input.Splice"),
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        package
+            .functions
+            .iter()
+            .any(|f| f.name == "read_const_ref" && f.pure)
+    );
+
+    for source in [
+        "static g: bool = true; pure fn bad() -> bool { g }",
+        "static g: bool = true; pure fn bad() -> bool { g.ref.* }",
+        "static g: bool = false; pure fn bad() -> bool { g = true; true }",
+        "^{ __flurry_volatile: true } struct Reg { value: bool }
+        static reg: Reg = Reg { value: true };
+        pure fn bad() -> bool { reg.value }",
+        "^{ __flurry_volatile: true } struct Reg { value: bool }
+        pure fn bad(p: *Reg) -> bool { p.value.* }",
+    ] {
+        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(error.contains("P4 evidence"), "{source}: {error}");
+    }
+
+    let p3_static_err = compile_with_protocols(
+        "static g: bool = true; fn take(.flag: bool = g) -> bool { flag }",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        p3_static_err.contains("P3 stability/termination"),
+        "{p3_static_err}"
+    );
 }

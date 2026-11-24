@@ -1685,6 +1685,7 @@ mod tests {
             loops: BTreeMap::new(),
             prologue: String::new(),
             body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
             declarations,
             text_constants,
             attr_table: None,

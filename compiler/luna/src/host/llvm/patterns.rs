@@ -519,7 +519,7 @@ impl Emitter<'_> {
                 return Err("host let-else failure must diverge".into());
             }
         } else {
-            self.line("call void @llvm.trap()");
+            self.emit_trap();
             self.line("unreachable");
             self.terminated = true;
         }
@@ -645,7 +645,7 @@ impl Emitter<'_> {
             }
         } else {
             // A total match must never deliver an uninitialized result.
-            self.line("call void @llvm.trap()");
+            self.emit_trap();
             self.line("unreachable");
             self.terminated = true;
         }

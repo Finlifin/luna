@@ -56,7 +56,7 @@ impl Emitter<'_> {
             }
             self.line(format!("ret {} {fields}", ty.llvm()));
         } else if control != "null" {
-            self.line("call void @llvm.trap()");
+            self.emit_trap();
             self.line("unreachable");
         } else if value.ty == Ty::Unit {
             self.line("ret void");

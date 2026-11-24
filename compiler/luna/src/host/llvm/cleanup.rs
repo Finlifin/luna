@@ -923,7 +923,7 @@ impl Emitter<'_> {
                         self.branch(&done);
                         self.label(&next);
                     }
-                    self.line("call void @llvm.trap()");
+                    self.emit_trap();
                     self.line("unreachable");
                     self.label(&done);
                 } else {
@@ -1388,7 +1388,7 @@ impl Emitter<'_> {
                     self.branch(&done);
                     self.label(&next);
                 }
-                self.line("call void @llvm.trap()");
+                self.emit_trap();
                 self.line("unreachable");
                 self.label(&done);
                 continue;
@@ -1411,7 +1411,7 @@ impl Emitter<'_> {
                     self.branch(&done);
                     self.label(&no);
                 }
-                self.line("call void @llvm.trap()");
+                self.emit_trap();
                 self.line("unreachable");
                 self.label(&done);
                 continue;
@@ -2769,6 +2769,7 @@ mod tests {
                 loops: BTreeMap::new(),
                 prologue: String::new(),
                 body: String::new(),
+                emitted_effects: attributes::EmittedBodyEffects::default(),
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
                 attr_table: None,

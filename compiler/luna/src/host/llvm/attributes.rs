@@ -1,12 +1,37 @@
 //! LLVM 23 attribute emission, deduplication, and final machine-IR soundness guards.
 use iir::{BehaviorAttributes, MemoryEffect, PointerParamAttrs};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// Structured machine-IR side-effect flags recorded directly during LLVM emission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct EmittedBodyEffects {
+    pub has_trap_or_unwind: bool,
+    pub has_volatile: bool,
+}
+
+impl EmittedBodyEffects {
+    pub(super) fn merge(&mut self, other: Self) {
+        self.has_trap_or_unwind |= other.has_trap_or_unwind;
+        self.has_volatile |= other.has_volatile;
+    }
+}
+
+impl fmt::Display for EmittedBodyEffects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(emitted-body-effects (trap-or-unwind {}) (volatile {}))",
+            self.has_trap_or_unwind, self.has_volatile
+        )
+    }
+}
 
 /// Deduplicates `attributes #N = { ... }` groups for deterministic LLVM IR emission.
 #[derive(Default)]
 pub(super) struct AttributeTable {
     groups: Vec<String>,
-    index: HashMap<String, usize>,
+    index: BTreeMap<String, usize>,
 }
 
 impl AttributeTable {
@@ -43,23 +68,23 @@ impl AttributeTable {
     }
 }
 
-/// Apply final machine-IR soundness checks on the lowered LLVM prologue and body.
+/// Apply final machine-IR soundness checks using structured side-effect flags
+/// recorded directly during LLVM emission.
 /// Reject speculation across machine traps and volatile memory accesses.
 pub(super) fn sanitize_for_emitted_body(
     attrs: &mut BehaviorAttributes,
-    prologue: &str,
-    body: &str,
+    effects: EmittedBodyEffects,
 ) {
-    let mentions_failure_or_trap = |text: &str| text.contains("@llvm.trap");
-    if mentions_failure_or_trap(prologue) || mentions_failure_or_trap(body) {
+    if effects.has_trap_or_unwind {
         attrs.degrade_for_runtime_failure_access();
     }
-    if prologue.contains(" volatile ") || body.contains(" volatile ") {
+    if effects.has_volatile {
         attrs.degrade_for_volatile_access();
     }
 }
 
 /// Format LLVM 23 function attribute tokens enforcing all P0-P5 soundness red lines.
+#[cfg(test)]
 pub(super) fn format_tokens(attrs: &BehaviorAttributes) -> String {
     format_tokens_inner(attrs, true)
 }
@@ -157,11 +182,43 @@ mod tests {
         assert_eq!(format_tokens(&p4), "nounwind nosync nofree memory(none)");
 
         let mut trapped = p5.clone();
-        sanitize_for_emitted_body(&mut trapped, "", "  call void @llvm.trap()\n");
+        sanitize_for_emitted_body(
+            &mut trapped,
+            EmittedBodyEffects {
+                has_trap_or_unwind: true,
+                has_volatile: false,
+            },
+        );
         let rendered = format_tokens(&trapped);
         assert!(!rendered.contains("memory(none)"));
         assert!(!rendered.contains("speculatable"));
         assert!(!rendered.contains("willreturn"));
         assert!(!rendered.contains("nounwind"));
+
+        let mut volatile = p5.clone();
+        sanitize_for_emitted_body(
+            &mut volatile,
+            EmittedBodyEffects {
+                has_trap_or_unwind: false,
+                has_volatile: true,
+            },
+        );
+        let rendered_vol = format_tokens(&volatile);
+        assert!(rendered_vol.contains("nounwind"));
+        assert!(!rendered_vol.contains("nosync"));
+        assert!(!rendered_vol.contains("memory(none)"));
+        assert!(!rendered_vol.contains("speculatable"));
+
+        let mut clean = p5.clone();
+        sanitize_for_emitted_body(&mut clean, EmittedBodyEffects::default());
+        assert_eq!(clean, p5);
+        assert_eq!(
+            EmittedBodyEffects {
+                has_trap_or_unwind: true,
+                has_volatile: false,
+            }
+            .to_string(),
+            "(emitted-body-effects (trap-or-unwind true) (volatile false))"
+        );
     }
 }
