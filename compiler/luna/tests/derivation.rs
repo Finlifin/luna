@@ -1,6 +1,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 #[test]
@@ -115,9 +116,13 @@ fn strategy_matching_preserves_normal_form_heads() {
 
 #[test]
 fn block_local_requests_do_not_leave_retired_item_references() {
-    let source = "trait Flag {} derive fn enabled for Flag {} struct Record {} fn run()->bool {derive Flag.use(enabled) for Record; true}";
-    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-    assert!(error.contains("block-local derive requests"), "{error}");
+    let source = "trait Flag {fn flag()->bool;} derive fn enabled for Flag {fn flag()->bool {true}} struct Record {} fn run()->bool {derive Flag.use(enabled) for Record; Record.as(Flag).flag()}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(package.implementations.len(), 1);
 }
 
 #[test]
@@ -1222,4 +1227,246 @@ fn strategy_inline_control_does_not_publish_nested_definitions() {
     let source = "trait Flag {fn flag()->bool;} derive fn configured for Flag {inline if false {fn flag()->bool {true}}} struct Subject {} derive Flag.use(configured) for Subject;";
     let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(error.contains("nested generation definitions"), "{error}");
+}
+
+#[test]
+fn strategy_where_clauses_bind_trait_arguments_and_enforce_trait_bounds() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        trait Bound {
+            fn ok() -> bool;
+        }
+        struct Allowed {}
+        impl Bound for Allowed {
+            fn ok() -> bool { true }
+        }
+        struct Denied {}
+        trait Format where T {
+            assoc Item: Type;
+            fn run_fmt() -> bool;
+        }
+        derive fn checked for Format<T>
+        where T :- Bound
+        {
+            assoc Item: Type = T;
+            fn run_fmt() -> bool { T.as(Bound).ok() }
+        }
+        struct Subject {}
+        derive Format<Allowed>.use(checked) for Subject;
+        fn run() -> bool { Subject.as(Format<Allowed>).run_fmt() }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    let rejected = source.replace("Format<Allowed>", "Format<Denied>");
+    let error = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(!error.contains("not implemented"), "{error}");
+    assert!(
+        error.contains("trait bound")
+            || error.contains("obligation")
+            || error.contains("implementation")
+            || error.contains("requirement")
+            || error.contains("Bound"),
+        "{error}"
+    );
+}
+
+#[test]
+fn strategy_where_clauses_work_in_generic_derive_requests_and_reject_missing_bounds() {
+    let source = r#"
+        trait Bound {
+            fn ok() -> bool;
+        }
+        struct Allowed {}
+        impl Bound for Allowed {
+            fn ok() -> bool { true }
+        }
+        trait Format where T {
+            fn run_fmt() -> bool;
+        }
+        derive fn checked for Format<T>
+        where T :- Bound
+        {
+            fn run_fmt() -> bool { T.as(Bound).ok() }
+        }
+        struct Wrapper where U {}
+        derive Format<U>.use(checked) for Wrapper<U> where U :- Bound;
+        fn run() -> bool { Wrapper<Allowed>.as(Format<Allowed>).run_fmt() }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    let missing_bound = source.replace("where U :- Bound;", "where U;");
+    let error = support::compile_with_protocols(&missing_bound, &Default::default()).unwrap_err();
+    assert!(!error.contains("not implemented"), "{error}");
+    assert!(
+        error.contains("obligation")
+            || error.contains("implementation")
+            || error.contains("requirement")
+            || error.contains("Bound"),
+        "{error}"
+    );
+}
+
+#[test]
+fn strategy_where_clauses_support_optional_and_quote_allocator_parameters() {
+    let default_static_source = r#"
+        struct DefaultAlloc { tag: u32 }
+        struct CustomAlloc { tag: u32 }
+        static DEFAULT_ALLOC: DefaultAlloc = DefaultAlloc { tag: 7 };
+        static CUSTOM_ALLOC: CustomAlloc = CustomAlloc { tag: 19 };
+        trait TaggedAlloc {
+            fn tag(self) -> u32;
+        }
+        derive fn with_alloc for TaggedAlloc
+        where .A: Type = DefaultAlloc, quote .allocator: lift *A = DEFAULT_ALLOC.ref
+        {
+            fn tag(self) -> u32 { allocator.tag.* }
+        }
+        struct First {}
+        struct Second {}
+        derive TaggedAlloc.use(with_alloc) for First;
+        derive TaggedAlloc.use(with_alloc<.A = CustomAlloc, .allocator = CUSTOM_ALLOC.ref>) for Second;
+        fn run() -> bool {
+            First{}.as(TaggedAlloc).tag() == 7 and Second{}.as(TaggedAlloc).tag() == 19
+        }
+    "#;
+
+    // Runtime-dependent `quote` clause parameter forwarded from a generic
+    // derive request executes end-to-end with local allocator provenance.
+    let runtime_quote_source = r#"
+        struct Alloc { tag: u32 }
+        struct Container where quote allocator: lift *Alloc {
+            slot: u32,
+        }
+        trait TaggedAlloc {
+            fn tag(self) -> u32;
+        }
+        derive fn by_alloc for TaggedAlloc
+        where quote allocator: lift *Alloc
+        {
+            fn tag(self) -> u32 { allocator.tag.* }
+        }
+        derive TaggedAlloc.use(by_alloc<allocator>) for Container<allocator>
+        where quote allocator: lift *Alloc;
+        fn run() -> bool {
+            let a = Alloc { tag: 11 };
+            let c: Container<a.ref> = Container<a.ref> { slot: 1 };
+            c.as(TaggedAlloc).tag() == 11
+        }
+    "#;
+
+    for (tag, src) in [
+        ("default-static", default_static_source),
+        ("runtime-quote", runtime_quote_source),
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("luna-derive-quote-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.fl"), src).unwrap();
+        let build = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+            .current_dir(&dir)
+            .args([
+                "build",
+                "main.fl",
+                "--entry",
+                "run",
+                "--output",
+                "program",
+                "--opt-level",
+                "0",
+                "--fuel",
+                "10000000",
+                "--sysroot",
+            ])
+            .arg(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library"))
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{tag} build failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = std::process::Command::new(dir.join("program"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "{tag} execution failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, b"(bool true)\n");
+    }
+
+    let unknown_clause = format!(
+        "typealias Type = .Type'builtin;\ntypealias u32 = .u32'builtin;\n{}",
+        default_static_source.replace(
+            "with_alloc<.A = CustomAlloc, .allocator = CUSTOM_ALLOC.ref>",
+            "with_alloc<.missing = CustomAlloc>",
+        )
+    );
+    let error = support::compile_with_protocols(&unknown_clause, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("unknown strategy clause parameter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unused_strategies_are_independently_checked_without_executing_bodies() {
+    let valid = r#"
+        trait Bound {}
+        trait Flag where T {
+            fn flag(self) -> bool;
+        }
+        derive fn unused_loop(value: bool) for Flag<T>
+        where T :- Bound, requires value
+        {
+            while true {}
+            fn flag(self) -> bool { value }
+        }
+        fn run() -> bool { true }
+    "#;
+    let package = support::compile(valid);
+    assert!(package.implementations.is_empty());
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    for (invalid, expected) in [
+        (
+            "struct NotATrait {} derive fn unused for NotATrait {}",
+            "trait",
+        ),
+        (
+            "trait Flag {} derive fn unused for Flag { let bad: bool = (); }",
+            "type mismatch",
+        ),
+        (
+            "trait Flag {} fn runtime_value() -> bool { true } derive fn unused for Flag { let x = runtime_value(); }",
+            "runtime function",
+        ),
+        (
+            "trait Flag {} derive fn unused for Flag { return; }",
+            "strategy statement execution",
+        ),
+    ] {
+        let error = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
+        assert!(
+            error.contains(expected),
+            "expected `{expected}` for `{invalid}`, got: {error}"
+        );
+    }
 }

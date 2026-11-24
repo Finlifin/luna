@@ -4,9 +4,12 @@ use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
 use hir::{ExprKind as E, HirArena, ItemKind, OwnerId, OwnerInfo, OwnerNode, Package};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 mod bindings;
 mod captures;
+mod clauses;
 mod diagnostics;
+
 pub(super) use diagnostics::with_context;
 
 fn unsupported(span: rustc_span::Span, detail: &str) -> Error {
@@ -15,16 +18,45 @@ fn unsupported(span: rustc_span::Span, detail: &str) -> Error {
         format!("derivation expansion requires {detail}, which is not implemented"),
     )
 }
+
 fn charge(fuel: &mut usize, span: rustc_span::Span) -> Result<(), Error> {
     *fuel = fuel
         .checked_sub(1)
         .ok_or_else(|| error(span, "derivation expansion budget exhausted"))?;
     Ok(())
 }
+
 struct StrategyBody<'h> {
     members: Vec<OwnerId>,
     locals: Vec<function_templates::GenerationBinding<'h>>,
     computations: Vec<&'h hir::Expr<'h>>,
+}
+
+fn validate_strategy_parameters<'h>(
+    parameters: &[hir::common::FnParam<'h>],
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    for parameter in parameters {
+        charge(fuel, parameter.span)?;
+        let supported_flags = hir::common::TPARAM_COMPTIME
+            | hir::common::TPARAM_IMPLICIT
+            | hir::common::TPARAM_LAMBDA;
+        if parameter.ty.flags & !supported_flags != 0 {
+            return Err(unsupported(
+                parameter.span,
+                "specialized strategy parameter matching",
+            ));
+        }
+        if !matches!(
+            parameter.ty.kind,
+            hir::common::TyParamKind::Positional(_)
+                | hir::common::TyParamKind::Optional(..)
+                | hir::common::TyParamKind::Varadic(..)
+        ) {
+            return Err(unsupported(parameter.span, "strategy parameter shape"));
+        }
+    }
+    Ok(())
 }
 
 fn members<'h>(
@@ -36,12 +68,6 @@ fn members<'h>(
     let ItemKind::Deriver(def) = &item.kind else {
         return Err(error(item.span, "derive selection must name a strategy"));
     };
-    if !def.clause_params.is_empty() {
-        return Err(unsupported(
-            item.span,
-            "strategy input and contract instantiation",
-        ));
-    }
     let body = source
         .body(def.body)
         .ok_or_else(|| error(item.span, "derivation strategy body missing"))?;
@@ -107,48 +133,48 @@ pub(super) fn expand<'h>(
     let mut requests = Vec::new();
     let mut selected = BTreeSet::new();
     let mut strategies = BTreeMap::new();
+    let mut unused_strategies = Vec::new();
     let mut omitted = BTreeSet::new();
+    let mut fallback_span = source
+        .item(source.root_mod)
+        .map_or(rustc_span::DUMMY_SP, |item| item.span);
     for (owner, info) in source.owners() {
         let item = info.node.expect_item();
         charge(fuel, item.span)?;
         if let ItemKind::Derive(request) = &item.kind {
-            if source.lexical_parents.get(&owner).is_some_and(|parent| {
-                !matches!(
-                    source.item(*parent).map(|item| &item.kind),
-                    Some(ItemKind::Mod(_))
-                )
-            }) {
-                return Err(unsupported(item.span, "block-local derive requests"));
-            }
+            fallback_span = item.span;
             let selection_span = request.strategy.map_or(item.span, |expr| expr.span);
-            let (strategy, arguments, extended) = if let Some(selection) = request.strategy {
-                let (head, arguments, extended) = match selection.kind {
-                    E::Application(head, arguments) => (head, arguments, false),
-                    E::ExtendedApplication(head, arguments) => (head, arguments, true),
-                    _ => (selection, &[] as &[_], false),
+            let (strategy, clause_arguments, arguments, extended) =
+                if let Some(selection) = request.strategy {
+                    let (callee, arguments, extended) = match selection.kind {
+                        E::Application(head, arguments) => (head, arguments, false),
+                        E::ExtendedApplication(head, arguments) => (head, arguments, true),
+                        _ => (selection, &[] as &[_], false),
+                    };
+                    let (head, clause_arguments) = match callee.kind {
+                        E::NFApplication(head, clause_args) => (head, clause_args),
+                        _ => (callee, &[] as &[_]),
+                    };
+                    let E::ResolvedDef { def_id, .. } = head.kind else {
+                        return Err(unsupported(selection.span, "computed strategy selection"));
+                    };
+                    let strategy = source
+                        .definition_owner(def_id)
+                        .ok_or_else(|| error(selection.span, "missing derivation strategy"))?;
+                    (strategy, clause_arguments, arguments, extended)
+                } else {
+                    let strategy = resolved_defaults.get(&owner).copied().ok_or_else(|| {
+                        error(item.span, "no applicable default derivation strategy found")
+                    })?;
+                    (strategy, &[] as &[_], &[] as &[_], false)
                 };
-                let E::ResolvedDef { def_id, .. } = head.kind else {
-                    return Err(unsupported(selection.span, "computed strategy selection"));
-                };
-                let strategy = source
-                    .definition_owner(def_id)
-                    .ok_or_else(|| error(selection.span, "missing derivation strategy"))?;
-                (strategy, arguments, extended)
-            } else {
-                let strategy = resolved_defaults.get(&owner).copied().ok_or_else(|| {
-                    error(item.span, "no applicable default derivation strategy found")
-                })?;
-                (strategy, &[] as &[_], false)
-            };
             if !strategies.contains_key(&strategy) {
                 strategies.insert(strategy, members(source, strategy, fuel)?);
             }
             let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
                 unreachable!()
             };
-            if (!generator.parameters.is_empty()
-                || !generator.clause_constraints.is_empty()
-                || !strategies[&strategy].computations.is_empty())
+            if (!generator.parameters.is_empty() || !strategies[&strategy].computations.is_empty())
                 && !request.clause_params.is_empty()
             {
                 return Err(unsupported(
@@ -156,26 +182,7 @@ pub(super) fn expand<'h>(
                     "strategy inputs in generic request environments",
                 ));
             }
-            for parameter in generator.parameters {
-                charge(fuel, parameter.span)?;
-                let supported_flags = hir::common::TPARAM_COMPTIME
-                    | hir::common::TPARAM_IMPLICIT
-                    | hir::common::TPARAM_LAMBDA;
-                if parameter.ty.flags & !supported_flags != 0 {
-                    return Err(unsupported(
-                        parameter.span,
-                        "specialized strategy parameter matching",
-                    ));
-                }
-                if !matches!(
-                    parameter.ty.kind,
-                    hir::common::TyParamKind::Positional(_)
-                        | hir::common::TyParamKind::Optional(..)
-                        | hir::common::TyParamKind::Varadic(..)
-                ) {
-                    return Err(unsupported(parameter.span, "strategy parameter shape"));
-                }
-            }
+            validate_strategy_parameters(generator.parameters, fuel)?;
             *fuel = fuel
                 .checked_sub(arguments.len().saturating_add(generator.parameters.len()))
                 .ok_or_else(|| error(selection_span, "strategy input routing budget exhausted"))?;
@@ -190,32 +197,48 @@ pub(super) fn expand<'h>(
                     selection_span,
                 )?;
             }
+            let resolved_clauses = clauses::resolve_strategy_clauses(
+                generator,
+                request,
+                clause_arguments,
+                selection_span,
+                fuel,
+            )?;
             selected.insert(strategy);
             omitted.insert(owner);
-            requests.push((owner, request, strategy, arguments, extended));
+            requests.push((
+                owner,
+                request,
+                strategy,
+                arguments,
+                extended,
+                resolved_clauses,
+            ));
         }
     }
     for (owner, info) in source.owners() {
-        charge(fuel, info.node.expect_item().span)?;
-        if matches!(info.node.expect_item().kind, ItemKind::Deriver(_)) {
+        let item = info.node.expect_item();
+        charge(fuel, item.span)?;
+        if let ItemKind::Deriver(generator) = &item.kind {
+            fallback_span = item.span;
             if !selected.contains(&owner) {
-                return Err(unsupported(
-                    info.node.expect_item().span,
-                    "independent checking of unused strategies",
-                ));
+                validate_strategy_parameters(generator.parameters, fuel)?;
+                let body = members(source, owner, fuel)?;
+                omitted.extend(body.members.iter().copied());
+                strategies.insert(owner, body);
+                unused_strategies.push(owner);
+            } else {
+                omitted.extend(strategies[&owner].members.iter().copied());
             }
             omitted.insert(owner);
-            omitted.extend(strategies[&owner].members.iter().copied());
         }
     }
     // All nested source definitions must be accounted for before pruning.
     for (owner, parent) in &source.lexical_parents {
-        charge(fuel, rustc_span::DUMMY_SP)?;
+        let span = source.item(*owner).map_or(fallback_span, |item| item.span);
+        charge(fuel, span)?;
         if omitted.contains(parent) && !omitted.contains(owner) {
-            return Err(unsupported(
-                source.item(*owner).unwrap().span,
-                "nested generation definitions",
-            ));
+            return Err(unsupported(span, "nested generation definitions"));
         }
     }
     for attribute in &source.definition_attributes {
@@ -241,13 +264,17 @@ pub(super) fn expand<'h>(
         }
     }
     let mut candidate = hir::definitions::omit_generation_sources(source, arena, &omitted, fuel)
-        .map_err(|e| error(rustc_span::DUMMY_SP, e.to_string()))?;
+        .map_err(|e| error(fallback_span, e.to_string()))?;
     let mut batch = DefinitionBatch::new(&mut candidate);
     let mut replacements = BTreeMap::new();
+    let mut block_replacements = BTreeMap::new();
+    let mut block_parent_owners = BTreeSet::new();
+    let mut impl_lexical_parents = BTreeMap::new();
     let mut resolution = Vec::new();
     let mut attributes = Vec::new();
     let mut staged = Vec::new();
-    for (request_owner, request, strategy, arguments, extended) in requests {
+    let mut extra_module_items: Vec<(OwnerId, OwnerId)> = Vec::new();
+    for (request_owner, request, strategy, arguments, extended, resolved_clauses) in requests {
         let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
             unreachable!()
         };
@@ -255,6 +282,16 @@ pub(super) fn expand<'h>(
         let mut reserve_owner = || batch.reserve().map_err(|e| error(span, e.to_string()));
         let impl_owner = reserve_owner()?;
         replacements.insert(request_owner, impl_owner);
+        if let Some(&parent) = source.lexical_parents.get(&request_owner)
+            && !matches!(
+                source.item(parent).map(|item| &item.kind),
+                Some(ItemKind::Mod(_))
+            )
+        {
+            block_replacements.insert(request_owner, impl_owner);
+            block_parent_owners.insert(parent);
+            impl_lexical_parents.insert(impl_owner, parent);
+        }
         let pkg = source
             .owner_definition(request_owner)
             .ok_or_else(|| error(span, "derive request has no definition identity"))?
@@ -274,15 +311,133 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(parameter.span, e.to_string()))?;
             mapping.insert(old, new);
         }
+        let mut strategy_to_temp = HashMap::<DefId, DefId>::new();
+        let mut temp_to_expr = HashMap::<DefId, &'h hir::Expr<'h>>::new();
+        let mut inferred_clause_defs = HashMap::<DefId, DefId>::new();
+        let mut extra_strategy_constraints = Vec::new();
+        let mut extra_strategy_computations = Vec::new();
+        let mut synthetic_local = 1u32;
+        for parameter in generator.clause_params {
+            charge(fuel, parameter.span)?;
+            let old = parameter
+                .definition
+                .ok_or_else(|| error(parameter.span, "derive strategy clause has no identity"))?;
+            if let Some(&bound_expr) = resolved_clauses.bound.get(&old) {
+                let temp = batch
+                    .reserve_identity(pkg, fuel)
+                    .map_err(|e| error(parameter.span, e.to_string()))?;
+                mapping.insert(old, temp);
+                strategy_to_temp.insert(old, temp);
+                temp_to_expr.insert(temp, bound_expr);
+                match parameter.kind.unquoted() {
+                    hir::clause::ClauseParamKind::TraitBound(_, bound) => {
+                        let lhs = arena.alloc_expr(hir::Expr {
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            span: parameter.span,
+                            kind: E::ResolvedClauseParam(parameter.name.name, old),
+                        });
+                        synthetic_local += 1;
+                        let bound_check = arena.alloc_expr(hir::Expr {
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            span: parameter.span,
+                            kind: E::TraitBound(lhs, bound),
+                        });
+                        synthetic_local += 1;
+                        extra_strategy_constraints.push(hir::clause::ClauseConstraint {
+                            label: None,
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            kind: hir::clause::ClauseConstraintKind::Requires(bound_check),
+                            span: parameter.span,
+                        });
+                        synthetic_local += 1;
+                    }
+                    hir::clause::ClauseParamKind::Positional(_, ty_expr)
+                    | hir::clause::ClauseParamKind::Optional(_, ty_expr, _)
+                        if !parameter.kind.is_quote() && request.clause_params.is_empty() =>
+                    {
+                        let rhs = arena.alloc_expr(hir::Expr {
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            span: parameter.span,
+                            kind: E::ResolvedClauseParam(parameter.name.name, old),
+                        });
+                        synthetic_local += 1;
+                        let let_decl = arena.alloc_let_decl(hir::decl::LetDecl {
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            pattern: hir::pattern::Pattern {
+                                hir_id: hir::HirId::new(
+                                    strategy,
+                                    hir::ItemLocalId::new(synthetic_local + 1),
+                                ),
+                                kind: hir::pattern::PatternKind::Wild,
+                                span: parameter.span,
+                            },
+                            ty: Some(ty_expr),
+                            init: Some(rhs),
+                            guard: None,
+                            otherwise: None,
+                            mutable: false,
+                            comptime: false,
+                            span: parameter.span,
+                        });
+                        synthetic_local += 2;
+                        extra_strategy_computations.push(arena.alloc_expr(hir::Expr {
+                            hir_id: hir::HirId::new(
+                                strategy,
+                                hir::ItemLocalId::new(synthetic_local),
+                            ),
+                            span: parameter.span,
+                            kind: E::Let(let_decl),
+                        }) as &_);
+                        synthetic_local += 1;
+                    }
+                    _ => {}
+                }
+            } else {
+                let fresh = batch
+                    .reserve_identity(pkg, fuel)
+                    .map_err(|e| error(parameter.span, e.to_string()))?;
+                mapping.insert(old, fresh);
+                inferred_clause_defs.insert(old, fresh);
+            }
+        }
+        let mut combined_constraints = Vec::with_capacity(
+            generator.clause_constraints.len() + extra_strategy_constraints.len(),
+        );
+        combined_constraints.extend(extra_strategy_constraints.iter().cloned());
+        combined_constraints.extend(generator.clause_constraints.iter().cloned());
+        let mut combined_computations = Vec::with_capacity(
+            extra_strategy_computations.len() + strategies[&strategy].computations.len(),
+        );
+        combined_computations.extend(extra_strategy_computations.iter().copied());
+        combined_computations.extend(strategies[&strategy].computations.iter().copied());
+
         let mut captures = HashMap::new();
         let mut capture_slots = HashMap::new();
         let mut inputs = Vec::new();
         let mut input_stages = HashMap::new();
         let local_bindings = &strategies[&strategy].locals;
-        let computations = &strategies[&strategy].computations;
-        let group = if generator.parameters.is_empty()
-            && generator.clause_constraints.is_empty()
-            && computations.is_empty()
+        let has_generic_req_check =
+            !request.clause_params.is_empty() && !combined_constraints.is_empty();
+        let group = if !request.clause_params.is_empty()
+            || (generator.parameters.is_empty()
+                && combined_constraints.is_empty()
+                && combined_computations.is_empty()
+                && resolved_clauses.inferred.is_empty())
         {
             None
         } else {
@@ -445,7 +600,19 @@ pub(super) fn expand<'h>(
         function_templates::relocate_generation_attributes(
             source, arena, strategy, shell, members, &mapping, &captures, fuel,
         )?;
-        let exported = captures::retain_used(&mut drafts, &capture_slots, arena, fuel)?;
+        let exported = captures::retain_used(&mut drafts, &capture_slots, arena, span, fuel)?;
+        for (draft, _) in &mut drafts {
+            clauses::substitute_draft(
+                source,
+                arena,
+                draft,
+                &temp_to_expr,
+                &strategy_to_temp,
+                &mapping,
+                None,
+                fuel,
+            )?;
+        }
         if let Some((owner, identity)) = group {
             let (execution_owner, execution_identity) = execution.unwrap();
             let (subject_owner, subject_identity) = subject_capture.unwrap();
@@ -462,25 +629,64 @@ pub(super) fn expand<'h>(
                     has_clause_param: false,
                 },
             });
-            drafts.push((
-                function_templates::execution_draft(
-                    source,
-                    arena,
-                    execution_owner,
-                    strategy,
-                    subject,
-                    generator.parameters,
-                    generator.clause_constraints,
-                    &input_stages,
-                    local_bindings,
-                    computations,
-                    &exported,
-                    &mapping,
-                    span,
-                    fuel,
-                )?,
-                execution_identity,
-            ));
+            let mut exec_draft = function_templates::execution_draft(
+                source,
+                arena,
+                execution_owner,
+                strategy,
+                subject,
+                generator.parameters,
+                &combined_constraints,
+                &input_stages,
+                local_bindings,
+                &combined_computations,
+                &exported,
+                &mapping,
+                span,
+                fuel,
+            )?;
+            if !resolved_clauses.inferred.is_empty() {
+                let mut exec_clauses = Vec::with_capacity(resolved_clauses.inferred.len());
+                let mut next_local = exec_draft
+                    .bindings
+                    .values()
+                    .map(|id| id.local_id.raw())
+                    .max()
+                    .unwrap_or(0)
+                    + 16;
+                for cp in &resolved_clauses.inferred {
+                    let orig_def = cp.definition.unwrap();
+                    let fresh_def = inferred_clause_defs[&orig_def];
+                    let mut cloned = (*cp).clone();
+                    cloned.hir_id =
+                        hir::HirId::new(execution_owner, hir::ItemLocalId::new(next_local));
+                    next_local += 1;
+                    cloned.definition = Some(fresh_def);
+                    exec_clauses.push(cloned);
+                }
+                let exec_clause_slice = arena.alloc_clause_param_slice(exec_clauses);
+                for cp in exec_clause_slice {
+                    exec_draft.nodes.insert(
+                        cp.hir_id.local_id,
+                        hir::ItemLocalId::new(0),
+                        hir::Node::ClauseParam(cp),
+                    );
+                }
+                if let ItemKind::Fn(sig, _) = &mut exec_draft.item.kind {
+                    sig.clause_params = exec_clause_slice;
+                }
+            }
+            clauses::substitute_draft(
+                source,
+                arena,
+                &mut exec_draft,
+                &temp_to_expr,
+                &strategy_to_temp,
+                &mapping,
+                Some(subject),
+                fuel,
+            )?;
+            drafts.push((exec_draft, execution_identity));
             drafts.push((
                 function_templates::input_group(
                     source,
@@ -494,6 +700,52 @@ pub(super) fn expand<'h>(
                 )?,
                 identity,
             ));
+        }
+        if has_generic_req_check {
+            let target_owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
+            let target_identity = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(span, e.to_string()))?;
+            let caller_owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
+            let caller_identity = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(span, e.to_string()))?;
+            let mut target_clause_defs = HashMap::new();
+            let mut caller_clause_defs = HashMap::new();
+            for parameter in request.clause_params {
+                let old = parameter.definition.unwrap();
+                target_clause_defs.insert(
+                    old,
+                    batch
+                        .reserve_identity(pkg, fuel)
+                        .map_err(|e| error(parameter.span, e.to_string()))?,
+                );
+                caller_clause_defs.insert(
+                    old,
+                    batch
+                        .reserve_identity(pkg, fuel)
+                        .map_err(|e| error(parameter.span, e.to_string()))?,
+                );
+            }
+            let (target_draft, caller_draft) = clauses::generic_request_requirement_check_drafts(
+                source,
+                arena,
+                request,
+                &combined_constraints,
+                &temp_to_expr,
+                &strategy_to_temp,
+                target_owner,
+                target_identity,
+                caller_owner,
+                &target_clause_defs,
+                &caller_clause_defs,
+                span,
+                fuel,
+            )?;
+            drafts.push((target_draft, target_identity));
+            drafts.push((caller_draft, caller_identity));
+            extra_module_items.push((source.root_mod, target_owner));
+            extra_module_items.push((source.root_mod, caller_owner));
         }
         for (draft, identity) in drafts {
             for attribute in &draft.attributes {
@@ -524,12 +776,101 @@ pub(super) fn expand<'h>(
             staged.extend(draft.staged_parameters);
         }
     }
+    for strategy in unused_strategies {
+        let item = source.item(strategy).unwrap();
+        let ItemKind::Deriver(generator) = &item.kind else {
+            unreachable!()
+        };
+        let span = item.span;
+        let pkg = source
+            .owner_definition(strategy)
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "unused derivation strategy has no definition identity",
+                )
+            })?
+            .pkg;
+        let check_owner = batch.reserve().map_err(|e| error(span, e.to_string()))?;
+        let check_identity = batch
+            .reserve_identity(pkg, fuel)
+            .map_err(|e| error(span, e.to_string()))?;
+        let self_def = batch
+            .reserve_identity(pkg, fuel)
+            .map_err(|e| error(span, e.to_string()))?;
+        let mut clause_defs = HashMap::new();
+        for parameter in generator.clause_params {
+            charge(fuel, parameter.span)?;
+            let old = parameter.definition.ok_or_else(|| {
+                error(
+                    parameter.span,
+                    "unused derivation strategy clause has no identity",
+                )
+            })?;
+            let fresh = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(parameter.span, e.to_string()))?;
+            clause_defs.insert(old, fresh);
+        }
+        let mut input_stages = HashMap::new();
+        for parameter in generator.parameters {
+            charge(fuel, parameter.span)?;
+            let stage = batch
+                .reserve_identity(pkg, fuel)
+                .map_err(|e| error(parameter.span, e.to_string()))?;
+            input_stages.insert(parameter.hir_id, stage);
+            if let Some(old) = source.staged_parameter_definitions.get(&parameter.hir_id) {
+                clause_defs.insert(*old, stage);
+            }
+        }
+        let draft = clauses::unused_strategy_check_draft(
+            source,
+            arena,
+            strategy,
+            check_owner,
+            self_def,
+            &clause_defs,
+            &input_stages,
+            &strategies[&strategy],
+            fuel,
+        )?;
+        batch
+            .define(
+                OwnerInfo {
+                    node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                    nodes: draft.nodes,
+                },
+                Some(check_identity),
+                None,
+            )
+            .map_err(|e| error(span, e.to_string()))?;
+        for (id, body) in draft.bodies {
+            batch
+                .body(id, body)
+                .map_err(|e| error(span, e.to_string()))?;
+        }
+        resolution.extend(draft.resolution);
+        attributes.extend(draft.attributes);
+        staged.extend(draft.staged_parameters);
+        extra_module_items.push((source.root_mod, check_owner));
+    }
     batch.set_resolution(resolution);
     batch.set_attributes(attributes);
     batch.set_staged_parameters(staged);
     batch
         .publish(fuel)
-        .map_err(|e| error(rustc_span::DUMMY_SP, e.to_string()))?;
+        .map_err(|e| error(fallback_span, e.to_string()))?;
+    for (impl_owner, parent) in impl_lexical_parents {
+        candidate.lexical_parents.insert(impl_owner, parent);
+    }
+    clauses::rewrite_body_item_owners(
+        source,
+        &mut candidate,
+        arena,
+        &block_parent_owners,
+        &block_replacements,
+        fuel,
+    )?;
     for (owner, original) in source.owners() {
         charge(fuel, original.node.expect_item().span)?;
         let ItemKind::Mod(module) = &original.node.expect_item().kind else {
@@ -546,6 +887,11 @@ pub(super) fn expand<'h>(
             charge(fuel, original.node.expect_item().span)?;
             if let Some(replacement) = replacements.get(child) {
                 current.items.push(*replacement);
+            }
+        }
+        for &(target_mod, extra_owner) in &extra_module_items {
+            if target_mod == owner {
+                current.items.push(extra_owner);
             }
         }
         let item = arena.alloc_item(item);

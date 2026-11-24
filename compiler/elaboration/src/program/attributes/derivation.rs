@@ -7,6 +7,7 @@ pub struct DefaultStrategyMarker {
     pub enabled: bool,
     pub source: n::SourceRange,
 }
+
 impl std::fmt::Display for DefaultStrategyMarker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -31,7 +32,16 @@ pub fn default_strategy_markers(
             .iter()
             .next()
             .map(|(_, value)| value.origin.source)
-            .unwrap_or(n::SourceRange { start: 0, end: 0 });
+            .unwrap_or_else(|| {
+                let owner = match target.target {
+                    hir::AttributeTarget::Definition(owner) => owner,
+                    hir::AttributeTarget::Member(id) => id.owner,
+                };
+                package
+                    .item(owner)
+                    .map(|item| source(item.span))
+                    .unwrap_or(n::SourceRange { start: 0, end: 0 })
+            });
         budget.consume(1).map_err(|e| MergeFailure {
             source: location,
             message: e.to_string(),

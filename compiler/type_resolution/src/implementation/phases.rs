@@ -23,6 +23,7 @@ pub enum PhaseSelection {
     },
     Unselected(Selection),
 }
+
 impl fmt::Display for PhaseSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -228,14 +229,23 @@ impl Index {
             }
         }
         if let Some(id) = complement {
+            let Some(entry) = self.entries.get_mut(&id) else {
+                return Err(Error::InvalidPhaseHead(
+                    "phase complement relationship missing from index".into(),
+                ));
+            };
             self.contributions.insert(head.declaration);
-            self.entries.get_mut(&id).unwrap().phases[wanted] = Some(head.declaration);
+            entry.phases[wanted] = Some(head.declaration);
             self.revision += 1;
             return Ok(id);
         }
         let declaration = head.declaration;
         self.insert(head, budget)?;
-        let entry = self.entries.get_mut(&declaration).unwrap();
+        let Some(entry) = self.entries.get_mut(&declaration) else {
+            return Err(Error::InvalidPhaseHead(
+                "inserted implementation missing from index".into(),
+            ));
+        };
         entry.phases = [None, None];
         entry.phases[wanted] = Some(declaration);
         Ok(declaration)

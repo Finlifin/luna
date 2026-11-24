@@ -12,9 +12,13 @@ fn contains(span: rustc_span::Span, range: nir::program::SourceRange) -> bool {
 
 fn selected(source: &Package<'_>, request: &hir::item::DeriveRequest<'_>) -> Option<OwnerId> {
     let selection = request.strategy?;
-    let head = match selection.kind {
+    let callee = match selection.kind {
         E::Application(head, _) | E::ExtendedApplication(head, _) => head,
         _ => selection,
+    };
+    let head = match callee.kind {
+        E::NFApplication(head, _) => head,
+        _ => callee,
     };
     let E::ResolvedDef { def_id, .. } = head.kind else {
         return None;

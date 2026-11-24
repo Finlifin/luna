@@ -2194,7 +2194,9 @@ impl Checker<'_, '_> {
                         .package
                         .item(owner)
                         .is_some_and(|item| matches!(item.kind, ItemKind::Deriver(_)))
-                        && target.iter().all(|(key, _)| key == "__flurry_derivation_default")
+                        && target
+                            .iter()
+                            .all(|(key, _)| key == "__flurry_derivation_default")
                     {
                         validated_deriver_attrs.insert(owner);
                     }
@@ -2204,16 +2206,43 @@ impl Checker<'_, '_> {
             self.required_steps = self
                 .required_steps
                 .saturating_sub((before - budget.steps) as u64);
-            result.map_err(|failure: attributes::MergeFailure| {
-                let mut diagnostic = error(Span::default(), failure.message);
-                diagnostic.source = failure.source;
-                diagnostic
+            result.map_err(|failure: attributes::MergeFailure| Error {
+                source: failure.source,
+                message: failure.message,
+                notes: Vec::new(),
+                needs_context: false,
+                needs_tactic: false,
+                retry_after_capability_progress: false,
+                incompatible_context: false,
             })?
         };
 
         let mut registry = crate::derivation::Registry::default();
         let mut strategy_owners = BTreeMap::new();
         let mut strategy_params: BTreeMap<DeclarationId, Vec<DeclarationId>> = BTreeMap::new();
+        let mut strategy_param_types: BTreeMap<DeclarationId, Vec<Term>> = BTreeMap::new();
+        let mut strategy_requirements: BTreeMap<DeclarationId, Vec<n::TypePredicate>> =
+            BTreeMap::new();
+        let mut default_coherence_index = crate::implementation::Index::for_builtin_packages(
+            self.target,
+            self.protocols
+                .builtin_implementation_packages
+                .iter()
+                .copied(),
+        );
+        for (id, domain) in self.implementation_index.parameter_domains() {
+            default_coherence_index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| {
+                    let span = self
+                        .parameter_domain_owners
+                        .get(id)
+                        .and_then(|owner| self.package.item(*owner))
+                        .map_or(Span::default(), |item| item.span);
+                    error(span, message)
+                })?;
+        }
+        default_coherence_index.set_normal_form_metadata(self.normal_form_metadata());
         for marker in markers {
             if !marker.enabled {
                 continue;
@@ -2234,7 +2263,7 @@ impl Checker<'_, '_> {
                     crate::derivation::DefaultStrategy {
                         declaration: decl,
                         interface: instance.declaration,
-                        interface_arguments: instance.arguments,
+                        interface_arguments: instance.arguments.clone(),
                     },
                     crate::ptc::Budget::default(),
                 )
@@ -2261,18 +2290,114 @@ impl Checker<'_, '_> {
                             "invalid default derivation strategy ownership"
                         }
                     };
-                    let mut diagnostic = error(Span::default(), message);
-                    diagnostic.source = marker.source;
+                    let mut diagnostic = error(item.span, message);
+                    if marker.source.start < marker.source.end {
+                        diagnostic.source = marker.source;
+                    }
+                    diagnostic
+                })?;
+            let params = self
+                .type_parameters
+                .get(&marker.owner)
+                .cloned()
+                .unwrap_or_default();
+            let param_types = self
+                .trait_parameter_types
+                .get(&marker.owner)
+                .filter(|domains| domains.len() == params.len())
+                .cloned()
+                .unwrap_or_default();
+            let requirements = self
+                .requirements
+                .get(&marker.owner)
+                .cloned()
+                .unwrap_or_default();
+            // Every default strategy uses the same fixed concrete subject so
+            // coherence never introduces a precision tie-break between default
+            // strategies and proves pairwise disjointness over full trait args
+            // and declaration requirements in PTC.
+            default_coherence_index
+                .insert(
+                    crate::implementation::ImplementationHead {
+                        declaration: decl,
+                        interface: Some(instance.declaration),
+                        interface_arguments: instance.arguments,
+                        subject: Term::Primitive(P::Bool),
+                        type_parameters: params.clone(),
+                        parameter_types: param_types.clone(),
+                        requirements: requirements.clone(),
+                    },
+                    crate::ptc::Budget::default(),
+                )
+                .map_err(|failure| {
+                    let mut diagnostic = error(
+                        item.span,
+                        format!(
+                            "default derivation strategy coherence admission failed: {failure:?}"
+                        ),
+                    );
+                    if marker.source.start < marker.source.end {
+                        diagnostic.source = marker.source;
+                    }
                     diagnostic
                 })?;
             strategy_owners.insert(decl, marker.owner);
-            strategy_params.insert(
-                decl,
-                self.type_parameters
-                    .get(&marker.owner)
-                    .cloned()
-                    .unwrap_or_default(),
+            strategy_params.insert(decl, params);
+            strategy_param_types.insert(decl, param_types);
+            strategy_requirements.insert(decl, requirements);
+        }
+
+        let coherence_context = self.nominal_context();
+        let default_coherence = default_coherence_index
+            .check_type_coherence_by_interface(&coherence_context, crate::ptc::Budget::default());
+        if !default_coherence_index.verify_type_coherence_by_interface(
+            &default_coherence,
+            &coherence_context,
+            crate::ptc::Budget::default(),
+        ) {
+            let pair = default_coherence
+                .pairs
+                .iter()
+                .find(|(_, _, result)| !result.is_proved());
+            let (span, notes) = if let Some((left, right, _)) = pair {
+                let right_span = strategy_owners
+                    .get(right)
+                    .and_then(|owner| self.package.item(*owner))
+                    .map_or(Span::default(), |item| item.span);
+                let mut notes = Vec::new();
+                if let Some(left_item) = strategy_owners
+                    .get(left)
+                    .and_then(|owner| self.package.item(*owner))
+                {
+                    notes.push(DiagnosticNote {
+                        source: source(left_item.span),
+                        message: format!(
+                            "conflicting default derivation strategy `{}` registered here",
+                            left_item.ident.name
+                        ),
+                    });
+                }
+                (right_span, notes)
+            } else {
+                let first_span = strategy_owners
+                    .values()
+                    .next()
+                    .and_then(|owner| self.package.item(*owner))
+                    .map_or(Span::default(), |item| item.span);
+                (first_span, Vec::new())
+            };
+            let mut diagnostic = error(
+                span,
+                format!(
+                    "ambiguous default derivation strategies for trait: registration overlap is not provably disjoint{}",
+                    pair.map_or_else(
+                        || " (coherence budget or proof replay incomplete)".into(),
+                        |(left, right, reason)| format!(" between {left} and {right}: {reason}")
+                    )
+                ),
             );
+            diagnostic.notes.extend(notes);
+            return Err(diagnostic);
         }
 
         let mut select_fuel = 100_000usize;
@@ -2307,28 +2432,80 @@ impl Checker<'_, '_> {
                         if candidate.interface_arguments.len() != requested.arguments.len() {
                             return Ok(crate::derivation::Applicability::Rejected);
                         }
-                        if candidate.interface_arguments == requested.arguments {
-                            return Ok(crate::derivation::Applicability::Applicable);
-                        }
                         let params = strategy_params
                             .get(&candidate.declaration)
                             .map(Vec::as_slice)
                             .unwrap_or(&[]);
-                        if params.is_empty() {
+                        let mut bindings = BTreeMap::new();
+                        let matched = if params.is_empty() {
+                            match_default_strategy_pairs(
+                                &candidate.interface_arguments,
+                                &requested.arguments,
+                                &[],
+                                &mut bindings,
+                                fuel,
+                            )?
+                        } else {
+                            match_default_strategy_pairs(
+                                &candidate.interface_arguments,
+                                &requested.arguments,
+                                params,
+                                &mut bindings,
+                                fuel,
+                            )?
+                        };
+                        if !matched {
                             return Ok(crate::derivation::Applicability::Rejected);
                         }
-                        let mut bindings = BTreeMap::new();
-                        if match_default_strategy_pairs(
-                            &candidate.interface_arguments,
-                            &requested.arguments,
-                            params,
-                            &mut bindings,
-                            fuel,
-                        )? {
-                            Ok(crate::derivation::Applicability::Applicable)
-                        } else {
-                            Ok(crate::derivation::Applicability::Rejected)
+                        let reqs = strategy_requirements
+                            .get(&candidate.declaration)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        if !reqs.is_empty() {
+                            let param_types = strategy_param_types
+                                .get(&candidate.declaration)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            let mut binders = Vec::new();
+                            let mut replacements = Vec::new();
+                            for (index, param) in params.iter().enumerate() {
+                                if let Some(bound) = bindings.get(param) {
+                                    let domain = param_types
+                                        .get(index)
+                                        .cloned()
+                                        .unwrap_or_else(|| Term::Primitive(P::Type));
+                                    binders
+                                        .push(nir::DeclarationParameter::comptime(*param, &domain));
+                                    replacements.push(bound.clone());
+                                }
+                            }
+                            let mut pending = false;
+                            for req in reqs {
+                                if default_strategy_predicate_has_trait(req) {
+                                    continue;
+                                }
+                                let Ok(instantiated) =
+                                    req.instantiate_parameters(&binders, &replacements)
+                                else {
+                                    return Ok(crate::derivation::Applicability::Rejected);
+                                };
+                                let goal = crate::ptc::Formula::from_predicate(&instantiated);
+                                match coherence_context.prove(goal, crate::ptc::Budget::default()) {
+                                    crate::ptc::Outcome::Entailed(_) => {}
+                                    crate::ptc::Outcome::NotEntailed(_)
+                                    | crate::ptc::Outcome::IllFormed(_) => {
+                                        return Ok(crate::derivation::Applicability::Rejected);
+                                    }
+                                    crate::ptc::Outcome::Unknown { .. } => {
+                                        pending = true;
+                                    }
+                                }
+                            }
+                            if pending {
+                                return Ok(crate::derivation::Applicability::Pending);
+                            }
                         }
+                        Ok(crate::derivation::Applicability::Applicable)
                     },
                 )
                 .map_err(|failure| {
@@ -2368,6 +2545,42 @@ impl Checker<'_, '_> {
     }
 }
 
+const DEFAULT_STRATEGY_MATCH_MAX_DEPTH: usize = 128;
+
+fn default_strategy_predicate_has_trait(predicate: &n::TypePredicate) -> bool {
+    let mut stack = vec![predicate];
+    while let Some(current) = stack.pop() {
+        match current {
+            n::TypePredicate::Trait(_) => return true,
+            n::TypePredicate::Not(inner) => stack.push(inner),
+            n::TypePredicate::And(parts) | n::TypePredicate::Or(parts) => stack.extend(parts),
+            n::TypePredicate::Bool(_)
+            | n::TypePredicate::Equal(..)
+            | n::TypePredicate::Kind(..) => {}
+        }
+    }
+    false
+}
+
+#[derive(Clone)]
+enum DefaultStrategyMatch<'a> {
+    Term(&'a Term, &'a Term, usize),
+    ErrorSet {
+        pat_errors: &'a [Term],
+        pat_result: &'a Term,
+        act_errors: &'a [Term],
+        act_result: &'a Term,
+        depth: usize,
+    },
+    EffectRow {
+        pat_effects: &'a [nir::effects::Operation],
+        pat_result: &'a Term,
+        act_effects: &'a [nir::effects::Operation],
+        act_result: &'a Term,
+        depth: usize,
+    },
+}
+
 fn match_default_strategy_pairs(
     patterns: &[Term],
     actuals: &[Term],
@@ -2378,24 +2591,326 @@ fn match_default_strategy_pairs(
     if patterns.len() != actuals.len() {
         return Ok(false);
     }
-    for (pattern, actual) in patterns.iter().zip(actuals) {
-        if !match_default_strategy_term(pattern, actual, params, bindings, fuel)? {
-            return Ok(false);
+    let mut obligations: Vec<_> = patterns
+        .iter()
+        .zip(actuals)
+        .rev()
+        .map(|(pattern, actual)| DefaultStrategyMatch::Term(pattern, actual, 0))
+        .collect();
+    match_default_strategy_obligations(&mut obligations, params, bindings, fuel)
+}
+
+fn match_default_strategy_obligations(
+    obligations: &mut Vec<DefaultStrategyMatch<'_>>,
+    params: &[DeclarationId],
+    bindings: &mut BTreeMap<DeclarationId, Term>,
+    fuel: &mut usize,
+) -> Result<bool, crate::implementation::Error> {
+    while let Some(obligation) = obligations.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::implementation::Error::BudgetExhausted)?;
+        match obligation {
+            DefaultStrategyMatch::Term(pattern, actual, depth) => {
+                if depth > DEFAULT_STRATEGY_MATCH_MAX_DEPTH {
+                    return Err(crate::implementation::Error::BudgetExhausted);
+                }
+                if !push_default_strategy_term_step(
+                    pattern,
+                    actual,
+                    params,
+                    bindings,
+                    obligations,
+                    fuel,
+                    depth,
+                )? {
+                    return Ok(false);
+                }
+            }
+            DefaultStrategyMatch::ErrorSet {
+                pat_errors,
+                pat_result,
+                act_errors,
+                act_result,
+                depth,
+            } => {
+                if depth > DEFAULT_STRATEGY_MATCH_MAX_DEPTH {
+                    return Err(crate::implementation::Error::BudgetExhausted);
+                }
+                let mut covered = vec![false; act_errors.len()];
+                return match_default_strategy_error_set(
+                    pat_errors,
+                    0,
+                    pat_result,
+                    act_errors,
+                    act_result,
+                    &mut covered,
+                    obligations,
+                    params,
+                    bindings,
+                    fuel,
+                    depth,
+                );
+            }
+            DefaultStrategyMatch::EffectRow {
+                pat_effects,
+                pat_result,
+                act_effects,
+                act_result,
+                depth,
+            } => {
+                if depth > DEFAULT_STRATEGY_MATCH_MAX_DEPTH {
+                    return Err(crate::implementation::Error::BudgetExhausted);
+                }
+                if pat_effects.len() > act_effects.len() {
+                    return Ok(false);
+                }
+                let mut consumed = vec![false; act_effects.len()];
+                return match_default_strategy_effect_row(
+                    pat_effects,
+                    0,
+                    pat_result,
+                    act_effects,
+                    act_result,
+                    &mut consumed,
+                    obligations,
+                    params,
+                    bindings,
+                    fuel,
+                    depth,
+                );
+            }
         }
     }
     Ok(true)
 }
 
-fn match_default_strategy_term(
-    pattern: &Term,
-    actual: &Term,
+#[allow(clippy::too_many_arguments)]
+fn match_default_strategy_error_set(
+    pat_errors: &[Term],
+    index: usize,
+    pat_result: &Term,
+    act_errors: &[Term],
+    act_result: &Term,
+    covered: &mut [bool],
+    rest: &[DefaultStrategyMatch<'_>],
     params: &[DeclarationId],
     bindings: &mut BTreeMap<DeclarationId, Term>,
     fuel: &mut usize,
+    depth: usize,
 ) -> Result<bool, crate::implementation::Error> {
+    if depth > DEFAULT_STRATEGY_MATCH_MAX_DEPTH {
+        return Err(crate::implementation::Error::BudgetExhausted);
+    }
     *fuel = fuel
         .checked_sub(1)
         .ok_or(crate::implementation::Error::BudgetExhausted)?;
+    if index == pat_errors.len() {
+        let uncovered: Vec<Term> = act_errors
+            .iter()
+            .zip(covered.iter())
+            .filter_map(|(err, &used)| (!used).then(|| err.clone()))
+            .collect();
+        // If pat_result is already bound to an ErrorResult whose labels lie
+        // inside act_errors and cover all uncovered labels, idempotence of
+        // error label sets makes the combined result equal to act_errors ! act_result.
+        if let Term::Rigid { declaration, .. } = pat_result
+            && params.contains(declaration)
+            && let Some(Term::ErrorResult {
+                errors: bound_errors,
+                result: bound_result,
+            }) = bindings.get(declaration)
+        {
+            let labels_match = bound_errors.iter().all(|e| act_errors.contains(e))
+                && uncovered.iter().all(|e| bound_errors.contains(e));
+            if labels_match {
+                let mut next_obligations = rest.to_vec();
+                let mut closed_bindings = BTreeMap::new();
+                if match_default_strategy_pairs(
+                    std::slice::from_ref(bound_result.as_ref()),
+                    std::slice::from_ref(act_result),
+                    &[],
+                    &mut closed_bindings,
+                    fuel,
+                )? && match_default_strategy_obligations(
+                    &mut next_obligations,
+                    params,
+                    bindings,
+                    fuel,
+                )? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        let residual = if uncovered.is_empty() {
+            act_result.clone()
+        } else {
+            Term::error_result(uncovered, act_result.clone())
+        };
+        let mut next_obligations = rest.to_vec();
+        next_obligations.push(DefaultStrategyMatch::Term(pat_result, &residual, depth + 1));
+        return match_default_strategy_obligations(&mut next_obligations, params, bindings, fuel);
+    }
+    let pat_label = &pat_errors[index];
+    for (act_index, act_label) in act_errors.iter().enumerate() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::implementation::Error::BudgetExhausted)?;
+        let mut branch_bindings = bindings.clone();
+        let mut label_obligations =
+            vec![DefaultStrategyMatch::Term(pat_label, act_label, depth + 1)];
+        if !match_default_strategy_obligations(
+            &mut label_obligations,
+            params,
+            &mut branch_bindings,
+            fuel,
+        )? {
+            continue;
+        }
+        let prev_covered = covered[act_index];
+        covered[act_index] = true;
+        if match_default_strategy_error_set(
+            pat_errors,
+            index + 1,
+            pat_result,
+            act_errors,
+            act_result,
+            covered,
+            rest,
+            params,
+            &mut branch_bindings,
+            fuel,
+            depth + 1,
+        )? {
+            *bindings = branch_bindings;
+            return Ok(true);
+        }
+        covered[act_index] = prev_covered;
+    }
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_default_strategy_effect_row(
+    pat_effects: &[nir::effects::Operation],
+    index: usize,
+    pat_result: &Term,
+    act_effects: &[nir::effects::Operation],
+    act_result: &Term,
+    consumed: &mut [bool],
+    rest: &[DefaultStrategyMatch<'_>],
+    params: &[DeclarationId],
+    bindings: &mut BTreeMap<DeclarationId, Term>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, crate::implementation::Error> {
+    if depth > DEFAULT_STRATEGY_MATCH_MAX_DEPTH {
+        return Err(crate::implementation::Error::BudgetExhausted);
+    }
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or(crate::implementation::Error::BudgetExhausted)?;
+    if index == pat_effects.len() {
+        let remaining: Vec<nir::effects::Operation> = act_effects
+            .iter()
+            .zip(consumed.iter())
+            .filter_map(|(op, &used)| (!used).then(|| op.clone()))
+            .collect();
+        let residual = if remaining.is_empty() {
+            act_result.clone()
+        } else {
+            Term::computation(remaining, act_result.clone())
+        };
+        let mut next_obligations = rest.to_vec();
+        next_obligations.push(DefaultStrategyMatch::Term(pat_result, &residual, depth + 1));
+        return match_default_strategy_obligations(&mut next_obligations, params, bindings, fuel);
+    }
+    let pat_op = &pat_effects[index];
+    for (act_index, act_op) in act_effects.iter().enumerate() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::implementation::Error::BudgetExhausted)?;
+        if consumed[act_index]
+            || pat_op.declaration != act_op.declaration
+            || pat_op.arguments.len() != act_op.arguments.len()
+        {
+            continue;
+        }
+        // Skip duplicate identical unconsumed effect entries to avoid redundant branches.
+        if act_effects[..act_index]
+            .iter()
+            .enumerate()
+            .any(|(prev_idx, prev_op)| !consumed[prev_idx] && prev_op == act_op)
+        {
+            continue;
+        }
+        let mut branch_bindings = bindings.clone();
+        let mut op_obligations: Vec<_> = pat_op
+            .arguments
+            .iter()
+            .zip(&act_op.arguments)
+            .rev()
+            .map(|(p, a)| DefaultStrategyMatch::Term(p, a, depth + 1))
+            .collect();
+        if !match_default_strategy_obligations(
+            &mut op_obligations,
+            params,
+            &mut branch_bindings,
+            fuel,
+        )? {
+            continue;
+        }
+        consumed[act_index] = true;
+        if match_default_strategy_effect_row(
+            pat_effects,
+            index + 1,
+            pat_result,
+            act_effects,
+            act_result,
+            consumed,
+            rest,
+            params,
+            &mut branch_bindings,
+            fuel,
+            depth + 1,
+        )? {
+            *bindings = branch_bindings;
+            return Ok(true);
+        }
+        consumed[act_index] = false;
+    }
+    Ok(false)
+}
+
+fn push_default_strategy_pairs<'a>(
+    patterns: &'a [Term],
+    actuals: &'a [Term],
+    obligations: &mut Vec<DefaultStrategyMatch<'a>>,
+    depth: usize,
+) -> bool {
+    if patterns.len() != actuals.len() {
+        return false;
+    }
+    obligations.extend(
+        patterns
+            .iter()
+            .zip(actuals)
+            .rev()
+            .map(|(p, a)| DefaultStrategyMatch::Term(p, a, depth)),
+    );
+    true
+}
+
+fn push_default_strategy_term_step<'a>(
+    pattern: &'a Term,
+    actual: &'a Term,
+    params: &[DeclarationId],
+    bindings: &mut BTreeMap<DeclarationId, Term>,
+    obligations: &mut Vec<DefaultStrategyMatch<'a>>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, crate::implementation::Error> {
     if let Term::Rigid { declaration, sort } = pattern
         && params.contains(declaration)
     {
@@ -2403,13 +2918,27 @@ fn match_default_strategy_term(
             return Ok(false);
         }
         return match bindings.get(declaration) {
-            Some(previous) => Ok(previous == actual),
+            Some(previous) => {
+                if previous == actual {
+                    Ok(true)
+                } else {
+                    let mut closed = BTreeMap::new();
+                    match_default_strategy_pairs(
+                        std::slice::from_ref(previous),
+                        std::slice::from_ref(actual),
+                        &[],
+                        &mut closed,
+                        fuel,
+                    )
+                }
+            }
             None => {
                 bindings.insert(*declaration, actual.clone());
                 Ok(true)
             }
         };
     }
+    let next_depth = depth + 1;
     match (pattern, actual) {
         (
             Term::Nominal {
@@ -2421,7 +2950,7 @@ fn match_default_strategy_term(
                 arguments: b_args,
             },
         ) => Ok(a_decl == b_decl
-            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+            && push_default_strategy_pairs(a_args, b_args, obligations, next_depth)),
         (
             Term::NormalForm {
                 head: a_head,
@@ -2435,11 +2964,11 @@ fn match_default_strategy_term(
             },
         ) => Ok(a_head == b_head
             && a_sort == b_sort
-            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+            && push_default_strategy_pairs(a_args, b_args, obligations, next_depth)),
         (Term::Tuple(a), Term::Tuple(b))
         | (Term::TupleValue(a), Term::TupleValue(b))
         | (Term::ClosureContextValue(a), Term::ClosureContextValue(b)) => {
-            match_default_strategy_pairs(a, b, params, bindings, fuel)
+            Ok(push_default_strategy_pairs(a, b, obligations, next_depth))
         }
         (
             Term::ListConcat {
@@ -2450,20 +2979,22 @@ fn match_default_strategy_term(
                 ty: b_ty,
                 parts: b_parts,
             },
-        ) => Ok(
-            match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
-                && match_default_strategy_pairs(a_parts, b_parts, params, bindings, fuel)?,
-        ),
+        ) => {
+            if !push_default_strategy_pairs(a_parts, b_parts, obligations, next_depth) {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a_ty, b_ty, next_depth));
+            Ok(true)
+        }
         (Term::Record(a), Term::Record(b)) | (Term::RecordValue(a), Term::RecordValue(b)) => {
             if a.len() != b.len() {
                 return Ok(false);
             }
-            for ((a_name, a_val), (b_name, b_val)) in a.iter().zip(b) {
-                if a_name != b_name
-                    || !match_default_strategy_term(a_val, b_val, params, bindings, fuel)?
-                {
+            for ((a_name, a_val), (b_name, b_val)) in a.iter().zip(b).rev() {
+                if a_name != b_name {
                     return Ok(false);
                 }
+                obligations.push(DefaultStrategyMatch::Term(a_val, b_val, next_depth));
             }
             Ok(true)
         }
@@ -2478,9 +3009,15 @@ fn match_default_strategy_term(
                 variant: b_var,
                 fields: b_fields,
             },
-        ) => Ok(a_var == b_var
-            && match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
-            && match_default_strategy_pairs(a_fields, b_fields, params, bindings, fuel)?),
+        ) => {
+            if a_var != b_var
+                || !push_default_strategy_pairs(a_fields, b_fields, obligations, next_depth)
+            {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a_ty, b_ty, next_depth));
+            Ok(true)
+        }
         (
             Term::OptionalValue {
                 ty: a_ty,
@@ -2491,14 +3028,15 @@ fn match_default_strategy_term(
                 value: b_val,
             },
         ) => {
-            if !match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)? {
-                return Ok(false);
-            }
             match (a_val, b_val) {
-                (None, None) => Ok(true),
-                (Some(a), Some(b)) => match_default_strategy_term(a, b, params, bindings, fuel),
-                _ => Ok(false),
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    obligations.push(DefaultStrategyMatch::Term(a, b, next_depth));
+                }
+                _ => return Ok(false),
             }
+            obligations.push(DefaultStrategyMatch::Term(a_ty, b_ty, next_depth));
+            Ok(true)
         }
         (
             Term::ErrorValue {
@@ -2512,30 +3050,39 @@ fn match_default_strategy_term(
                 value: b_val,
             },
         ) => {
-            if !match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
-                || !match_default_strategy_term(a_val, b_val, params, bindings, fuel)?
-            {
-                return Ok(false);
-            }
             match (a_lbl, b_lbl) {
-                (None, None) => Ok(true),
-                (Some(a), Some(b)) => match_default_strategy_term(a, b, params, bindings, fuel),
-                _ => Ok(false),
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    obligations.push(DefaultStrategyMatch::Term(a, b, next_depth));
+                }
+                _ => return Ok(false),
             }
+            obligations.push(DefaultStrategyMatch::Term(a_val, b_val, next_depth));
+            obligations.push(DefaultStrategyMatch::Term(a_ty, b_ty, next_depth));
+            Ok(true)
         }
         (Term::RuntimeField { base: a, index: i }, Term::RuntimeField { base: b, index: j }) => {
-            Ok(i == j && match_default_strategy_term(a, b, params, bindings, fuel)?)
+            if i != j {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a, b, next_depth));
+            Ok(true)
         }
         (Term::Optional(a), Term::Optional(b))
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
         | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => {
-            match_default_strategy_term(a, b, params, bindings, fuel)
+            obligations.push(DefaultStrategyMatch::Term(a, b, next_depth));
+            Ok(true)
         }
-        (Term::NormalFormFunction(a_sig, a_idx), Term::NormalFormFunction(b_sig, b_idx)) => Ok(
-            a_idx == b_idx && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
-        ),
+        (Term::NormalFormFunction(a_sig, a_idx), Term::NormalFormFunction(b_sig, b_idx)) => {
+            if a_idx != b_idx {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a_sig, b_sig, next_depth));
+            Ok(true)
+        }
         (
             Term::ErrorResult {
                 errors: a_err,
@@ -2545,10 +3092,16 @@ fn match_default_strategy_term(
                 errors: b_err,
                 result: b_res,
             },
-        ) => Ok(
-            match_default_strategy_pairs(a_err, b_err, params, bindings, fuel)?
-                && match_default_strategy_term(a_res, b_res, params, bindings, fuel)?,
-        ),
+        ) => {
+            obligations.push(DefaultStrategyMatch::ErrorSet {
+                pat_errors: a_err,
+                pat_result: a_res,
+                act_errors: b_err,
+                act_result: b_res,
+                depth: next_depth,
+            });
+            Ok(true)
+        }
         (
             Term::Computation {
                 effects: a_eff,
@@ -2558,9 +3111,16 @@ fn match_default_strategy_term(
                 effects: b_eff,
                 result: b_res,
             },
-        ) => Ok(
-            a_eff == b_eff && match_default_strategy_term(a_res, b_res, params, bindings, fuel)?
-        ),
+        ) => {
+            obligations.push(DefaultStrategyMatch::EffectRow {
+                pat_effects: a_eff,
+                pat_result: a_res,
+                act_effects: b_eff,
+                act_result: b_res,
+                depth: next_depth,
+            });
+            Ok(true)
+        }
         (
             Term::AssociatedType {
                 origin: a_orig,
@@ -2572,9 +3132,18 @@ fn match_default_strategy_term(
                 arguments: b_args,
                 subject: b_subj,
             },
-        ) => Ok(a_orig == b_orig
-            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?
-            && match_default_strategy_term(a_subj, b_subj, params, bindings, fuel)?),
+        ) => {
+            if a_orig != b_orig {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(a_subj, b_subj, next_depth));
+            Ok(push_default_strategy_pairs(
+                a_args,
+                b_args,
+                obligations,
+                next_depth,
+            ))
+        }
         (
             Term::ContextualClosure {
                 context: a_ctx,
@@ -2584,10 +3153,11 @@ fn match_default_strategy_term(
                 context: b_ctx,
                 signature: b_sig,
             },
-        ) => Ok(
-            match_default_strategy_term(a_ctx, b_ctx, params, bindings, fuel)?
-                && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
-        ),
+        ) => {
+            obligations.push(DefaultStrategyMatch::Term(a_sig, b_sig, next_depth));
+            obligations.push(DefaultStrategyMatch::Term(a_ctx, b_ctx, next_depth));
+            Ok(true)
+        }
         (
             Term::Closure {
                 environment: a_env,
@@ -2597,10 +3167,15 @@ fn match_default_strategy_term(
                 environment: b_env,
                 signature: b_sig,
             },
-        ) => Ok(
-            match_default_strategy_pairs(a_env, b_env, params, bindings, fuel)?
-                && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
-        ),
+        ) => {
+            obligations.push(DefaultStrategyMatch::Term(a_sig, b_sig, next_depth));
+            Ok(push_default_strategy_pairs(
+                a_env,
+                b_env,
+                obligations,
+                next_depth,
+            ))
+        }
         (
             Term::Function {
                 parameters: a_params,
@@ -2614,14 +3189,14 @@ fn match_default_strategy_term(
             if a_params.len() != b_params.len() {
                 return Ok(false);
             }
-            for (ap, bp) in a_params.iter().zip(b_params) {
-                if ap.sort != bp.sort
-                    || !match_default_strategy_term(&ap.ty, &bp.ty, params, bindings, fuel)?
-                {
+            obligations.push(DefaultStrategyMatch::Term(a_res, b_res, next_depth));
+            for (ap, bp) in a_params.iter().zip(b_params).rev() {
+                if ap.sort != bp.sort {
                     return Ok(false);
                 }
+                obligations.push(DefaultStrategyMatch::Term(&ap.ty, &bp.ty, next_depth));
             }
-            match_default_strategy_term(a_res, b_res, params, bindings, fuel)
+            Ok(true)
         }
         (
             Term::FunctionValue {
@@ -2633,7 +3208,7 @@ fn match_default_strategy_term(
                 arguments: b_args,
             },
         ) => Ok(a_decl == b_decl
-            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+            && push_default_strategy_pairs(a_args, b_args, obligations, next_depth)),
         (
             Term::ClosureSnapshot {
                 factory: a_fac,
@@ -2645,25 +3220,30 @@ fn match_default_strategy_term(
             },
         ) => {
             Ok(a_fac == b_fac
-                && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?)
+                && push_default_strategy_pairs(a_args, b_args, obligations, next_depth))
         }
-        (Term::MethodValue(a), Term::MethodValue(b)) => Ok(a.member == b.member
-            && a.interface.declaration == b.interface.declaration
-            && match_default_strategy_pairs(
-                &a.interface.arguments,
-                &b.interface.arguments,
-                params,
-                bindings,
-                fuel,
-            )?
-            && match_default_strategy_term(&a.subject, &b.subject, params, bindings, fuel)?
-            && match_default_strategy_pairs(
+        (Term::MethodValue(a), Term::MethodValue(b)) => {
+            if a.member != b.member || a.interface.declaration != b.interface.declaration {
+                return Ok(false);
+            }
+            if !push_default_strategy_pairs(
                 &a.method_arguments,
                 &b.method_arguments,
-                params,
-                bindings,
-                fuel,
-            )?),
+                obligations,
+                next_depth,
+            ) {
+                return Ok(false);
+            }
+            obligations.push(DefaultStrategyMatch::Term(
+                &a.subject, &b.subject, next_depth,
+            ));
+            Ok(push_default_strategy_pairs(
+                &a.interface.arguments,
+                &b.interface.arguments,
+                obligations,
+                next_depth,
+            ))
+        }
         (
             Term::Primitive(_)
             | Term::ClosureContextType
@@ -2687,6 +3267,151 @@ fn match_default_strategy_term(
             _,
         ) => Ok(pattern == actual),
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod default_strategy_matching_tests {
+    use super::*;
+
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 7, local }
+    }
+
+    fn nominal(local: u32) -> Term {
+        Term::Nominal {
+            declaration: id(local),
+            arguments: vec![],
+        }
+    }
+
+    fn rigid(local: u32) -> Term {
+        Term::Rigid {
+            declaration: id(local),
+            sort: nir::Sort::Type,
+        }
+    }
+
+    #[test]
+    fn error_result_matching_treats_error_labels_as_unordered_sets() {
+        let err_a = nominal(1);
+        let err_b = nominal(2);
+        let param_e = id(100);
+        let bool_ty = Term::Primitive(P::Bool);
+        let pattern = Term::ErrorResult {
+            errors: vec![rigid(100), err_a.clone()],
+            result: Box::new(bool_ty.clone()),
+        };
+        let actual_ab = Term::ErrorResult {
+            errors: vec![err_a.clone(), err_b.clone()],
+            result: Box::new(bool_ty.clone()),
+        };
+        let actual_ba = Term::ErrorResult {
+            errors: vec![err_b.clone(), err_a.clone()],
+            result: Box::new(bool_ty.clone()),
+        };
+        for actual in [&actual_ab, &actual_ba] {
+            let mut bindings = BTreeMap::new();
+            let mut fuel = 10_000;
+            assert!(
+                match_default_strategy_pairs(
+                    std::slice::from_ref(&pattern),
+                    std::slice::from_ref(actual),
+                    &[param_e],
+                    &mut bindings,
+                    &mut fuel,
+                )
+                .unwrap()
+            );
+            assert_eq!(bindings.get(&param_e), Some(&err_b));
+        }
+
+        // Unmatched concrete error label must still fail.
+        let err_c = nominal(3);
+        let actual_bc = Term::ErrorResult {
+            errors: vec![err_b, err_c],
+            result: Box::new(bool_ty),
+        };
+        let mut bindings = BTreeMap::new();
+        let mut fuel = 10_000;
+        assert!(
+            !match_default_strategy_pairs(
+                std::slice::from_ref(&pattern),
+                std::slice::from_ref(&actual_bc),
+                &[param_e],
+                &mut bindings,
+                &mut fuel,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn computation_effects_substitute_bound_params_and_commute_distinct_operations() {
+        let eff_a = id(10);
+        let eff_b = id(11);
+        let param_t = id(100);
+        let param_u = id(101);
+        let bool_ty = Term::Primitive(P::Bool);
+        let u32_ty = Term::Primitive(P::U32);
+        let pattern = Term::Computation {
+            effects: vec![
+                nir::effects::Operation {
+                    declaration: eff_a,
+                    arguments: vec![rigid(100)],
+                },
+                nir::effects::Operation {
+                    declaration: eff_b,
+                    arguments: vec![rigid(101)],
+                },
+            ],
+            result: Box::new(bool_ty.clone()),
+        };
+        let actual = Term::Computation {
+            effects: vec![
+                nir::effects::Operation {
+                    declaration: eff_b,
+                    arguments: vec![u32_ty.clone()],
+                },
+                nir::effects::Operation {
+                    declaration: eff_a,
+                    arguments: vec![bool_ty.clone()],
+                },
+            ],
+            result: Box::new(bool_ty.clone()),
+        };
+        let mut bindings = BTreeMap::new();
+        let mut fuel = 10_000;
+        assert!(
+            match_default_strategy_pairs(
+                std::slice::from_ref(&pattern),
+                std::slice::from_ref(&actual),
+                &[param_t, param_u],
+                &mut bindings,
+                &mut fuel,
+            )
+            .unwrap()
+        );
+        assert_eq!(bindings.get(&param_t), Some(&bool_ty));
+        assert_eq!(bindings.get(&param_u), Some(&u32_ty));
+    }
+
+    #[test]
+    fn deep_nesting_hits_explicit_depth_guard_before_stack_overflow() {
+        let mut deep = Term::Primitive(P::Bool);
+        for _ in 0..140 {
+            deep = Term::Optional(Box::new(deep));
+        }
+        let mut bindings = BTreeMap::new();
+        let mut fuel = 100_000;
+        let result = match_default_strategy_pairs(
+            std::slice::from_ref(&deep),
+            std::slice::from_ref(&deep),
+            &[],
+            &mut bindings,
+            &mut fuel,
+        );
+        assert_eq!(result, Err(crate::implementation::Error::BudgetExhausted));
     }
 }
 

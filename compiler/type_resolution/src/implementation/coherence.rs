@@ -14,6 +14,7 @@ pub enum PairAssessment {
     NotDisjoint(Witness),
     Unresolved(String),
 }
+
 impl PairAssessment {
     pub fn is_proved(&self) -> bool {
         matches!(
@@ -476,6 +477,7 @@ fn separation_goal(
         },
     ))
 }
+
 impl ImplementationHead {
     pub fn assess_type_overlap(
         &self,
@@ -491,6 +493,7 @@ impl ImplementationHead {
         }
         self.assess_subject_overlap(other, context, budget)
     }
+
     pub(super) fn assess_subject_overlap(
         &self,
         other: &Self,
@@ -542,6 +545,7 @@ impl ImplementationHead {
         }
         self.verify_subject_disjointness(other, proof, context, budget)
     }
+
     pub(super) fn verify_subject_disjointness(
         &self,
         other: &Self,
@@ -564,6 +568,7 @@ pub struct CoherenceReport {
     pub open_interfaces: Vec<DeclarationId>,
     pub complete: bool,
 }
+
 impl CoherenceReport {
     /// Only type-head pair obligations, not phase or declaration well-formedness.
     pub fn is_proved(&self) -> bool {
@@ -572,6 +577,7 @@ impl CoherenceReport {
             && self.pairs.iter().all(|(_, _, p)| p.is_proved())
     }
 }
+
 impl Index {
     // Reserve traversal/report work for every pair, but distribute proof work
     // only among same-interface, same-precision obligations. Unrelated traits
@@ -634,9 +640,9 @@ impl Index {
         let entries: Vec<_> = self.entries.values().collect();
         let mut reported = report.pairs.iter();
         for (i, a) in entries.iter().enumerate() {
-            if a.head.interface.is_none() {
+            let Some(a_interface) = a.head.interface else {
                 return false;
-            }
+            };
             for b in &entries[i + 1..] {
                 let Some((left, right, assessment)) = reported.next() else {
                     return false;
@@ -644,10 +650,13 @@ impl Index {
                 if *left != a.head.declaration || *right != b.head.declaration {
                     return false;
                 }
-                let valid = if a.head.interface != b.head.interface {
+                let Some(b_interface) = b.head.interface else {
+                    return false;
+                };
+                let valid = if a_interface != b_interface {
                     matches!(assessment, PairAssessment::DifferentInterfaces)
                 } else {
-                    let key = (a.head.interface.unwrap(), a.precision);
+                    let key = (a_interface, a.precision);
                     let steps = allowances.get(&key).copied().unwrap_or(0);
                     verify_same_interface_pair(a, b, assessment, context, steps, budget)
                 };
@@ -658,9 +667,11 @@ impl Index {
         }
         true
     }
+
     pub fn type_coherence_is_current(&self, report: &CoherenceReport) -> bool {
         report.identity == self.identity && report.revision == self.revision
     }
+
     pub fn check_type_coherence(&self, context: &Context, budget: Budget) -> CoherenceReport {
         let mut report = CoherenceReport {
             identity: self.identity,
@@ -679,14 +690,18 @@ impl Index {
                 report.open_interfaces.push(a.head.declaration);
             }
             for b in &entries[i + 1..] {
-                let assessment = if a.head.interface.is_none() || b.head.interface.is_none() {
-                    PairAssessment::Unresolved("open interface head".into())
-                } else if a.head.interface != b.head.interface {
-                    PairAssessment::DifferentInterfaces
-                } else {
-                    let key = (a.head.interface.unwrap(), a.precision);
-                    let steps = allowances.get(&key).copied().unwrap_or(0);
-                    assess_same_interface_pair(a, b, context, steps, budget)
+                let assessment = match (a.head.interface, b.head.interface) {
+                    (None, _) | (_, None) => {
+                        PairAssessment::Unresolved("open interface head".into())
+                    }
+                    (Some(left), Some(right)) if left != right => {
+                        PairAssessment::DifferentInterfaces
+                    }
+                    (Some(interface), Some(_)) => {
+                        let key = (interface, a.precision);
+                        let steps = allowances.get(&key).copied().unwrap_or(0);
+                        assess_same_interface_pair(a, b, context, steps, budget)
+                    }
                 };
                 report
                     .pairs
@@ -789,6 +804,7 @@ impl Index {
         true
     }
 }
+
 impl fmt::Display for PairAssessment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -807,6 +823,7 @@ impl fmt::Display for PairAssessment {
         }
     }
 }
+
 impl fmt::Display for CoherenceReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -828,6 +845,7 @@ impl fmt::Display for CoherenceReport {
 #[cfg(test)]
 mod pending_error_indices {
     use super::*;
+
     #[test]
     fn incomplete_inner_branch_does_not_prove_implementation_disjointness() {
         let boolean = Term::Primitive(nir::Primitive::Bool);
@@ -863,5 +881,78 @@ mod pending_error_indices {
                     .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn verify_type_coherence_returns_false_cleanly_on_missing_interface() {
+        let mut index = Index::default();
+        let iface = DeclarationId {
+            package: 0,
+            local: 10,
+        };
+        index
+            .insert(
+                ImplementationHead {
+                    declaration: DeclarationId {
+                        package: 0,
+                        local: 1,
+                    },
+                    interface: Some(iface),
+                    interface_arguments: vec![],
+                    subject: Term::Primitive(nir::Primitive::Bool),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                },
+                Budget::default(),
+            )
+            .unwrap();
+        index
+            .insert(
+                ImplementationHead {
+                    declaration: DeclarationId {
+                        package: 0,
+                        local: 2,
+                    },
+                    interface: None,
+                    interface_arguments: vec![],
+                    subject: Term::Primitive(nir::Primitive::Char),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                },
+                Budget::default(),
+            )
+            .unwrap();
+        let report = index.check_type_coherence(&Context::default(), Budget::default());
+        assert!(!report.is_proved());
+        assert_eq!(report.open_interfaces.len(), 1);
+        assert!(!index.verify_type_coherence(&report, &Context::default(), Budget::default()));
+
+        // A forged report claiming complete proof with no open interfaces must
+        // still be rejected cleanly without panicking on missing interface heads.
+        let forged = CoherenceReport {
+            identity: report.identity,
+            revision: report.revision,
+            pairs: vec![(
+                DeclarationId {
+                    package: 0,
+                    local: 1,
+                },
+                DeclarationId {
+                    package: 0,
+                    local: 2,
+                },
+                PairAssessment::DifferentInterfaces,
+            )],
+            open_interfaces: vec![],
+            complete: true,
+        };
+        assert!(!index.verify_type_coherence(&forged, &Context::default(), Budget::default()));
+        assert!(!index.verify_type_coherence_by_interface(
+            &forged,
+            &Context::default(),
+            Budget::default()
+        ));
     }
 }

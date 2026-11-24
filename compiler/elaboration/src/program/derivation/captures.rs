@@ -6,9 +6,9 @@ pub(super) fn retain_used<'h>(
     drafts: &mut [(ClonedMember<'h>, DefId)],
     slots: &HashMap<DefId, usize>,
     arena: &'h HirArena,
+    span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<BTreeSet<usize>, Error> {
-    let span = rustc_span::DUMMY_SP;
     *fuel = fuel
         .checked_sub(drafts.len().saturating_add(slots.len()))
         .ok_or_else(|| error(span, "generation capture analysis budget exhausted"))?;

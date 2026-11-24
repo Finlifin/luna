@@ -257,3 +257,221 @@ fn imported_default_metadata_uses_the_same_multi_package_consumer() {
     );
     assert!(report.contains("(enabled true)"), "{report}");
 }
+
+#[test]
+fn default_strategy_matches_unordered_error_result_label_sets() {
+    let source = r#"
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        enum FirstErr { A, }
+        enum SecondErr { B, }
+        trait ErrorTag where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn handle_closed for ErrorTag<!SecondErr !FirstErr bool> {
+            fn tag() -> u64 { 7 }
+        }
+        struct Subject {}
+        derive ErrorTag<!FirstErr !SecondErr bool> for Subject;
+        fn run() -> bool { Subject.as(ErrorTag<!FirstErr !SecondErr bool>).tag() == 7 }
+    "#;
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR artifact");
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    let parameterized = r#"
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        enum FirstErr { A, }
+        enum SecondErr { B, }
+        enum ThirdErr { C, }
+        trait ErrorTag where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn handle_param for ErrorTag<!E !FirstErr bool>
+        where E
+        {
+            fn tag() -> u64 { 11 }
+        }
+        struct First {}
+        struct Second {}
+        derive ErrorTag<!FirstErr !SecondErr bool> for First;
+        derive ErrorTag<!ThirdErr !FirstErr bool> for Second;
+        fn run() -> bool {
+            First.as(ErrorTag<!FirstErr !SecondErr bool>).tag() == 11
+                and Second.as(ErrorTag<!ThirdErr !FirstErr bool>).tag() == 11
+        }
+    "#;
+    let Artifact::Nir(package) = compile(parameterized, Emit::Nir).unwrap() else {
+        panic!("expected NIR artifact");
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    let unmatched = r#"
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        enum FirstErr { A, }
+        enum SecondErr { B, }
+        trait ErrorTag where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn handle_closed for ErrorTag<!SecondErr !FirstErr bool> {
+            fn tag() -> u64 { 7 }
+        }
+        struct Subject {}
+        derive ErrorTag<!FirstErr bool> for Subject;
+    "#;
+    let error = compile(unmatched, Emit::Nir)
+        .err()
+        .expect("expected unmatched error-result failure");
+    assert!(
+        error.contains("no applicable default derivation strategy found"),
+        "{error}"
+    );
+}
+
+#[test]
+fn default_strategy_matches_parameterized_computation_effects() {
+    let source = r#"
+        typealias u32 = .u32'builtin;
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        effect op(x: T) -> T where T;
+        effect other(x: T) -> T where T;
+        trait EffectTag where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn handle_eff for EffectTag<#op<T> bool>
+        where T
+        {
+            fn tag() -> u64 { 13 }
+        }
+        struct Subject {}
+        derive EffectTag<#op<u32> bool> for Subject;
+        fn run() -> bool { Subject.as(EffectTag<#op<u32> bool>).tag() == 13 }
+    "#;
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR artifact");
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    let wrong_effect = source.replace("op<u32>", "other<u32>");
+    let error = compile(&wrong_effect, Emit::Nir)
+        .err()
+        .expect("expected wrong-effect failure");
+    assert!(
+        error.contains("no applicable default derivation strategy found"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parameterized_default_strategies_enforce_ptc_disjointness_at_registration() {
+    // General vs specific default strategies overlap and must be rejected at
+    // registration time even when no derive requests the overlapping instance.
+    let overlapping_param = r#"
+        typealias u32 = .u32'builtin;
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        trait Format where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn general_fmt for Format<T> where T {
+            fn tag() -> u64 { 1 }
+        }
+        ^default_marker
+        derive fn bool_fmt for Format<bool> {
+            fn tag() -> u64 { 2 }
+        }
+        struct Subject {}
+        derive Format<u32> for Subject;
+    "#;
+    let error = compile(overlapping_param, Emit::Nir)
+        .err()
+        .expect("expected parameterized overlap failure");
+    assert!(
+        error.contains("ambiguous default derivation strategies")
+            && error.contains("not provably disjoint"),
+        "{error}"
+    );
+
+    // Unordered equivalent ErrorResult default strategies must be caught at registration.
+    let overlapping_errors = r#"
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        enum FirstErr { A, }
+        enum SecondErr { B, }
+        trait ErrorTag where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn first_err for ErrorTag<!FirstErr !SecondErr bool> {
+            fn tag() -> u64 { 1 }
+        }
+        ^default_marker
+        derive fn second_err for ErrorTag<!SecondErr !FirstErr bool> {
+            fn tag() -> u64 { 2 }
+        }
+    "#;
+    let error = compile(overlapping_errors, Emit::Nir)
+        .err()
+        .expect("expected unordered error-result overlap failure");
+    assert!(
+        error.contains("ambiguous default derivation strategies")
+            && error.contains("not provably disjoint"),
+        "{error}"
+    );
+
+    // Disjoint PTC-constrained parameterized default strategies are accepted
+    // and uniquely selected according to their constraints.
+    let disjoint_constrained = r#"
+        typealias Type = .Type'builtin;
+        typealias u32 = .u32'builtin;
+        typealias u64 = .u64'builtin;
+        const default_marker = { __flurry_derivation_default: true };
+        trait Format where T {
+            fn tag() -> u64;
+        }
+        ^default_marker
+        derive fn int_fmt for Format<T>
+        where T, requires Type.predicates.is_integer(T)
+        {
+            fn tag() -> u64 { 10 }
+        }
+        ^default_marker
+        derive fn bool_fmt for Format<T>
+        where T, requires Type.predicates.is_boolean(T)
+        {
+            fn tag() -> u64 { 20 }
+        }
+        struct IntSubj {}
+        struct BoolSubj {}
+        derive Format<u32> for IntSubj;
+        derive Format<bool> for BoolSubj;
+        fn run() -> bool {
+            IntSubj.as(Format<u32>).tag() == 10 and BoolSubj.as(Format<bool>).tag() == 20
+        }
+    "#;
+    let Artifact::Nir(package) = compile(disjoint_constrained, Emit::Nir).unwrap() else {
+        panic!("expected NIR artifact");
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
