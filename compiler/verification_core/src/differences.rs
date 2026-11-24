@@ -78,12 +78,21 @@ impl DifferenceBounds {
             graph.bounds[i][i] = Some(Integer::zero());
         }
         for (left, right, bound) in constraints {
-            let a = graph.nodes.binary_search(&left).unwrap();
-            let b = graph.nodes.binary_search(&right).unwrap();
+            let a = graph
+                .nodes
+                .binary_search(&left)
+                .map_err(|_| Unknown::InsufficientBounds)?;
+            let b = graph
+                .nodes
+                .binary_search(&right)
+                .map_err(|_| Unknown::InsufficientBounds)?;
             graph.tighten(a, b, bound, limits)?;
         }
         for i in 1..size {
-            let bound = facts.bound(graph.nodes[i].unwrap(), limits)?;
+            let Some(id) = graph.nodes[i] else {
+                return Err(Unknown::InsufficientBounds);
+            };
+            let bound = facts.bound(id, limits)?;
             graph.tighten(i, 0, limits.integer(&bound.upper)?, limits)?;
             graph.tighten(0, i, bound.lower.negate(&mut limits.arithmetic)?, limits)?;
         }
@@ -117,7 +126,9 @@ impl DifferenceBounds {
         let mut changed = false;
         for (i, node) in self.nodes.iter().enumerate().skip(1) {
             limits.step(1)?;
-            let id = node.unwrap();
+            let Some(id) = *node else {
+                return Err(Unknown::InsufficientBounds);
+            };
             let old = facts.bound(id, limits)?.copy(limits)?;
             let lower = self.bounds[0][i]
                 .as_ref()
@@ -264,13 +275,13 @@ impl DifferenceBounds {
                     let Some(edge) = &self.bounds[x][y] else {
                         continue;
                     };
+                    let (Some(x_id), Some(y_id)) = (self.nodes[x], self.nodes[y]) else {
+                        return Err(Unknown::InsufficientBounds);
+                    };
                     let independent = facts
-                        .bound(self.nodes[x].unwrap(), limits)?
+                        .bound(x_id, limits)?
                         .upper
-                        .subtract(
-                            &facts.bound(self.nodes[y].unwrap(), limits)?.lower,
-                            &mut limits.arithmetic,
-                        )?;
+                        .subtract(&facts.bound(y_id, limits)?.lower, &mut limits.arithmetic)?;
                     let saving = independent.subtract(edge, &mut limits.arithmetic)?;
                     if saving.is_negative() || saving.is_zero() {
                         continue;

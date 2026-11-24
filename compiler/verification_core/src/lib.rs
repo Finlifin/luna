@@ -27,6 +27,16 @@ pub struct PlaceId {
     pub local: u32,
 }
 
+impl fmt::Display for PlaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(place-id (owner {}) (local {}))",
+            self.owner, self.local
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId {
     pub place: PlaceId,
@@ -68,7 +78,17 @@ impl From<ArithmeticError> for Unknown {
 impl fmt::Display for Unknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Arithmetic(e) => write!(f, "(verification-unknown (resource {e:?}))"),
+            Self::Arithmetic(e) => write!(
+                f,
+                "(verification-unknown (resource {}))",
+                match e {
+                    ArithmeticError::InvalidLiteral => "invalid-literal",
+                    ArithmeticError::BudgetExhausted => "budget-exhausted",
+                    ArithmeticError::SizeLimit => "size-limit",
+                    ArithmeticError::DivisionByZero => "division-by-zero",
+                    ArithmeticError::OutOfRange => "out-of-range",
+                }
+            ),
             Self::MissingBound(id) => write!(f, "(verification-unknown (missing-bound {id}))"),
             Self::StaleValue(id) => write!(f, "(verification-unknown (stale-value {id}))"),
             other => write!(
@@ -84,7 +104,9 @@ impl fmt::Display for Unknown {
                     Self::UnreachablePath => "unreachable-path",
                     Self::UnrelatedFacts => "unrelated-facts",
                     Self::ConditionDepthLimit => "condition-depth-limit",
-                    _ => unreachable!(),
+                    Self::Arithmetic(_) | Self::MissingBound(_) | Self::StaleValue(_) => {
+                        return Ok(());
+                    }
                 }
             ),
         }
@@ -95,6 +117,16 @@ impl fmt::Display for Unknown {
 pub struct Limits {
     pub arithmetic: Budget,
     pub max_terms: usize,
+}
+
+impl fmt::Display for Limits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(verification-limits (steps {}) (max-limbs {}) (max-terms {}))",
+            self.arithmetic.steps, self.arithmetic.max_limbs, self.max_terms
+        )
+    }
 }
 
 impl Default for Limits {
@@ -2226,6 +2258,22 @@ mod disjunction_complexity_tests {
             .unwrap();
         let (enclosure, _) = diff.enclosure(&chain, &mut setup).unwrap();
         assert!(enclosure.upper <= Integer::zero());
+    }
+
+    #[test]
+    fn place_id_limits_and_unknown_render_balanced_sexprs() {
+        let place = PlaceId { owner: 7, local: 3 };
+        assert_eq!(place.to_string(), "(place-id (owner 7) (local 3))");
+        let limits = Limits::default();
+        assert_eq!(
+            limits.to_string(),
+            "(verification-limits (steps 1000000) (max-limbs 4096) (max-terms 1024))"
+        );
+        let unknown = Unknown::Arithmetic(ArithmeticError::BudgetExhausted);
+        assert_eq!(
+            unknown.to_string(),
+            "(verification-unknown (resource budget-exhausted))"
+        );
     }
 }
 

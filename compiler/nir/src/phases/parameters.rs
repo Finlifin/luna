@@ -1,9 +1,6 @@
 //! Shared parameter admission for one phase-validation pass. This owns no
 //! allowance: every index, domain and default consumes the caller's fuel.
-use crate::{
-    Term,
-    program::{Package, SourceRange},
-};
+use crate::{Term, program::Package};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +8,7 @@ pub(super) enum Failure {
     Budget(super::Error),
     Invalid(super::Error),
 }
+
 impl Failure {
     pub(super) fn into_diagnostic(self) -> super::Error {
         match self {
@@ -23,7 +21,7 @@ pub(super) fn domains(
     package: &Package,
     fuel: &mut usize,
 ) -> Result<BTreeMap<crate::DeclarationId, Term>, Failure> {
-    let source = SourceRange { start: 0, end: 0 };
+    let source = super::package_source(package);
     let domains = package
         .declaration_parameter_domains_checked(fuel)
         .map_err(|error| match error {
@@ -48,6 +46,7 @@ pub(super) struct InspectionFrame<'a> {
     pub(super) frames: Vec<Vec<crate::Sort>>,
     pub(super) frozen: BTreeSet<crate::program::LocalId>,
 }
+
 impl<'a> InspectionFrame<'a> {
     pub(super) fn new(
         function: crate::contracts::CallableProgram<'a>,
@@ -139,7 +138,7 @@ mod tests {
     use super::*;
     use crate::{
         DeclarationId, Parameter, Primitive, Sort,
-        program::{Expr, ExprKind, Function, FunctionPhase, LocalId},
+        program::{Expr, ExprKind, Function, FunctionPhase, LocalId, SourceRange},
     };
 
     fn function(local: u32) -> Function {

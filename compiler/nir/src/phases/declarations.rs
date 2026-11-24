@@ -8,31 +8,30 @@ pub(super) struct Declarations {
     pub(super) trait_index: trait_index::Index,
     pub(super) callables: std::sync::Arc<crate::callable_source::Positions>,
 }
+
 impl Declarations {
     pub(super) fn new(package: &Package, declaration_fuel: &mut usize) -> Result<Self, Error> {
         // Reserve membership and position tables before allocating them. Their
         // entries hold IDs/slots; parameter and contract payloads are metered by
         // the shared domain/frame validators below.
+        let package_fallback = super::package_source(package);
         *declaration_fuel = declaration_fuel
             .checked_sub(package.enums.len())
             .ok_or_else(|| {
                 Error::budget(
-                    SourceRange { start: 0, end: 0 },
+                    package_fallback,
                     "phase declaration directory budget exhausted",
                 )
             })?;
         let parameter_domains = parameters::domains(package, declaration_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
         let aliases = crate::type_aliases::admit_in(&package.alias_contracts, declaration_fuel)
-            .map_err(|failure| {
-                let source = SourceRange { start: 0, end: 0 };
-                match failure {
-                    crate::type_aliases::ValidationError::Budget => {
-                        Error::budget(source, failure.message())
-                    }
-                    crate::type_aliases::ValidationError::Invalid(message) => {
-                        Error::invalid(source, message)
-                    }
+            .map_err(|failure| match failure {
+                crate::type_aliases::ValidationError::Budget => {
+                    Error::budget(package_fallback, failure.message())
+                }
+                crate::type_aliases::ValidationError::Invalid(message) => {
+                    Error::invalid(package_fallback, message)
                 }
             })?;
         for definition in &package.enums {
@@ -40,12 +39,12 @@ impl Declarations {
                 .validate_encoding_in(package.target)
                 .map_err(|message| Error {
                     kind: ErrorKind::Invalid,
-                    source: SourceRange { start: 0, end: 0 },
+                    source: package_fallback,
                     message,
                 })?;
         }
         let trait_index = trait_index::Index::new(package, declaration_fuel)
-            .map_err(|error| Error::member(SourceRange { start: 0, end: 0 }, error))?;
+            .map_err(|error| Error::member(error.source().unwrap_or(package_fallback), error))?;
         crate::normal_forms::validate_in(package, declaration_fuel).map_err(|error| Error {
             kind: match error {
                 crate::normal_forms::ValidationError::Budget
@@ -54,7 +53,7 @@ impl Declarations {
                 ) => ErrorKind::Budget,
                 _ => ErrorKind::Invalid,
             },
-            source: SourceRange { start: 0, end: 0 },
+            source: super::normal_form_source(package),
             message: error.message(),
         })?;
         let callables = crate::callable_source::Positions::build(package, declaration_fuel)?;

@@ -28,7 +28,10 @@ impl Polynomial {
         if coefficients[3].is_zero() {
             return Ok(false);
         }
-        let bound = facts.bound(variable.unwrap(), limits)?.copy(limits)?;
+        let Some(id) = variable else {
+            return Ok(false);
+        };
+        let bound = facts.bound(id, limits)?.copy(limits)?;
         let one = Integer::from_u128(1);
         let two = Integer::from_u128(2);
         let three_a = coefficients[3].multiply(&Integer::from_u128(3), &mut limits.arithmetic)?;
@@ -120,7 +123,9 @@ impl Polynomial {
                 }
             }
         }
-        let exact = exact.unwrap();
+        let Some(exact) = exact else {
+            return Ok(false);
+        };
         if limits.compare(&exact.lower, &enclosure.lower)?.is_gt() {
             enclosure.lower = exact.lower;
         }

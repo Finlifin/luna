@@ -1,9 +1,9 @@
 //! Stored comptime payloads cannot contain runtime pointers. Type arguments,
 //! code ports and runtime callable signatures describe values rather than store
 //! them; inspecting those as payloads would reject legal metaprogramming.
-use super::{NominalStorageResolver, StorageError};
+use super::{NominalStorageResolver, StorageError, storage_key::OrderedTerm};
 use crate::{Sort, Term, program::Package};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 pub(super) fn validate_resolved(
     ty: &Term,
@@ -30,7 +30,7 @@ struct Query<'a> {
     frames: &'a [Vec<Sort>],
     resolve: NominalStorageResolver<'a>,
     /// Only expansion of a named layout can revisit a type recursively.
-    layouts: Option<HashSet<Term>>,
+    layouts: Option<BTreeSet<OrderedTerm>>,
 }
 
 impl<'a> Query<'a> {
@@ -85,11 +85,12 @@ impl<'a> Query<'a> {
                 _ => Ok(()),
             },
             Term::Nominal { .. } | Term::NormalForm { .. } => {
-                let layouts = self.layouts.get_or_insert_with(HashSet::new);
-                if layouts.contains(ty) {
+                let layouts = self.layouts.get_or_insert_with(BTreeSet::new);
+                let key = OrderedTerm(ty.clone());
+                if layouts.contains(&key) {
                     return Ok(());
                 }
-                layouts.insert(ty.clone());
+                layouts.insert(key);
                 self.check_layout(ty, fuel, next)
             }
             // A callable signature or a Type value can describe pointers.

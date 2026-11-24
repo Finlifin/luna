@@ -117,6 +117,28 @@ pub enum CapturedEnvTarget {
     Invalid { reason: String },
 }
 
+fn write_sexpr_string(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    f.write_str("\"")?;
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        if !matches!(ch, '"' | '\\' | '\n' | '\r' | '\t') && !ch.is_control() {
+            continue;
+        }
+        f.write_str(&value[start..index])?;
+        match ch {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            c => write!(f, "\\u{:04x}", c as u32)?,
+        }
+        start = index + ch.len_utf8();
+    }
+    f.write_str(&value[start..])?;
+    f.write_str("\"")
+}
+
 impl fmt::Display for CapturedEnvTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -142,7 +164,11 @@ impl fmt::Display for CapturedEnvTarget {
                 }
                 f.write_str("))")
             }
-            Self::Invalid { reason } => write!(f, "(invalid (reason {reason:?}))"),
+            Self::Invalid { reason } => {
+                f.write_str("(invalid (reason ")?;
+                write_sexpr_string(f, reason)?;
+                f.write_str("))")
+            }
         }
     }
 }
@@ -172,7 +198,7 @@ impl fmt::Display for CapturedEnv {
             self.deliveries.len()
         )?;
         for root in &self.delivery_locals {
-            write!(f, " ({}:{})", root.owner, root.local)?;
+            write!(f, " {root}")?;
         }
         write!(f, ") (target {}))", self.target)
     }
@@ -1595,5 +1621,13 @@ mod construction_remapping_tests {
         assert_eq!(frame.captured_envs(&dst).len(), 1);
         frame.retire(dst.root).unwrap();
         assert!(frame.captured_envs(&dst).is_empty());
+
+        let invalid = CapturedEnvTarget::Invalid {
+            reason: "bad \"alloc\"\nnext\0".to_string(),
+        };
+        assert_eq!(
+            invalid.to_string(),
+            "(invalid (reason \"bad \\\"alloc\\\"\\nnext\\u0000\"))"
+        );
     }
 }

@@ -1,8 +1,12 @@
 //! Runtime payload admission in a caller's sort environment. Only nominal
 //! expansion can introduce cycles. Ordinary structural children stay borrowed.
-use super::{NominalStorageResolver, Package, Sort, StorageError, Term, storage_domains::Domains};
+use super::{
+    NominalStorageResolver, Package, Sort, StorageError, Term,
+    storage_domains::Domains,
+    storage_key::{OrderedSort, OrderedTerm, ordered_frames},
+};
 use crate::Primitive;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 pub(super) fn validate(
     ty: &Term,
@@ -22,7 +26,7 @@ pub(super) fn validate(
         package,
         resolve,
         domains,
-        seen: HashSet::new(),
+        seen: BTreeSet::new(),
     };
     query.check(ty, frames, 0, fuel)
 }
@@ -31,7 +35,7 @@ struct Payloads<'a> {
     package: &'a Package,
     resolve: NominalStorageResolver<'a>,
     domains: &'a Domains<'a>,
-    seen: HashSet<(Term, Vec<Vec<Sort>>)>,
+    seen: BTreeSet<(OrderedTerm, Vec<Vec<OrderedSort>>)>,
 }
 
 fn charge(fuel: &mut usize, count: usize) -> Result<(), StorageError> {
@@ -145,9 +149,10 @@ impl Payloads<'_> {
                 let scope = if ty.check_scope(&[]).is_ok() {
                     Vec::new()
                 } else {
-                    copy_frames(frames, fuel)?
+                    copy_frames(frames, fuel)?;
+                    ordered_frames(frames)
                 };
-                if !self.seen.insert((ty.clone(), scope)) {
+                if !self.seen.insert((OrderedTerm(ty.clone()), scope)) {
                     return Ok(());
                 }
                 let fields = if let Some(resolve) = self.resolve {

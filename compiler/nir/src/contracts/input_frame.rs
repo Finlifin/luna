@@ -20,6 +20,22 @@ pub enum InputFrameErrorKind {
     Depth,
 }
 
+impl std::fmt::Display for InputFrameErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Signature => "signature",
+            Self::Arity => "arity",
+            Self::DuplicateBinding => "duplicate-binding",
+            Self::DefaultSlot => "default-slot",
+            Self::DefaultScope => "default-scope",
+            Self::UnavailableDefaultBinding => "unavailable-default-binding",
+            Self::Budget => "budget",
+            Self::DefaultBudget => "default-budget",
+            Self::Depth => "depth",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputFrameError {
     pub source: SourceRange,
@@ -71,6 +87,7 @@ impl std::fmt::Display for InputFrameError {
         )
     }
 }
+
 impl std::error::Error for InputFrameError {}
 
 impl<'a> CallableProgram<'a> {

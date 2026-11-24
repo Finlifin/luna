@@ -153,8 +153,9 @@ impl<'a> Inspection<'a> {
     }
 
     fn package_obligations(&self, fuel: &mut usize) -> Result<super::ArithmeticObligations, Error> {
-        let declarations = self.declarations(super::SourceRange { start: 0, end: 0 }, fuel)?;
-        PhaseContext::new(self.package(), declarations).check_package(fuel, self.programs.clone())
+        let package = self.package();
+        let declarations = self.declarations(super::package_source(package), fuel)?;
+        PhaseContext::new(package, declarations).check_package(fuel, self.programs.clone())
     }
 
     /// Publish evidence only after the entire package traversal succeeds.
@@ -218,6 +219,7 @@ mod tests {
             kind: K::Literal(Literal::Bool(true)),
         }
     }
+
     fn identity() -> Function {
         let parameter = LocalId { owner: 1, index: 0 };
         Function {
@@ -259,6 +261,7 @@ mod tests {
             runtime_deliveries: Default::default(),
         }
     }
+
     fn call(function: &Function) -> Expr {
         Expr {
             kind: K::Call {
@@ -279,6 +282,7 @@ mod tests {
             ..flag()
         }
     }
+
     fn source() -> Arc<Package> {
         Arc::new(Package {
             functions: vec![identity()],

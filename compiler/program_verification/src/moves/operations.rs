@@ -262,7 +262,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::ScalarGreaterEqual(left, right)
             | K::BitEqual(left, right)
             | K::BitConcat(left, right)
-            | K::BitIndex(left, right) => {
+            | K::BitIndex(left, right)
+            | K::TypeEqual(left, right) => {
                 self.expr(left, flow, depth + 1)?;
                 self.expr(right, flow, depth + 1)?;
             }

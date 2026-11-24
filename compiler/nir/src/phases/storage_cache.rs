@@ -1,9 +1,13 @@
 //! Storage observations belong to one borrowed, immutable declaration world.
 //! A failed budget is not a reusable statement about a type's storage phase.
-use super::{Package, Sort, StorageError, Term, runtime_storage, storage_domains::Domains};
-use std::collections::HashMap;
+use super::{
+    Package, Sort, StorageError, Term, runtime_storage,
+    storage_domains::Domains,
+    storage_key::{OrderedSort, OrderedTerm, ordered_frames},
+};
+use std::collections::BTreeMap;
 
-type Entries = HashMap<Term, HashMap<usize, Result<(), StorageError>>>;
+type Entries = BTreeMap<OrderedTerm, BTreeMap<usize, Result<(), StorageError>>>;
 
 #[derive(Clone, Copy)]
 enum Phase {
@@ -13,7 +17,7 @@ enum Phase {
 
 pub(super) struct StorageQueries<'a> {
     package: &'a Package,
-    frames: HashMap<Vec<Vec<Sort>>, usize>,
+    frames: BTreeMap<Vec<Vec<OrderedSort>>, usize>,
     runtime_entries: Entries,
     comptime_entries: Entries,
     domains: Domains<'a>,
@@ -24,9 +28,9 @@ impl<'a> StorageQueries<'a> {
     pub(super) fn new(package: &'a Package) -> Self {
         Self {
             package,
-            frames: HashMap::new(),
-            runtime_entries: HashMap::new(),
-            comptime_entries: HashMap::new(),
+            frames: BTreeMap::new(),
+            runtime_entries: BTreeMap::new(),
+            comptime_entries: BTreeMap::new(),
             domains: Domains::new(package),
         }
     }
@@ -37,9 +41,9 @@ impl<'a> StorageQueries<'a> {
     ) -> Self {
         Self {
             package,
-            frames: HashMap::new(),
-            runtime_entries: HashMap::new(),
-            comptime_entries: HashMap::new(),
+            frames: BTreeMap::new(),
+            runtime_entries: BTreeMap::new(),
+            comptime_entries: BTreeMap::new(),
             domains: Domains::admitted(package, declarations),
         }
     }
@@ -59,12 +63,15 @@ impl<'a> StorageQueries<'a> {
         }
         let id = if frames.is_empty() {
             0
-        } else if let Some(id) = self.frames.get(frames) {
-            *id
         } else {
-            let id = self.frames.len() + 1;
-            self.frames.insert(frames.to_vec(), id);
-            id
+            let key = ordered_frames(frames);
+            if let Some(id) = self.frames.get(&key) {
+                *id
+            } else {
+                let id = self.frames.len() + 1;
+                self.frames.insert(key, id);
+                id
+            }
         };
         Ok(StorageScope {
             queries: self,
@@ -103,7 +110,8 @@ impl StorageScope<'_, '_> {
             Phase::Runtime => &mut self.queries.runtime_entries,
             Phase::Comptime => &mut self.queries.comptime_entries,
         };
-        if let Some(scopes) = entries.get(ty) {
+        let key = OrderedTerm(ty.clone());
+        if let Some(scopes) = entries.get(&key) {
             if let Some(result) = scopes.get(&self.id) {
                 return *result;
             }
@@ -131,10 +139,7 @@ impl StorageScope<'_, '_> {
             ),
         };
         if !matches!(result, Err(StorageError::Budget)) {
-            entries
-                .entry(ty.clone())
-                .or_default()
-                .insert(self.id, result);
+            entries.entry(key).or_default().insert(self.id, result);
         }
         result
     }
@@ -320,14 +325,17 @@ mod tests {
         queries
             .check_runtime(&bound, &[vec![Sort::Type]], &mut 1000)
             .unwrap();
-        assert_eq!(queries.runtime_entries[&bound].len(), 2);
+        assert_eq!(
+            queries.runtime_entries[&OrderedTerm(bound.clone())].len(),
+            2
+        );
         let mut fuel = 16;
         assert_eq!(
             queries.check_runtime(&bound, &[vec![Sort::Type; 100]], &mut fuel),
             Err(StorageError::Budget)
         );
         assert!(fuel > 0 && fuel < 16);
-        assert_eq!(queries.runtime_entries[&bound].len(), 2);
+        assert_eq!(queries.runtime_entries[&OrderedTerm(bound)].len(), 2);
 
         let declaration = DeclarationId {
             package: 98,
@@ -385,7 +393,10 @@ mod tests {
             Err(StorageError::Budget)
         );
         assert!(fuel > 0);
-        assert_eq!(queries.comptime_entries[&pointer].len(), 1);
+        assert_eq!(
+            queries.comptime_entries[&OrderedTerm(pointer.clone())].len(),
+            1
+        );
 
         let declaration = DeclarationId {
             package: 98,

@@ -220,6 +220,67 @@ impl<'a> ProgramParts<'a> {
     }
 }
 
+impl ProgramParts<'_> {
+    fn fmt_tail_fields(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(" (type-parameters")?;
+        for parameter in self.type_parameters {
+            write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameters")?;
+        for parameter in self.parameters {
+            write!(f, " {parameter}")?;
+        }
+        if !self.env_parameters.is_empty() {
+            f.write_str(") (env-parameters")?;
+            for env in self.env_parameters {
+                write!(f, " {env}")?;
+            }
+        }
+        f.write_str(") (requires")?;
+        for condition in self.preconditions {
+            write!(f, " {condition}")?;
+        }
+        f.write_str(") (ensures")?;
+        for condition in self.postconditions {
+            write!(f, " {condition}")?;
+        }
+        f.write_str(") (result-binding")?;
+        if let Some(binding) = self.result_binding {
+            write!(f, " {binding}")?;
+        }
+        f.write_str(") (entry-snapshots")?;
+        for snapshot in self.entry_snapshots {
+            write!(f, " {snapshot}")?;
+        }
+        f.write_str(") (defaults")?;
+        for (index, value) in self.defaults {
+            write!(f, " ({index} {value})")?;
+        }
+        f.write_str(") (body")?;
+        if let Some(body) = self.body {
+            write!(f, " {body}")?;
+        }
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for ProgramParts<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(program-parts ")?;
+        match self.declaration {
+            Some(declaration) => write!(f, "{declaration}")?,
+            None => f.write_str("(anonymous)")?,
+        }
+        write!(
+            f,
+            " (phase {}) (unsafe {}) {}",
+            self.phase, self.is_unsafe, self.source
+        )?;
+        self.fmt_tail_fields(f)?;
+        f.write_str(")")
+    }
+}
+
 impl fmt::Display for CallableProgram<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(callable-program ")?;
@@ -232,45 +293,8 @@ impl fmt::Display for CallableProgram<'_> {
             " (phase {}) (unsafe {}) (signature {})",
             self.parts.phase, self.parts.is_unsafe, self.signature
         )?;
-        f.write_str(" (type-parameters")?;
-        for parameter in self.parts.type_parameters {
-            write!(f, " {parameter}")?;
-        }
-        f.write_str(") (parameters")?;
-        for parameter in self.parts.parameters {
-            write!(f, " {parameter}")?;
-        }
-        if !self.parts.env_parameters.is_empty() {
-            f.write_str(") (env-parameters")?;
-            for env in self.parts.env_parameters {
-                write!(f, " {env}")?;
-            }
-        }
-        f.write_str(") (requires")?;
-        for condition in self.parts.preconditions {
-            write!(f, " {condition}")?;
-        }
-        f.write_str(") (ensures")?;
-        for condition in self.parts.postconditions {
-            write!(f, " {condition}")?;
-        }
-        f.write_str(") (result-binding")?;
-        if let Some(binding) = self.parts.result_binding {
-            write!(f, " {binding}")?;
-        }
-        f.write_str(") (entry-snapshots")?;
-        for snapshot in self.parts.entry_snapshots {
-            write!(f, " {snapshot}")?;
-        }
-        f.write_str(") (defaults")?;
-        for (index, value) in self.parts.defaults {
-            write!(f, " ({index} {value})")?;
-        }
-        f.write_str(") (body")?;
-        if let Some(body) = self.parts.body {
-            write!(f, " {body}")?;
-        }
-        f.write_str("))")
+        self.parts.fmt_tail_fields(f)?;
+        f.write_str(")")
     }
 }
 

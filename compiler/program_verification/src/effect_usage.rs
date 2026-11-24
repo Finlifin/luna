@@ -13,17 +13,20 @@ use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     fmt,
 };
+
 mod callables;
 mod control;
 mod returns;
 
 type Uses = Vec<u8>; // 0, 1, or >= 2 / unknown repetition.
+
 fn step(fuel: &mut usize, work: usize) -> Result<(), String> {
     *fuel = fuel
         .checked_sub(work)
         .ok_or("effect usage budget exhausted")?;
     Ok(())
 }
+
 fn add(a: &mut Uses, b: &[u8], factor: u8, fuel: &mut usize) -> Result<(), String> {
     if a.len() != b.len() {
         return Err("effect usage row mismatch".into());
@@ -34,6 +37,7 @@ fn add(a: &mut Uses, b: &[u8], factor: u8, fuel: &mut usize) -> Result<(), Strin
     }
     Ok(())
 }
+
 fn join(a: &mut Uses, b: &[u8], fuel: &mut usize) -> Result<(), String> {
     if a.len() != b.len() {
         return Err("effect usage branch row mismatch".into());
@@ -44,6 +48,7 @@ fn join(a: &mut Uses, b: &[u8], fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
+
 fn width(signature: &Term) -> usize {
     match signature.callable_signature() {
         Term::Function { result, .. } => match result.as_ref() {
@@ -53,6 +58,7 @@ fn width(signature: &Term) -> usize {
         _ => 0,
     }
 }
+
 // This fact describes only normal completion. The caller must first account
 // for all prefix effects and control exits; it cannot be used to skip evaluation.
 fn completed_bool(expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Option<bool>, String> {
@@ -94,28 +100,36 @@ pub struct Installation {
     pub upper: u8,
     pub delivery: Delivery,
 }
+
+impl fmt::Display for Installation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(installation {} (source {} {}) {} (upper {}) (delivery {}))",
+            self.instance,
+            self.source.start,
+            self.source.end,
+            self.operation,
+            match self.upper {
+                0 => "zero",
+                1 => "one",
+                _ => "many",
+            },
+            self.delivery
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub installations: Vec<Installation>,
 }
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(effect-usage (installations")?;
         for item in &self.installations {
-            write!(
-                f,
-                " (installation {} (source {} {}) {} (upper {}) (delivery {}))",
-                item.instance,
-                item.source.start,
-                item.source.end,
-                item.operation,
-                match item.upper {
-                    0 => "zero",
-                    1 => "one",
-                    _ => "many",
-                },
-                item.delivery
-            )?;
+            write!(f, " {item}")?;
         }
         f.write_str("))")
     }
@@ -227,6 +241,7 @@ pub fn check(graph: &Package, plan: &Plan<'_>, fuel: &mut usize) -> Result<Repor
     }
     Ok(report)
 }
+
 struct Analyzer<'a, 'p, 's, 'r> {
     functions: &'a [iir::FunctionInstance],
     all_aliases: &'s [callables::Aliases<'a>],
@@ -238,6 +253,7 @@ struct Analyzer<'a, 'p, 's, 'r> {
     report: Option<&'r mut Report>,
     dependencies: Option<&'r mut BTreeSet<usize>>,
 }
+
 impl Analyzer<'_, '_, '_, '_> {
     fn expr(
         &mut self,
@@ -248,6 +264,7 @@ impl Analyzer<'_, '_, '_, '_> {
     ) -> Result<Uses, String> {
         self.control(root, n, fuel, depth)?.upper(n, fuel)
     }
+
     fn raw(
         &mut self,
         root: &Expr,
@@ -283,6 +300,7 @@ impl Analyzer<'_, '_, '_, '_> {
         })?;
         Ok(result)
     }
+
     fn invoked(&mut self, callee: &Expr, fuel: &mut usize, depth: usize) -> Result<Uses, String> {
         step(fuel, 1)?;
         if depth >= 128 {

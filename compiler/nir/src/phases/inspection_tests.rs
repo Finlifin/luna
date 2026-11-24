@@ -402,3 +402,94 @@ fn a_definition_region_borrows_its_frame_without_publishing_the_owner() {
     assert_eq!(invalid_frame.kind, ErrorKind::Invalid);
     assert_eq!(invalid_frame.source, region.body.source);
 }
+
+#[test]
+fn package_phase_errors_report_declaration_sources_and_sexpr_display() {
+    let f = function(10, Phase::Runtime);
+    let expected_fn_source = f.source;
+    let runtime_id = crate::RuntimeId {
+        instance: 0,
+        local: 7,
+    };
+    let delivery_source = SourceRange { start: 42, end: 58 };
+    let mut package = Package {
+        functions: vec![f],
+        runtime_domains: BTreeMap::from([(runtime_id, Term::Primitive(Primitive::Bool))]),
+        global_runtime_deliveries: BTreeMap::from([(
+            runtime_id,
+            Expr {
+                source: delivery_source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(Literal::Bool(true)),
+            },
+        )]),
+        ..Default::default()
+    };
+    let error = Inspection::new(&package)
+        .check_package(&mut 10_000)
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Invalid);
+    assert_eq!(error.source, delivery_source);
+    assert_eq!(
+        error.to_string(),
+        "(phase-error (kind invalid) (source 42 58) (message \"runtime dependency domain must be a lift type\"))"
+    );
+
+    package.runtime_domains.clear();
+    package.global_runtime_deliveries.clear();
+    let method_source = SourceRange { start: 70, end: 88 };
+    package.traits.push(crate::program::Trait {
+        declaration: crate::DeclarationId {
+            package: 1,
+            local: 50,
+        },
+        self_parameter: crate::DeclarationId {
+            package: 1,
+            local: 51,
+        },
+        name: "Ct".into(),
+        comptime_only: true,
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        parents: vec![],
+        methods: vec![crate::program::MethodContract {
+            source: method_source,
+            phase: crate::program::TraitPhase::Runtime,
+            is_quote: false,
+            pure: false,
+            is_unsafe: false,
+            declaration: crate::DeclarationId {
+                package: 1,
+                local: 52,
+            },
+            name: "bad".into(),
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            }
+            .into(),
+            type_arguments: vec![],
+            type_parameters: vec![],
+            capabilities: vec![],
+            program: Default::default(),
+            parameter_bindings: vec![],
+            by_value_receiver: false,
+            by_reference_receiver: false,
+            requirements: vec![],
+            default: None,
+        }],
+        associated: vec![],
+    });
+    let trait_err = Inspection::new(&package)
+        .check_package(&mut 10_000)
+        .unwrap_err();
+    assert_eq!(trait_err.source, method_source);
+    assert_ne!(trait_err.source, SourceRange { start: 0, end: 0 });
+
+    package.traits.clear();
+    let decl_budget_err = Inspection::new(&package).check_package(&mut 1).unwrap_err();
+    assert_eq!(decl_budget_err.kind, ErrorKind::Budget);
+    assert_eq!(decl_budget_err.source, expected_fn_source);
+}

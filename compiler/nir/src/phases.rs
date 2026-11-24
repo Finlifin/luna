@@ -21,6 +21,7 @@ mod runtime_storage;
 mod storage_cache;
 mod storage_domains;
 mod storage_error;
+mod storage_key;
 mod trait_index;
 mod worklist;
 
@@ -39,6 +40,28 @@ pub enum ErrorKind {
     Budget,
     Depth,
     Invalid,
+}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Budget => "budget",
+            Self::Depth => "depth",
+            Self::Invalid => "invalid",
+        })
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(phase-error (kind {}) {} (message ",
+            self.kind, self.source
+        )?;
+        crate::display::string(f, self.message)?;
+        f.write_str("))")
+    }
 }
 
 impl Error {
@@ -86,9 +109,10 @@ impl Error {
     }
 
     fn member(source: SourceRange, failure: trait_index::Error) -> Self {
+        let source = failure.source().unwrap_or(source);
         match failure {
-            trait_index::Error::Budget => Self::budget(source, failure.message()),
-            trait_index::Error::Invalid(message) => Self::invalid(source, message),
+            trait_index::Error::Budget(_) => Self::budget(source, failure.message()),
+            trait_index::Error::Invalid { message, .. } => Self::invalid(source, message),
         }
     }
 
@@ -240,6 +264,130 @@ pub fn validate_comptime_expression(
     Inspection::new(package).check(body, fuel)
 }
 
+pub(super) fn implementation_entry_source(
+    package: &Package,
+    row: &crate::program::Implementation,
+) -> Option<SourceRange> {
+    row.associated_initializers
+        .first()
+        .map(|(_, init)| init.expression().source)
+        .or_else(|| row.associated.first().map(|(_, expr)| expr.source))
+        .or_else(|| {
+            row.methods.iter().find_map(|(_, id)| {
+                package
+                    .functions
+                    .iter()
+                    .find(|f| f.declaration == *id)
+                    .map(|f| f.source)
+                    .or_else(|| {
+                        package
+                            .quote_templates
+                            .iter()
+                            .find(|f| f.declaration == *id)
+                            .map(|f| f.source)
+                    })
+                    .or_else(|| {
+                        package
+                            .method_links
+                            .iter()
+                            .find(|link| link.declaration == *id)
+                            .map(|link| link.source)
+                    })
+            })
+        })
+}
+
+pub(super) fn runtime_domain_source(
+    package: &Package,
+    id: crate::RuntimeId,
+) -> Option<SourceRange> {
+    package
+        .global_runtime_deliveries
+        .get(&id)
+        .map(|expr| expr.source)
+        .or_else(|| {
+            package
+                .functions
+                .iter()
+                .find_map(|f| f.runtime_deliveries.get(&id).map(|expr| expr.source))
+        })
+        .or_else(|| {
+            package
+                .functions
+                .iter()
+                .find(|f| {
+                    f.env_parameters
+                        .iter()
+                        .any(|env| env.runtime_id == Some(id))
+                })
+                .map(|f| f.source)
+        })
+}
+
+pub(super) fn normal_form_source(package: &Package) -> SourceRange {
+    package
+        .normal_forms
+        .iter()
+        .find_map(|head| {
+            package
+                .functions
+                .iter()
+                .find(|f| f.declaration == head.declaration)
+                .map(|f| f.source)
+                .or_else(|| {
+                    package
+                        .method_links
+                        .iter()
+                        .find(|link| link.declaration == head.declaration)
+                        .map(|link| link.source)
+                })
+        })
+        .unwrap_or_else(|| package_source(package))
+}
+
+pub(super) fn package_source(package: &Package) -> SourceRange {
+    package
+        .functions
+        .first()
+        .map(|f| f.source)
+        .or_else(|| package.quote_templates.first().map(|f| f.source))
+        .or_else(|| {
+            package
+                .traits
+                .iter()
+                .flat_map(|t| t.methods.iter().map(|m| m.source))
+                .next()
+        })
+        .or_else(|| package.method_links.first().map(|m| m.source))
+        .or_else(|| {
+            package
+                .runtime_function_identities
+                .first()
+                .map(|f| f.source)
+        })
+        .or_else(|| {
+            package
+                .implementations
+                .iter()
+                .find_map(|row| implementation_entry_source(package, row))
+        })
+        .or_else(|| {
+            package
+                .global_runtime_deliveries
+                .values()
+                .next()
+                .map(|expr| expr.source)
+        })
+        .or_else(|| {
+            package
+                .statics
+                .iter()
+                .find_map(|s| s.initializer.as_ref().map(|expr| expr.source))
+        })
+        .or_else(|| package.expansion_sources.first().map(|e| e.site))
+        .unwrap_or(SourceRange { start: 0, end: 0 })
+}
+
 struct PhaseContext<'a> {
     package: &'a Package,
     declarations: &'a declarations::Declarations,
@@ -380,11 +528,17 @@ impl<'a> PhaseContext<'a> {
                 machine_owners.functions.insert(method.declaration);
             }
         }
+        let implementation_budget_source = self
+            .package
+            .implementations
+            .iter()
+            .find_map(|row| implementation_entry_source(self.package, row))
+            .unwrap_or_else(|| package_source(self.package));
         *fuel = fuel
             .checked_sub(self.package.implementations.len())
             .ok_or_else(|| {
                 Error::budget(
-                    SourceRange { start: 0, end: 0 },
+                    implementation_budget_source,
                     "associated initializer inspection budget exhausted",
                 )
             })?;
@@ -401,36 +555,51 @@ impl<'a> PhaseContext<'a> {
             }
         }
         if !self.package.runtime_domains.is_empty() {
+            let first_domain_source = self
+                .package
+                .runtime_domains
+                .keys()
+                .find_map(|id| runtime_domain_source(self.package, *id))
+                .unwrap_or_else(|| package_source(self.package));
             *fuel = fuel
                 .checked_sub(self.package.runtime_domains.len())
                 .ok_or_else(|| {
                     Error::budget(
-                        SourceRange { start: 0, end: 0 },
+                        first_domain_source,
                         "runtime domain validation budget exhausted",
                     )
                 })?;
             let mut scope = self
                 .storage_queries
                 .scope(&[], fuel)
-                .map_err(|failure| Error::storage(SourceRange { start: 0, end: 0 }, failure))?;
-            for domain in self.package.runtime_domains.values() {
+                .map_err(|failure| Error::storage(first_domain_source, failure))?;
+            for (id, domain) in &self.package.runtime_domains {
+                let domain_source =
+                    runtime_domain_source(self.package, *id).unwrap_or(first_domain_source);
                 let Term::Lift(inner) = domain else {
                     return Err(Error::invalid(
-                        SourceRange { start: 0, end: 0 },
+                        domain_source,
                         "runtime dependency domain must be a lift type",
                     ));
                 };
                 scope
                     .check_runtime(inner, fuel)
-                    .map_err(|failure| Error::storage(SourceRange { start: 0, end: 0 }, failure))?;
+                    .map_err(|failure| Error::storage(domain_source, failure))?;
             }
         }
         if !self.package.global_runtime_deliveries.is_empty() {
+            let delivery_source = self
+                .package
+                .global_runtime_deliveries
+                .values()
+                .next()
+                .map(|expr| expr.source)
+                .unwrap_or_else(|| package_source(self.package));
             *fuel = fuel
                 .checked_sub(self.package.global_runtime_deliveries.len())
                 .ok_or_else(|| {
                     Error::budget(
-                        SourceRange { start: 0, end: 0 },
+                        delivery_source,
                         "global runtime delivery inspection budget exhausted",
                     )
                 })?;

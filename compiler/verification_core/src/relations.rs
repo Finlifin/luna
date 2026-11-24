@@ -629,7 +629,9 @@ impl Polynomial {
             }
             if point + 1 < volume {
                 for (id, (bound, _)) in &domains {
-                    let value = values.get_mut(id).unwrap();
+                    let Some(value) = values.get_mut(id) else {
+                        return Err(Unknown::InsufficientBounds);
+                    };
                     if limits.compare(value, &bound.upper)?.is_lt() {
                         *value = value.add(&one, &mut limits.arithmetic)?;
                         break;
@@ -835,7 +837,10 @@ impl Polynomial {
                 continue;
             }
             let mut remaining = factors.clone();
-            remaining.remove(remaining.iter().position(|factor| *factor == id).unwrap());
+            let Some(pos) = remaining.iter().position(|factor| *factor == id) else {
+                continue;
+            };
+            remaining.remove(pos);
             let coefficient =
                 coefficient.multiply(&Integer::from_u128(count as u128), &mut limits.arithmetic)?;
             result.insert(remaining, &coefficient, limits)?;
@@ -860,7 +865,10 @@ impl Polynomial {
                 };
                 let mut remaining = factors.clone();
                 for _ in 0..removed {
-                    remaining.remove(remaining.iter().position(|factor| *factor == id).unwrap());
+                    let Some(pos) = remaining.iter().position(|factor| *factor == id) else {
+                        return Err(Unknown::InsufficientBounds);
+                    };
+                    remaining.remove(pos);
                 }
                 let scaled = coefficient
                     .multiply(&Integer::from_u128(multiplier), &mut limits.arithmetic)?;
