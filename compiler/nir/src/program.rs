@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 mod definition_attributes;
 
-pub use definition_attributes::{CallingConvention, DefinitionAttributes};
+pub use definition_attributes::{
+    CallingConvention, DefinitionAttributes, EffectiveAttributeError, EffectiveAttributes,
+    STABLE_SINCE_KEY, is_valid_semver,
+};
 
 mod formed_nominals;
 mod observed_types;
@@ -1454,6 +1457,7 @@ pub enum ExprKind {
     RecordFieldTypes(Box<Expr>),
     RecordFieldNames(Box<Expr>),
     ReflectCallable(Box<Expr>),
+    TypeId(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
     /// Compiler-private packet: definition name and representation Type.
@@ -2313,11 +2317,62 @@ pub struct Static {
     pub initializer: Option<Expr>,
 }
 
+/// Canonical package-level naming and semantic version metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageMetadata {
+    pub name: String,
+    pub version: String,
+}
+
+impl Default for PackageMetadata {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: "0.0.0".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for PackageMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(package-metadata (name ")?;
+        crate::display::string(f, &self.name)?;
+        f.write_str(") (version ")?;
+        crate::display::string(f, &self.version)?;
+        f.write_str("))")
+    }
+}
+
+/// Canonical package/module/declaration path for a nominal or constructor item.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CanonicalDeclarationPath {
+    pub package: u64,
+    pub modules: Vec<String>,
+    pub name: String,
+}
+
+impl fmt::Display for CanonicalDeclarationPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(declaration-path {} (modules", self.package)?;
+        for segment in &self.modules {
+            f.write_str(" ")?;
+            crate::display::string(f, segment)?;
+        }
+        f.write_str(") (name ")?;
+        crate::display::string(f, &self.name)?;
+        f.write_str("))")
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub refinements: crate::refinements::Refinements,
     /// Driver-authorized builtin implementation packages retained across snapshots.
     pub builtin_implementation_packages: std::collections::BTreeSet<u64>,
+    /// Canonical package name and SemVer version keyed by semantic package identity.
+    pub package_metadata: std::collections::BTreeMap<u64, PackageMetadata>,
+    /// Canonical module/item path keyed by declaration identity.
+    pub declaration_paths: std::collections::BTreeMap<DeclarationId, CanonicalDeclarationPath>,
     /// Explicit compilation target facts. None is target-independent; it must
     /// never be filled from the process host during semantic queries.
     pub target: Option<crate::target::TargetData>,
@@ -3936,6 +3991,7 @@ impl fmt::Display for ExprKind {
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::RecordFieldTypes(subject) => write!(f, "(record-field-types {subject})"),
             Self::ReflectCallable(subject) => write!(f, "(reflect-callable {subject})"),
+            Self::TypeId(subject) => write!(f, "(type-id {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::BuildNewtype(request) => write!(f, "(build-newtype {request})"),
             Self::BuildEnum(request) => write!(f, "(build-enum {request})"),
@@ -4173,6 +4229,20 @@ impl fmt::Display for Package {
             }
             f.write_str(")")?;
         }
+        if !self.package_metadata.is_empty() {
+            f.write_str("\n (package-metadata")?;
+            for (pkg, meta) in &self.package_metadata {
+                write!(f, " (package {pkg} {meta})")?;
+            }
+            f.write_str(")")?;
+        }
+        if !self.declaration_paths.is_empty() {
+            f.write_str("\n (declaration-paths")?;
+            for (declaration, path) in &self.declaration_paths {
+                write!(f, " (entry {declaration} {path})")?;
+            }
+            f.write_str(")")?;
+        }
         if !self.global_runtime_deliveries.is_empty() {
             f.write_str("\n (global-runtime-deliveries")?;
             for (runtime, expr) in &self.global_runtime_deliveries {
@@ -4367,6 +4437,7 @@ impl Expr {
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::RecordFieldTypes(_)
                     | ExprKind::ReflectCallable(_)
+                    | ExprKind::TypeId(_)
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildNewtype(_)
                     | ExprKind::BuildEnum(_)
@@ -4486,6 +4557,7 @@ impl Expr {
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::RecordFieldTypes(value)
                 | ExprKind::ReflectCallable(value)
+                | ExprKind::TypeId(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildNewtype(value)
                 | ExprKind::BuildEnum(value)
@@ -4991,6 +5063,7 @@ impl Expr {
             | ExprKind::StructFieldTypes(value)
             | ExprKind::RecordFieldTypes(value)
             | ExprKind::ReflectCallable(value)
+            | ExprKind::TypeId(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildNewtype(value)
             | ExprKind::BuildEnum(value)

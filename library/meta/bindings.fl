@@ -36,6 +36,7 @@ const compiler_struct_field_names: comptime fn(Type) -> List<Symbol> = .struct_f
 const compiler_record_field_types: comptime fn(Type) -> List<Type> = .record_field_types'builtin;
 const compiler_record_field_names: comptime fn(Type) -> List<Symbol> = .record_field_names'builtin;
 const compiler_reflect_callable: comptime fn(Type) -> Object = .reflect_callable'builtin;
+const compiler_type_id: comptime fn(Type) -> u128 = .type_id'builtin;
 const compiler_enum_group_paths: comptime fn(Type) -> List<List<Symbol>> =
     .enum_group_paths'builtin;
 const compiler_enum_variant_paths: comptime fn(Type) -> List<List<Symbol>> =
@@ -189,6 +190,10 @@ pub pure comptime fn record_field_names(subject: Type) -> List<Symbol> {
 
 pub pure comptime fn reflect_callable_object(subject: Type) -> Object {
     compiler_reflect_callable(subject)
+}
+
+pub pure comptime fn type_id(subject: Type) -> u128 {
+    compiler_type_id(subject)
 }
 
 pub pure comptime fn enum_group_paths(subject: Type) -> List<List<Symbol>> {

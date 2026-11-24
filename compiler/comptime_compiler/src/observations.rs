@@ -9,6 +9,7 @@ pub enum Kind {
     StructFields { names: bool },
     RecordFields { names: bool },
     CallableReflection,
+    TypeId,
     EnumStructure(nir::program::EnumStructureQuery),
     SymbolName,
     Text(nir::program::TextQueryKind),
@@ -25,6 +26,7 @@ impl fmt::Display for Kind {
                 write!(f, "record-field-{}", if *names { "names" } else { "types" })
             }
             Self::CallableReflection => write!(f, "reflect-callable"),
+            Self::TypeId => write!(f, "type-id"),
             Self::EnumStructure(query) => write!(f, "(enum-structure {query})"),
             Self::NewtypeRepresentation => write!(f, "newtype-representation"),
             Self::DefinitionAttributes => write!(f, "definition-attributes"),

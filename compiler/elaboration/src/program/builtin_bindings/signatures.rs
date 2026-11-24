@@ -215,6 +215,7 @@ pub(super) fn callable(
         }
         "newtype_representation" => (vec![p(P::Type)], p(P::Type)),
         "reflect_callable" => (vec![p(P::Type)], p(P::Object)),
+        "type_id" => (vec![p(P::Type)], p(P::U128)),
         "struct_field_types" | "record_field_types" => (vec![p(P::Type)], list(p(P::Type))?),
         "struct_field_names"
         | "record_field_names"

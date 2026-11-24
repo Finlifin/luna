@@ -86,6 +86,7 @@ impl Interpreter<'_> {
             K::RecordFieldTypes(operand) => (O::RecordFields { names: false }, operand.as_ref()),
             K::RecordFieldNames(operand) => (O::RecordFields { names: true }, operand.as_ref()),
             K::ReflectCallable(operand) => (O::CallableReflection, operand.as_ref()),
+            K::TypeId(operand) => (O::TypeId, operand.as_ref()),
             K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
@@ -165,6 +166,22 @@ impl Interpreter<'_> {
                     || (matches!(observation.kind, O::CallableReflection)
                         && *input != never
                         && *input != Term::Primitive(Primitive::Type))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::TypeId => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Primitive(Primitive::U128)
+                };
+                if *output != expected
+                    || (*input != never && *input != Term::Primitive(Primitive::Type))
                 {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
@@ -405,6 +422,7 @@ impl Interpreter<'_> {
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
             O::RecordFields { names } => self.observe_record_fields(value, output, names, source),
             O::CallableReflection => self.observe_callable(value, source),
+            O::TypeId => self.observe_type_id(value, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {
                 self.check_value_type(&value, input, Some(source))?;

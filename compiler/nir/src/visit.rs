@@ -764,6 +764,7 @@ fn walk_mut(
                     | K::StructFieldTypes(value)
                     | K::RecordFieldTypes(value)
                     | K::ReflectCallable(value)
+                    | K::TypeId(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)
                     | K::BuildMetadata {

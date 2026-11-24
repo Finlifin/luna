@@ -2796,6 +2796,7 @@ impl<'a> Interpreter<'a> {
             | K::RecordFieldTypes(_)
             | K::RecordFieldNames(_)
             | K::ReflectCallable(_)
+            | K::TypeId(_)
             | K::TypeLayout { .. } => self.eval_observation(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),

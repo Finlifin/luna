@@ -211,6 +211,7 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
         "record_field_types" => K::RecordFieldTypes(subject),
         "record_field_names" => K::RecordFieldNames(subject),
         "reflect_callable" => K::ReflectCallable(subject),
+        "type_id" => K::TypeId(subject),
         _ => K::EnumStructure {
             subject,
             query: match name {

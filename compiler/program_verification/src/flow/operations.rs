@@ -127,6 +127,7 @@ impl Walker<'_> {
             | K::RecordFieldTypes(subject)
             | K::RecordFieldNames(subject)
             | K::ReflectCallable(subject)
+            | K::TypeId(subject)
             | K::BuildStruct(subject)
             | K::BuildNewtype(subject)
             | K::BuildEnum(subject)

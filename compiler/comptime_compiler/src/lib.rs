@@ -1855,6 +1855,7 @@ fn compile_root<'a>(
                     | K::RecordFieldTypes(_)
                     | K::RecordFieldNames(_)
                     | K::ReflectCallable(_)
+                    | K::TypeId(_)
                     | K::EnumStructure { .. }
                     | K::TypeLayout { .. } => {
                         use observations::{Kind as O, Observation};
@@ -1880,6 +1881,7 @@ fn compile_root<'a>(
                             K::ReflectCallable(operand) => {
                                 (O::CallableReflection, operand.as_ref())
                             }
+                            K::TypeId(operand) => (O::TypeId, operand.as_ref()),
                             K::EnumStructure { subject, query } => {
                                 (O::EnumStructure(*query), subject.as_ref())
                             }

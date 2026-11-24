@@ -78,6 +78,8 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     let n::Package {
         refinements,
         builtin_implementation_packages,
+        package_metadata,
+        declaration_paths,
         target,
         tests,
         function_parameters,
@@ -116,6 +118,8 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     meter.width(1)?;
     for count in [
         builtin_implementation_packages.len(),
+        package_metadata.len(),
+        declaration_paths.len(),
         tests.len(),
         function_parameters.len(),
         runtime_instances.len(),
@@ -227,6 +231,22 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     for expr in global_runtime_deliveries.values() {
         meter.node(Node::Expr(expr))?;
     }
+    for meta in package_metadata.values() {
+        meter.width(
+            meta.name
+                .len()
+                .saturating_add(meta.version.len())
+                .saturating_add(1),
+        )?;
+    }
+    for path in declaration_paths.values() {
+        meter.width(
+            path.modules
+                .len()
+                .saturating_add(path.name.len())
+                .saturating_add(1),
+        )?;
+    }
     meter.width(volatile_storage.entry_count())?;
     meter.width(match_plans.entry_count())?;
     // No clone above this point. Failure leaves the caller's source untouched
@@ -234,6 +254,8 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     Ok(n::Package {
         refinements: refinements.clone(),
         builtin_implementation_packages: builtin_implementation_packages.clone(),
+        package_metadata: package_metadata.clone(),
+        declaration_paths: declaration_paths.clone(),
         target: *target,
         tests: tests.clone(),
         function_parameters: function_parameters.clone(),

@@ -525,12 +525,16 @@ fn compile_bound_for_target_with_invocation(
         options.emit,
         Emit::Nir | Emit::Attributes | Emit::MergedAttributes
     ) {
-        let protocols = crate::protocols::type_constructors::resolve_source(
+        let mut protocols = crate::protocols::type_constructors::resolve_source(
             package.package(),
             &[(0, package_identity, "input")],
             selectors,
             protocols,
         )?;
+        protocols
+            .package_names
+            .entry(package_identity)
+            .or_insert_with(|| "input".to_string());
         if matches!(options.emit, Emit::Attributes | Emit::MergedAttributes) {
             let attributes = elaboration::program::attributes::inspect(
                 package.package(),
@@ -614,6 +618,51 @@ fn compile_sysroot(
     target: Option<nir::target::TargetData>,
     invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_sysroot_internal(
+        options,
+        identity,
+        root,
+        &[],
+        protocols,
+        selectors,
+        target,
+        invocation,
+    )
+}
+
+/// Compile a primary source against `--sysroot` plus additional explicit library packages.
+pub fn compile_sysroot_with_extra_packages(
+    options: &Options,
+    identity: u64,
+    root: &std::path::Path,
+    extra_packages: &[(&str, u64, &std::path::Path)],
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_sysroot_internal(
+        options,
+        identity,
+        root,
+        extra_packages,
+        protocols,
+        selectors,
+        target,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_sysroot_internal(
+    options: &Options,
+    identity: u64,
+    root: &std::path::Path,
+    extra_packages: &[(&str, u64, &std::path::Path)],
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+    invocation: Option<&mut crate::packages::BuilderInvocation<'_>>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     use crate::packages::SourcePackage;
     let mut packages = vec![SourcePackage {
         resolution_id: 0,
@@ -624,6 +673,8 @@ fn compile_sysroot(
     // Standalone-driver identities are local to this package set. Build tools
     // needing persistent identities use packages::compile_with_builtin instead.
     let mut next_identity = 1u64;
+    let extra_ids: std::collections::BTreeSet<u64> =
+        extra_packages.iter().map(|&(_, id, _)| id).collect();
     for name in ["builtin", "std", "meta", "build", "attrs", "verification"] {
         let directory = root.join(name);
         if !directory.exists() && name != "builtin" && name != "std" {
@@ -636,7 +687,7 @@ fn compile_sysroot(
                 entry.display()
             ));
         }
-        while next_identity == identity {
+        while next_identity == identity || extra_ids.contains(&next_identity) {
             next_identity += 1;
         }
         packages.push(SourcePackage {
@@ -646,6 +697,15 @@ fn compile_sysroot(
             entry,
         });
         next_identity += 1;
+    }
+    let sysroot_end = packages.len();
+    for &(name, pkg_id, entry) in extra_packages {
+        packages.push(SourcePackage {
+            resolution_id: packages.len() as u32,
+            identity: pkg_id,
+            name: name.into(),
+            entry: entry.to_path_buf(),
+        });
     }
     let configured = options.build_modes.bind(
         packages.iter().map(|package| package.identity),
@@ -657,13 +717,15 @@ fn compile_sysroot(
         identity,
         &configured,
     )?;
-    configured
-        .builtin_implementation_packages
-        .extend(packages.iter().skip(1).map(|package| package.identity));
+    configured.builtin_implementation_packages.extend(
+        packages[1..sysroot_end]
+            .iter()
+            .map(|package| package.identity),
+    );
     let protocols = &configured;
     let mut dependencies = Vec::new();
     for requester in &packages {
-        for provider in packages.iter().skip(1) {
+        for provider in &packages[1..sysroot_end] {
             if requester.resolution_id != provider.resolution_id {
                 dependencies.push(resolve::DependencyEdge {
                     requester: requester.resolution_id,
@@ -672,6 +734,13 @@ fn compile_sysroot(
                 });
             }
         }
+    }
+    for provider in &packages[sysroot_end..] {
+        dependencies.push(resolve::DependencyEdge {
+            requester: 0,
+            alias: provider.name.clone(),
+            provider: provider.resolution_id,
+        });
     }
     selectors.validate_stage(options.emit)?;
     let needs_sysroot_bindings = matches!(
@@ -704,9 +773,8 @@ fn compile_sysroot(
     } else {
         selectors
     };
-    let preludes: Vec<_> = packages
+    let preludes: Vec<_> = packages[1..sysroot_end]
         .iter()
-        .skip(1)
         .filter(|package| package.name != "std")
         .map(|package| package.resolution_id)
         .collect();

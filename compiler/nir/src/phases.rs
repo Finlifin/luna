@@ -1816,7 +1816,8 @@ impl<'a> PhaseContext<'a> {
                         | K::StructFieldNames(value)
                         | K::RecordFieldTypes(value)
                         | K::RecordFieldNames(value)
-                        | K::ReflectCallable(value) => {
+                        | K::ReflectCallable(value)
+                        | K::TypeId(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,

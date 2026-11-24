@@ -92,11 +92,17 @@ pub mod intrinsics;
 
 pub mod layout;
 
+pub mod type_id;
+
 pub use layout::{
     BitPackedError, BitPackedFieldLayout, BitPackedStructLayout, FieldLookup, LayoutError,
     LayoutWorld, NominalLayout, PackageLayoutWorld, TypeLayout, TypeLayoutQuery,
     bit_packed_field_info, bit_packed_struct_layout, compute_bit_width, compute_field_offset,
     compute_layout, compute_stride, compute_type_layout_query,
+};
+pub use type_id::{
+    CanonicalDigest, ConcreteEnumInfo, ConcreteStructInfo, ConcreteVariantInfo, PackageTypeIdWorld,
+    Sha256, TypeIdError, TypeIdWorld, compute_type_id, compute_type_id_with_world,
 };
 
 pub mod type_budget;

@@ -299,6 +299,10 @@ pub struct Protocols {
     pub dispatch_fuel: Option<usize>,
     /// Explicit authority to implement compiler builtin types, by semantic package ID.
     pub builtin_implementation_packages: BTreeSet<u64>,
+    /// Canonical package names by semantic package identity.
+    pub package_names: BTreeMap<u64, String>,
+    /// Canonical SemVer 2.0.0 versions by semantic package identity.
+    pub package_versions: BTreeMap<u64, String>,
     /// Explicit build modes by source semantic package identity. Empty means
     /// unavailable, never an implicit host/debug configuration.
     pub build_modes: BTreeMap<u64, String>,
@@ -717,9 +721,13 @@ fn elaborate_in_mode(
     )?;
     let (definition_attributes, attribute_demands) =
         attributes::index_suppliers(package, package_identities, invocation_steps)?;
+    let package_metadata = build_package_metadata(package, package_identities, protocols)?;
+    let declaration_paths = build_declaration_paths(package, package_identities);
     let mut checker = Checker {
         declared_theory: source_declarations.nominal_context.clone(),
         source_declarations,
+        package_metadata,
+        declaration_paths,
         definition_identities: package
             .next_definition_index()
             .max(u32::try_from(package.num_defs()).unwrap_or(u32::MAX))
@@ -1746,6 +1754,8 @@ fn elaborate_candidate<'a, 'h>(
     output.target = target;
     output.builtin_implementation_packages =
         checker.protocols.builtin_implementation_packages.clone();
+    output.package_metadata = checker.package_metadata.clone();
+    output.declaration_paths = checker.declaration_paths.clone();
     for (owner, info) in package.owners() {
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test) {
             output
@@ -3770,6 +3780,218 @@ struct Checker<'a, 'h> {
     local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
     local_write_versions: BTreeMap<n::LocalId, u64>,
     active_env_parameters: BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    package_metadata: BTreeMap<u64, n::PackageMetadata>,
+    declaration_paths: BTreeMap<DeclarationId, n::CanonicalDeclarationPath>,
+}
+
+fn build_package_metadata(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+) -> Result<BTreeMap<u64, n::PackageMetadata>, Error> {
+    let mut ids: BTreeSet<u64> = package_identities.values().copied().collect();
+    ids.extend(protocols.package_names.keys().copied());
+    ids.extend(protocols.package_versions.keys().copied());
+    ids.extend(protocols.builtin_implementation_packages.iter().copied());
+    let mut package_spans: BTreeMap<u64, Span> = BTreeMap::new();
+    for (owner, info) in package.owners() {
+        if let Some(def_id) = package.owner_definition(owner)
+            && let Some(&identity) = package_identities.get(&def_id.pkg)
+        {
+            package_spans
+                .entry(identity)
+                .or_insert_with(|| info.node.expect_item().span);
+        }
+    }
+    let mut result = BTreeMap::new();
+    for id in ids {
+        let name = protocols
+            .package_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let version = match protocols.package_versions.get(&id) {
+            Some(ver) => {
+                if !n::is_valid_semver(ver) {
+                    return Err(error(
+                        package_spans.get(&id).copied().unwrap_or_default(),
+                        format!(
+                            "package {id} (`{name}`) declares invalid SemVer 2.0.0 version `{ver}`"
+                        ),
+                    ));
+                }
+                ver.clone()
+            }
+            None => "0.0.0".to_string(),
+        };
+        result.insert(id, n::PackageMetadata { name, version });
+    }
+    Ok(result)
+}
+
+fn build_declaration_paths(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+) -> BTreeMap<DeclarationId, n::CanonicalDeclarationPath> {
+    let mut contained = BTreeSet::new();
+    let mut children: BTreeMap<OwnerId, &[OwnerId]> = BTreeMap::new();
+    for (owner, info) in package.owners() {
+        let slice = match &info.node.expect_item().kind {
+            ItemKind::Mod(item) => item.items.as_slice(),
+            ItemKind::Struct(item) => item.nested_items.as_slice(),
+            ItemKind::Enum(item) => item.nested_items.as_slice(),
+            ItemKind::Trait(item) => item.items.as_slice(),
+            ItemKind::Impl(item) => item.items.as_slice(),
+            _ => continue,
+        };
+        contained.extend(slice.iter().copied());
+        children.insert(owner, slice);
+    }
+
+    let mut roots = Vec::new();
+    for (owner, info) in package.owners() {
+        if matches!(info.node.expect_item().kind, ItemKind::Mod(_)) && !contained.contains(&owner) {
+            if let Some(def_id) = package.owner_definition(owner) {
+                roots.push((def_id.pkg, def_id.index, owner));
+            }
+        }
+    }
+    roots.sort_by_key(|&(pkg, index, _)| (pkg, index));
+
+    let mut paths = BTreeMap::new();
+    let mut visited_owners = BTreeSet::new();
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit_owner(
+        package: &hir::Package<'_>,
+        package_identities: &BTreeMap<u32, u64>,
+        children: &BTreeMap<OwnerId, &[OwnerId]>,
+        owner: OwnerId,
+        is_root_mod: bool,
+        modules: &mut Vec<String>,
+        impl_ordinal: Option<usize>,
+        paths: &mut BTreeMap<DeclarationId, n::CanonicalDeclarationPath>,
+        visited_owners: &mut BTreeSet<OwnerId>,
+    ) {
+        if !visited_owners.insert(owner) {
+            return;
+        }
+        let Some(item) = package.item(owner) else {
+            return;
+        };
+        let decl_id = declaration(package, package_identities, owner);
+        let item_name = if let Some(ord) = impl_ordinal {
+            format!("impl#{ord}")
+        } else {
+            item.ident.name.as_str().to_string()
+        };
+        paths.insert(
+            decl_id,
+            n::CanonicalDeclarationPath {
+                package: decl_id.package,
+                modules: modules.clone(),
+                name: item_name.clone(),
+            },
+        );
+        let Some(&child_slice) = children.get(&owner) else {
+            return;
+        };
+        let push_segment = match &item.kind {
+            ItemKind::Mod(_) => !is_root_mod,
+            ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Trait(_) | ItemKind::Impl(_) => {
+                true
+            }
+            _ => false,
+        };
+        if push_segment {
+            modules.push(item_name);
+        }
+        let mut child_impl_ordinal = 0usize;
+        for &child in child_slice {
+            let next_impl_ordinal = if package
+                .item(child)
+                .is_some_and(|it| matches!(it.kind, ItemKind::Impl(_)))
+            {
+                let ord = child_impl_ordinal;
+                child_impl_ordinal += 1;
+                Some(ord)
+            } else {
+                None
+            };
+            visit_owner(
+                package,
+                package_identities,
+                children,
+                child,
+                false,
+                modules,
+                next_impl_ordinal,
+                paths,
+                visited_owners,
+            );
+        }
+        if push_segment {
+            modules.pop();
+        }
+    }
+
+    for (_, _, root) in roots {
+        let mut modules = Vec::new();
+        visit_owner(
+            package,
+            package_identities,
+            &children,
+            root,
+            true,
+            &mut modules,
+            None,
+            &mut paths,
+            &mut visited_owners,
+        );
+    }
+
+    // Cover any remaining owners (e.g. declarations inside bodies) via lexical_parents.
+    for (owner, info) in package.owners() {
+        if visited_owners.contains(&owner) {
+            continue;
+        }
+        let item = info.node.expect_item();
+        let decl_id = declaration(package, package_identities, owner);
+        let mut chain = Vec::new();
+        let mut cursor = package.lexical_parents.get(&owner).copied();
+        let mut guard = 0usize;
+        while let Some(parent) = cursor {
+            guard += 1;
+            if guard > 256 {
+                break;
+            }
+            let parent_decl = declaration(package, package_identities, parent);
+            if let Some(parent_path) = paths.get(&parent_decl) {
+                let mut full = parent_path.modules.clone();
+                if !parent_path.name.is_empty() {
+                    full.push(parent_path.name.clone());
+                }
+                chain.reverse();
+                full.extend(chain);
+                chain = full;
+                break;
+            }
+            if let Some(p_item) = package.item(parent) {
+                chain.push(p_item.ident.name.as_str().to_string());
+            }
+            cursor = package.lexical_parents.get(&parent).copied();
+        }
+        paths.insert(
+            decl_id,
+            n::CanonicalDeclarationPath {
+                package: decl_id.package,
+                modules: chain,
+                name: item.ident.name.as_str().to_string(),
+            },
+        );
+    }
+
+    paths
 }
 
 impl Checker<'_, '_> {

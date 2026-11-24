@@ -191,6 +191,63 @@ impl Interpreter<'_> {
         Ok(value)
     }
 
+    pub(super) fn observe_type_id(
+        &mut self,
+        subject: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let Value::Type(subject) = subject else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let ty = self.reflection_type(&subject).map_err(|mut error| {
+            if error.source.is_none() {
+                error.source = Some(source);
+            }
+            error
+        })?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::compute_type_id_with_world(&InterpreterTypeIdWorld(self), &ty, &mut fuel);
+        self.budget.steps = self.budget.steps.saturating_sub((before - fuel) as u64);
+        let id = result.map_err(|err| match err {
+            nir::TypeIdError::BudgetExhausted => {
+                self.failure(ErrorKind::StepsExhausted, Some(source))
+            }
+            nir::TypeIdError::PendingDefinitionAttributes(decl) => {
+                self.failure(ErrorKind::PendingDefinitionAttributes(decl), Some(source))
+            }
+            nir::TypeIdError::MissingTarget
+            | nir::TypeIdError::Unresolved(_)
+            | nir::TypeIdError::OpenGeneric(_) => {
+                self.failure(ErrorKind::TypeContractUnresolved, Some(source))
+            }
+            nir::TypeIdError::Layout(nir::LayoutError::BudgetExhausted) => {
+                self.failure(ErrorKind::StepsExhausted, Some(source))
+            }
+            nir::TypeIdError::Layout(nir::LayoutError::Unresolved(_)) => {
+                self.failure(ErrorKind::TypeContractUnresolved, Some(source))
+            }
+            nir::TypeIdError::Layout(nir::LayoutError::Overflow) => {
+                self.failure(ErrorKind::MachineOverflow, Some(source))
+            }
+            nir::TypeIdError::InvalidStableSince { .. }
+            | nir::TypeIdError::InvalidAbiMetadata { .. }
+            | nir::TypeIdError::UnsupportedGlobalExpr(_)
+            | nir::TypeIdError::NonGlobalRuntimeOrigin(_)
+            | nir::TypeIdError::NotAType(_)
+            | nir::TypeIdError::ComptimeOnly(_)
+            | nir::TypeIdError::Layout(_)
+            | nir::TypeIdError::Unsupported(_) => self.failure(
+                ErrorKind::InvalidTypeContract(err.to_string()),
+                Some(source),
+            ),
+        })?;
+        Ok(Value::UnsignedInteger(id))
+    }
+
     fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
         let ty = self.selected_type_view(ty, None)?;
         self.check_type_description(&ty, None)?;
@@ -282,6 +339,202 @@ impl Interpreter<'_> {
             subject: subject.clone(),
             fields,
         })
+    }
+}
+
+struct InterpreterTypeIdWorld<'a, 'b>(&'a Interpreter<'b>);
+
+impl nir::LayoutWorld for InterpreterTypeIdWorld<'_, '_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        super::observations::InterpreterLayoutWorld(self.0).target()
+    }
+
+    fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        super::observations::InterpreterLayoutWorld(self.0).is_tuple_head(head)
+    }
+
+    fn is_list_head(&self, head: DeclarationId) -> bool {
+        super::observations::InterpreterLayoutWorld(self.0).is_list_head(head)
+    }
+
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
+        super::observations::InterpreterLayoutWorld(self.0).nominal_kind(ty)
+    }
+
+    fn is_template_identity(&self, ty: &Term) -> bool {
+        super::observations::InterpreterLayoutWorld(self.0).is_template_identity(ty)
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        super::observations::InterpreterLayoutWorld(self.0).nominal_layout(ty, fuel)
+    }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        fuel: &mut usize,
+    ) -> Result<nir::FieldLookup, nir::LayoutError> {
+        super::observations::InterpreterLayoutWorld(self.0).nominal_field_index(ty, field, fuel)
+    }
+}
+
+impl nir::TypeIdWorld for InterpreterTypeIdWorld<'_, '_> {
+    fn package_metadata(&self, package: u64) -> Option<&nir::program::PackageMetadata> {
+        self.0
+            .declaration_world
+            .and_then(|world| world.package_metadata.get(&package))
+    }
+
+    fn declaration_path(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&nir::program::CanonicalDeclarationPath> {
+        self.0
+            .declaration_world
+            .and_then(|world| world.declaration_paths.get(&declaration))
+    }
+
+    fn definition_attributes(&self) -> Option<&nir::program::DefinitionAttributes> {
+        self.0
+            .declaration_world
+            .map(|world| &world.definition_attributes)
+    }
+
+    fn global_runtime_origin(&self, id: nir::RuntimeId) -> Option<&nir::program::Expr> {
+        self.0
+            .declaration_world
+            .and_then(|world| world.global_runtime_deliveries.get(&id))
+    }
+
+    fn nominal_name_fallback(&self, declaration: DeclarationId) -> Option<&str> {
+        if let Some(def) = self.0.structs.get(&declaration) {
+            return Some(def.name.as_str());
+        }
+        if let Some(def) = self.0.enums.get(&declaration) {
+            return Some(def.name.as_str());
+        }
+        if let Some(def) = self.0.newtypes.get(&declaration) {
+            return Some(def.name.as_str());
+        }
+        None
+    }
+
+    fn normal_form_name_fallback(&self, _head: DeclarationId) -> Option<&str> {
+        None
+    }
+
+    fn concrete_struct_info(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::ConcreteStructInfo>, nir::LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if self.0.graph.is_some() {
+            return Ok(match self.0.concrete_nominal(ty) {
+                Some(ConcreteNominal::Struct(def)) => Some(nir::ConcreteStructInfo {
+                    packed: def.packed,
+                    fields: def.fields.clone(),
+                }),
+                _ => None,
+            });
+        }
+        let Some(def) = self.0.structs.get(declaration) else {
+            return Ok(None);
+        };
+        let field_types = nir::normal_forms::instantiate_value_fields_checked(
+            &def.type_parameters,
+            &def.parameter_types,
+            arguments,
+            def.fields.iter().map(|(_, t)| t),
+            fuel,
+        )
+        .map_err(|err| match err {
+            nir::NominalAdmissionError::Budget => nir::LayoutError::BudgetExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => nir::LayoutError::Unresolved(ty.clone()),
+            nir::NominalAdmissionError::Invalid(_) => nir::LayoutError::Unsupported(ty.clone()),
+        })?;
+        Ok(Some(nir::ConcreteStructInfo {
+            packed: def.packed,
+            fields: def
+                .fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .zip(field_types)
+                .collect(),
+        }))
+    }
+
+    fn concrete_enum_info(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::ConcreteEnumInfo>, nir::LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if self.0.graph.is_some() {
+            return Ok(match self.0.concrete_nominal(ty) {
+                Some(ConcreteNominal::Enum(def)) => Some(nir::ConcreteEnumInfo {
+                    variants: def
+                        .variants
+                        .iter()
+                        .map(|v| nir::ConcreteVariantInfo {
+                            name: v.name.clone(),
+                            shape: v.shape.clone(),
+                            fields: v.fields.clone(),
+                        })
+                        .collect(),
+                    encoding: def.encoding.clone(),
+                    symbol_encoding: def.symbol_encoding.clone(),
+                }),
+                _ => None,
+            });
+        }
+        let Some(def) = self.0.enums.get(declaration) else {
+            return Ok(None);
+        };
+        let mut variants = Vec::with_capacity(def.variants.len());
+        for variant in &def.variants {
+            let fields = nir::normal_forms::instantiate_value_fields_checked(
+                &def.type_parameters,
+                &def.parameter_types,
+                arguments,
+                variant.fields.iter(),
+                fuel,
+            )
+            .map_err(|err| match err {
+                nir::NominalAdmissionError::Budget => nir::LayoutError::BudgetExhausted,
+                nir::NominalAdmissionError::Unresolved(_) => {
+                    nir::LayoutError::Unresolved(ty.clone())
+                }
+                nir::NominalAdmissionError::Invalid(_) => nir::LayoutError::Unsupported(ty.clone()),
+            })?;
+            variants.push(nir::ConcreteVariantInfo {
+                name: variant.name.clone(),
+                shape: variant.shape.clone(),
+                fields,
+            });
+        }
+        Ok(Some(nir::ConcreteEnumInfo {
+            variants,
+            encoding: def.encoding.clone(),
+            symbol_encoding: def.symbol_encoding.clone(),
+        }))
     }
 }
 

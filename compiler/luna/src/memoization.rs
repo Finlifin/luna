@@ -600,6 +600,14 @@ pub fn scope_for(package: &Package, items: &LangItems) -> Scope {
     }
     defs.display(&package.definition_attributes);
     defs.display(&package.volatile_storage);
+    for (pkg_id, meta) in &package.package_metadata {
+        defs.u64(*pkg_id);
+        defs.display(meta);
+    }
+    for (decl_id, path) in &package.declaration_paths {
+        defs.display(decl_id);
+        defs.display(path);
+    }
 
     let mut protos = HashWriter::new();
     const ALL_ITEMS: [LangItem; 29] = [
@@ -689,5 +697,50 @@ pub fn scope_for(package: &Package, items: &LangItems) -> Scope {
         definitions: defs.0,
         protocols: protos.0,
         target: target.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scope_for;
+    use intrinsic::LangItems;
+    use nir::{
+        DeclarationId,
+        program::{CanonicalDeclarationPath, Package, PackageMetadata},
+    };
+
+    #[test]
+    fn scope_for_includes_package_metadata_and_declaration_paths() {
+        let items = LangItems::default();
+        let mut pkg = Package::default();
+        let base = scope_for(&pkg, &items);
+
+        pkg.package_metadata.insert(
+            1,
+            PackageMetadata {
+                name: "acme".into(),
+                version: "1.0.0".into(),
+            },
+        );
+        let with_meta_v1 = scope_for(&pkg, &items);
+        assert_ne!(base.definitions, with_meta_v1.definitions);
+
+        pkg.package_metadata.get_mut(&1).unwrap().version = "1.2.0".into();
+        let with_meta_v2 = scope_for(&pkg, &items);
+        assert_ne!(with_meta_v1.definitions, with_meta_v2.definitions);
+
+        pkg.declaration_paths.insert(
+            DeclarationId {
+                package: 1,
+                local: 7,
+            },
+            CanonicalDeclarationPath {
+                package: 1,
+                modules: vec!["collections".into()],
+                name: "Buffer".into(),
+            },
+        );
+        let with_decl_path = scope_for(&pkg, &items);
+        assert_ne!(with_meta_v2.definitions, with_decl_path.definitions);
     }
 }

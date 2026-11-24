@@ -281,6 +281,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::StructFieldTypes(_)
         | K::RecordFieldTypes(_)
         | K::ReflectCallable(_)
+        | K::TypeId(_)
         | K::BuildStruct(_)
         | K::BuildNewtype(_)
         | K::BuildEnum(_)

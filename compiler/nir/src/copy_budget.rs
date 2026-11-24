@@ -1205,6 +1205,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::StructFieldTypes(value)
                     | K::RecordFieldTypes(value)
                     | K::ReflectCallable(value)
+                    | K::TypeId(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)
                     | K::BuildEnum(value)

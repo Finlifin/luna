@@ -1317,6 +1317,30 @@ fn hash_scoped_protocols(
         hasher.update_u64(id);
     }
 
+    let names: BTreeMap<u64, &str> = protocols
+        .package_names
+        .iter()
+        .filter(|(id, _)| upstream_identities.contains(id))
+        .map(|(&id, name)| (id, name.as_str()))
+        .collect();
+    hasher.update_u64(names.len() as u64);
+    for (id, name) in names {
+        hasher.update_u64(id);
+        hasher.update_str(name);
+    }
+
+    let versions: BTreeMap<u64, &str> = protocols
+        .package_versions
+        .iter()
+        .filter(|(id, _)| upstream_identities.contains(id))
+        .map(|(&id, ver)| (id, ver.as_str()))
+        .collect();
+    hasher.update_u64(versions.len() as u64);
+    for (id, ver) in versions {
+        hasher.update_u64(id);
+        hasher.update_str(ver);
+    }
+
     let modes: BTreeMap<u64, &str> = protocols
         .build_modes
         .iter()

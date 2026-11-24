@@ -19,59 +19,9 @@ impl std::fmt::Display for StableSinceEntry {
 }
 
 /// Validate strict SemVer 2.0.0 syntax (`MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`).
+/// Validate strict SemVer 2.0.0 (`MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`).
 pub fn is_valid_semver(version: &str) -> bool {
-    let (core_and_pre, build) = match version.split_once('+') {
-        Some((head, tail)) => {
-            if tail.is_empty()
-                || !tail.split('.').all(|id| {
-                    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                })
-            {
-                return false;
-            }
-            (head, Some(tail))
-        }
-        None => (version, None),
-    };
-    let _ = build;
-    let (core, pre) = match core_and_pre.split_once('-') {
-        Some((head, tail)) => {
-            if tail.is_empty()
-                || !tail.split('.').all(|id| {
-                    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    {
-                        return false;
-                    }
-                    if id.bytes().all(|b| b.is_ascii_digit()) {
-                        is_canonical_numeric_id(id)
-                    } else {
-                        true
-                    }
-                })
-            {
-                return false;
-            }
-            (head, Some(tail))
-        }
-        None => (core_and_pre, None),
-    };
-    let _ = pre;
-    let mut parts = core.split('.');
-    let (Some(major), Some(minor), Some(patch), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    is_canonical_numeric_id(major)
-        && is_canonical_numeric_id(minor)
-        && is_canonical_numeric_id(patch)
-}
-
-fn is_canonical_numeric_id(segment: &str) -> bool {
-    if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    segment == "0" || !segment.starts_with('0')
+    nir::program::is_valid_semver(version)
 }
 
 /// Validate `__flurry_stable_since` on anchorable nominal or normal-form definitions.

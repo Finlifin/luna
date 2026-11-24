@@ -37,6 +37,7 @@ fn operation(name: &str) -> bool {
             | "record_field_types"
             | "record_field_names"
             | "reflect_callable"
+            | "type_id"
             | "enum_group_paths"
             | "enum_variant_paths"
             | "enum_variant_shapes"

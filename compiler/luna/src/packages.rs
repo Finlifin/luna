@@ -1775,6 +1775,12 @@ fn compile_packages_core(
         selectors,
         initial_protocols,
     )?;
+    for pkg in packages {
+        protocols
+            .package_names
+            .entry(pkg.identity)
+            .or_insert_with(|| pkg.name.clone());
+    }
     if let Some(selected) = builtin {
         if let Some(package) = packages
             .iter()

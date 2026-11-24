@@ -232,6 +232,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::StructFieldTypes(value)
             | K::RecordFieldTypes(value)
             | K::ReflectCallable(value)
+            | K::TypeId(value)
             | K::BuildStruct(value)
             | K::BuildNewtype(value)
             | K::BuildMetadata {

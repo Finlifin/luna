@@ -1,7 +1,7 @@
 use List;
 use bindings;
 use bindings.Object;
-use builtin.{Integer, Symbol, Type, bool}
+use builtin.{Integer, Symbol, Type, bool, u128}
 
 {-
     Observe declaration order through the checked Type value. Reflection grants
@@ -23,6 +23,7 @@ pub use bindings.record_field_names;
 pub use bindings.record_field_types;
 pub use bindings.struct_field_names;
 pub use bindings.struct_field_types;
+pub use bindings.type_id;
 
 {-
     Observation of an applied callable Type without exposing closure
@@ -157,6 +158,10 @@ impl Type {
 
     pub pure comptime fn reflect_callable(self) -> CallableReflection {
         build_callable_reflection(self)
+    }
+
+    pub pure comptime fn type_id(self) -> u128 {
+        bindings.type_id(self)
     }
 
     {-

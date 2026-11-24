@@ -1490,11 +1490,113 @@ impl Checker<'_, '_> {
                 &mut self.required_steps,
                 expr.span,
             )?;
+            let mut closure_roots = std::mem::take(&mut observed.code);
+            let mut used_runtime_ids = BTreeSet::new();
+            for (_, ty, value) in &capture.inputs {
+                used_runtime_ids.extend(ty.runtime_dependencies());
+                if let Some(val) = value {
+                    used_runtime_ids.extend(val.runtime_dependencies());
+                }
+            }
+            used_runtime_ids.extend(capture.function.signature.runtime_dependencies());
+            let mut collect_expr_runtimes = |target_expr: &n::Expr,
+                                             ids: &mut BTreeSet<nir::RuntimeId>,
+                                             steps: &mut u64|
+             -> Result<(), Error> {
+                let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let res = nir::visit::expression_checked(target_expr, &mut fuel, |sub, _| {
+                    ids.extend(sub.ty.runtime_dependencies());
+                    match &sub.kind {
+                        K::TypeValue(t) | K::ComptimeValue(t) | K::StagedValue(t) => {
+                            ids.extend(t.runtime_dependencies());
+                        }
+                        K::FunctionInstance { arguments, .. } => {
+                            for arg in arguments {
+                                ids.extend(arg.runtime_dependencies());
+                            }
+                        }
+                        K::EffectRequest { signature, .. } => {
+                            ids.extend(signature.runtime_dependencies());
+                        }
+                        K::BitUpdate { storage_type, .. } | K::BitAssign { storage_type, .. } => {
+                            ids.extend(storage_type.runtime_dependencies());
+                        }
+                        _ => {}
+                    }
+                    Ok::<(), nir::visit::Error>(())
+                });
+                *steps = steps.saturating_sub((before - fuel) as u64);
+                res.map_err(|err| error(expr.span, err.to_string()))
+            };
+            collect_expr_runtimes(
+                &capture.function.body,
+                &mut used_runtime_ids,
+                &mut self.required_steps,
+            )?;
             let source_closure::SourceClosure {
                 mut functions,
-                runtime_function_identities,
-                retained,
-            } = self.required_source_closure(std::mem::take(&mut observed.code), expr.span)?;
+                mut runtime_function_identities,
+                mut retained,
+            } = self.required_source_closure(closure_roots.clone(), expr.span)?;
+            // Include transitive global runtime delivery origins referenced by the
+            // captured invocation and fold any dependencies they reference into closure_roots.
+            let mut seen_deliveries = BTreeSet::new();
+            let mut extra_closure_added = false;
+            loop {
+                for f in &functions {
+                    used_runtime_ids.extend(f.signature.runtime_dependencies());
+                    for (&rid, delivery) in &f.runtime_deliveries {
+                        used_runtime_ids.insert(rid);
+                        collect_expr_runtimes(
+                            delivery,
+                            &mut used_runtime_ids,
+                            &mut self.required_steps,
+                        )?;
+                    }
+                    collect_expr_runtimes(
+                        &f.body,
+                        &mut used_runtime_ids,
+                        &mut self.required_steps,
+                    )?;
+                }
+                let pending_deliveries: Vec<nir::RuntimeId> = used_runtime_ids
+                    .difference(&seen_deliveries)
+                    .copied()
+                    .collect();
+                if pending_deliveries.is_empty() {
+                    break;
+                }
+                let mut new_roots = false;
+                for rid in pending_deliveries {
+                    seen_deliveries.insert(rid);
+                    if let Some(delivery) = self.global_runtime_deliveries.get(&rid).cloned() {
+                        collect_expr_runtimes(
+                            &delivery,
+                            &mut used_runtime_ids,
+                            &mut self.required_steps,
+                        )?;
+                        let refs =
+                            Discovery::Required(&self.implementation_index, &self.member_sources)
+                                .references(&delivery, &mut self.required_steps)
+                                .map_err(|failure| error(expr.span, failure.to_string()))?;
+                        for dep in refs {
+                            if closure_roots.insert(dep) {
+                                new_roots = true;
+                            }
+                        }
+                    }
+                }
+                if !new_roots {
+                    break;
+                }
+                extra_closure_added = true;
+                let refreshed = self.required_source_closure(closure_roots.clone(), expr.span)?;
+                functions = refreshed.functions;
+                runtime_function_identities = refreshed.runtime_function_identities;
+                retained = refreshed.retained;
+            }
+            let _ = extra_closure_added;
             let capture::Entry {
                 function,
                 inputs,
@@ -1617,6 +1719,8 @@ impl Checker<'_, '_> {
                     .protocols
                     .builtin_implementation_packages
                     .clone(),
+                package_metadata: self.package_metadata.clone(),
+                declaration_paths: self.declaration_paths.clone(),
                 refinements: self.refinements.clone(),
                 definition_identity_cursor: self.definition_identities.next(),
                 target: self.target,
@@ -1634,6 +1738,12 @@ impl Checker<'_, '_> {
                 statics: self.statics.values().cloned().collect(),
                 definition_attributes: self.definition_attributes.clone(),
                 runtime_domains: self.runtime_domains.clone(),
+                global_runtime_deliveries: self
+                    .global_runtime_deliveries
+                    .iter()
+                    .filter(|(id, _)| used_runtime_ids.contains(id))
+                    .map(|(id, expr)| (*id, expr.clone()))
+                    .collect(),
                 ..Default::default()
             };
             crate::verification::contracts::inherit(&mut package, &mut self.next_temporary_binding)
@@ -2559,6 +2669,7 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
             | K::RecordFieldTypes(value)
             | K::RecordFieldNames(value)
             | K::ReflectCallable(value)
+            | K::TypeId(value)
             | K::EnumStructure { subject: value, .. }
             | K::ObjectQuery { subject: value, .. }
             | K::ObjectEdit { subject: value, .. }
@@ -2821,10 +2932,26 @@ fn scope_for_required(
     }
     defs.display(&package.definition_attributes);
     defs.display(&package.volatile_storage);
+    for (pkg_id, meta) in &package.package_metadata {
+        defs.u64(*pkg_id);
+        defs.display(meta);
+    }
+    for (decl_id, path) in &package.declaration_paths {
+        defs.display(decl_id);
+        defs.display(path);
+    }
 
     let mut protos = RequiredHashWriter::new();
     for pkg in &protocols_cfg.builtin_implementation_packages {
         protos.u64(*pkg);
+    }
+    for (pkg, name) in &protocols_cfg.package_names {
+        protos.u64(*pkg);
+        protos.str(name);
+    }
+    for (pkg, version) in &protocols_cfg.package_versions {
+        protos.u64(*pkg);
+        protos.str(version);
     }
     for slot in [
         protocols_cfg.copy,
