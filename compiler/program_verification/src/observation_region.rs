@@ -278,6 +278,7 @@ pub(super) fn check(
             | K::SymbolName(_)
             | K::EnumName(_)
             | K::TypeKind { .. }
+            | K::TypeNotSized { .. }
             | K::TypeLayout { .. }
             | K::BitSlice { .. }
             | K::BitWindow { .. }

@@ -2608,7 +2608,21 @@ impl<'a> Analysis<'a> {
                 self.set_code_fields(fields);
                 true
             }
-            K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
+            K::TypeKind { operand, .. } | K::TypeNotSized { operand } => {
+                matches!(operand.kind, K::TypeValue(_)) && self.copy_type(&value.ty)
+            }
+            K::TypeLayout {
+                query: nir::TypeLayoutQuery::FieldOffset,
+                operand,
+            } => {
+                matches!(
+                    &operand.kind,
+                    K::Tuple(items) if items.len() == 2
+                        && matches!(items[0].kind, K::TypeValue(_))
+                        && self.expression(&items[1], private, returns, depth + 1)
+                ) && self.copy_type(&value.ty)
+            }
+            K::TypeLayout { operand, .. } => {
                 matches!(operand.kind, K::TypeValue(_)) && self.copy_type(&value.ty)
             }
             K::TextQuery { subject, query } => {

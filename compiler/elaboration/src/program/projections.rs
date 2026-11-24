@@ -390,7 +390,7 @@ impl Checker<'_, '_> {
     pub(super) fn type_layout_query_call<'h>(
         &mut self,
         expr: &'h Expr<'h>,
-    ) -> Result<Option<(nir::TypeLayoutQuery, &'h Expr<'h>)>, Error> {
+    ) -> Result<Option<(nir::TypeLayoutQuery, &'h Expr<'h>, Option<&'h Expr<'h>>)>, Error> {
         let H::Application(callee, args) = &expr.kind else {
             return Ok(None);
         };
@@ -400,10 +400,22 @@ impl Checker<'_, '_> {
         let query = match method.name.as_str() {
             "size_of" => nir::TypeLayoutQuery::SizeOf,
             "align_of" => nir::TypeLayoutQuery::AlignOf,
+            "stride_of" => nir::TypeLayoutQuery::StrideOf,
+            "bit_width_of" => nir::TypeLayoutQuery::BitWidthOf,
+            "field_offset_of" => nir::TypeLayoutQuery::FieldOffset,
             _ => return Ok(None),
         };
         if !self.is_metatype_namespace_receiver(base)? {
             return Ok(None);
+        }
+        if query == nir::TypeLayoutQuery::FieldOffset {
+            let [Arg::Positional(subject), Arg::Positional(field)] = *args else {
+                return Err(error(
+                    expr.span,
+                    "Type.field_offset_of requires exactly two positional arguments (Type, Symbol)",
+                ));
+            };
+            return Ok(Some((query, *subject, Some(*field))));
         }
         let [Arg::Positional(arg)] = *args else {
             return Err(error(
@@ -414,7 +426,7 @@ impl Checker<'_, '_> {
                 ),
             ));
         };
-        Ok(Some((query, *arg)))
+        Ok(Some((query, *arg, None)))
     }
 
     pub(super) fn is_metatype_namespace_receiver(

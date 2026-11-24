@@ -18,13 +18,19 @@ const MAX_BIT_WIDTH: u32 = 65_536;
 pub enum TypeLayoutQuery {
     SizeOf,
     AlignOf,
+    StrideOf,
+    BitWidthOf,
+    FieldOffset,
 }
 
 impl TypeLayoutQuery {
-    pub fn select(self, layout: TypeLayout) -> u64 {
+    pub fn select(self, layout: TypeLayout) -> Result<u64, LayoutError> {
         match self {
-            Self::SizeOf => layout.size,
-            Self::AlignOf => layout.align,
+            Self::SizeOf => Ok(layout.size),
+            Self::AlignOf => Ok(layout.align),
+            Self::StrideOf => align_up(layout.size, layout.align),
+            Self::BitWidthOf => layout.size.checked_mul(8).ok_or(LayoutError::Overflow),
+            Self::FieldOffset => Err(LayoutError::Overflow),
         }
     }
 }
@@ -34,6 +40,9 @@ impl fmt::Display for TypeLayoutQuery {
         f.write_str(match self {
             Self::SizeOf => "size-of",
             Self::AlignOf => "align-of",
+            Self::StrideOf => "stride-of",
+            Self::BitWidthOf => "bit-width-of",
+            Self::FieldOffset => "field-offset",
         })
     }
 }
@@ -61,6 +70,15 @@ pub enum LayoutError {
     Unresolved(Term),
     Cycle(Term),
     Unsupported(Term),
+    UnknownField {
+        ty: Term,
+        field: String,
+    },
+    UnalignedBitField {
+        ty: Term,
+        field: String,
+        bit_offset: u32,
+    },
     Overflow,
     BudgetExhausted,
 }
@@ -82,6 +100,19 @@ impl fmt::Display for LayoutError {
             }
             Self::Unsupported(ty) => {
                 write!(f, "type {ty} has no concrete runtime storage layout")
+            }
+            Self::UnknownField { ty, field } => {
+                write!(f, "type {ty} has no runtime field `{field}`")
+            }
+            Self::UnalignedBitField {
+                ty,
+                field,
+                bit_offset,
+            } => {
+                write!(
+                    f,
+                    "bit-packed field `{field}` of {ty} starts at non-byte-aligned bit offset {bit_offset}"
+                )
             }
             Self::Overflow => f.write_str("type layout size computation overflowed"),
             Self::BudgetExhausted => f.write_str("type layout computation budget exhausted"),
@@ -183,6 +214,13 @@ pub struct LayoutWithNiche {
     pub niche: Option<Niche>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldLookup {
+    Index(usize),
+    NotFound,
+    Unavailable,
+}
+
 pub trait LayoutWorld {
     fn target(&self) -> Option<crate::target::TargetData>;
 
@@ -201,6 +239,15 @@ pub trait LayoutWorld {
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<Option<NominalLayout>, LayoutError>;
+
+    fn nominal_field_index(
+        &self,
+        _ty: &Term,
+        _field: &str,
+        _fuel: &mut usize,
+    ) -> Result<FieldLookup, LayoutError> {
+        Ok(FieldLookup::Unavailable)
+    }
 }
 
 pub fn compute_layout(
@@ -209,6 +256,284 @@ pub fn compute_layout(
     fuel: &mut usize,
 ) -> Result<TypeLayout, LayoutError> {
     compute_layout_and_niche(world, ty, fuel).map(|res| res.layout)
+}
+
+pub fn compute_stride(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<u64, LayoutError> {
+    let layout = compute_layout(world, ty, fuel)?;
+    align_up(layout.size, layout.align)
+}
+
+pub fn compute_bit_width(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<u64, LayoutError> {
+    let mut visiting = Vec::new();
+    bit_width_at(world, ty, 0, &mut visiting, fuel)
+}
+
+pub fn compute_field_offset(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    field: &str,
+    fuel: &mut usize,
+) -> Result<u64, LayoutError> {
+    // Validate the enclosing type's runtime layout, target requirements, and acyclicity first.
+    compute_layout(world, ty, fuel)?;
+    match ty {
+        Term::Record(fields) => {
+            let Some(index) = fields.iter().position(|(name, _)| name == field) else {
+                return Err(LayoutError::UnknownField {
+                    ty: ty.clone(),
+                    field: field.to_string(),
+                });
+            };
+            let mut offset = 0u64;
+            for (i, (_, field_ty)) in fields.iter().enumerate() {
+                let fl = compute_layout(world, field_ty, fuel)?;
+                offset = align_up(offset, fl.align)?;
+                if i == index {
+                    return Ok(offset);
+                }
+                offset = offset.checked_add(fl.size).ok_or(LayoutError::Overflow)?;
+            }
+            Err(LayoutError::UnknownField {
+                ty: ty.clone(),
+                field: field.to_string(),
+            })
+        }
+        Term::Nominal { .. } => {
+            let Some(definition) = world.nominal_layout(ty, fuel)? else {
+                return Err(LayoutError::Unresolved(ty.clone()));
+            };
+            let index = match world.nominal_field_index(ty, field, fuel)? {
+                FieldLookup::Index(index) => index,
+                FieldLookup::NotFound => {
+                    return Err(LayoutError::UnknownField {
+                        ty: ty.clone(),
+                        field: field.to_string(),
+                    });
+                }
+                FieldLookup::Unavailable => return Err(LayoutError::Unresolved(ty.clone())),
+            };
+            match definition {
+                NominalLayout::Struct(fields) => {
+                    let mut offset = 0u64;
+                    for (i, field_ty) in fields.iter().enumerate() {
+                        let fl = compute_layout(world, field_ty, fuel)?;
+                        offset = align_up(offset, fl.align)?;
+                        if i == index {
+                            return Ok(offset);
+                        }
+                        offset = offset.checked_add(fl.size).ok_or(LayoutError::Overflow)?;
+                    }
+                    Err(LayoutError::UnknownField {
+                        ty: ty.clone(),
+                        field: field.to_string(),
+                    })
+                }
+                NominalLayout::PackedStruct(fields) => {
+                    let mut offset = 0u64;
+                    for (i, field_ty) in fields.iter().enumerate() {
+                        let fl = compute_layout(world, field_ty, fuel)?;
+                        if i == index {
+                            return Ok(offset);
+                        }
+                        offset = offset.checked_add(fl.size).ok_or(LayoutError::Overflow)?;
+                    }
+                    Err(LayoutError::UnknownField {
+                        ty: ty.clone(),
+                        field: field.to_string(),
+                    })
+                }
+                NominalLayout::BitPackedStruct(fields) => {
+                    let bp = bit_packed_struct_layout(world, &fields, fuel).map_err(
+                        |err| match err {
+                            BitPackedError::Layout(layout_err) => layout_err,
+                            BitPackedError::UnsupportedField { .. } => {
+                                LayoutError::Unsupported(ty.clone())
+                            }
+                            BitPackedError::WidthOverflow => LayoutError::Overflow,
+                        },
+                    )?;
+                    let Some(field_layout) = bp.fields.get(index) else {
+                        return Err(LayoutError::UnknownField {
+                            ty: ty.clone(),
+                            field: field.to_string(),
+                        });
+                    };
+                    if field_layout.bit_offset % 8 != 0 {
+                        return Err(LayoutError::UnalignedBitField {
+                            ty: ty.clone(),
+                            field: field.to_string(),
+                            bit_offset: field_layout.bit_offset,
+                        });
+                    }
+                    Ok(u64::from(field_layout.bit_offset / 8))
+                }
+                _ => Err(LayoutError::UnknownField {
+                    ty: ty.clone(),
+                    field: field.to_string(),
+                }),
+            }
+        }
+        _ => Err(LayoutError::UnknownField {
+            ty: ty.clone(),
+            field: field.to_string(),
+        }),
+    }
+}
+
+pub fn compute_type_layout_query(
+    world: &impl LayoutWorld,
+    query: TypeLayoutQuery,
+    ty: &Term,
+    field: Option<&str>,
+    fuel: &mut usize,
+) -> Result<u64, LayoutError> {
+    match query {
+        TypeLayoutQuery::SizeOf => compute_layout(world, ty, fuel).map(|l| l.size),
+        TypeLayoutQuery::AlignOf => compute_layout(world, ty, fuel).map(|l| l.align),
+        TypeLayoutQuery::StrideOf => compute_stride(world, ty, fuel),
+        TypeLayoutQuery::BitWidthOf => compute_bit_width(world, ty, fuel),
+        TypeLayoutQuery::FieldOffset => {
+            let Some(field) = field else {
+                return Err(LayoutError::Unsupported(ty.clone()));
+            };
+            compute_field_offset(world, ty, field, fuel)
+        }
+    }
+}
+
+fn bit_width_at(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<u64, LayoutError> {
+    charge(fuel, 1)?;
+    if depth >= MAX_LAYOUT_DEPTH {
+        return Err(LayoutError::BudgetExhausted);
+    }
+    if world.is_template_identity(ty) {
+        return Ok(64);
+    }
+    match ty {
+        Term::Primitive(Primitive::Void) => Ok(0),
+        Term::Primitive(Primitive::Bool) => Ok(1),
+        Term::Primitive(Primitive::Char) => Ok(32),
+        Term::Primitive(Primitive::I8 | Primitive::U8) => Ok(8),
+        Term::Primitive(Primitive::I16 | Primitive::U16 | Primitive::F16 | Primitive::Bf16) => {
+            Ok(16)
+        }
+        Term::Primitive(Primitive::I32 | Primitive::U32 | Primitive::F32) => Ok(32),
+        Term::Primitive(Primitive::I64 | Primitive::U64 | Primitive::F64) => Ok(64),
+        Term::Primitive(Primitive::I128 | Primitive::U128) => Ok(128),
+        Term::Primitive(Primitive::Isize | Primitive::Usize) => Ok(u64::from(
+            world
+                .target()
+                .ok_or(LayoutError::TargetRequired)?
+                .pointer_bits(),
+        )),
+        Term::Primitive(Primitive::BitVec(width)) => {
+            let bits = u32::try_from(*width).map_err(|_| LayoutError::Unsupported(ty.clone()))?;
+            if bits > MAX_BIT_WIDTH {
+                return Err(LayoutError::Unsupported(ty.clone()));
+            }
+            Ok(u64::from(bits))
+        }
+        Term::Primitive(
+            Primitive::Type
+            | Primitive::Object
+            | Primitive::Integer
+            | Primitive::Float
+            | Primitive::Unit,
+        )
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => Err(LayoutError::ComptimeOnly(ty.clone())),
+        Term::Primitive(Primitive::Never) => Err(LayoutError::Unsupported(ty.clone())),
+        Term::Pointer(_) => Ok(u64::from(
+            world
+                .target()
+                .ok_or(LayoutError::TargetRequired)?
+                .pointer_bits(),
+        )),
+        Term::UnsafeFunction(signature) => {
+            bit_width_at(world, signature, depth + 1, visiting, fuel)
+        }
+        Term::Function { parameters, .. } => {
+            if parameters.iter().any(|p| p.sort != Sort::Runtime) {
+                return Err(LayoutError::ComptimeOnly(ty.clone()));
+            }
+            Ok(u64::from(
+                world
+                    .target()
+                    .ok_or(LayoutError::TargetRequired)?
+                    .pointer_bits(),
+            ))
+        }
+        Term::ComptimeFunction(_) | Term::NormalFormFunction(..) | Term::Lift(_) => {
+            Err(LayoutError::ComptimeOnly(ty.clone()))
+        }
+        Term::Nominal { .. } => {
+            if visiting.contains(ty) {
+                return Err(LayoutError::Cycle(ty.clone()));
+            }
+            let Some(definition) = world.nominal_layout(ty, fuel)? else {
+                return Err(LayoutError::Unresolved(ty.clone()));
+            };
+            visiting.push(ty.clone());
+            let result: Result<Option<u64>, LayoutError> = match definition {
+                NominalLayout::BitPackedStruct(fields) => {
+                    bit_packed_struct_layout_at(world, &fields, depth + 1, visiting, fuel)
+                        .map(|bp| Some(u64::from(bp.total_bits)))
+                        .map_err(|err| match err {
+                            BitPackedError::Layout(layout_err) => layout_err,
+                            BitPackedError::UnsupportedField { .. } => {
+                                LayoutError::Unsupported(ty.clone())
+                            }
+                            BitPackedError::WidthOverflow => LayoutError::Overflow,
+                        })
+                }
+                NominalLayout::EnumFixedBits { width, .. } => {
+                    if width > MAX_BIT_WIDTH {
+                        Err(LayoutError::Unsupported(ty.clone()))
+                    } else {
+                        Ok(Some(u64::from(width)))
+                    }
+                }
+                NominalLayout::EnumUnit(variant_count) => {
+                    Ok(Some(u64::from(unit_enum_tag_bits(variant_count)?)))
+                }
+                NominalLayout::Newtype(representation) => {
+                    bit_width_at(world, &representation, depth + 1, visiting, fuel).map(Some)
+                }
+                NominalLayout::Struct(_)
+                | NominalLayout::PackedStruct(_)
+                | NominalLayout::EnumSymbol
+                | NominalLayout::EnumAggregate(_) => Ok(None),
+            };
+            visiting.pop();
+            match result? {
+                Some(bits) => Ok(bits),
+                None => {
+                    let layout = layout_with_niche_at(world, ty, depth, visiting, fuel)?.layout;
+                    layout.size.checked_mul(8).ok_or(LayoutError::Overflow)
+                }
+            }
+        }
+        _ => {
+            let layout = layout_with_niche_at(world, ty, depth, visiting, fuel)?.layout;
+            layout.size.checked_mul(8).ok_or(LayoutError::Overflow)
+        }
+    }
 }
 
 pub fn compute_layout_and_niche(
@@ -240,6 +565,195 @@ pub fn evaluate_kind(world: &impl LayoutWorld, kind: TypeKind, ty: &Term) -> Opt
         |head| world.is_tuple_head(head),
         |_| world.nominal_kind(ty),
     )
+}
+
+/// Evaluate `Type.predicates.is_not_sized(ty)` against a concrete `LayoutWorld`,
+/// returning `Err(LayoutError::ComptimeOnly(_))` if any component is comptime-only.
+pub fn evaluate_not_sized(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<Option<bool>, LayoutError> {
+    let mut visiting = Vec::new();
+    evaluate_not_sized_at(world, ty, 0, &mut visiting, fuel)
+}
+
+fn evaluate_not_sized_aggregate<'a>(
+    world: &impl LayoutWorld,
+    fields: impl Iterator<Item = &'a Term>,
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<Option<bool>, LayoutError> {
+    let mut unknown = false;
+    let mut saw_unsized = false;
+    for field in fields {
+        match evaluate_not_sized_at(world, field, depth, visiting, fuel)? {
+            Some(true) => saw_unsized = true,
+            Some(false) => {}
+            None => unknown = true,
+        }
+    }
+    if saw_unsized {
+        Ok(Some(true))
+    } else if unknown {
+        Ok(None)
+    } else {
+        Ok(Some(false))
+    }
+}
+
+fn evaluate_not_sized_at(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<Option<bool>, LayoutError> {
+    charge(fuel, 1)?;
+    if depth >= MAX_LAYOUT_DEPTH {
+        return Err(LayoutError::BudgetExhausted);
+    }
+    match ty {
+        Term::Primitive(
+            Primitive::Type
+            | Primitive::Object
+            | Primitive::Integer
+            | Primitive::Float
+            | Primitive::Unit,
+        )
+        | Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(..)
+        | Term::Lift(_)
+        | Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => Err(LayoutError::ComptimeOnly(ty.clone())),
+        Term::Function { parameters, .. } => {
+            if parameters.iter().any(|p| p.sort != Sort::Runtime) {
+                Err(LayoutError::ComptimeOnly(ty.clone()))
+            } else {
+                Ok(Some(false))
+            }
+        }
+        Term::UnsafeFunction(inner) => {
+            evaluate_not_sized_at(world, inner, depth + 1, visiting, fuel)
+        }
+        Term::Closure {
+            environment,
+            signature,
+        } => {
+            if !matches!(
+                signature.callable_signature(),
+                Term::Function { parameters, .. } if parameters.iter().all(|p| p.sort == Sort::Runtime)
+            ) {
+                return Err(LayoutError::ComptimeOnly(ty.clone()));
+            }
+            evaluate_not_sized_aggregate(world, environment.iter(), depth + 1, visiting, fuel)
+        }
+        Term::Primitive(
+            Primitive::Bool
+            | Primitive::Char
+            | Primitive::Str
+            | Primitive::Symbol
+            | Primitive::Void
+            | Primitive::Never
+            | Primitive::I8
+            | Primitive::I16
+            | Primitive::I32
+            | Primitive::I64
+            | Primitive::I128
+            | Primitive::Isize
+            | Primitive::U8
+            | Primitive::U16
+            | Primitive::U32
+            | Primitive::U64
+            | Primitive::U128
+            | Primitive::Usize
+            | Primitive::F16
+            | Primitive::Bf16
+            | Primitive::F32
+            | Primitive::F64
+            | Primitive::BitVec(_),
+        )
+        | Term::Pointer(_) => Ok(Some(false)),
+        Term::Optional(inner) => evaluate_not_sized_at(world, inner, depth + 1, visiting, fuel),
+        Term::Tuple(elements) => {
+            evaluate_not_sized_aggregate(world, elements.iter(), depth + 1, visiting, fuel)
+        }
+        Term::Record(fields) => evaluate_not_sized_aggregate(
+            world,
+            fields.iter().map(|(_, t)| t),
+            depth + 1,
+            visiting,
+            fuel,
+        ),
+        Term::ErrorResult { errors, result } => evaluate_not_sized_aggregate(
+            world,
+            errors.iter().chain(std::iter::once(result.as_ref())),
+            depth + 1,
+            visiting,
+            fuel,
+        ),
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments,
+        } => {
+            if world.is_list_head(*head) {
+                return Err(LayoutError::ComptimeOnly(ty.clone()));
+            }
+            if world.is_tuple_head(*head) {
+                if let Some(elements) =
+                    crate::normal_forms::type_list_fields_with_layouts(arguments, &|id| {
+                        world.is_list_head(id)
+                    })
+                {
+                    return evaluate_not_sized_aggregate(
+                        world,
+                        elements.iter(),
+                        depth + 1,
+                        visiting,
+                        fuel,
+                    );
+                }
+            }
+            Ok(None)
+        }
+        Term::Nominal { .. } => {
+            if visiting.contains(ty) {
+                return Err(LayoutError::Cycle(ty.clone()));
+            }
+            let Some(definition) = world.nominal_layout(ty, fuel)? else {
+                return Ok(None);
+            };
+            visiting.push(ty.clone());
+            let result = match definition {
+                NominalLayout::Struct(fields)
+                | NominalLayout::PackedStruct(fields)
+                | NominalLayout::BitPackedStruct(fields) => {
+                    evaluate_not_sized_aggregate(world, fields.iter(), depth + 1, visiting, fuel)
+                }
+                NominalLayout::Newtype(repr) => {
+                    evaluate_not_sized_at(world, &repr, depth + 1, visiting, fuel)
+                }
+                NominalLayout::EnumUnit(_)
+                | NominalLayout::EnumSymbol
+                | NominalLayout::EnumFixedBits { .. } => Ok(Some(false)),
+                NominalLayout::EnumAggregate(variants) => evaluate_not_sized_aggregate(
+                    world,
+                    variants.iter().flat_map(|fields| fields.iter()),
+                    depth + 1,
+                    visiting,
+                    fuel,
+                ),
+            };
+            visiting.pop();
+            result
+        }
+        _ => Ok(None),
+    }
 }
 
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), LayoutError> {
@@ -473,7 +987,11 @@ fn layout_with_niche_at(
             | Primitive::Integer
             | Primitive::Float
             | Primitive::Unit,
-        ) => Err(LayoutError::ComptimeOnly(ty.clone())),
+        )
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => Err(LayoutError::ComptimeOnly(ty.clone())),
         Term::Primitive(Primitive::Never) => Err(LayoutError::Unsupported(ty.clone())),
         Term::Pointer(_) => Ok(LayoutWithNiche {
             layout: pointer_layout(world, ty)?,
@@ -786,8 +1304,8 @@ fn layout_with_niche_at(
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
         | Term::ContextualClosure { .. }
-        | Term::ClosureContextType
         | Term::ClosureContextValue(_) => Err(LayoutError::Unresolved(ty.clone())),
+        Term::ClosureContextType => Err(LayoutError::ComptimeOnly(ty.clone())),
         _ => Err(LayoutError::Unsupported(ty.clone())),
     }
 }
@@ -985,10 +1503,16 @@ fn bit_packed_field_info_at(
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
         | Term::ContextualClosure { .. }
-        | Term::ClosureContextType
         | Term::ClosureContextValue(_) => {
             Err(BitPackedError::Layout(LayoutError::Unresolved(ty.clone())))
         }
+        Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => Err(BitPackedError::Layout(LayoutError::ComptimeOnly(
+            ty.clone(),
+        ))),
         Term::Runtime(_) | Term::RuntimeField { .. } => Err(unsupported(
             "runtime-dependent types are not allowed in an attrs.packed.bit struct",
         )),
@@ -1248,6 +1772,31 @@ impl LayoutWorld for PackageLayoutWorld<'_> {
         }
         Ok(None)
     }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        fuel: &mut usize,
+    ) -> Result<FieldLookup, LayoutError> {
+        charge(fuel, 1)?;
+        let Term::Nominal { declaration, .. } = ty else {
+            return Ok(FieldLookup::NotFound);
+        };
+        if let Some(def) = self
+            .0
+            .structs
+            .iter()
+            .find(|s| s.declaration == *declaration)
+        {
+            return Ok(def
+                .fields
+                .iter()
+                .position(|(name, _)| name == field)
+                .map_or(FieldLookup::NotFound, FieldLookup::Index));
+        }
+        Ok(FieldLookup::NotFound)
+    }
 }
 
 #[cfg(test)]
@@ -1260,6 +1809,7 @@ mod tests {
         tuple_head: Option<DeclarationId>,
         list_head: Option<DeclarationId>,
         nominals: Vec<(Term, NominalLayout)>,
+        field_names: Vec<(Term, Vec<String>)>,
     }
 
     impl TestWorldVec {
@@ -1269,6 +1819,7 @@ mod tests {
                 tuple_head: None,
                 list_head: None,
                 nominals: Vec::new(),
+                field_names: Vec::new(),
             }
         }
     }
@@ -1307,6 +1858,21 @@ mod tests {
                 .iter()
                 .find(|(key, _)| key == ty)
                 .map(|(_, def)| def.clone()))
+        }
+
+        fn nominal_field_index(
+            &self,
+            ty: &Term,
+            field: &str,
+            _fuel: &mut usize,
+        ) -> Result<FieldLookup, LayoutError> {
+            Ok(match self.field_names.iter().find(|(key, _)| key == ty) {
+                Some((_, names)) => names
+                    .iter()
+                    .position(|name| name == field)
+                    .map_or(FieldLookup::NotFound, FieldLookup::Index),
+                None => FieldLookup::NotFound,
+            })
         }
     }
 
@@ -2084,5 +2650,111 @@ mod tests {
             bit_packed_struct_layout(&world, &[cycle], &mut fuel),
             Err(BitPackedError::Layout(LayoutError::Cycle(_)))
         ));
+    }
+
+    #[test]
+    fn stride_bit_width_and_field_offset_queries_are_exact() {
+        let mut world = TestWorldVec::new(Some(TargetData::new(64).unwrap()));
+        let mut fuel = 10_000;
+        assert_eq!(TypeLayoutQuery::StrideOf.to_string(), "stride-of");
+        assert_eq!(TypeLayoutQuery::BitWidthOf.to_string(), "bit-width-of");
+        assert_eq!(TypeLayoutQuery::FieldOffset.to_string(), "field-offset");
+
+        assert_eq!(
+            compute_bit_width(&world, &Term::Primitive(Primitive::Void), &mut fuel),
+            Ok(0)
+        );
+        assert_eq!(
+            compute_bit_width(&world, &Term::Primitive(Primitive::Bool), &mut fuel),
+            Ok(1)
+        );
+        assert_eq!(
+            compute_bit_width(&world, &Term::Primitive(Primitive::BitVec(5)), &mut fuel),
+            Ok(5)
+        );
+        assert_eq!(
+            compute_bit_width(&world, &Term::Primitive(Primitive::Usize), &mut fuel),
+            Ok(64)
+        );
+        assert_eq!(
+            compute_stride(&world, &Term::Primitive(Primitive::U32), &mut fuel),
+            Ok(4)
+        );
+
+        let st = Term::Nominal {
+            declaration: id(200),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            st.clone(),
+            NominalLayout::Struct(vec![
+                Term::Primitive(Primitive::U8),
+                Term::Primitive(Primitive::U64),
+                Term::Primitive(Primitive::U8),
+            ]),
+        ));
+        world
+            .field_names
+            .push((st.clone(), vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(compute_stride(&world, &st, &mut fuel), Ok(24));
+        assert_eq!(compute_bit_width(&world, &st, &mut fuel), Ok(192));
+        assert_eq!(compute_field_offset(&world, &st, "a", &mut fuel), Ok(0));
+        assert_eq!(compute_field_offset(&world, &st, "b", &mut fuel), Ok(8));
+        assert_eq!(compute_field_offset(&world, &st, "c", &mut fuel), Ok(16));
+        assert!(matches!(
+            compute_field_offset(&world, &st, "missing", &mut fuel),
+            Err(LayoutError::UnknownField { .. })
+        ));
+
+        let packed_st = Term::Nominal {
+            declaration: id(201),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            packed_st.clone(),
+            NominalLayout::PackedStruct(vec![
+                Term::Primitive(Primitive::U8),
+                Term::Primitive(Primitive::U64),
+            ]),
+        ));
+        world
+            .field_names
+            .push((packed_st.clone(), vec!["a".into(), "b".into()]));
+        assert_eq!(compute_stride(&world, &packed_st, &mut fuel), Ok(9));
+        assert_eq!(compute_bit_width(&world, &packed_st, &mut fuel), Ok(72));
+        assert_eq!(
+            compute_field_offset(&world, &packed_st, "b", &mut fuel),
+            Ok(1)
+        );
+
+        let bp_st = Term::Nominal {
+            declaration: id(202),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            bp_st.clone(),
+            NominalLayout::BitPackedStruct(vec![
+                Term::Primitive(Primitive::BitVec(5)),
+                Term::Primitive(Primitive::BitVec(3)),
+                Term::Primitive(Primitive::U8),
+            ]),
+        ));
+        world
+            .field_names
+            .push((bp_st.clone(), vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(compute_bit_width(&world, &bp_st, &mut fuel), Ok(16));
+        assert_eq!(compute_field_offset(&world, &bp_st, "a", &mut fuel), Ok(0));
+        assert!(matches!(
+            compute_field_offset(&world, &bp_st, "b", &mut fuel),
+            Err(LayoutError::UnalignedBitField { bit_offset: 5, .. })
+        ));
+        assert_eq!(compute_field_offset(&world, &bp_st, "c", &mut fuel), Ok(1));
+
+        let rec = Term::Record(vec![
+            ("x".into(), Term::Primitive(Primitive::U16)),
+            ("y".into(), Term::Primitive(Primitive::U32)),
+        ]);
+        assert_eq!(compute_field_offset(&world, &rec, "x", &mut fuel), Ok(0));
+        assert_eq!(compute_field_offset(&world, &rec, "y", &mut fuel), Ok(4));
     }
 }

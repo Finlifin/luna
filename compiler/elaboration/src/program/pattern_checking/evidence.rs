@@ -202,7 +202,9 @@ pub(in crate::program) fn readonly_guard_comparison(
         {
             (left, right)
         }
-        K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
+        K::TypeKind { operand, .. }
+        | K::TypeNotSized { operand }
+        | K::TypeLayout { operand, .. } => {
             return readonly_guard_operand(operand, fuel, span);
         }
         _ => return Ok(false),
@@ -236,6 +238,7 @@ pub(in crate::program) fn readonly_guard_operand(
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
             K::IntegerBinary { left, right, .. }

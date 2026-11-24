@@ -32,6 +32,26 @@ impl Context {
                 }
                 Input::Formula(Formula::Kind(query)) => pending.push(Input::Term(&query.ty)),
                 Input::Formula(Formula::NotSized(query)) => pending.push(Input::Term(&query.ty)),
+                Input::Formula(Formula::HasHeadShape(query)) => {
+                    pending.push(Input::Term(&query.ty))
+                }
+                Input::Formula(Formula::RowContains(query)) => {
+                    pending.push(Input::Term(&query.row));
+                    match &query.label {
+                        RowLabel::Error(ty) => pending.push(Input::Term(ty)),
+                        RowLabel::Effect(op) => {
+                            pending.extend(op.arguments.iter().rev().map(Input::Term));
+                        }
+                    }
+                }
+                Input::Formula(Formula::RowSubset(query)) => {
+                    pending.push(Input::Term(&query.right));
+                    pending.push(Input::Term(&query.left));
+                }
+                Input::Formula(Formula::RowDisjoint(query)) => {
+                    pending.push(Input::Term(&query.right));
+                    pending.push(Input::Term(&query.left));
+                }
                 Input::Formula(Formula::Trait(query)) => {
                     pending.extend(query.inputs().map(Input::Term))
                 }

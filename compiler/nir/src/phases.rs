@@ -1236,8 +1236,23 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(left, false, true), inspection_fuel)?;
                             work.push(Work::Expr(right, false, true), inspection_fuel)?;
                         }
-                        K::TypeKind { operand, .. } if matches!(operand.kind, K::TypeValue(_)) => {
+                        K::TypeKind { operand, .. } | K::TypeNotSized { operand }
+                            if matches!(operand.kind, K::TypeValue(_)) =>
+                        {
                             work.push(Work::Expr(operand, false, true), inspection_fuel)?;
+                        }
+                        K::TypeLayout {
+                            query: crate::TypeLayoutQuery::FieldOffset,
+                            operand,
+                        } if matches!(
+                            &operand.kind,
+                            K::Tuple(items) if items.len() == 2 && matches!(items[0].kind, K::TypeValue(_))
+                        ) =>
+                        {
+                            if let K::Tuple(items) = &operand.kind {
+                                work.push(Work::Expr(&items[0], false, true), inspection_fuel)?;
+                                work.push(Work::Expr(&items[1], false, ct), inspection_fuel)?;
+                            }
                         }
                         K::TypeLayout { operand, .. }
                             if matches!(operand.kind, K::TypeValue(_)) =>
@@ -1806,6 +1821,7 @@ impl<'a> PhaseContext<'a> {
                         | K::SymbolName(value)
                         | K::EnumName(value)
                         | K::TypeKind { operand: value, .. }
+                        | K::TypeNotSized { operand: value }
                         | K::TypeLayout { operand: value, .. }
                         | K::Not(value)
                         | K::Loop { body: value, .. } => {

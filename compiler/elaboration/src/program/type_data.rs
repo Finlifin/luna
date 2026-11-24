@@ -153,12 +153,21 @@ impl Checker<'_, '_> {
             }
         }
         if let H::Projection(value, field) = &expr.kind {
-            if field.name.as_str() == "Closure"
-                && let H::Projection(base, namespace) = &value.kind
+            if let H::Projection(base, namespace) = &value.kind
                 && namespace.name.as_str() == "vars"
                 && self.metatype_namespace_receiver(base)?
             {
-                return Ok(CompletedType::Identity(Term::ClosureContextType));
+                let marker = match field.name.as_str() {
+                    "Closure" => Some(Term::ClosureContextType),
+                    "EffectRow" => Some(Term::EffectRowType),
+                    "ErrorRow" => Some(Term::ErrorRowType),
+                    "Reachability" => Some(Term::ReachabilityType),
+                    "Any" => Some(Term::AnyType),
+                    _ => None,
+                };
+                if let Some(term) = marker {
+                    return Ok(CompletedType::Identity(term));
+                }
             }
         }
         // This is a type position: computed member receivers are required

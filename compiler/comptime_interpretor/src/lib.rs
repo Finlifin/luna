@@ -2769,6 +2769,7 @@ impl<'a> Interpreter<'a> {
             | K::ScalarGreaterEqual(..) => self.eval_scalar_operation(expr, environment),
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TypeKind { .. } => self.eval_type_kind(expr, environment),
+            K::TypeNotSized { .. } => self.eval_type_not_sized(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
             K::BuildStruct(_) | K::BuildEnum(_) | K::BuildNewtype(_) => {

@@ -2,9 +2,11 @@
 use nir::program::{self as n, ExprKind as K};
 use nir::{Primitive as P, Term};
 use std::collections::BTreeSet;
+
 fn p(value: P) -> Term {
     Term::Primitive(value)
 }
+
 fn is_never(ty: &Term) -> bool {
     *ty == p(P::Never)
 }
@@ -374,7 +376,9 @@ fn loop_may_transfer(
                     }
                     return Ok(false);
                 }
-                K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
+                K::TypeKind { operand, .. }
+                | K::TypeNotSized { operand }
+                | K::TypeLayout { operand, .. } => {
                     pending.push(operand);
                     return Ok(false);
                 }
@@ -570,6 +574,7 @@ pub fn freshen_loop_sites(
 #[cfg(test)]
 mod synthetic_loop_sites_tests {
     use super::*;
+
     #[test]
     fn loop_sites_preserve_shared_discard_chains_and_source_provenance() {
         let original = n::SourceRange { start: 3, end: 40 };

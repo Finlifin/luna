@@ -4304,6 +4304,7 @@ impl Builder<'_, '_> {
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
+                | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
                 | K::Not(value)
                 | K::Loop { body: value, .. } => pending.push((value, depth + 1)),
@@ -4806,6 +4807,7 @@ impl Builder<'_, '_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::Not(value)
             | K::Loop { body: value, .. } => self.expr(value, depth + 1, comptime)?,
@@ -5121,6 +5123,40 @@ impl nir::LayoutWorld for MaterializationLayoutWorld<'_> {
             return Ok(Some(nir::NominalLayout::EnumAggregate(variants)));
         }
         Ok(None)
+    }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        _fuel: &mut usize,
+    ) -> Result<nir::FieldLookup, nir::LayoutError> {
+        let Term::Nominal { declaration, .. } = ty else {
+            return Ok(nir::FieldLookup::NotFound);
+        };
+        if let Some(instance) = self.nominals.iter().find(|item| item.ty == *ty) {
+            return Ok(match &instance.definition {
+                iir::NominalDefinition::Struct(def) => def
+                    .fields
+                    .iter()
+                    .position(|(name, _)| name == field)
+                    .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index),
+                _ => nir::FieldLookup::NotFound,
+            });
+        }
+        if let Some(def) = self
+            .package
+            .structs
+            .iter()
+            .find(|s| s.declaration == *declaration)
+        {
+            return Ok(def
+                .fields
+                .iter()
+                .position(|(name, _)| name == field)
+                .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index));
+        }
+        Ok(nir::FieldLookup::NotFound)
     }
 }
 

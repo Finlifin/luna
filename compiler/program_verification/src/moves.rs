@@ -5695,7 +5695,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if parameter.sort != nir::Sort::Runtime
                     && matches!(
                         parameter.ty,
-                        Term::Primitive(nir::Primitive::Type) | Term::ClosureContextType
+                        Term::Primitive(nir::Primitive::Type)
+                            | Term::ClosureContextType
+                            | Term::EffectRowType
+                            | Term::ErrorRowType
+                            | Term::ReachabilityType
+                            | Term::AnyType
                     )
                 {
                     continue;
@@ -9085,6 +9090,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.observe_guard(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {

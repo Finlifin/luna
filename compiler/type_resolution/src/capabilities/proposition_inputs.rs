@@ -53,6 +53,26 @@ impl<'a> PropositionInputs<'a> {
                     }
                     Formula::Kind(query) => observe(&query.ty)?,
                     Formula::NotSized(query) => observe(&query.ty)?,
+                    Formula::HasHeadShape(query) => observe(&query.ty)?,
+                    Formula::RowContains(query) => {
+                        observe(&query.row)?;
+                        match &query.label {
+                            crate::ptc::RowLabel::Error(ty) => observe(ty)?,
+                            crate::ptc::RowLabel::Effect(op) => {
+                                for arg in &op.arguments {
+                                    observe(arg)?;
+                                }
+                            }
+                        }
+                    }
+                    Formula::RowSubset(query) => {
+                        observe(&query.left)?;
+                        observe(&query.right)?;
+                    }
+                    Formula::RowDisjoint(query) => {
+                        observe(&query.left)?;
+                        observe(&query.right)?;
+                    }
                     Formula::Not(inner) => pending.push((inner, child_depth)),
                     Formula::And(items) | Formula::Or(items) => {
                         if items.len() > fuel.saturating_sub(pending.len()) {
@@ -60,7 +80,10 @@ impl<'a> PropositionInputs<'a> {
                         }
                         pending.extend(items.iter().map(|item| (item, child_depth)));
                     }
-                    Formula::True | Formula::False | Formula::IntLe(_) => {}
+                    Formula::True
+                    | Formula::False
+                    | Formula::IntLe(_)
+                    | Formula::IntCongruent(_) => {}
                 }
             }
         }

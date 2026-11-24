@@ -3,6 +3,7 @@
 use super::*;
 use nir::program::LocalId;
 use std::collections::BTreeMap;
+
 mod matching;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -13,11 +14,13 @@ enum Exit {
     Resume,
     Abort,
 }
+
 #[derive(Default)]
 pub(super) struct Paths {
     normal: Option<Uses>,
     exits: BTreeMap<Exit, Uses>,
 }
+
 impl Paths {
     fn normal(uses: Uses) -> Self {
         Self {
@@ -25,6 +28,7 @@ impl Paths {
             exits: BTreeMap::new(),
         }
     }
+
     fn exit(&mut self, target: Exit, uses: Uses, fuel: &mut usize) -> Result<(), String> {
         step(fuel, 1)?;
         if let Some(previous) = self.exits.get_mut(&target) {
@@ -34,12 +38,14 @@ impl Paths {
         }
         Ok(())
     }
+
     fn divert(&mut self, target: Exit, fuel: &mut usize) -> Result<(), String> {
         if let Some(uses) = self.normal.take() {
             self.exit(target, uses, fuel)?;
         }
         Ok(())
     }
+
     fn merge(&mut self, other: Self, fuel: &mut usize) -> Result<(), String> {
         if let Some(uses) = other.normal {
             if let Some(normal) = &mut self.normal {
@@ -53,6 +59,7 @@ impl Paths {
         }
         Ok(())
     }
+
     fn then(&mut self, mut next: Self, fuel: &mut usize) -> Result<(), String> {
         let Some(prefix) = self.normal.take() else {
             return Ok(());
@@ -65,6 +72,7 @@ impl Paths {
         }
         self.merge(next, fuel)
     }
+
     pub(super) fn upper(self, n: usize, fuel: &mut usize) -> Result<Uses, String> {
         step(fuel, n + 1)?;
         let mut upper = self.normal.unwrap_or_else(|| vec![0; n]);
@@ -74,6 +82,7 @@ impl Paths {
         Ok(upper)
     }
 }
+
 impl Analyzer<'_, '_, '_, '_> {
     fn sequence<'e>(
         &mut self,
@@ -92,6 +101,7 @@ impl Analyzer<'_, '_, '_, '_> {
         }
         Ok(paths)
     }
+
     /// Unsupported control correlations retain all syntactic exits as well as
     /// normal completion. In particular a hidden break must not turn a loop
     /// into a proven infinite loop and erase its reachable successor.
@@ -116,6 +126,7 @@ impl Analyzer<'_, '_, '_, '_> {
         }
         Ok(paths)
     }
+
     pub(super) fn control(
         &mut self,
         expr: &Expr,
@@ -349,6 +360,7 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. }
             | K::BitAssign { value, .. }
@@ -390,6 +402,7 @@ impl Analyzer<'_, '_, '_, '_> {
         }
         Ok(paths)
     }
+
     fn handler_installation(
         &mut self,
         expr: &Expr,

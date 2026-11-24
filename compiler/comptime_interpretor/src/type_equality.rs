@@ -160,4 +160,84 @@ impl Interpreter<'_> {
         self.complete_type_kind_value(*kind, operand, expr.source)
             .map(Flow::Value)
     }
+
+    pub(super) fn complete_type_not_sized(
+        &mut self,
+        operand: Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        self.check_type_description(&operand, Some(source))?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let concrete = nir::layout::evaluate_not_sized(
+            &observations::InterpreterLayoutWorld(self),
+            &operand,
+            &mut fuel,
+        );
+        self.budget.steps -= (before - fuel) as u64;
+        match concrete {
+            Ok(Some(value)) => return Ok(Value::Bool(value)),
+            Ok(None) => {}
+            Err(nir::LayoutError::BudgetExhausted) => {
+                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
+            }
+            Err(nir::LayoutError::ComptimeOnly(_)) => {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            Err(_) => {}
+        }
+        let predicate = nir::program::TypePredicate::NotSized(operand);
+        self.tick(Some(source))?;
+        if self
+            .solve_type_predicate(&predicate)
+            .map_err(|kind| self.failure(kind, Some(source)))?
+            == ContractOutcome::Satisfied
+        {
+            return Ok(Value::Bool(true));
+        }
+        self.tick(Some(source))?;
+        if self
+            .solve_type_predicate(&nir::program::TypePredicate::Not(Box::new(predicate)))
+            .map_err(|kind| self.failure(kind, Some(source)))?
+            == ContractOutcome::Satisfied
+        {
+            return Ok(Value::Bool(false));
+        }
+        Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
+    }
+
+    pub(super) fn complete_type_not_sized_value(
+        &mut self,
+        operand: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if let Value::Description(ref data) = operand {
+            use nir::program::TypePredicate as P;
+            let mut evidence = self.description_evidence(data, None, source)?;
+            let target = P::NotSized(evidence.subject.clone());
+            if evidence.entails(self, target.clone(), source)? {
+                return Ok(Value::Bool(true));
+            }
+            if evidence.entails(self, P::Not(Box::new(target)), source)? {
+                return Ok(Value::Bool(false));
+            }
+            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+        }
+        let operand = self.type_identity_term(operand, source)?;
+        self.complete_type_not_sized(operand, source)
+    }
+
+    pub(super) fn eval_type_not_sized(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::TypeNotSized { operand } = &expr.kind else {
+            unreachable!()
+        };
+        self.prepare_type_kind(&expr.ty, &operand.ty, expr.source)?;
+        let operand = value!(self.eval(operand, environment));
+        self.complete_type_not_sized_value(operand, expr.source)
+            .map(Flow::Value)
+    }
 }

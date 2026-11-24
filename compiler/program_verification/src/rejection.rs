@@ -568,6 +568,7 @@ fn scan<'a>(
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
+                | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
                 | K::Not(value)
                 | K::Loop { body: value, .. } => work.push(Work::Expr(value, context.clone())),

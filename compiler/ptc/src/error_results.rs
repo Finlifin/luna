@@ -71,6 +71,7 @@ impl Search<'_> {
         }
         Ok(false)
     }
+
     pub(super) fn error_result_congruent(
         &mut self,
         left: usize,
@@ -90,9 +91,10 @@ impl Search<'_> {
         };
         Ok(left == right)
     }
+
     /// Follow only branch-proved aliases. A cyclic tail remains open: error
     /// labels are idempotent, so such an equation is not itself contradictory.
-    fn error_result_view(
+    pub(super) fn error_result_view(
         &mut self,
         start: usize,
         classes: &Classes,

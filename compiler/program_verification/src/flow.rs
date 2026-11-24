@@ -6066,6 +6066,7 @@ impl Walker<'_> {
             | K::ClosureType { .. }
             | K::TypeEqual(..)
             | K::TypeKind { .. }
+            | K::TypeNotSized { .. }
             | K::TypeLayout { .. } => self.formation_expression(expr, state, depth),
             K::ErrorConvert { .. }
             | K::OptionalAbsent
@@ -7334,6 +7335,7 @@ fn exportable_postcondition(
             | K::SymbolName(a)
             | K::EnumName(a)
             | K::TypeKind { operand: a, .. }
+            | K::TypeNotSized { operand: a }
             | K::TypeLayout { operand: a, .. }
             | K::BitConvert(a)
             | K::UnsafeScope(a)

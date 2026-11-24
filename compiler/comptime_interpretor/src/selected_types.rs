@@ -375,6 +375,10 @@ fn walk<'p, L: Lookup<'p>>(
         }
         Term::Primitive(_)
         | Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType
         | Term::Hole { .. }
         | Term::Bound { .. }
         | Term::Rigid { .. }

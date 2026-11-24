@@ -123,6 +123,10 @@ impl Interpreter<'_> {
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(_, _)
                     | Term::ClosureContextType
+                    | Term::EffectRowType
+                    | Term::ErrorRowType
+                    | Term::ReachabilityType
+                    | Term::AnyType
             ),
             _ => true,
         };

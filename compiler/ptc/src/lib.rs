@@ -48,9 +48,17 @@ mod not_sized;
 
 pub use not_sized::NotSizedQuery;
 
+mod head_shape;
+
+pub use head_shape::HeadShapeQuery;
+
+mod rows;
+
+pub use rows::{RowContainsQuery, RowDisjointQuery, RowKind, RowLabel, RowSubsetQuery};
+
 mod integer;
 
-pub use integer::{IntLe, IntegerBoundProof, IntegerTerm};
+pub use integer::{IntCongruent, IntLe, IntegerBoundProof, IntegerTerm};
 
 use nir::{DeclarationId, Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -64,8 +72,13 @@ pub struct Equality(pub Term, pub Term);
 pub enum Atom {
     TypeEqual(Equality),
     IntLe(IntLe),
+    IntCongruent(IntCongruent),
     Kind(KindQuery),
     NotSized(NotSizedQuery),
+    HasHeadShape(HeadShapeQuery),
+    RowContains(RowContainsQuery),
+    RowSubset(RowSubsetQuery),
+    RowDisjoint(RowDisjointQuery),
     Trait(TraitQuery),
 }
 
@@ -75,8 +88,13 @@ pub enum Formula {
     False,
     Equal(Equality),
     IntLe(IntLe),
+    IntCongruent(IntCongruent),
     Kind(KindQuery),
     NotSized(NotSizedQuery),
+    HasHeadShape(HeadShapeQuery),
+    RowContains(RowContainsQuery),
+    RowSubset(RowSubsetQuery),
+    RowDisjoint(RowDisjointQuery),
     Trait(TraitQuery),
     Not(Box<Formula>),
     And(Vec<Formula>),
@@ -108,12 +126,36 @@ impl Formula {
         Self::IntLe(IntLe { left, right })
     }
 
+    pub fn int_congruent(term: IntegerTerm, remainder: i128, modulus: i128) -> Self {
+        Self::IntCongruent(IntCongruent {
+            term,
+            remainder,
+            modulus,
+        })
+    }
+
     pub fn kind(ty: Term, kind: TypeKind) -> Self {
         Self::Kind(KindQuery { ty, kind })
     }
 
     pub fn not_sized(ty: Term) -> Self {
         Self::NotSized(NotSizedQuery { ty })
+    }
+
+    pub fn has_head_shape(ty: Term, head: DeclarationId) -> Self {
+        Self::HasHeadShape(HeadShapeQuery { ty, head })
+    }
+
+    pub fn row_contains(kind: RowKind, row: Term, label: RowLabel) -> Self {
+        Self::RowContains(RowContainsQuery { kind, row, label })
+    }
+
+    pub fn row_subset(left: Term, right: Term) -> Self {
+        Self::RowSubset(RowSubsetQuery { left, right })
+    }
+
+    pub fn row_disjoint(left: Term, right: Term) -> Self {
+        Self::RowDisjoint(RowDisjointQuery { left, right })
     }
 
     pub fn negate(self) -> Self {
@@ -136,8 +178,33 @@ impl Formula {
                         return true;
                     }
                 }
-                Self::Kind(KindQuery { ty, .. }) | Self::NotSized(NotSizedQuery { ty }) => {
+                Self::Kind(KindQuery { ty, .. })
+                | Self::NotSized(NotSizedQuery { ty })
+                | Self::HasHeadShape(HeadShapeQuery { ty, .. }) => {
                     if term_has_bound_or_hole(ty) {
+                        return true;
+                    }
+                }
+                Self::RowContains(RowContainsQuery { row, label, .. }) => {
+                    if term_has_bound_or_hole(row) {
+                        return true;
+                    }
+                    match label {
+                        RowLabel::Error(ty) => {
+                            if term_has_bound_or_hole(ty) {
+                                return true;
+                            }
+                        }
+                        RowLabel::Effect(op) => {
+                            if op.arguments.iter().any(term_has_bound_or_hole) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                Self::RowSubset(RowSubsetQuery { left, right })
+                | Self::RowDisjoint(RowDisjointQuery { left, right }) => {
+                    if term_has_bound_or_hole(left) || term_has_bound_or_hole(right) {
                         return true;
                     }
                 }
@@ -152,7 +219,7 @@ impl Formula {
                 }
                 Self::Not(inner) => pending.push(inner),
                 Self::And(parts) | Self::Or(parts) => pending.extend(parts),
-                Self::True | Self::False | Self::IntLe(_) => {}
+                Self::True | Self::False | Self::IntLe(_) | Self::IntCongruent(_) => {}
             }
         }
         false
@@ -181,6 +248,7 @@ pub struct Context {
     scope: Arc<Vec<Vec<Sort>>>,
     assumptions: Arc<Vec<Formula>>,
     theory: DeclarationTheory,
+    disallow_synthetic_nominals: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -306,6 +374,7 @@ pub struct Witness {
     pub types: BTreeMap<DeclarationId, Term>,
     pub bound_types: BTreeMap<TypeBinder, Term>,
     pub integers: BTreeMap<DeclarationId, i128>,
+    pub synthetic_nominals: BTreeMap<DeclarationId, nir::NominalKind>,
     pub assumptions: Vec<Formula>,
     pub goal: Formula,
 }
@@ -335,6 +404,7 @@ impl Context {
             scope: Arc::new(scope),
             assumptions: Arc::default(),
             theory: self.theory.clone(),
+            disallow_synthetic_nominals: self.disallow_synthetic_nominals,
         }
     }
 
@@ -554,10 +624,27 @@ impl Context {
                 Ok(())
             })?;
         }
+        if !witness.synthetic_nominals.is_empty() && self.disallow_synthetic_nominals {
+            return Err(ProofError::Invalid);
+        }
+        for &id in witness.synthetic_nominals.keys() {
+            *fuel = fuel.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
+            if mentioned_nominals.contains(&id)
+                || self
+                    .theory
+                    .constructors
+                    .nominal_constructors
+                    .contains_key(&id)
+                || self.formed_nullary_nominals().contains_declaration(id)
+            {
+                return Err(ProofError::Invalid);
+            }
+        }
         let admit_nominal = |term: &Term| {
             if let Some(id) = model_domain::nullary_nominal(term)
                 && !mentioned_nominals.contains(&id)
                 && !self.formed_nullary_nominals().contains_declaration(id)
+                && !witness.synthetic_nominals.contains_key(&id)
             {
                 return Err(ProofError::Invalid);
             }
@@ -609,16 +696,18 @@ impl Context {
         let evaluation_fuel = std::cell::Cell::new(*fuel);
         let result = (|| {
             if atoms.iter().any(|atom| {
-                model_atom(
-                    atom,
-                    &witness.types,
-                    &witness.bound_types,
-                    &applications,
-                    &evaluation_fuel,
-                    &witness.integers,
-                    &self.theory,
-                )
-                .is_none()
+                !matches!(atom, Atom::Trait(_))
+                    && model_atom(
+                        atom,
+                        &witness.types,
+                        &witness.bound_types,
+                        &applications,
+                        &evaluation_fuel,
+                        &witness.integers,
+                        &witness.synthetic_nominals,
+                        &self.theory,
+                    )
+                    .is_none()
             }) {
                 return Err(if evaluation_fuel.get() == 0 {
                     ProofError::BudgetExhausted
@@ -634,6 +723,7 @@ impl Context {
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
+                    &witness.synthetic_nominals,
                     &self.theory,
                 )
             };
@@ -710,6 +800,26 @@ impl Context {
                     Input::Formula(Formula::Kind(query)) => pending.push(Input::Term(&query.ty)),
                     Input::Formula(Formula::NotSized(query)) => {
                         pending.push(Input::Term(&query.ty))
+                    }
+                    Input::Formula(Formula::HasHeadShape(query)) => {
+                        pending.push(Input::Term(&query.ty))
+                    }
+                    Input::Formula(Formula::RowContains(query)) => {
+                        pending.push(Input::Term(&query.row));
+                        match &query.label {
+                            RowLabel::Error(ty) => pending.push(Input::Term(ty)),
+                            RowLabel::Effect(op) => {
+                                pending.extend(op.arguments.iter().rev().map(Input::Term))
+                            }
+                        }
+                    }
+                    Input::Formula(Formula::RowSubset(query)) => {
+                        pending.push(Input::Term(&query.right));
+                        pending.push(Input::Term(&query.left));
+                    }
+                    Input::Formula(Formula::RowDisjoint(query)) => {
+                        pending.push(Input::Term(&query.right));
+                        pending.push(Input::Term(&query.left));
                     }
                     Input::Formula(Formula::Trait(query)) => {
                         pending.extend(query.inputs().map(Input::Term))
@@ -927,6 +1037,7 @@ impl Context {
                 types: model.types,
                 bound_types: model.bound_types,
                 integers: model.integers,
+                synthetic_nominals: model.synthetic_nominals,
                 assumptions: (*self.assumptions).clone(),
                 goal,
             }),
@@ -987,6 +1098,30 @@ fn visit_input_terms(
             Input::Formula(Formula::NotSized(query)) => {
                 pending.push((Input::Term(&query.ty), depth + 1))
             }
+            Input::Formula(Formula::HasHeadShape(query)) => {
+                pending.push((Input::Term(&query.ty), depth + 1))
+            }
+            Input::Formula(Formula::RowContains(query)) => {
+                pending.push((Input::Term(&query.row), depth + 1));
+                match &query.label {
+                    RowLabel::Error(ty) => pending.push((Input::Term(ty), depth + 1)),
+                    RowLabel::Effect(op) => {
+                        if op.arguments.len() > room {
+                            return Err(ProofError::BudgetExhausted);
+                        }
+                        pending
+                            .extend(op.arguments.iter().map(|arg| (Input::Term(arg), depth + 1)));
+                    }
+                }
+            }
+            Input::Formula(Formula::RowSubset(query)) => {
+                pending.push((Input::Term(&query.left), depth + 1));
+                pending.push((Input::Term(&query.right), depth + 1));
+            }
+            Input::Formula(Formula::RowDisjoint(query)) => {
+                pending.push((Input::Term(&query.left), depth + 1));
+                pending.push((Input::Term(&query.right), depth + 1));
+            }
             Input::Predicate(P::Kind(ty, _) | P::NotSized(ty)) => {
                 pending.push((Input::Term(ty), depth + 1))
             }
@@ -1043,7 +1178,9 @@ fn visit_input_terms(
                 }
             }
             Input::Predicate(P::Bool(_) | P::IntLe(..))
-            | Input::Formula(Formula::True | Formula::False | Formula::IntLe(_)) => {}
+            | Input::Formula(
+                Formula::True | Formula::False | Formula::IntLe(_) | Formula::IntCongruent(_),
+            ) => {}
         }
     }
     Ok(())
@@ -1261,6 +1398,64 @@ fn validate_atom_inputs(
         Formula::Trait(query) => {
             query.validate_inputs(scope)?;
         }
+        Formula::HasHeadShape(query) => {
+            if query.ty.sort() != Sort::Type {
+                return Err("HasHeadShape requires a Type term".into());
+            }
+            query
+                .ty
+                .check_scope(scope)
+                .map_err(|e| format!("invalid HasHeadShape type: {e:?}"))?;
+        }
+        Formula::IntCongruent(query) => {
+            query.validate()?;
+        }
+        Formula::RowContains(query) => {
+            if query.row.sort() != Sort::Type {
+                return Err("RowContains requires a Type row term".into());
+            }
+            query
+                .row
+                .check_scope(scope)
+                .map_err(|e| format!("invalid RowContains row type: {e:?}"))?;
+            match (query.kind, &query.label) {
+                (RowKind::Error, RowLabel::Error(ty)) => {
+                    if ty.sort() != Sort::Type {
+                        return Err("error RowContains requires a Type error label".into());
+                    }
+                    ty.check_scope(scope)
+                        .map_err(|e| format!("invalid RowContains error label: {e:?}"))?;
+                }
+                (RowKind::Effect, RowLabel::Effect(op)) => {
+                    for arg in &op.arguments {
+                        arg.check_scope(scope).map_err(|e| {
+                            format!("invalid RowContains operation argument: {e:?}")
+                        })?;
+                    }
+                }
+                _ => {
+                    return Err("RowContains row kind does not match label kind".into());
+                }
+            }
+        }
+        Formula::RowSubset(query) => {
+            for term in [&query.left, &query.right] {
+                if term.sort() != Sort::Type {
+                    return Err("RowSubset requires Type row terms".into());
+                }
+                term.check_scope(scope)
+                    .map_err(|e| format!("invalid RowSubset row type: {e:?}"))?;
+            }
+        }
+        Formula::RowDisjoint(query) => {
+            for term in [&query.left, &query.right] {
+                if term.sort() != Sort::Type {
+                    return Err("RowDisjoint requires Type row terms".into());
+                }
+                term.check_scope(scope)
+                    .map_err(|e| format!("invalid RowDisjoint row type: {e:?}"))?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1338,6 +1533,52 @@ fn collect_in_theory(
                 atoms.push(atom);
             }
         }
+        Formula::IntCongruent(atom) => {
+            let atom = Atom::IntCongruent(atom.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
+        Formula::HasHeadShape(query) => {
+            terms.insert(&query.ty);
+            let atom = Atom::HasHeadShape(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
+        Formula::RowContains(query) => {
+            terms.insert(&query.row);
+            match &query.label {
+                RowLabel::Error(ty) => {
+                    terms.insert(ty);
+                }
+                RowLabel::Effect(op) => {
+                    for arg in &op.arguments {
+                        terms.insert(arg);
+                    }
+                }
+            }
+            let atom = Atom::RowContains(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
+        Formula::RowSubset(query) => {
+            terms.insert(&query.left);
+            terms.insert(&query.right);
+            let atom = Atom::RowSubset(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
+        Formula::RowDisjoint(query) => {
+            terms.insert(&query.left);
+            terms.insert(&query.right);
+            let atom = Atom::RowDisjoint(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
         Formula::Not(inner) => {
             collect_in_theory(inner, atoms, terms, depth + 1, limit, scope, theory)?
         }
@@ -1358,8 +1599,13 @@ fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> O
         Formula::Equal(atom) => atom_value(&Atom::TypeEqual(atom.clone())),
         Formula::Kind(query) => atom_value(&Atom::Kind(query.clone())),
         Formula::NotSized(query) => atom_value(&Atom::NotSized(query.clone())),
+        Formula::HasHeadShape(query) => atom_value(&Atom::HasHeadShape(query.clone())),
+        Formula::RowContains(query) => atom_value(&Atom::RowContains(query.clone())),
+        Formula::RowSubset(query) => atom_value(&Atom::RowSubset(query.clone())),
+        Formula::RowDisjoint(query) => atom_value(&Atom::RowDisjoint(query.clone())),
         Formula::Trait(query) => atom_value(&Atom::Trait(query.clone())),
         Formula::IntLe(atom) => atom_value(&Atom::IntLe(atom.clone())),
+        Formula::IntCongruent(atom) => atom_value(&Atom::IntCongruent(atom.clone())),
         Formula::Not(inner) => evaluate(inner, atom_value).map(|b| !b),
         Formula::And(items) => {
             let mut all = true;
@@ -1382,6 +1628,51 @@ fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> O
                 }
             }
             all.then_some(false)
+        }
+    }
+}
+
+fn evaluate_metered(
+    formula: &Formula,
+    atom_value: &impl Fn(&Atom) -> Option<bool>,
+    fuel: &mut usize,
+) -> Option<Option<bool>> {
+    *fuel = fuel.checked_sub(1)?;
+    match formula {
+        Formula::True => Some(Some(true)),
+        Formula::False => Some(Some(false)),
+        Formula::Equal(atom) => Some(atom_value(&Atom::TypeEqual(atom.clone()))),
+        Formula::Kind(query) => Some(atom_value(&Atom::Kind(query.clone()))),
+        Formula::NotSized(query) => Some(atom_value(&Atom::NotSized(query.clone()))),
+        Formula::HasHeadShape(query) => Some(atom_value(&Atom::HasHeadShape(query.clone()))),
+        Formula::RowContains(query) => Some(atom_value(&Atom::RowContains(query.clone()))),
+        Formula::RowSubset(query) => Some(atom_value(&Atom::RowSubset(query.clone()))),
+        Formula::RowDisjoint(query) => Some(atom_value(&Atom::RowDisjoint(query.clone()))),
+        Formula::Trait(query) => Some(atom_value(&Atom::Trait(query.clone()))),
+        Formula::IntLe(atom) => Some(atom_value(&Atom::IntLe(atom.clone()))),
+        Formula::IntCongruent(atom) => Some(atom_value(&Atom::IntCongruent(atom.clone()))),
+        Formula::Not(inner) => Some(evaluate_metered(inner, atom_value, fuel)?.map(|b| !b)),
+        Formula::And(items) => {
+            let mut all = true;
+            for item in items {
+                match evaluate_metered(item, atom_value, fuel)? {
+                    Some(false) => return Some(Some(false)),
+                    None => all = false,
+                    _ => {}
+                }
+            }
+            Some(all.then_some(true))
+        }
+        Formula::Or(items) => {
+            let mut all = true;
+            for item in items {
+                match evaluate_metered(item, atom_value, fuel)? {
+                    Some(true) => return Some(Some(true)),
+                    None => all = false,
+                    _ => {}
+                }
+            }
+            Some(all.then_some(false))
         }
     }
 }
@@ -1679,6 +1970,7 @@ struct Model {
     types: BTreeMap<DeclarationId, Term>,
     bound_types: BTreeMap<TypeBinder, Term>,
     integers: BTreeMap<DeclarationId, i128>,
+    synthetic_nominals: BTreeMap<DeclarationId, nir::NominalKind>,
 }
 
 struct TheoryModel {
@@ -1828,19 +2120,7 @@ impl Search<'_> {
         else {
             return Ok(None);
         };
-        let integers = integer::solve(
-            self.atoms
-                .iter()
-                .zip(assignment)
-                .filter_map(|(atom, value)| {
-                    if let Atom::IntLe(atom) = atom {
-                        Some((atom, *value))
-                    } else {
-                        None
-                    }
-                }),
-            &mut self.steps,
-        )?;
+        let integers = integer::solve_with_congruences(self.atoms, assignment, &mut self.steps)?;
         Ok(integers.map(|integers| TheoryModel {
             classes,
             kinds,
@@ -2030,6 +2310,32 @@ impl Search<'_> {
             }
             not_sized.push((root, *value));
         }
+        // A06 `HasHeadShape` checks direct preserved head shape without blind propagation across Eq.
+        let mut head_shapes: Vec<(&HeadShapeQuery, bool)> = Vec::new();
+        for (atom, value) in self.atoms.iter().zip(assignment) {
+            let (Atom::HasHeadShape(query), Some(value)) = (atom, value) else {
+                continue;
+            };
+            self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+            if query.evaluate().is_some_and(|actual| actual != *value) {
+                return Ok(None);
+            }
+            for &(other, other_val) in &head_shapes {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                if other.ty == query.ty {
+                    if (other.head == query.head && other_val != *value)
+                        || (*value && other_val && other.head != query.head)
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+            head_shapes.push((query, *value));
+        }
+        // A16–A18 row predicates (`RowContains`, `RowSubset`, `RowDisjoint`).
+        if !self.check_row_atoms(classes, assignment)? {
+            return Ok(None);
+        }
         Ok(Some((kinds, not_sized)))
     }
 
@@ -2126,28 +2432,51 @@ fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize
     }
 }
 
-fn evaluate_kind_with_heads(
+fn evaluate_kind_with_synthetic(
     kind: TypeKind,
     ty: &Term,
     nominal: &NominalConstructors,
     tuple_heads: &BTreeSet<DeclarationId>,
+    synthetic_nominals: &BTreeMap<DeclarationId, nir::NominalKind>,
 ) -> Option<bool> {
-    if let Term::Nominal { declaration, .. } = ty
-        && nominal.get(declaration) == Some(&None)
+    if let Term::Nominal {
+        declaration,
+        arguments,
+    } = ty
     {
-        // A generative nominal head excludes the structural and scalar kinds
-        // even when its precise declaration category has not been published.
-        return if matches!(kind, TypeKind::Nominal(_)) {
-            None
-        } else {
-            Some(false)
-        };
+        if arguments.is_empty()
+            && let Some(&synthetic_kind) = synthetic_nominals.get(declaration)
+        {
+            return kind.evaluate_with_declarations(
+                ty,
+                |head| tuple_heads.contains(&head),
+                |id| (id == *declaration).then_some(synthetic_kind),
+            );
+        }
+        if nominal.get(declaration) == Some(&None) {
+            // A generative nominal head excludes the structural and scalar kinds
+            // even when its precise declaration category has not been published.
+            return if matches!(kind, TypeKind::Nominal(_)) {
+                None
+            } else {
+                Some(false)
+            };
+        }
     }
     kind.evaluate_with_declarations(
         ty,
         |head| tuple_heads.contains(&head),
         |id| nominal.get(&id).copied().flatten(),
     )
+}
+
+fn evaluate_kind_with_heads(
+    kind: TypeKind,
+    ty: &Term,
+    nominal: &NominalConstructors,
+    tuple_heads: &BTreeSet<DeclarationId>,
+) -> Option<bool> {
+    evaluate_kind_with_synthetic(kind, ty, nominal, tuple_heads, &BTreeMap::new())
 }
 
 fn evaluate_model(
@@ -2157,6 +2486,7 @@ fn evaluate_model(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
+    synthetic_nominals: &BTreeMap<DeclarationId, nir::NominalKind>,
     theory: &DeclarationTheory,
 ) -> Option<bool> {
     evaluate(formula, &|atom| {
@@ -2167,6 +2497,7 @@ fn evaluate_model(
             applications,
             fuel,
             integers,
+            synthetic_nominals,
             theory,
         )
     })
@@ -2179,6 +2510,7 @@ fn model_atom(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
+    synthetic_nominals: &BTreeMap<DeclarationId, nir::NominalKind>,
     theory: &DeclarationTheory,
 ) -> Option<bool> {
     let nominal = &theory.constructors.nominal_constructors;
@@ -2187,6 +2519,102 @@ fn model_atom(
         // An abstract SAT assignment is not implementation-world evidence.
         Atom::Trait(_) => None,
         Atom::IntLe(atom) => atom.evaluate(integers),
+        Atom::IntCongruent(atom) => atom.evaluate(integers),
+        Atom::HasHeadShape(query) => match &query.ty {
+            Term::Rigid {
+                declaration,
+                sort: Sort::Type,
+            } => {
+                let ty = types.get(declaration)?;
+                head_shape::evaluate_term(ty, query.head)
+            }
+            Term::Bound {
+                depth,
+                index,
+                sort: Sort::Type,
+            } => {
+                let ty = bound_types.get(&TypeBinder {
+                    depth: *depth,
+                    index: *index,
+                })?;
+                head_shape::evaluate_term(ty, query.head)
+            }
+            other => head_shape::evaluate_term(other, query.head),
+        },
+        Atom::RowContains(query) => {
+            let row =
+                substitute_types(&query.row, types, bound_types, applications, fuel, nominal)?;
+            if !closed_type(&row, nominal) {
+                return None;
+            }
+            let label = match &query.label {
+                RowLabel::Error(ty) => {
+                    let ty = substitute_types(ty, types, bound_types, applications, fuel, nominal)?;
+                    if !closed_type(&ty, nominal) {
+                        return None;
+                    }
+                    RowLabel::Error(ty)
+                }
+                RowLabel::Effect(op) => {
+                    let mut args = Vec::with_capacity(op.arguments.len());
+                    for arg in &op.arguments {
+                        if model_applications::fixed_argument(arg) {
+                            args.push(arg.clone());
+                        } else {
+                            let s = substitute_types(
+                                arg,
+                                types,
+                                bound_types,
+                                applications,
+                                fuel,
+                                nominal,
+                            )?;
+                            if !closed_type(&s, nominal) {
+                                return None;
+                            }
+                            args.push(s);
+                        }
+                    }
+                    RowLabel::Effect(nir::effects::Operation {
+                        declaration: op.declaration,
+                        arguments: args,
+                    })
+                }
+            };
+            rows::eval_model_row_contains(query, &row, &label, fuel)
+        }
+        Atom::RowSubset(query) => {
+            let left =
+                substitute_types(&query.left, types, bound_types, applications, fuel, nominal)?;
+            let right = substitute_types(
+                &query.right,
+                types,
+                bound_types,
+                applications,
+                fuel,
+                nominal,
+            )?;
+            if !closed_type(&left, nominal) || !closed_type(&right, nominal) {
+                return None;
+            }
+            rows::eval_model_row_subset(&left, &right, fuel)
+        }
+        Atom::RowDisjoint(query) => {
+            let left =
+                substitute_types(&query.left, types, bound_types, applications, fuel, nominal)?;
+            let right = substitute_types(
+                &query.right,
+                types,
+                bound_types,
+                applications,
+                fuel,
+                nominal,
+            )?;
+            if !closed_type(&left, nominal) || !closed_type(&right, nominal) {
+                return None;
+            }
+            rows::eval_model_row_disjoint(&left, &right, fuel)
+        }
         Atom::Kind(query) => {
             // Classification is independent of Tuple elements, but a concrete
             // counterexample must not hide unresolved value-list inputs.
@@ -2194,18 +2622,34 @@ fn model_atom(
                 if tuple_heads.contains(head) && matches!(arguments.as_slice(), [input]
                     if closed_classification_input(input, nominal, 0)));
             if closed_tuple {
-                evaluate_kind_with_heads(query.kind, &query.ty, nominal, tuple_heads)
+                evaluate_kind_with_synthetic(
+                    query.kind,
+                    &query.ty,
+                    nominal,
+                    tuple_heads,
+                    synthetic_nominals,
+                )
             } else {
-                evaluate_kind_with_heads(
+                evaluate_kind_with_synthetic(
                     query.kind,
                     &substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?,
                     nominal,
                     tuple_heads,
+                    synthetic_nominals,
                 )
             }
         }
         Atom::NotSized(query) => {
             let ty = substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?;
+            if let Term::Nominal {
+                declaration,
+                arguments,
+            } = &ty
+                && arguments.is_empty()
+                && synthetic_nominals.contains_key(declaration)
+            {
+                return Some(false);
+            }
             match not_sized::evaluate(&ty, &theory.constructors, &theory.list_inference_heads) {
                 not_sized::NotSizedStatus::Known(value) => Some(value),
                 not_sized::NotSizedStatus::InvalidRepresentation(_)
@@ -2259,8 +2703,8 @@ fn reify(
     id: usize,
     terms: &Terms,
     classes: &Classes,
-    representatives: &HashMap<usize, usize>,
-    free: &mut HashMap<usize, Term>,
+    representatives: &BTreeMap<usize, usize>,
+    free: &mut BTreeMap<usize, Term>,
     active: &mut BTreeSet<usize>,
     nominal: &NominalConstructors,
     fuel: &mut usize,
@@ -2519,8 +2963,13 @@ impl fmt::Display for Atom {
         match self {
             Self::TypeEqual(atom) => atom.fmt(f),
             Self::IntLe(atom) => atom.fmt(f),
+            Self::IntCongruent(atom) => atom.fmt(f),
             Self::Kind(query) => query.fmt(f),
             Self::NotSized(query) => query.fmt(f),
+            Self::HasHeadShape(query) => query.fmt(f),
+            Self::RowContains(query) => query.fmt(f),
+            Self::RowSubset(query) => query.fmt(f),
+            Self::RowDisjoint(query) => query.fmt(f),
             Self::Trait(query) => query.fmt(f),
         }
     }
@@ -2539,8 +2988,13 @@ impl fmt::Display for Formula {
             Self::False => f.write_str("false"),
             Self::Equal(atom) => atom.fmt(f),
             Self::IntLe(atom) => atom.fmt(f),
+            Self::IntCongruent(atom) => atom.fmt(f),
             Self::Kind(query) => query.fmt(f),
             Self::NotSized(query) => query.fmt(f),
+            Self::HasHeadShape(query) => query.fmt(f),
+            Self::RowContains(query) => query.fmt(f),
+            Self::RowSubset(query) => query.fmt(f),
+            Self::RowDisjoint(query) => query.fmt(f),
             Self::Trait(query) => query.fmt(f),
             Self::Not(inner) => write!(f, "(not {inner})"),
             Self::And(items) | Self::Or(items) => {
@@ -2618,6 +3072,12 @@ impl fmt::Display for Outcome {
                 f.write_str(") (applications")?;
                 for application in &witness.applications {
                     write!(f, " {application}")?;
+                }
+                if !witness.synthetic_nominals.is_empty() {
+                    f.write_str(") (synthetic-nominals")?;
+                    for (id, kind) in &witness.synthetic_nominals {
+                        write!(f, " ({id} {kind})")?;
+                    }
                 }
                 write!(f, ") (goal {}) {}", witness.goal, witness.constructors)?;
                 display_scope(f, &witness.scope)?;
@@ -3386,5 +3846,233 @@ mod tuple_classification_tests {
             search.check_tree(&ProofTree::BooleanConflict, &mut [], 0),
             Err(ProofError::Invalid)
         );
+    }
+
+    #[test]
+    fn trait_irrelevance_and_synthetic_nominal_witnesses_are_sound() {
+        let id = |local| DeclarationId { package: 78, local };
+        let rigid = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let t = rigid(1);
+        let u = rigid(2);
+        let trait_atom = Formula::Trait(TraitQuery {
+            interface: id(10),
+            subject: u.clone(),
+            arguments: vec![],
+        });
+
+        // Irrelevant `Trait` in goal/assumption must not block concrete refutation.
+        let mut ctx = Context::default();
+        ctx.assume(Formula::Or(vec![
+            Formula::equal(t.clone(), Term::Primitive(Primitive::U8)),
+            trait_atom.clone(),
+        ]));
+        let Outcome::NotEntailed(witness) = ctx.prove(
+            Formula::And(vec![
+                trait_atom.clone(),
+                Formula::equal(t.clone(), Term::Primitive(Primitive::U32)),
+            ]),
+            Budget::default(),
+        ) else {
+            panic!("irrelevant trait should still refute T == u32");
+        };
+        ctx.verify_witness(&witness, Budget::default()).unwrap();
+
+        // Positively required `Trait` assumption must stay `Unknown`, never `NotEntailed`.
+        let mut dependent = Context::default();
+        dependent.assume(trait_atom);
+        assert!(matches!(
+            dependent.prove(
+                Formula::equal(t.clone(), Term::Primitive(Primitive::U32)),
+                Budget::default(),
+            ),
+            Outcome::Unknown { .. }
+        ));
+
+        // Synthetic nullary nominal witnesses allow `Context::prove` to refute
+        // unpopulated nominal kinds while keeping `search_type_inputs` `Unknown`.
+        let mut nom_ctx = Context::default();
+        nom_ctx.assume(Formula::kind(
+            t.clone(),
+            TypeKind::Nominal(nir::NominalKind::Struct),
+        ));
+        nom_ctx.assume(Formula::kind(
+            u.clone(),
+            TypeKind::Nominal(nir::NominalKind::Struct),
+        ));
+        nom_ctx.assume(Formula::equal(t.clone(), u.clone()).negate());
+        let Outcome::NotEntailed(nom_witness) = nom_ctx.prove(Formula::False, Budget::default())
+        else {
+            panic!("Context::prove should synthesize fresh distinct struct nominals");
+        };
+        assert_ne!(nom_witness.types[&id(1)], nom_witness.types[&id(2)]);
+        assert!(!nom_witness.synthetic_nominals.is_empty());
+        nom_ctx
+            .verify_witness(&nom_witness, Budget::default())
+            .unwrap();
+        assert!(matches!(
+            Context::default().search_type_inputs(
+                &[id(1)],
+                Formula::kind(t, TypeKind::Nominal(nir::NominalKind::Struct)),
+                &mut Budget::default(),
+            ),
+            TypeInputOutcome::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn priority_atoms_head_shape_int_congruent_and_rows_enforce_soundness() {
+        let id = |local| DeclarationId { package: 79, local };
+        let rigid = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let int_var = |local, offset| IntegerTerm::variable(id(local), offset);
+
+        // A06 HasHeadShape: direct structural head without blind propagation across Eq.
+        let nf = Term::NormalForm {
+            head: id(100),
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::U8)],
+        };
+        let mut hs_ctx = Context::default();
+        hs_ctx.admit_congruence(id(100));
+        hs_ctx.assume(Formula::equal(nf.clone(), Term::Primitive(Primitive::U8)));
+        hs_ctx.assume(Formula::has_head_shape(nf.clone(), id(100)));
+        assert!(matches!(
+            hs_ctx.prove(
+                Formula::has_head_shape(Term::Primitive(Primitive::U8), id(100)),
+                Budget::default(),
+            ),
+            Outcome::NotEntailed(_)
+        ));
+        let Outcome::Entailed(proof) = hs_ctx.prove(
+            Formula::has_head_shape(nf.clone(), id(100)),
+            Budget::default(),
+        ) else {
+            panic!("direct HasHeadShape should entail itself");
+        };
+        hs_ctx.verify_proof(&proof, Budget::default()).unwrap();
+        assert!(matches!(
+            hs_ctx.prove(Formula::has_head_shape(nf, id(101)), Budget::default()),
+            Outcome::NotEntailed(_)
+        ));
+        // Conflicting head claims on the same term entail False.
+        let mut clash = Context::default();
+        clash.assume(Formula::has_head_shape(rigid(1), id(100)));
+        clash.assume(Formula::has_head_shape(rigid(1), id(101)));
+        let Outcome::Entailed(p) = clash.prove(Formula::False, Budget::default()) else {
+            panic!("distinct head shapes on same term conflict");
+        };
+        clash.verify_proof(&p, Budget::default()).unwrap();
+
+        // A13 IntCongruent: IllFormed on non-positive m; CRT + IntLe bounds + witnesses.
+        let bad_mod = Context::default().prove(
+            Formula::int_congruent(int_var(20, 0), 0, 0),
+            Budget::default(),
+        );
+        assert!(matches!(bad_mod, Outcome::IllFormed(_)));
+
+        let mut int_ctx = Context::default();
+        int_ctx.assume(Formula::int_le(IntegerTerm::constant(0), int_var(21, 0)));
+        int_ctx.assume(Formula::int_le(int_var(21, 0), IntegerTerm::constant(2)));
+        int_ctx.assume(Formula::int_congruent(int_var(21, 0), 1, 2));
+        let Outcome::NotEntailed(int_witness) = int_ctx.prove(Formula::False, Budget::default())
+        else {
+            panic!("0 <= x <= 2 and x == 1 mod 2 has witness x = 1");
+        };
+        assert_eq!(int_witness.integers[&id(21)], 1);
+        int_ctx
+            .verify_witness(&int_witness, Budget::default())
+            .unwrap();
+
+        let mut crt_unsat = Context::default();
+        crt_unsat.assume(Formula::int_congruent(int_var(22, 0), 0, 2));
+        crt_unsat.assume(Formula::int_congruent(int_var(22, 0), 1, 4));
+        let Outcome::Entailed(crt_proof) = crt_unsat.prove(Formula::False, Budget::default())
+        else {
+            panic!("mod 2 == 0 and mod 4 == 1 conflict");
+        };
+        crt_unsat
+            .verify_proof(&crt_proof, Budget::default())
+            .unwrap();
+
+        // A16-A18 RowContains / RowSubset / RowDisjoint: open tail never infers absence.
+        let err_a = Term::Nominal {
+            declaration: id(200),
+            arguments: vec![],
+        };
+        let err_b = Term::Nominal {
+            declaration: id(201),
+            arguments: vec![],
+        };
+        let mut open_row_ctx = Context::default();
+        open_row_ctx.admit_nominal_kind(id(200), nir::NominalKind::Enum);
+        open_row_ctx.admit_nominal_kind(id(201), nir::NominalKind::Enum);
+        let open_row = Term::error_result(vec![err_a.clone()], rigid(3));
+        assert!(matches!(
+            open_row_ctx.prove(
+                Formula::row_contains(
+                    RowKind::Error,
+                    open_row.clone(),
+                    RowLabel::Error(err_b.clone()),
+                )
+                .negate(),
+                Budget::default(),
+            ),
+            Outcome::Unknown { .. } | Outcome::NotEntailed(_)
+        ));
+        // Closed tail refutes absence cleanly.
+        let closed_row = Term::error_result(vec![err_a.clone()], Term::Primitive(Primitive::U32));
+        let Outcome::Entailed(row_proof) = open_row_ctx.prove(
+            Formula::row_contains(
+                RowKind::Error,
+                closed_row.clone(),
+                RowLabel::Error(err_b.clone()),
+            )
+            .negate(),
+            Budget::default(),
+        ) else {
+            panic!("closed error row without ErrB entails absence of ErrB");
+        };
+        open_row_ctx
+            .verify_proof(&row_proof, Budget::default())
+            .unwrap();
+
+        // RowSubset + RowContains monotonicity and RowDisjoint conflict.
+        let mut sub_ctx = Context::default();
+        sub_ctx.assume(Formula::row_contains(
+            RowKind::Error,
+            rigid(4),
+            RowLabel::Error(err_a.clone()),
+        ));
+        sub_ctx.assume(Formula::row_subset(rigid(4), rigid(5)));
+        let Outcome::Entailed(sub_proof) = sub_ctx.prove(
+            Formula::row_contains(RowKind::Error, rigid(5), RowLabel::Error(err_a.clone())),
+            Budget::default(),
+        ) else {
+            panic!("l in R and R <= S entails l in S");
+        };
+        sub_ctx.verify_proof(&sub_proof, Budget::default()).unwrap();
+
+        let mut disj_ctx = Context::default();
+        disj_ctx.assume(Formula::row_disjoint(
+            Term::error_result(vec![err_a.clone()], Term::Primitive(Primitive::U32)),
+            Term::error_result(vec![err_b.clone()], Term::Primitive(Primitive::U32)),
+        ));
+        let Outcome::Entailed(disj_proof) = disj_ctx.prove(
+            Formula::row_disjoint(
+                closed_row,
+                Term::error_result(vec![err_b], Term::Primitive(Primitive::Bool)),
+            ),
+            Budget::default(),
+        ) else {
+            panic!("distinct closed error rows are disjoint");
+        };
+        disj_ctx
+            .verify_proof(&disj_proof, Budget::default())
+            .unwrap();
     }
 }

@@ -2,6 +2,7 @@
 mod alignment;
 mod input_frame;
 mod program_view;
+
 use crate::program::{
     EntrySnapshot, Expr, ExprKind as K, FunctionDeclaration, FunctionPhase, LocalId, MethodContract,
 };
@@ -18,6 +19,7 @@ pub struct ProgramContract {
     pub result_binding: Option<LocalId>,
     pub entry_snapshots: Vec<EntrySnapshot>,
 }
+
 impl ProgramContract {
     pub fn instantiate_types(
         &self,
@@ -33,6 +35,7 @@ impl ProgramContract {
             .collect::<Vec<_>>();
         self.instantiate_parameters(&parameters, arguments)
     }
+
     pub fn instantiate_parameters(
         &self,
         parameters: &[crate::DeclarationParameter],
@@ -55,6 +58,7 @@ impl ProgramContract {
             entry_snapshots: self.entry_snapshots.clone(),
         })
     }
+
     /// Specialize declaration inputs while preserving ordinary contract scope.
     pub fn instantiate_declaration_parameters(
         &self,
@@ -75,6 +79,7 @@ impl ProgramContract {
             fuel,
         )
     }
+
     pub fn instantiate_admitted<T: std::borrow::Borrow<Term>>(
         &self,
         inputs: &crate::AdmittedArguments<'_, T>,
@@ -89,10 +94,12 @@ impl ProgramContract {
             fuel,
         )
     }
+
     pub fn is_empty(&self) -> bool {
         self.preconditions.is_empty() && self.postconditions.is_empty()
     }
 }
+
 /// The owned contract and borrowed callable view use the same copy boundary.
 fn instantiate_program_parts(
     preconditions: &[Expr],
@@ -144,6 +151,7 @@ impl fmt::Display for ProgramContract {
         f.write_str("))")
     }
 }
+
 impl MethodContract {
     /// Specialize a body-free interface summary using declaration domains, keeping
     /// caller type frames and the method's ordinary input frame distinct.
@@ -252,6 +260,7 @@ impl MethodContract {
         })
     }
 }
+
 /// Rebind an effect-free predicate, retaining its expression tree and source.
 /// Unsupported executable forms cannot silently bypass substitution.
 pub fn remap_predicate(
@@ -328,6 +337,7 @@ pub fn remap_predicate_metered(
             | K::SymbolName(v)
             | K::EnumName(v)
             | K::TypeKind { operand: v, .. }
+            | K::TypeNotSized { operand: v }
             | K::TypeLayout { operand: v, .. }
             | K::UnsafeScope(v)
             | K::Discard(v)

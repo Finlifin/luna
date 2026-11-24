@@ -240,6 +240,7 @@ impl DeclarationTheory {
             theory: self,
             scope: Arc::default(),
             assumptions: Arc::default(),
+            disallow_synthetic_nominals: false,
         }
     }
 }

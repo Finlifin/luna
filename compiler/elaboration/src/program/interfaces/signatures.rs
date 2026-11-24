@@ -291,6 +291,23 @@ fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
         }),
         Formula::Kind(query) => Formula::kind(term(&query.ty)?, query.kind),
         Formula::NotSized(query) => Formula::not_sized(term(&query.ty)?),
+        Formula::HasHeadShape(query) => Formula::has_head_shape(term(&query.ty)?, query.head),
+        Formula::RowContains(query) => {
+            let label = match &query.label {
+                crate::ptc::RowLabel::Error(ty) => crate::ptc::RowLabel::Error(term(ty)?),
+                crate::ptc::RowLabel::Effect(op) => {
+                    crate::ptc::RowLabel::Effect(nir::effects::Operation {
+                        declaration: op.declaration,
+                        arguments: op.arguments.iter().map(&mut term).collect::<Option<_>>()?,
+                    })
+                }
+            };
+            Formula::row_contains(query.kind, term(&query.row)?, label)
+        }
+        Formula::RowSubset(query) => Formula::row_subset(term(&query.left)?, term(&query.right)?),
+        Formula::RowDisjoint(query) => {
+            Formula::row_disjoint(term(&query.left)?, term(&query.right)?)
+        }
         Formula::Not(inner) => lift(inner, fuel, depth + 1)?.negate(),
         Formula::And(items) => Formula::And(
             items
@@ -304,7 +321,9 @@ fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
                 .map(|v| lift(v, fuel, depth + 1))
                 .collect::<Option<_>>()?,
         ),
-        Formula::True | Formula::False | Formula::IntLe(_) => formula.clone(),
+        Formula::True | Formula::False | Formula::IntLe(_) | Formula::IntCongruent(_) => {
+            formula.clone()
+        }
     })
 }
 

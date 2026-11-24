@@ -1473,7 +1473,12 @@ pub enum ExprKind {
         kind: crate::TypeKind,
         operand: Box<Expr>,
     },
-    /// Query target-aware physical storage layout (`size_of` / `align_of`) of a Type.
+    /// Decide whether a runtime-representable Type is size-dependent (`is_not_sized`).
+    TypeNotSized {
+        operand: Box<Expr>,
+    },
+    /// Query target-aware physical storage layout (`size_of`, `align_of`, `stride_of`,
+    /// `bit_width_of`, `field_offset_of`) of a Type.
     TypeLayout {
         query: crate::TypeLayoutQuery,
         operand: Box<Expr>,
@@ -3876,6 +3881,9 @@ impl fmt::Display for ExprKind {
             Self::TypeKind { kind, operand } => {
                 write!(f, "(type-kind {kind} (operand {operand}))")
             }
+            Self::TypeNotSized { operand } => {
+                write!(f, "(type-not-sized (operand {operand}))")
+            }
             Self::TypeLayout { query, operand } => {
                 write!(f, "(type-layout {query} (operand {operand}))")
             }
@@ -4293,6 +4301,7 @@ impl Expr {
                     | ExprKind::SymbolName(_)
                     | ExprKind::EnumName(_)
                     | ExprKind::TypeKind { .. }
+                    | ExprKind::TypeNotSized { .. }
                     | ExprKind::TypeLayout { .. }
                     | ExprKind::Not(_)
                     | ExprKind::Loop { .. }
@@ -4404,6 +4413,7 @@ impl Expr {
                 | ExprKind::SymbolName(value)
                 | ExprKind::EnumName(value)
                 | ExprKind::TypeKind { operand: value, .. }
+                | ExprKind::TypeNotSized { operand: value }
                 | ExprKind::TypeLayout { operand: value, .. }
                 | ExprKind::Not(value)
                 | ExprKind::Loop { body: value, .. } => work.push(Work::Expr(value)),
@@ -4879,6 +4889,7 @@ impl Expr {
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::TypeKind { operand: value, .. }
+            | ExprKind::TypeNotSized { operand: value }
             | ExprKind::TypeLayout { operand: value, .. }
             | ExprKind::Not(value)
             | ExprKind::Loop { body: value, .. } => (value).rewrite_with(rewriter)?,

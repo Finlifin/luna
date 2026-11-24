@@ -1675,21 +1675,36 @@ impl Checker<'_, '_> {
                 let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
                 known_type_kind(&self.context, *kind, &operand, budget).map(Term::Bool)
             }
+            K::TypeNotSized { operand } => {
+                let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
+                let pos = crate::ptc::Formula::not_sized(copy_observed_term(&operand, budget)?);
+                let neg = pos.clone().negate();
+                known_type_formula(&self.context, pos, neg, budget).map(Term::Bool)
+            }
             K::TypeLayout { query, operand } => {
                 let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
-                let layout = nir::compute_layout(self, &operand, &mut budget.steps).map_err(
-                    |err| match err {
-                        nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_) => {
-                            Failure::Unavailable
-                        }
-                        nir::LayoutError::BudgetExhausted => Failure::Steps,
-                        nir::LayoutError::ComptimeOnly(_)
-                        | nir::LayoutError::Cycle(_)
-                        | nir::LayoutError::Unsupported(_)
-                        | nir::LayoutError::Overflow => Failure::Evaluation(err.to_string()),
-                    },
-                )?;
-                let value = u128::from(query.select(layout));
+                let (ty, field) = match (*query, &operand) {
+                    (nir::TypeLayoutQuery::FieldOffset, Term::TupleValue(items))
+                        if items.len() == 2 =>
+                    {
+                        let Term::Symbol(name) = &items[1] else {
+                            return Err(Failure::Unavailable);
+                        };
+                        (&items[0], Some(name.as_ref()))
+                    }
+                    (nir::TypeLayoutQuery::FieldOffset, _) => return Err(Failure::Unavailable),
+                    _ => (&operand, None),
+                };
+                let value = u128::from(
+                    nir::compute_type_layout_query(self, *query, ty, field, &mut budget.steps)
+                        .map_err(|err| match err {
+                            nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_) => {
+                                Failure::Unavailable
+                            }
+                            nir::LayoutError::BudgetExhausted => Failure::Steps,
+                            _ => Failure::Evaluation(err.to_string()),
+                        })?,
+                );
                 if let Some(target) = self.target
                     && target.pointer_bits() < 128
                     && let Some(limit) = 1u128.checked_shl(target.pointer_bits())

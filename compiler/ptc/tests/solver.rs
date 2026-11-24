@@ -1,8 +1,10 @@
 use nir::{DeclarationId, Parameter, Primitive as P, Sort, Term};
 use ptc::{Budget, Context, Formula as F, Outcome, UnknownReason};
+
 fn ty(p: P) -> Term {
     Term::Primitive(p)
 }
+
 fn variable(index: u32) -> Term {
     Term::Rigid {
         declaration: DeclarationId {
@@ -12,6 +14,7 @@ fn variable(index: u32) -> Term {
         sort: Sort::Type,
     }
 }
+
 fn head(index: u32, arguments: Vec<Term>) -> Term {
     Term::NormalForm {
         head: DeclarationId {
@@ -22,9 +25,11 @@ fn head(index: u32, arguments: Vec<Term>) -> Term {
         arguments,
     }
 }
+
 fn eq(a: Term, b: Term) -> F {
     F::equal(a, b)
 }
+
 fn proved(context: &Context, goal: F) {
     let outcome = context.prove(goal, Budget::default());
     assert!(matches!(outcome, Outcome::Entailed(_)), "{outcome}");
@@ -244,6 +249,7 @@ fn finite_domain_disjunction_and_negative_literals_remain_joint() {
     context.assume(eq(t.clone(), ty(P::U32)).negate());
     proved(&context, eq(t, ty(P::F32)));
 }
+
 #[test]
 fn equality_is_symmetric_transitive_and_congruent_for_structural_types() {
     let (a, b, c) = (variable(1), variable(2), variable(3));
@@ -259,6 +265,7 @@ fn equality_is_symmetric_transitive_and_congruent_for_structural_types() {
         ),
     );
 }
+
 #[test]
 fn structural_injectivity_and_disjoint_closed_constructors_explain_conflicts() {
     let t = variable(1);
@@ -271,6 +278,7 @@ fn structural_injectivity_and_disjoint_closed_constructors_explain_conflicts() {
     context.assume(eq(ty(P::Bool), ty(P::Char)));
     proved(&context, F::False);
 }
+
 #[test]
 fn normal_form_bodies_are_not_unfolded_and_congruence_requires_admission() {
     let (a, b) = (variable(1), variable(2));
@@ -295,6 +303,7 @@ fn normal_form_bodies_are_not_unfolded_and_congruence_requires_admission() {
     };
     context.verify_witness(&witness, Budget::default()).unwrap();
 }
+
 #[test]
 fn congruent_calls_are_not_injective_or_disjoint_without_a_contract() {
     let (a, b) = (variable(1), variable(2));
@@ -315,6 +324,7 @@ fn congruent_calls_are_not_injective_or_disjoint_without_a_contract() {
         Outcome::Entailed(_)
     ));
 }
+
 #[test]
 fn branch_facts_and_theory_merges_do_not_escape_their_query() {
     let root = Context::default();
@@ -333,6 +343,7 @@ fn branch_facts_and_theory_merges_do_not_escape_their_query() {
     ]));
     proved(&alternatives, eq(t, ty(P::U32)));
 }
+
 #[test]
 fn counterexamples_contain_real_type_values_and_are_not_negation_proofs() {
     let mut context = Context::default();
@@ -358,6 +369,7 @@ fn counterexamples_contain_real_type_values_and_are_not_negation_proofs() {
         Outcome::NotEntailed(_)
     ));
 }
+
 #[test]
 fn budget_exhaustion_is_unknown_and_later_queries_recover() {
     let context = Context::default();
@@ -377,6 +389,7 @@ fn budget_exhaustion_is_unknown_and_later_queries_recover() {
     ));
     proved(&context, goal);
 }
+
 #[test]
 fn malformed_terms_are_rejected_even_under_a_boolean_tautology() {
     for bad in [
@@ -399,6 +412,7 @@ fn malformed_terms_are_rejected_even_under_a_boolean_tautology() {
         ));
     }
 }
+
 #[test]
 fn dependent_binders_do_not_get_flattened_into_global_equality_variables() {
     let signature = Term::Function {
@@ -427,6 +441,7 @@ fn dependent_binders_do_not_get_flattened_into_global_equality_variables() {
     ));
     proved(&Context::default(), eq(signature.clone(), signature));
 }
+
 #[test]
 fn proof_support_and_sexpression_order_are_stable() {
     let mut context = Context::default();
@@ -465,7 +480,14 @@ fn supported_boolean_theory_results_agree_with_independent_ground_evaluation() {
             F::True => true,
             F::False => false,
             F::Equal(e) => replace(&e.0, env) == replace(&e.1, env),
-            F::IntLe(_) => panic!("no integer atoms in this generator"),
+            F::IntLe(_) | F::IntCongruent(_) => panic!("no integer atoms in this generator"),
+            F::NotSized(_)
+            | F::HasHeadShape(_)
+            | F::RowContains(_)
+            | F::RowSubset(_)
+            | F::RowDisjoint(_) => {
+                panic!("no auxiliary theory atoms in this generator")
+            }
             F::Not(f) => !eval(f, env),
             F::And(fs) => fs.iter().all(|f| eval(f, env)),
             F::Or(fs) => fs.iter().any(|f| eval(f, env)),

@@ -1651,7 +1651,12 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             if ty.sort != nir::Sort::Runtime
                 && matches!(
                     ty.ty,
-                    Term::Primitive(Primitive::Type) | Term::ClosureContextType
+                    Term::Primitive(Primitive::Type)
+                        | Term::ClosureContextType
+                        | Term::EffectRowType
+                        | Term::ErrorRowType
+                        | Term::ReachabilityType
+                        | Term::AnyType
                 )
             {
                 locals.insert(*id, Regions::new());
@@ -2704,6 +2709,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitAssign { value, .. }
             | K::BitSlice { value, .. } => Ok(self

@@ -203,6 +203,25 @@ fn existing_inputs(
                 }
                 Formula::Kind(query) => pending.push(Input::Term(&query.ty)),
                 Formula::NotSized(query) => pending.push(Input::Term(&query.ty)),
+                Formula::HasHeadShape(query) => pending.push(Input::Term(&query.ty)),
+                Formula::RowContains(query) => {
+                    pending.push(Input::Term(&query.row));
+                    match &query.label {
+                        ptc::RowLabel::Error(ty) => pending.push(Input::Term(ty)),
+                        ptc::RowLabel::Effect(op) => {
+                            for arg in &op.arguments {
+                                charge(budget)?;
+                                pending.push(Input::Term(arg));
+                            }
+                        }
+                    }
+                }
+                Formula::RowSubset(query) => {
+                    pending.extend([Input::Term(&query.left), Input::Term(&query.right)]);
+                }
+                Formula::RowDisjoint(query) => {
+                    pending.extend([Input::Term(&query.left), Input::Term(&query.right)]);
+                }
                 Formula::Trait(query) => {
                     for term in query.inputs() {
                         charge(budget)?;
@@ -212,6 +231,9 @@ fn existing_inputs(
                 Formula::IntLe(query) => {
                     used.extend(query.left.variable);
                     used.extend(query.right.variable);
+                }
+                Formula::IntCongruent(query) => {
+                    used.extend(query.term.variable);
                 }
                 Formula::Not(inner) => pending.push(Input::Formula(inner)),
                 Formula::And(parts) | Formula::Or(parts) => {

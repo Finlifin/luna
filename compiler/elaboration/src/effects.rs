@@ -7,12 +7,15 @@ use nir::{Sort, Term};
 use std::fmt;
 
 mod requests;
+
 pub use requests::Request;
 
 mod rows;
+
 pub use rows::{RowEmbedding, RowLayer, embed_row, select_layer};
 
 mod instances;
+
 pub use instances::{Instance, instantiate, instantiate_with_domains, instantiate_with_evidence};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +30,7 @@ pub enum Error {
     AmbiguousInstallation,
     BudgetExhausted,
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -57,6 +61,7 @@ impl fmt::Display for Error {
         })
     }
 }
+
 impl std::error::Error for Error {}
 
 /// Borrowed inputs prevent a route from surviving mutated frames or type facts.
@@ -67,18 +72,21 @@ pub struct Route<'a> {
     _context: &'a Context,
     hops: Vec<(usize, usize)>,
 }
+
 impl<'a> Route<'a> {
     pub fn entries(&self) -> impl Iterator<Item = &'a Entry> + '_ {
         self.hops
             .iter()
             .map(|&(frame, entry)| &self.frames[frame].entries[entry])
     }
+
     /// The branch runs outside its entire installation, including sibling
     /// operations. The handled computation keeps the full installed chain.
     pub fn branch_environment(&self, hop: usize) -> Option<&'a [Frame]> {
         self.hops.get(hop).map(|&(frame, _)| &self.frames[..frame])
     }
 }
+
 impl fmt::Display for Route<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(effect-route (hops")?;
@@ -196,6 +204,10 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             Ok(())
         }
         Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType
         | Term::Primitive(_)
         | Term::Rigid { .. }
         | Term::Bound { .. }

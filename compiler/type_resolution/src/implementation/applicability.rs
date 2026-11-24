@@ -183,12 +183,33 @@ impl ImplementationHead {
                 }
                 Visit::Formula(Formula::Kind(query)) => work.push(Visit::Term(&query.ty)),
                 Visit::Formula(Formula::NotSized(query)) => work.push(Visit::Term(&query.ty)),
+                Visit::Formula(Formula::HasHeadShape(query)) => work.push(Visit::Term(&query.ty)),
+                Visit::Formula(Formula::RowContains(query)) => {
+                    work.push(Visit::Term(&query.row));
+                    match &query.label {
+                        crate::ptc::RowLabel::Error(ty) => work.push(Visit::Term(ty)),
+                        crate::ptc::RowLabel::Effect(op) => {
+                            work.extend(op.arguments.iter().map(Visit::Term));
+                        }
+                    }
+                }
+                Visit::Formula(Formula::RowSubset(query)) => {
+                    work.push(Visit::Term(&query.left));
+                    work.push(Visit::Term(&query.right));
+                }
+                Visit::Formula(Formula::RowDisjoint(query)) => {
+                    work.push(Visit::Term(&query.left));
+                    work.push(Visit::Term(&query.right));
+                }
                 Visit::Formula(Formula::Trait(query)) => {
                     work.extend(query.inputs().map(Visit::Term));
                 }
                 Visit::Formula(Formula::IntLe(le)) => {
                     used.extend(le.left.variable);
                     used.extend(le.right.variable);
+                }
+                Visit::Formula(Formula::IntCongruent(cong)) => {
+                    used.extend(cong.term.variable);
                 }
                 Visit::Formula(Formula::Not(inner)) => work.push(Visit::Formula(inner)),
                 Visit::Formula(Formula::And(parts) | Formula::Or(parts)) => {

@@ -567,6 +567,31 @@ impl Refinement {
                 Formula::Equal(ptc::Equality(a, b)) => Formula::equal(term(a)?, term(b)?),
                 Formula::Kind(query) => Formula::kind(term(&query.ty)?, query.kind),
                 Formula::NotSized(query) => Formula::not_sized(term(&query.ty)?),
+                Formula::HasHeadShape(query) => {
+                    Formula::has_head_shape(term(&query.ty)?, query.head)
+                }
+                Formula::RowContains(query) => {
+                    let label = match &query.label {
+                        ptc::RowLabel::Error(ty) => ptc::RowLabel::Error(term(ty)?),
+                        ptc::RowLabel::Effect(op) => {
+                            ptc::RowLabel::Effect(nir::effects::Operation {
+                                declaration: op.declaration,
+                                arguments: op
+                                    .arguments
+                                    .iter()
+                                    .map(term)
+                                    .collect::<Result<_, _>>()?,
+                            })
+                        }
+                    };
+                    Formula::row_contains(query.kind, term(&query.row)?, label)
+                }
+                Formula::RowSubset(query) => {
+                    Formula::row_subset(term(&query.left)?, term(&query.right)?)
+                }
+                Formula::RowDisjoint(query) => {
+                    Formula::row_disjoint(term(&query.left)?, term(&query.right)?)
+                }
                 Formula::Trait(query) => Formula::Trait(ptc::TraitQuery {
                     interface: query.interface,
                     subject: term(&query.subject)?,
@@ -581,6 +606,15 @@ impl Refinement {
                         }));
                     }
                     Formula::IntLe(query.clone())
+                }
+                Formula::IntCongruent(query) => {
+                    if query.term.variable == Some(subject) {
+                        return Err(Error::Inference(InferenceError::WrongSort {
+                            expected: Sort::ComptimeValue,
+                            actual: Sort::Type,
+                        }));
+                    }
+                    Formula::IntCongruent(query.clone())
                 }
                 Formula::Not(inner) => visit(inner, subject, term)?.negate(),
                 Formula::And(parts) => Formula::And(

@@ -553,7 +553,7 @@ impl Walker<'_> {
                 // This layer tracks the evaluation, not type-theory equality.
                 // Its Bool result remains unknown without program evidence.
             }
-            K::TypeKind { operand, .. } => {
+            K::TypeKind { operand, .. } | K::TypeNotSized { operand } => {
                 self.child(operand, state, depth)?;
             }
             K::TypeLayout { operand, .. } => {

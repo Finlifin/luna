@@ -332,7 +332,11 @@ pub fn supported_input_type_in_scope(
         }
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         match ty {
-            Term::ClosureContextType => {}
+            Term::ClosureContextType
+            | Term::EffectRowType
+            | Term::ErrorRowType
+            | Term::ReachabilityType
+            | Term::AnyType => {}
             Term::Lift(inner) if depth == 0 => {
                 if inner
                     .structural_terms()

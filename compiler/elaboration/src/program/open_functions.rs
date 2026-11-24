@@ -3140,7 +3140,7 @@ impl Checker<'_, '_> {
                         depth + 1,
                     )?;
                     D::Known(p(P::Bool))
-                } else if let Some((_, arg)) = self.type_layout_query_call(expr)? {
+                } else if let Some(arg) = self.type_predicate_not_sized_call(expr)? {
                     self.describe_open_expression(
                         arg,
                         locals,
@@ -3148,6 +3148,24 @@ impl Checker<'_, '_> {
                         Some(&D::Known(p(P::Type))),
                         depth + 1,
                     )?;
+                    D::Known(p(P::Bool))
+                } else if let Some((_, arg, field)) = self.type_layout_query_call(expr)? {
+                    self.describe_open_expression(
+                        arg,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    if let Some(field) = field {
+                        self.describe_open_expression(
+                            field,
+                            locals,
+                            returns,
+                            Some(&D::Known(p(P::Symbol))),
+                            depth + 1,
+                        )?;
+                    }
                     D::Known(p(P::Usize))
                 } else {
                     self.describe_open_call(

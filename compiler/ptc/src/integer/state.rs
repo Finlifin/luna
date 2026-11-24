@@ -1,6 +1,6 @@
 //! Query-owned difference graph and feasible potentials. Checkpoints belong to
 //! the enclosing theory layers; independent proof replay never trusts this state.
-use super::{Graph, IntLe, UnknownReason, propagation::Explained, tick};
+use super::{Graph, IntCongruent, IntLe, UnknownReason, propagation::Explained, tick};
 use crate::Atom;
 use nir::DeclarationId;
 use std::{collections::BTreeMap, fmt};
@@ -16,20 +16,32 @@ pub(crate) struct State {
     outgoing: Vec<Vec<usize>>,
     potential: Vec<i128>,
     undo: Vec<(usize, i128)>,
+    has_congruences: bool,
 }
 
 impl State {
     pub fn new(atoms: &[Atom], fuel: &mut usize) -> Result<Self, UnknownReason> {
         let mut variables = BTreeMap::new();
+        let mut has_congruences = false;
         for atom in atoms {
             tick(fuel)?;
-            if let Atom::IntLe(atom) = atom {
-                for term in [&atom.left, &atom.right] {
-                    if let Some(id) = term.variable {
+            match atom {
+                Atom::IntLe(atom) => {
+                    for term in [&atom.left, &atom.right] {
+                        if let Some(id) = term.variable {
+                            let next = variables.len() + 1;
+                            variables.entry(id).or_insert(next);
+                        }
+                    }
+                }
+                Atom::IntCongruent(atom) => {
+                    has_congruences = true;
+                    if let Some(id) = atom.term.variable {
                         let next = variables.len() + 1;
                         variables.entry(id).or_insert(next);
                     }
                 }
+                _ => {}
             }
         }
         let count = variables.len() + 1;
@@ -45,6 +57,7 @@ impl State {
             outgoing: vec![Vec::new(); count],
             potential: vec![0; count],
             undo: Vec::new(),
+            has_congruences,
         })
     }
 
@@ -179,6 +192,475 @@ impl State {
             })
             .collect()
     }
+
+    /// Check consistency of active `IntCongruent` literals against each other
+    /// and against `IntLe` bounds / fixed-difference relations.
+    pub fn check_congruences(
+        &self,
+        atoms: &[Atom],
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<bool, UnknownReason> {
+        if !self.has_congruences {
+            return Ok(true);
+        }
+        let mut active: Vec<(&IntCongruent, bool)> = Vec::new();
+        for (atom, value) in atoms.iter().zip(assignment) {
+            tick(fuel)?;
+            if let (Atom::IntCongruent(cong), Some(truth)) = (atom, *value) {
+                if cong.modulus <= 0 {
+                    return Err(UnknownReason::ArithmeticRange);
+                }
+                if cong.term.variable.is_none() {
+                    let holds = cong.term.offset.rem_euclid(cong.modulus)
+                        == cong.remainder.rem_euclid(cong.modulus);
+                    if holds != truth {
+                        return Ok(false);
+                    }
+                } else {
+                    active.push((cong, truth));
+                }
+            }
+        }
+        if active.is_empty() {
+            return Ok(true);
+        }
+        let count = self.potential.len();
+        let mut positive: Vec<Option<(i128, i128)>> = vec![None; count];
+        let mut negative: Vec<Vec<(i128, i128)>> = vec![Vec::new(); count];
+        for &(cong, truth) in &active {
+            tick(fuel)?;
+            let var = cong.term.variable.expect("checked variable presence");
+            let idx = self.graph.variables[&var];
+            let target = effective_target_residue(cong);
+            if !add_congruence(
+                idx,
+                target,
+                cong.modulus,
+                truth,
+                &mut positive,
+                &mut negative,
+            )? {
+                return Ok(false);
+            }
+        }
+        // Propagate congruences across exact fixed-difference pairs `u - v == c`
+        // established by bidirectional shortest paths in the `IntLe` graph.
+        let mut constrained_vertices = Vec::new();
+        for v in 1..count {
+            if positive[v].is_some() || !negative[v].is_empty() {
+                constrained_vertices.push(v);
+            }
+        }
+        for v in constrained_vertices {
+            let from_v = self.shortest_paths_from(v, fuel)?;
+            let to_v = self.shortest_paths_to(v, fuel)?;
+            for u in 1..count {
+                tick(fuel)?;
+                if u == v {
+                    continue;
+                }
+                // `u - v <= from_v[u]` and `v - u <= to_v[u]` => if `from_v[u] == -to_v[u]`,
+                // then `u = v + from_v[u]` holds in every feasible integer solution.
+                if let (Some(upper_uv), Some(upper_vu)) = (from_v[u], to_v[u])
+                    && let Some(neg_vu) = upper_vu.checked_neg()
+                    && upper_uv == neg_vu
+                {
+                    let delta = upper_uv;
+                    if let Some((r, m)) = positive[v] {
+                        let shifted = shift_residue(r, delta, m);
+                        if !add_congruence(u, shifted, m, true, &mut positive, &mut negative)? {
+                            return Ok(false);
+                        }
+                    }
+                    let negs = negative[v].clone();
+                    for (r, m) in negs {
+                        let shifted = shift_residue(r, delta, m);
+                        if !add_congruence(u, shifted, m, false, &mut positive, &mut negative)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        // Check each constrained variable against its exact `[lo, hi]` constant bounds from `IntLe`.
+        let from_zero = self.shortest_paths_from(0, fuel)?;
+        let to_zero = self.shortest_paths_to(0, fuel)?;
+        for v in 1..count {
+            if positive[v].is_none() && negative[v].is_empty() {
+                continue;
+            }
+            let hi = from_zero[v];
+            let lo = to_zero[v].and_then(i128::checked_neg);
+            if let (Some(lo_val), Some(hi_val)) = (lo, hi) {
+                if lo_val > hi_val {
+                    return Ok(false);
+                }
+                if let Some((r0, m0)) = positive[v] {
+                    let Some(first) = first_congruent_ge(lo_val, r0, m0) else {
+                        return Ok(false);
+                    };
+                    if first > hi_val {
+                        return Ok(false);
+                    }
+                    if hi_val.saturating_sub(lo_val) <= 64 {
+                        let mut cur = first;
+                        let mut any_ok = false;
+                        while cur <= hi_val {
+                            tick(fuel)?;
+                            if negative[v].iter().all(|&(nr, nm)| cur.rem_euclid(nm) != nr) {
+                                any_ok = true;
+                                break;
+                            }
+                            let Some(next) = cur.checked_add(m0) else {
+                                break;
+                            };
+                            cur = next;
+                        }
+                        if !any_ok {
+                            return Ok(false);
+                        }
+                    }
+                } else if hi_val.saturating_sub(lo_val) <= 64 {
+                    let mut any_ok = false;
+                    for candidate in lo_val..=hi_val {
+                        tick(fuel)?;
+                        if negative[v]
+                            .iter()
+                            .all(|&(nr, nm)| candidate.rem_euclid(nm) != nr)
+                        {
+                            any_ok = true;
+                            break;
+                        }
+                    }
+                    if !any_ok {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Build a concrete integer assignment respecting `IntLe` potentials and active `IntCongruent`s.
+    pub fn model_with_congruences(
+        &self,
+        atoms: &[Atom],
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<BTreeMap<DeclarationId, i128>, UnknownReason> {
+        if !self.has_congruences {
+            return self.model(fuel);
+        }
+        let count = self.potential.len();
+        let mut values = vec![0i128; count];
+        for v in 1..count {
+            tick(fuel)?;
+            values[v] = self.potential[v]
+                .checked_sub(self.potential[0])
+                .ok_or(UnknownReason::ArithmeticRange)?;
+        }
+        let mut positive: Vec<Option<(i128, i128)>> = vec![None; count];
+        let mut negative: Vec<Vec<(i128, i128)>> = vec![Vec::new(); count];
+        let mut has_congruences = false;
+        for (atom, value) in atoms.iter().zip(assignment) {
+            tick(fuel)?;
+            if let (Atom::IntCongruent(cong), Some(truth)) = (atom, *value)
+                && let Some(var) = cong.term.variable
+            {
+                if cong.modulus <= 0 {
+                    return Err(UnknownReason::ArithmeticRange);
+                }
+                has_congruences = true;
+                let idx = self.graph.variables[&var];
+                let target = effective_target_residue(cong);
+                let _ = add_congruence(
+                    idx,
+                    target,
+                    cong.modulus,
+                    truth,
+                    &mut positive,
+                    &mut negative,
+                )?;
+            }
+        }
+        if has_congruences {
+            let from_zero = self.shortest_paths_from(0, fuel)?;
+            let to_zero = self.shortest_paths_to(0, fuel)?;
+            for v in 1..count {
+                if positive[v].is_none() && negative[v].is_empty() {
+                    continue;
+                }
+                let satisfies = |x: i128| {
+                    positive[v].is_none_or(|(r0, m0)| x.rem_euclid(m0) == r0)
+                        && negative[v].iter().all(|&(nr, nm)| x.rem_euclid(nm) != nr)
+                };
+                if satisfies(values[v]) {
+                    continue;
+                }
+                // Compute neighbor-consistent bounds `[lo, hi]` against current `values`.
+                let mut lo = to_zero[v].and_then(i128::checked_neg);
+                let mut hi = from_zero[v];
+                for &(from, to, bound) in &self.graph.edges {
+                    tick(fuel)?;
+                    if to == v
+                        && from != v
+                        && let Some(limit) = values[from].checked_add(bound)
+                    {
+                        hi = Some(hi.map_or(limit, |prev| prev.min(limit)));
+                    }
+                    if from == v
+                        && to != v
+                        && let Some(limit) = values[to].checked_sub(bound)
+                    {
+                        lo = Some(lo.map_or(limit, |prev| prev.max(limit)));
+                    }
+                }
+                let start = lo.unwrap_or(values[v]);
+                let step_base = positive[v].map_or(1, |(_, m0)| m0);
+                let first = if let Some((r0, m0)) = positive[v] {
+                    first_congruent_ge(start, r0, m0)
+                } else {
+                    Some(start)
+                };
+                if let Some(mut cand) = first {
+                    for _ in 0..256 {
+                        tick(fuel)?;
+                        if hi.is_some_and(|h| cand > h) {
+                            break;
+                        }
+                        if satisfies(cand) {
+                            values[v] = cand;
+                            break;
+                        }
+                        let Some(next) = cand.checked_add(step_base) else {
+                            break;
+                        };
+                        cand = next;
+                    }
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        for (&id, &index) in &self.graph.variables {
+            tick(fuel)?;
+            out.insert(id, values[index]);
+        }
+        Ok(out)
+    }
+
+    fn shortest_paths_from(
+        &self,
+        source: usize,
+        fuel: &mut usize,
+    ) -> Result<Vec<Option<i128>>, UnknownReason> {
+        let count = self.potential.len();
+        let mut dist: Vec<Option<i128>> = vec![None; count];
+        dist[source] = Some(0);
+        for _ in 0..count.saturating_sub(1) {
+            let mut changed = false;
+            for &(from, to, bound) in &self.graph.edges {
+                tick(fuel)?;
+                let Some(d) = dist[from] else { continue };
+                let candidate = d.checked_add(bound).ok_or(UnknownReason::ArithmeticRange)?;
+                if dist[to].is_none_or(|prev| candidate < prev) {
+                    dist[to] = Some(candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Ok(dist)
+    }
+
+    fn shortest_paths_to(
+        &self,
+        target: usize,
+        fuel: &mut usize,
+    ) -> Result<Vec<Option<i128>>, UnknownReason> {
+        let count = self.potential.len();
+        let mut dist: Vec<Option<i128>> = vec![None; count];
+        dist[target] = Some(0);
+        for _ in 0..count.saturating_sub(1) {
+            let mut changed = false;
+            for &(from, to, bound) in &self.graph.edges {
+                tick(fuel)?;
+                let Some(d) = dist[to] else { continue };
+                let candidate = d.checked_add(bound).ok_or(UnknownReason::ArithmeticRange)?;
+                if dist[from].is_none_or(|prev| candidate < prev) {
+                    dist[from] = Some(candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Ok(dist)
+    }
+}
+
+/// Solve active `IntLe` and `IntCongruent` literals from scratch for
+/// independent proof replay without relying on incremental solver state.
+pub(crate) fn solve_with_congruences(
+    atoms: &[Atom],
+    assignment: &[Option<bool>],
+    fuel: &mut usize,
+) -> Result<Option<BTreeMap<DeclarationId, i128>>, UnknownReason> {
+    let mut state = State::new(atoms, fuel)?;
+    let checkpoint = Checkpoint::default();
+    for (index, (atom, value)) in atoms.iter().zip(assignment).enumerate() {
+        tick(fuel)?;
+        if let (Atom::IntLe(atom), Some(value)) = (atom, value) {
+            state.admit(index, atom, *value, fuel)?;
+        }
+    }
+    if !state.stabilize(checkpoint, fuel)? {
+        return Ok(None);
+    }
+    if !state.check_congruences(atoms, assignment, fuel)? {
+        return Ok(None);
+    }
+    state
+        .model_with_congruences(atoms, assignment, fuel)
+        .map(Some)
+}
+
+fn effective_target_residue(cong: &IntCongruent) -> i128 {
+    let rem = cong.remainder.rem_euclid(cong.modulus);
+    let off = cong.term.offset.rem_euclid(cong.modulus);
+    if rem >= off {
+        rem - off
+    } else {
+        cong.modulus - (off - rem)
+    }
+}
+
+fn shift_residue(r: i128, delta: i128, m: i128) -> i128 {
+    let d = delta.rem_euclid(m);
+    let rem = r.rem_euclid(m);
+    let sum = rem as u128 + d as u128;
+    (sum % m as u128) as i128
+}
+
+fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a.abs()
+}
+
+fn mul_mod_u128(a: u128, b: u128, m: u128) -> u128 {
+    let mut res = 0u128;
+    let mut x = a % m;
+    let mut y = b % m;
+    while y > 0 {
+        if y & 1 == 1 {
+            // Avoid overflow: res + x mod m
+            res = if res >= m - x { res - (m - x) } else { res + x };
+        }
+        x = if x >= m - x { x - (m - x) } else { x + x };
+        y >>= 1;
+    }
+    res
+}
+
+fn mod_inverse_i128(a: i128, m: i128) -> Option<i128> {
+    if m <= 1 {
+        return Some(0);
+    }
+    let mut t: i128 = 0;
+    let mut new_t: i128 = 1;
+    let mut r: i128 = m;
+    let mut new_r: i128 = a.rem_euclid(m);
+    while new_r != 0 {
+        let q = r / new_r;
+        let qt = q.checked_mul(new_t)?;
+        let next_t = t.checked_sub(qt)?;
+        t = new_t;
+        new_t = next_t;
+        let qr = q.checked_mul(new_r)?;
+        let next_r = r.checked_sub(qr)?;
+        r = new_r;
+        new_r = next_r;
+    }
+    if r != 1 {
+        return None;
+    }
+    Some(t.rem_euclid(m))
+}
+
+fn crt_combine(
+    r1: i128,
+    m1: i128,
+    r2: i128,
+    m2: i128,
+) -> Result<Option<(i128, i128)>, UnknownReason> {
+    let g = gcd_i128(m1, m2);
+    if r1.rem_euclid(g) != r2.rem_euclid(g) {
+        return Ok(None);
+    }
+    let m1_g = m1 / g;
+    let m2_g = m2 / g;
+    let lcm = m1_g.checked_mul(m2).ok_or(UnknownReason::ArithmeticRange)?;
+    let diff = if r2 >= r1 {
+        r2 - r1
+    } else {
+        m2 - ((r1 - r2) % m2)
+    };
+    let rhs = (diff / g).rem_euclid(m2_g);
+    let inv = mod_inverse_i128(m1_g, m2_g).ok_or(UnknownReason::ArithmeticRange)?;
+    let k = mul_mod_u128(rhs as u128, inv as u128, m2_g as u128);
+    let offset = mul_mod_u128(k, m1 as u128, lcm as u128);
+    let combined = ((r1.rem_euclid(lcm) as u128) + offset) % (lcm as u128);
+    Ok(Some((combined as i128, lcm)))
+}
+
+fn add_congruence(
+    idx: usize,
+    rem: i128,
+    modulus: i128,
+    truth: bool,
+    positive: &mut [Option<(i128, i128)>],
+    negative: &mut [Vec<(i128, i128)>],
+) -> Result<bool, UnknownReason> {
+    if truth {
+        if let Some((r0, m0)) = positive[idx] {
+            let Some(merged) = crt_combine(r0, m0, rem, modulus)? else {
+                return Ok(false);
+            };
+            positive[idx] = Some(merged);
+        } else {
+            positive[idx] = Some((rem, modulus));
+        }
+    } else {
+        if modulus == 1 {
+            return Ok(false);
+        }
+        negative[idx].push((rem, modulus));
+    }
+    if let Some((r0, m0)) = positive[idx] {
+        for &(nr, nm) in &negative[idx] {
+            if m0 % nm == 0 && r0.rem_euclid(nm) == nr {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn first_congruent_ge(lo: i128, rem: i128, modulus: i128) -> Option<i128> {
+    let rem_lo = lo.rem_euclid(modulus);
+    let delta = if rem >= rem_lo {
+        rem - rem_lo
+    } else {
+        modulus - (rem_lo - rem)
+    };
+    lo.checked_add(delta)
 }
 
 impl fmt::Display for Checkpoint {
@@ -190,6 +672,7 @@ impl fmt::Display for Checkpoint {
         )
     }
 }
+
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(integer-state {} (potentials", self.graph)?;

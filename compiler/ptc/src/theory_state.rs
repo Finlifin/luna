@@ -320,9 +320,10 @@ impl Search<'_> {
             for &index in &state.pending {
                 charge(&mut self.steps, 1)?;
                 if state.facts[index].is_none() && assignment[index].is_some() {
-                    // Only IntLe is independent of this type closure. New atom
+                    // Only integer atoms are independent of this type closure. New atom
                     // kinds must be rechecked unless their separation is known.
-                    type_changed |= !matches!(self.atoms[index], Atom::IntLe(_));
+                    type_changed |=
+                        !matches!(self.atoms[index], Atom::IntLe(_) | Atom::IntCongruent(_));
                 }
             }
             let next_summary = if type_changed {
@@ -358,6 +359,12 @@ impl Search<'_> {
             if !state.integers.stabilize(integers, &mut self.steps)? {
                 return Ok(Check::Conflict);
             }
+            if !state
+                .integers
+                .check_congruences(self.atoms, assignment, &mut self.steps)?
+            {
+                return Ok(Check::Conflict);
+            }
             let cost = state
                 .pending
                 .len()
@@ -385,7 +392,11 @@ impl Search<'_> {
                     classes: state.classes.snapshot(),
                     kinds: kinds.clone(),
                     not_sized: not_sized.clone(),
-                    integers: state.integers.model(&mut self.steps)?,
+                    integers: state.integers.model_with_congruences(
+                        self.atoms,
+                        assignment,
+                        &mut self.steps,
+                    )?,
                 })
             } else {
                 Check::Consistent

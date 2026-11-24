@@ -4,7 +4,9 @@ use super::*;
 use comptime_interpretor::Value;
 
 mod generator_layouts;
+
 pub(super) use generator_layouts::{SchemaSequence, SchemaStep};
+
 mod initializers;
 mod materialization;
 
@@ -2337,6 +2339,7 @@ impl Checker<'_, '_> {
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
+                | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
                 | K::BitConvert(value)
                 | K::ErrorConvert { value, .. }

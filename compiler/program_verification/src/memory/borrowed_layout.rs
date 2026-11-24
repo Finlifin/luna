@@ -272,6 +272,10 @@ pub fn borrowed_input_layout(
                 Term::Function { .. }
                     | Term::UnsafeFunction(_)
                     | Term::ClosureContextType
+                    | Term::EffectRowType
+                    | Term::ErrorRowType
+                    | Term::ReachabilityType
+                    | Term::AnyType
                     | Term::ClosureContextValue(_)
                     | Term::Primitive(
                         Primitive::Void | Primitive::Never | Primitive::Type | Primitive::Unit,

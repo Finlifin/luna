@@ -25,6 +25,41 @@ impl IntLe {
     }
 }
 
+/// A13 `IntCongruent(term, remainder, modulus)` modulo a positive constant `modulus`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IntCongruent {
+    pub term: IntegerTerm,
+    pub remainder: i128,
+    pub modulus: i128,
+}
+
+impl IntCongruent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.modulus <= 0 {
+            return Err("IntCongruent modulus must be a positive integer constant".into());
+        }
+        Ok(())
+    }
+
+    pub fn evaluate(&self, values: &BTreeMap<DeclarationId, i128>) -> Option<bool> {
+        if self.modulus <= 0 {
+            return None;
+        }
+        let value = self.term.evaluate(values)?;
+        Some(value.rem_euclid(self.modulus) == self.remainder.rem_euclid(self.modulus))
+    }
+}
+
+impl fmt::Display for IntCongruent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(int-congruent {} {} {})",
+            self.term, self.remainder, self.modulus
+        )
+    }
+}
+
 fn tick(steps: &mut usize) -> Result<(), UnknownReason> {
     *steps = steps.checked_sub(1).ok_or(UnknownReason::BudgetExhausted)?;
     Ok(())
@@ -60,6 +95,7 @@ impl IntLe {
 }
 
 impl Graph {
+    #[cfg(test)]
     fn new<'a>(
         literals: impl Iterator<Item = (&'a IntLe, Option<bool>)>,
         steps: &mut usize,
@@ -147,9 +183,12 @@ pub(super) fn propagate_explained(
     )
 }
 
+pub(super) use state::solve_with_congruences;
+
 /// All vertices start at distance zero, equivalently a fresh super-source has
 /// zero-cost edges to every vertex. The distinguished zero vertex is shifted
 /// back to zero when producing the concrete model.
+#[cfg(test)]
 pub(super) fn solve<'a>(
     literals: impl Iterator<Item = (&'a IntLe, Option<bool>)>,
     steps: &mut usize,

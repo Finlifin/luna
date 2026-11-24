@@ -95,6 +95,10 @@ macro_rules! visit_children {
             }
             Self::Primitive(_)
             | Self::ClosureContextType
+            | Self::EffectRowType
+            | Self::ErrorRowType
+            | Self::ReachabilityType
+            | Self::AnyType
             | Self::Hole { .. }
             | Self::Bound { .. }
             | Self::Rigid { .. }

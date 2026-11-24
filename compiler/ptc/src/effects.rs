@@ -5,7 +5,7 @@ use super::*;
 use nir::effects::Operation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Relation {
+pub(super) enum Relation {
     Same,
     Different,
     Pending,
@@ -146,7 +146,7 @@ impl<'a> Search<'a> {
     /// Flatten syntax and branch-proved result aliases. Returned operations
     /// borrow the immutable term table; no new type identity is manufactured.
     /// Empty self wrappers are harmless; nonempty cyclic tails remain pending.
-    fn computation_view(
+    pub(super) fn computation_view(
         &mut self,
         start: usize,
         classes: &Classes,
@@ -198,7 +198,7 @@ impl<'a> Search<'a> {
         Err(UnknownReason::BudgetExhausted)
     }
 
-    fn operation_relation(
+    pub(super) fn operation_relation(
         &mut self,
         a: &Operation,
         b: &Operation,

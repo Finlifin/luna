@@ -439,6 +439,30 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
             }
         }))
     }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        _fuel: &mut usize,
+    ) -> Result<nir::FieldLookup, nir::LayoutError> {
+        let Some(instance) = self
+            .graph
+            .nominals
+            .iter()
+            .find(|instance| instance.ty == *ty)
+        else {
+            return Ok(nir::FieldLookup::NotFound);
+        };
+        Ok(match &instance.definition {
+            iir::NominalDefinition::Struct(def) => def
+                .fields
+                .iter()
+                .position(|(name, _)| name == field)
+                .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index),
+            _ => nir::FieldLookup::NotFound,
+        })
+    }
 }
 
 fn query_niche_layout(
@@ -1627,6 +1651,7 @@ impl Emitter<'_> {
             | K::ComptimeIntegerConvert(_)
             | K::TypeLayout { .. }
             | K::TypeKind { .. }
+            | K::TypeNotSized { .. }
             | K::IntegerRepresentation(_)
             | K::TryIntegerConvert(_)
             | K::TakeBits(_)
@@ -2822,21 +2847,46 @@ impl Emitter<'_> {
                 Err("comptime integer conversion must complete before LLVM lowering".into())
             }
             K::TypeLayout { query, operand } => {
-                let K::TypeValue(ty) = &operand.kind else {
-                    return Err("host layout query requires a resolved Type value".into());
+                let (ty, field_name) = if *query == nir::TypeLayoutQuery::FieldOffset {
+                    let K::Tuple(items) = &operand.kind else {
+                        return Err(
+                            "host field_offset_of query requires a resolved (Type, Symbol) tuple"
+                                .into(),
+                        );
+                    };
+                    let [subject_expr, field_expr] = items.as_slice() else {
+                        return Err(
+                            "host field_offset_of query requires exactly two arguments".into()
+                        );
+                    };
+                    let K::TypeValue(ty) = &subject_expr.kind else {
+                        return Err("host layout query requires a resolved Type value".into());
+                    };
+                    let K::Literal(nir::program::Literal::Symbol(field)) = &field_expr.kind else {
+                        return Err(
+                            "host field_offset_of query requires a constant Symbol field name"
+                                .into(),
+                        );
+                    };
+                    (ty, Some(field.as_str()))
+                } else {
+                    let K::TypeValue(ty) = &operand.kind else {
+                        return Err("host layout query requires a resolved Type value".into());
+                    };
+                    (ty, None)
                 };
                 let world = HostLayoutWorld {
                     graph: self.graph,
                     pointer_fallback: None,
                 };
-                let layout =
-                    nir::compute_layout(&world, ty, self.fuel).map_err(|err| err.to_string())?;
+                let raw = nir::compute_type_layout_query(&world, *query, ty, field_name, self.fuel)
+                    .map_err(|err| err.to_string())?;
                 let target = self
                     .graph
                     .target
                     .ok_or("host layout query requires target pointer width")?;
                 let bits = target.pointer_bits();
-                let val = u128::from(query.select(layout));
+                let val = u128::from(raw);
                 if bits < 128
                     && let Some(limit) = 1u128.checked_shl(bits)
                     && val >= limit
@@ -2858,6 +2908,22 @@ impl Emitter<'_> {
                 };
                 let result = nir::layout::evaluate_kind(&world, *kind, ty)
                     .ok_or("host type predicate evaluation is unresolved")?;
+                Ok(Value {
+                    ty: Ty::Bool,
+                    text: if result { "true" } else { "false" }.into(),
+                })
+            }
+            K::TypeNotSized { operand } => {
+                let K::TypeValue(ty) = &operand.kind else {
+                    return Err("host type predicate requires a resolved Type value".into());
+                };
+                let world = HostLayoutWorld {
+                    graph: self.graph,
+                    pointer_fallback: None,
+                };
+                let result = nir::layout::evaluate_not_sized(&world, ty, self.fuel)
+                    .map_err(|err| err.to_string())?
+                    .ok_or("host type is_not_sized evaluation is unresolved")?;
                 Ok(Value {
                     ty: Ty::Bool,
                     text: if result { "true" } else { "false" }.into(),

@@ -1601,3 +1601,170 @@ fn base_type_unsigned_encodings_groups_and_reflection_work_natively() {
     );
     assert!(run_with_target(prefixed32, "x86_64", "linux", "64").is_err());
 }
+
+#[test]
+fn type_stride_bit_width_field_offset_and_vars_work_end_to_end() {
+    let source = r#"
+        struct Padded {
+            a: u8,
+            b: u64,
+            c: u16,
+        }
+
+        ^attrs.packed.byte
+        struct BytePacked {
+            a: u8,
+            b: u64,
+        }
+
+        ^attrs.packed.bit
+        struct BitPacked {
+            low: BitVec<5>,
+            mid: BitVec<3>,
+            high: u8,
+        }
+
+        newtype FiveBits = BitVec<5>;
+
+        enum TriColor { red, green, blue }
+        enum FixedBits3 {
+            .width 3,
+            .discrete_tag true,
+            a: 0,
+            b: 1,
+        }
+
+        const PADDED_STRIDE: usize = Type.stride_of(Padded);
+        const PADDED_BITS: usize = Type.bit_width_of(Padded);
+        const PADDED_B_OFF: usize = Type.field_offset_of(Padded, .b);
+        const PADDED_C_OFF: usize = Type.field_offset_of(Padded, .c);
+        const BP_STRIDE: usize = Type.stride_of(BytePacked);
+        const BP_B_OFF: usize = Type.field_offset_of(BytePacked, .b);
+        const BITP_BITS: usize = Type.bit_width_of(BitPacked);
+        const BITP_HIGH_OFF: usize = Type.field_offset_of(BitPacked, .high);
+
+        fn generic_stride() -> usize where T {
+            Type.stride_of(T)
+        }
+
+        fn accept_vars(x: T) -> T
+        where T,
+              r: Type.vars.EffectRow,
+              e: Type.vars.ErrorRow,
+              p: Type.vars.Reachability,
+              a: Type.vars.Any
+        {
+            x
+        }
+
+        fn forward_vars(x: T) -> T
+        where T,
+              r2: Type.vars.EffectRow,
+              e2: Type.vars.ErrorRow,
+              p2: Type.vars.Reachability,
+              a2: Type.vars.Any
+        {
+            accept_vars<T, r2, e2, p2, a2>(x)
+        }
+
+        fn run() -> bool {
+            let vars_ok = true;
+            vars_ok
+                and PADDED_STRIDE == 24
+                and PADDED_BITS == 192
+                and PADDED_B_OFF == 8
+                and PADDED_C_OFF == 16
+                and BP_STRIDE == 9
+                and BP_B_OFF == 1
+                and BITP_BITS == 16
+                and BITP_HIGH_OFF == 1
+                and Type.stride_of(u32) == 4
+                and generic_stride<Padded>() == 24
+                and Type.bit_width_of(void) == 0
+                and Type.bit_width_of(bool) == 1
+                and Type.bit_width_of(BitVec<5>) == 5
+                and Type.bit_width_of(FiveBits) == 5
+                and Type.bit_width_of(TriColor) == 8
+                and Type.bit_width_of(FixedBits3) == 3
+                and Type.field_offset_of(Padded, .a) == 0
+                and Type.field_offset_of(Padded, .b) == 8
+                and Type.field_offset_of(BytePacked, .b) == 1
+                and Type.field_offset_of(BitPacked, .low) == 0
+                and Type.field_offset_of(BitPacked, .high) == 1
+                and not Type.predicates.is_not_sized(Padded)
+        }
+    "#;
+    assert_eq!(
+        run_with_target(source, "x86_64", "linux", "64").unwrap(),
+        Value::Bool(true)
+    );
+    for level in ["0", "3"] {
+        let case = NativeCase::new(source);
+        let built = case.build(level);
+        assert_success(&built);
+        let ran = case.run();
+        assert_success(&ran);
+        assert_eq!(ran.stdout, b"(bool true)\n");
+    }
+
+    // Target sensitivity of bit_width_of(usize).
+    let width_probe = r#"
+        fn run() -> usize { Type.bit_width_of(usize) }
+    "#;
+    assert_eq!(
+        run_with_target(width_probe, "x86", "linux", "32").unwrap(),
+        Value::UnsignedInteger(32)
+    );
+    assert_eq!(
+        run_with_target(width_probe, "x86_64", "linux", "64").unwrap(),
+        Value::UnsignedInteger(64)
+    );
+
+    // Negative cases: missing field, unaligned bit-packed field, comptime-only types & Type.vars.*.
+    let bad_field_const = r#"
+        struct Pair { a: u8, b: u64 }
+        const BAD: usize = Type.field_offset_of(Pair, .missing);
+        fn run() -> usize { BAD }
+    "#;
+    assert!(support::compile(bad_field_const).is_err());
+
+    let bad_field_rt = r#"
+        struct Pair { a: u8, b: u64 }
+        fn run() -> usize { Type.field_offset_of(Pair, .missing) }
+    "#;
+    assert!(run_with_target(bad_field_rt, "x86_64", "linux", "64").is_err());
+
+    let unaligned_bit_field = r#"
+        ^attrs.packed.bit
+        struct Bits { a: BitVec<5>, b: BitVec<3> }
+        const BAD: usize = Type.field_offset_of(Bits, .b);
+        fn run() -> usize { BAD }
+    "#;
+    assert!(support::compile(unaligned_bit_field).is_err());
+
+    let wrong_var_domain = r#"
+        fn accept_effect_var(x: u32) -> u32
+        where r: Type.vars.EffectRow
+        {
+            x
+        }
+        fn run() -> u32 { accept_effect_var<void>(1) }
+    "#;
+    assert!(support::compile(wrong_var_domain).is_err());
+
+    for var_ty in [
+        "Type.vars.Closure",
+        "Type.vars.EffectRow",
+        "Type.vars.ErrorRow",
+        "Type.vars.Reachability",
+        "Type.vars.Any",
+    ] {
+        for q in ["size_of", "stride_of", "bit_width_of"] {
+            let bad = format!("const BAD: usize = Type.{q}({var_ty}); fn run() -> usize {{ BAD }}");
+            assert!(
+                support::compile(&bad).is_err(),
+                "Type.{q}({var_ty}) must fail"
+            );
+        }
+    }
+}

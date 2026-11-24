@@ -318,6 +318,14 @@ pub enum Op {
         kind: nir::TypeKind,
         operand: Register,
     },
+    PrepareTypeNotSized {
+        ty: Arc<Term>,
+        operand: Arc<Term>,
+    },
+    TypeNotSized {
+        destination: Register,
+        operand: Register,
+    },
     PrepareObjectAccess(Arc<objects::ObjectAccess>),
     ObjectAccess {
         destination: Register,
@@ -998,6 +1006,14 @@ impl fmt::Display for Program {
                     kind,
                     operand,
                 } => write!(f, "(type-kind %{destination} {kind} %{operand})")?,
+                Op::PrepareTypeNotSized { ty, operand } => write!(
+                    f,
+                    "(prepare-type-not-sized (type {ty}) (operand {operand}))"
+                )?,
+                Op::TypeNotSized {
+                    destination,
+                    operand,
+                } => write!(f, "(type-not-sized %{destination} %{operand})")?,
                 Op::PrepareObjectAccess(access) => write!(f, "(prepare-object-access {access})")?,
                 Op::ObjectAccess {
                     destination,
@@ -2568,6 +2584,25 @@ fn compile_root<'a>(
                         emit(
                             &mut work,
                             Op::PrepareTypeKind {
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                                operand: Arc::new(copy_term(&operand.ty, fuel, source)?),
+                            },
+                        );
+                    }
+                    K::TypeNotSized { operand } => {
+                        let slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::TypeNotSized {
+                                destination: dst,
+                                operand: slot,
+                            },
+                        );
+                        emit(&mut work, Op::TypeDescription(slot));
+                        work.push(Work::Expression(operand, slot));
+                        emit(
+                            &mut work,
+                            Op::PrepareTypeNotSized {
                                 ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
                                 operand: Arc::new(copy_term(&operand.ty, fuel, source)?),
                             },

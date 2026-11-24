@@ -95,9 +95,29 @@ pub(super) fn validate(
                     // not runtime locals. Their terms are checked by IIR typing.
                     Ok(false)
                 }
-                K::TypeKind { operand, .. } | K::TypeLayout { operand, .. }
+                K::TypeKind { operand, .. } | K::TypeNotSized { operand }
                     if matches!(operand.kind, K::TypeValue(_)) =>
                 {
+                    // Immutable descriptions are operands of type observation,
+                    // not runtime locals. Their terms are checked by IIR typing.
+                    Ok(false)
+                }
+                K::TypeLayout {
+                    query: nir::TypeLayoutQuery::FieldOffset,
+                    operand,
+                } if matches!(
+                    &operand.kind,
+                    K::Tuple(items) if items.len() == 2 && matches!(items[0].kind, K::TypeValue(_))
+                ) =>
+                {
+                    if let K::Tuple(items) = &operand.kind
+                        && !matches!(items[1].kind, K::Literal(_))
+                    {
+                        roots.push(&items[1]);
+                    }
+                    Ok(false)
+                }
+                K::TypeLayout { operand, .. } if matches!(operand.kind, K::TypeValue(_)) => {
                     // Immutable descriptions are operands of type observation,
                     // not runtime locals. Their terms are checked by IIR typing.
                     Ok(false)

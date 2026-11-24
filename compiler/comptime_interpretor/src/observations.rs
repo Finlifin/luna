@@ -231,6 +231,30 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
+            O::TypeLayout(nir::TypeLayoutQuery::FieldOffset) => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected = match input {
+                    Term::Tuple(items) if items.len() == 2 => {
+                        let (a, b) = (&items[0], &items[1]);
+                        if *a != Term::Primitive(Primitive::Type) && *a != never {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        }
+                        if *b != Term::Primitive(Primitive::Symbol) && *b != never {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        }
+                        if *a == never || *b == never {
+                            never.clone()
+                        } else {
+                            Term::Primitive(Primitive::Usize)
+                        }
+                    }
+                    _ if *input == never => never.clone(),
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                };
+                if *output != expected {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
             O::TypeLayout(_) => {
                 let never = Term::Primitive(Primitive::Never);
                 let expected = if *input == never {
@@ -524,7 +548,24 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let subject = self.type_identity_term(value, source)?;
+        let (type_value, field_name) = if query == nir::TypeLayoutQuery::FieldOffset {
+            let Value::Tuple(mut items) = value else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            let (Some(field_val), Some(type_val)) = (items.pop(), items.pop()) else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            if !items.is_empty() {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            let Value::Symbol(field) = field_val else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            (type_val, Some(field))
+        } else {
+            (value, None)
+        };
+        let subject = self.type_identity_term(type_value, source)?;
         let subject = self.selected_type_view(&subject, Some(source))?;
         self.check_type_description(&subject, Some(source))?;
         self.admit_type(&subject, 0).map_err(|mut error| {
@@ -535,9 +576,15 @@ impl Interpreter<'_> {
         })?;
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let layout = nir::compute_layout(&InterpreterLayoutWorld(self), &subject, &mut fuel);
+        let result = nir::compute_type_layout_query(
+            &InterpreterLayoutWorld(self),
+            query,
+            &subject,
+            field_name.as_deref(),
+            &mut fuel,
+        );
         self.budget.steps -= (before - fuel) as u64;
-        let layout = layout.map_err(|err| {
+        let raw = result.map_err(|err| {
             let kind = match err {
                 nir::LayoutError::BudgetExhausted => ErrorKind::StepsExhausted,
                 nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_) => {
@@ -546,11 +593,13 @@ impl Interpreter<'_> {
                 nir::LayoutError::Overflow => ErrorKind::MachineOverflow,
                 nir::LayoutError::ComptimeOnly(_)
                 | nir::LayoutError::Cycle(_)
-                | nir::LayoutError::Unsupported(_) => ErrorKind::Type,
+                | nir::LayoutError::Unsupported(_)
+                | nir::LayoutError::UnknownField { .. }
+                | nir::LayoutError::UnalignedBitField { .. } => ErrorKind::Type,
             };
             self.failure(kind, Some(source))
         })?;
-        let val = u128::from(query.select(layout));
+        let val = u128::from(raw);
         if let Some(target) = self.target
             && target.pointer_bits() < 128
             && let Some(limit) = 1u128.checked_shl(target.pointer_bits())
@@ -759,5 +808,39 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
             return Ok(Some(nir::NominalLayout::EnumAggregate(variants)));
         }
         Ok(None)
+    }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        fuel: &mut usize,
+    ) -> Result<nir::FieldLookup, nir::LayoutError> {
+        let Some(next) = fuel.checked_sub(1) else {
+            *fuel = 0;
+            return Err(nir::LayoutError::BudgetExhausted);
+        };
+        *fuel = next;
+        let Term::Nominal { declaration, .. } = ty else {
+            return Ok(nir::FieldLookup::NotFound);
+        };
+        if self.0.graph.is_some() {
+            return Ok(match self.0.concrete_nominal(ty) {
+                Some(ConcreteNominal::Struct(def)) => def
+                    .fields
+                    .iter()
+                    .position(|(name, _)| name == field)
+                    .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index),
+                _ => nir::FieldLookup::NotFound,
+            });
+        }
+        if let Some(def) = self.0.structs.get(declaration) {
+            return Ok(def
+                .fields
+                .iter()
+                .position(|(name, _)| name == field)
+                .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index));
+        }
+        Ok(nir::FieldLookup::NotFound)
     }
 }

@@ -116,6 +116,11 @@ impl Search<'_> {
                     }
                     continue;
                 }
+                Atom::IntCongruent(_)
+                | Atom::HasHeadShape(_)
+                | Atom::RowContains(_)
+                | Atom::RowSubset(_)
+                | Atom::RowDisjoint(_) => continue,
             };
             pending.push((index, query));
         }

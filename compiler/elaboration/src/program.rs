@@ -3249,6 +3249,10 @@ fn push_default_strategy_term_step<'a>(
         (
             Term::Primitive(_)
             | Term::ClosureContextType
+            | Term::EffectRowType
+            | Term::ErrorRowType
+            | Term::ReachabilityType
+            | Term::AnyType
             | Term::Hole { .. }
             | Term::Bound { .. }
             | Term::Rigid { .. }
@@ -8720,18 +8724,44 @@ impl Checker<'_, '_> {
                                 operand: Box::new(operand),
                             },
                         })
-                    } else if let Some(_arg) = self.type_predicate_not_sized_call(expr)? {
-                        return Err(error(
-                            expr.span,
-                            "expression-level Type.predicates.is_not_sized is not yet implemented; use it in requires or assumes propositions",
-                        ));
-                    } else if let Some((query, arg)) = self.type_layout_query_call(expr)? {
+                    } else if let Some(arg) = self.type_predicate_not_sized_call(expr)? {
                         let operand = self.type_observation_operand(arg)?;
+                        if let K::TypeValue(ty) = &operand.kind
+                            && !is_never(ty)
+                        {
+                            self.check_not_sized_operand(ty, arg.span)?;
+                        }
                         let ty = p(if is_never(&operand.ty) {
                             P::Never
                         } else {
-                            P::Usize
+                            P::Bool
                         });
+                        if let Some(expected) = expected {
+                            self.require_expression(&ty, expected, expr.span)?;
+                        }
+                        Ok(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind: K::TypeNotSized {
+                                operand: Box::new(operand),
+                            },
+                        })
+                    } else if let Some((query, arg, field)) = self.type_layout_query_call(expr)? {
+                        let subject_op = self.type_observation_operand(arg)?;
+                        let (operand, never_operand) = if let Some(field_expr) = field {
+                            let field_op = self.expr(field_expr, Some(&p(P::Symbol)))?;
+                            let never = is_never(&subject_op.ty) || is_never(&field_op.ty);
+                            let tuple = n::Expr {
+                                source: source(expr.span),
+                                ty: Term::Tuple(vec![subject_op.ty.clone(), field_op.ty.clone()]),
+                                kind: K::Tuple(vec![subject_op, field_op]),
+                            };
+                            (tuple, never)
+                        } else {
+                            let never = is_never(&subject_op.ty);
+                            (subject_op, never)
+                        };
+                        let ty = p(if never_operand { P::Never } else { P::Usize });
                         if let Some(expected) = expected {
                             self.require_expression(&ty, expected, expr.span)?;
                         }

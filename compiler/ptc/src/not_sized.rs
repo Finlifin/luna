@@ -61,7 +61,11 @@ fn evaluate_at(
         Term::ComptimeFunction(_)
         | Term::NormalFormFunction(..)
         | Term::Lift(_)
-        | Term::ClosureContextType => NotSizedStatus::InvalidRepresentation(COMPTIME_ONLY_REASON),
+        | Term::ClosureContextType
+        | Term::EffectRowType
+        | Term::ErrorRowType
+        | Term::ReachabilityType
+        | Term::AnyType => NotSizedStatus::InvalidRepresentation(COMPTIME_ONLY_REASON),
         Term::Function { parameters, .. } => {
             if parameters.iter().any(|param| param.sort != Sort::Runtime) {
                 NotSizedStatus::InvalidRepresentation(COMPTIME_ONLY_REASON)

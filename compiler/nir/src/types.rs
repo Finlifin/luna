@@ -475,6 +475,14 @@ pub enum Term {
     },
     /// Domain of ordered closure contexts, distinct from Type and type lists.
     ClosureContextType,
+    /// Domain marker for effect-row type parameters (`Type.vars.EffectRow`).
+    EffectRowType,
+    /// Domain marker for error-row type parameters (`Type.vars.ErrorRow`).
+    ErrorRowType,
+    /// Domain marker for reachability-set type parameters (`Type.vars.Reachability`).
+    ReachabilityType,
+    /// Domain marker for unrestricted quantified parameters (`Type.vars.Any`).
+    AnyType,
     /// A completed context's capture types in semantic order. Ordinary capture
     /// values are carried by closures, not by this type-level context value.
     ClosureContextValue(Vec<Term>),
@@ -845,6 +853,10 @@ impl Term {
                     pending.push(*signature);
                 }
                 Self::ClosureContextType
+                | Self::EffectRowType
+                | Self::ErrorRowType
+                | Self::ReachabilityType
+                | Self::AnyType
                 | Self::Primitive(_)
                 | Self::Hole { .. }
                 | Self::Bound { .. }
@@ -2783,6 +2795,10 @@ impl fmt::Display for Term {
                 f.write_str("))")
             }
             Self::ClosureContextType => f.write_str("(closure-context-type)"),
+            Self::EffectRowType => f.write_str("(effect-row-type)"),
+            Self::ErrorRowType => f.write_str("(error-row-type)"),
+            Self::ReachabilityType => f.write_str("(reachability-type)"),
+            Self::AnyType => f.write_str("(any-type)"),
             Self::ClosureContextValue(fields) => {
                 f.write_str("(closure-context (fields ")?;
                 list(f, fields)?;

@@ -14,15 +14,6 @@ thread_local! {
 
 impl Search<'_> {
     pub(super) fn witness(&mut self, theory: &TheoryModel) -> Option<Model> {
-        // A bare theory model cannot interpret implementation-world predicates.
-        // Detect that boundary before allocating type witnesses that would be
-        // discarded regardless of their values.
-        for atom in self.atoms {
-            self.steps = self.steps.checked_sub(1)?;
-            if matches!(atom, Atom::Trait(_)) {
-                return None;
-            }
-        }
         // No closed unsized runtime Term constructor exists yet; any model
         // requiring `NotSized(T) = true` remains conservatively `Unknown`.
         for &(_, truth) in &theory.not_sized {
@@ -34,7 +25,7 @@ impl Search<'_> {
         let classes = &theory.classes;
         // Reify actual closed types, not arbitrary EUF domain elements. Missing
         // value-store, runtime or opaque-call interpretations keep Unknown.
-        let mut representatives = HashMap::new();
+        let mut representatives = BTreeMap::new();
         for (id, term) in self.terms.nodes.iter().enumerate() {
             if !matches!(
                 term,
@@ -50,6 +41,14 @@ impl Search<'_> {
                 representatives.entry(classes.root(id)).or_insert(id);
             }
         }
+        let mut mentioned_nominals = BTreeSet::new();
+        for term in &self.terms.nodes {
+            if let Some(id) = model_domain::nullary_nominal(term) {
+                mentioned_nominals.insert(id);
+            }
+        }
+        let mut synthetic_pool = BTreeMap::new();
+        let mut next_synthetic_local = 0u32;
         // Classification selects a domain, not a single canonical model value.
         // Try combinations transactionally: disequalities and opaque application
         // collisions can invalidate a choice that satisfies every local kind.
@@ -146,6 +145,57 @@ impl Search<'_> {
                     }
                 }
             }
+            // Synthesize fresh nullary nominal witnesses for Context::prove when
+            // no declared formed nominal fills a permitted nominal category.
+            if !self.context.disallow_synthetic_nominals {
+                for kind in [
+                    nir::NominalKind::Struct,
+                    nir::NominalKind::Enum,
+                    nir::NominalKind::Newtype,
+                ] {
+                    let category = TypeKind::Nominal(kind);
+                    let mut permitted = true;
+                    for &(other, test, truth) in &theory.kinds {
+                        self.steps = self.steps.checked_sub(1)?;
+                        if root == other && category.consequence(true, test) != Some(truth) {
+                            permitted = false;
+                            break;
+                        }
+                    }
+                    if !permitted {
+                        continue;
+                    }
+                    let count = self.terms.nodes.len().saturating_add(1);
+                    for _ in 0..count {
+                        self.steps = self.steps.checked_sub(1)?;
+                        let declaration = loop {
+                            self.steps = self.steps.checked_sub(1)?;
+                            let id = DeclarationId {
+                                package: u64::MAX,
+                                local: next_synthetic_local,
+                            };
+                            next_synthetic_local = next_synthetic_local.checked_add(1)?;
+                            if !mentioned_nominals.contains(&id)
+                                && !self
+                                    .context
+                                    .theory
+                                    .constructors
+                                    .nominal_constructors
+                                    .contains_key(&id)
+                                && !formed.contains_declaration(id)
+                                && !synthetic_pool.contains_key(&id)
+                            {
+                                break id;
+                            }
+                        };
+                        synthetic_pool.insert(declaration, kind);
+                        candidates.push(Term::Nominal {
+                            declaration,
+                            arguments: Vec::new(),
+                        });
+                    }
+                }
+            }
             if candidates.is_empty() {
                 return None;
             }
@@ -164,13 +214,15 @@ impl Search<'_> {
             self.steps = self
                 .steps
                 .checked_sub(domains.len().saturating_mul(8).saturating_add(1))?;
-            let mut free = HashMap::new();
+            let mut free = BTreeMap::new();
             for ((root, candidates), &position) in domains.iter().zip(&positions) {
                 let candidate = &candidates[position];
                 nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
                 free.insert(*root, candidate.clone());
             }
-            if let Some(model) = self.witness_with_choices(theory, &representatives, free) {
+            if let Some(model) =
+                self.witness_with_choices(theory, &representatives, free, &synthetic_pool)
+            {
                 return Some(model);
             }
             if combinations::advance(&mut positions, &sizes, &previous_sizes) {
@@ -236,8 +288,9 @@ impl Search<'_> {
     fn witness_with_choices(
         &mut self,
         theory: &TheoryModel,
-        representatives: &HashMap<usize, usize>,
-        mut free: HashMap<usize, Term>,
+        representatives: &BTreeMap<usize, usize>,
+        mut free: BTreeMap<usize, Term>,
+        synthetic_pool: &BTreeMap<DeclarationId, nir::NominalKind>,
     ) -> Option<Model> {
         let classes = &theory.classes;
         let mut types = BTreeMap::new();
@@ -258,7 +311,7 @@ impl Search<'_> {
                     id,
                     self.terms,
                     classes,
-                    &representatives,
+                    representatives,
                     &mut free,
                     &mut BTreeSet::new(),
                     &self.context.theory.constructors.nominal_constructors,
@@ -305,7 +358,7 @@ impl Search<'_> {
                     self.terms.ids[argument],
                     self.terms,
                     classes,
-                    &representatives,
+                    representatives,
                     &mut free,
                     &mut BTreeSet::new(),
                     &self.context.theory.constructors.nominal_constructors,
@@ -316,7 +369,7 @@ impl Search<'_> {
                 id,
                 self.terms,
                 classes,
-                &representatives,
+                representatives,
                 &mut free,
                 &mut BTreeSet::new(),
                 &self.context.theory.constructors.nominal_constructors,
@@ -339,6 +392,29 @@ impl Search<'_> {
                 });
             }
         }
+        let mut synthetic_nominals = BTreeMap::new();
+        if !synthetic_pool.is_empty() {
+            for term in types.values().chain(bound_types.values()).chain(
+                applications
+                    .iter()
+                    .flat_map(|app| app.arguments.iter().chain(std::iter::once(&app.result))),
+            ) {
+                let _ = visit_input_terms(
+                    Input::Term(term),
+                    self.max_depth.min(256),
+                    &mut self.steps,
+                    |node| {
+                        if let Some(id) = model_domain::nullary_nominal(node)
+                            && let Some(&kind) = synthetic_pool.get(&id)
+                        {
+                            synthetic_nominals.insert(id, kind);
+                        }
+                        Ok(())
+                    },
+                )
+                .ok()?;
+            }
+        }
         let application_index = model_applications::index(
             &applications,
             self.context,
@@ -349,7 +425,10 @@ impl Search<'_> {
         .ok()?;
         // A Boolean short circuit must not conceal an uninterpreted atom in
         // a purported concrete model (opaque calls still require evidence).
-        let mut atom_values = Vec::new();
+        // `Atom::Trait` may stay `None` only when 3-valued formula evaluation
+        // still decides every assumption true and the goal false.
+        let mut atom_values = Vec::with_capacity(self.atoms.len());
+        let mut has_trait_none = false;
         let evaluation_fuel = std::cell::Cell::new(self.steps);
         for atom in self.atoms {
             let value = model_atom(
@@ -359,24 +438,52 @@ impl Search<'_> {
                 &application_index,
                 &evaluation_fuel,
                 &theory.integers,
+                &synthetic_nominals,
                 &self.context.theory,
             );
             self.steps = evaluation_fuel.get();
-            atom_values.push(value?);
+            match value {
+                Some(b) => atom_values.push(Some(b)),
+                None if matches!(atom, Atom::Trait(_)) => {
+                    has_trait_none = true;
+                    atom_values.push(None);
+                }
+                None => return None,
+            }
         }
-        let cnf = self
-            .boolean
-            .as_mut()?
-            .clauses(self.atoms.len(), &mut self.steps)
-            .ok()?;
-        cnf.accepts(&atom_values, &mut self.steps)
-            .ok()?
-            .then_some(Model {
-                applications,
-                types,
-                bound_types,
-                integers: theory.integers.clone(),
-            })
+        let accepted = if !has_trait_none {
+            let bool_values: Vec<bool> = atom_values
+                .into_iter()
+                .map(|v| v.unwrap_or(false))
+                .collect();
+            let cnf = self
+                .boolean
+                .as_mut()?
+                .clauses(self.atoms.len(), &mut self.steps)
+                .ok()?;
+            cnf.accepts(&bool_values, &mut self.steps).ok()?
+        } else {
+            let Some(result) = evaluate_metered(
+                self.formula,
+                &|atom| {
+                    self.atoms
+                        .iter()
+                        .position(|a| a == atom)
+                        .and_then(|idx| atom_values[idx])
+                },
+                &mut self.steps,
+            ) else {
+                return None;
+            };
+            result == Some(true)
+        };
+        accepted.then_some(Model {
+            applications,
+            types,
+            bound_types,
+            integers: theory.integers.clone(),
+            synthetic_nominals,
+        })
     }
 }
 

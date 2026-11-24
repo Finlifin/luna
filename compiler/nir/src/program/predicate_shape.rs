@@ -5,26 +5,32 @@ use super::{Expr, ExprKind, Pattern, Term, intrinsic_pointer_value, pointer_oper
 pub enum PredicateShapeError {
     Budget,
 }
+
 impl std::fmt::Display for PredicateShapeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("program predicate inspection budget exhausted")
     }
 }
+
 impl std::error::Error for PredicateShapeError {}
+
 impl From<PredicateShapeError> for String {
     fn from(error: PredicateShapeError) -> Self {
         error.to_string()
     }
 }
+
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), PredicateShapeError> {
     *fuel = fuel
         .checked_sub(amount)
         .ok_or(PredicateShapeError::Budget)?;
     Ok(())
 }
+
 fn charge_type(ty: &Term, fuel: &mut usize) -> Result<(), PredicateShapeError> {
     crate::type_computations::charge_term(ty, fuel).map_err(|_| PredicateShapeError::Budget)
 }
+
 fn queue<'a, T: 'a, I: IntoIterator<Item = &'a T>>(
     work: &mut Vec<&'a T>,
     values: I,
@@ -173,7 +179,8 @@ fn predicate_shape(
             | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
-            | ExprKind::TypeKind { operand: value, .. } => pending.push(value),
+            | ExprKind::TypeKind { operand: value, .. }
+            | ExprKind::TypeNotSized { operand: value } => pending.push(value),
             ExprKind::TypeLayout { operand, .. } => {
                 if matches!(operand.kind, ExprKind::TypeValue(_)) {
                     charge_type(&operand.ty, remaining)?;

@@ -319,6 +319,25 @@ impl nir::LayoutWorld for IirLayoutWorld<'_> {
             }
         }))
     }
+
+    fn nominal_field_index(
+        &self,
+        ty: &Term,
+        field: &str,
+        _fuel: &mut usize,
+    ) -> Result<nir::FieldLookup, nir::LayoutError> {
+        let Some(instance) = self.0.nominals.iter().find(|instance| instance.ty == *ty) else {
+            return Ok(nir::FieldLookup::NotFound);
+        };
+        Ok(match &instance.definition {
+            NominalDefinition::Struct(def) => def
+                .fields
+                .iter()
+                .position(|(name, _)| name == field)
+                .map_or(nir::FieldLookup::NotFound, nir::FieldLookup::Index),
+            _ => nir::FieldLookup::NotFound,
+        })
+    }
 }
 
 impl Package {

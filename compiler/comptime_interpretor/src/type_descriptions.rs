@@ -124,6 +124,7 @@ pub(super) fn spend(fuel: &mut usize, amount: usize) -> Result<(), ErrorKind> {
     *fuel = fuel.checked_sub(amount).ok_or(ErrorKind::StepsExhausted)?;
     Ok(())
 }
+
 pub(super) fn application_error(error: nir::normal_forms::ApplicationError) -> ErrorKind {
     match error {
         nir::normal_forms::ApplicationError::Budget { .. } => ErrorKind::StepsExhausted,
@@ -646,6 +647,10 @@ pub(super) fn inspect<'signature>(
             }
             Term::Primitive(_)
             | Term::ClosureContextType
+            | Term::EffectRowType
+            | Term::ErrorRowType
+            | Term::ReachabilityType
+            | Term::AnyType
             | Term::Bound { .. }
             | Term::Unit
             | Term::Bool(_)
@@ -667,5 +672,6 @@ pub(super) fn inspect<'signature>(
 
 #[cfg(test)]
 mod operation_tests;
+
 #[cfg(test)]
 mod tests;

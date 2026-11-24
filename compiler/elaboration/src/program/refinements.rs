@@ -758,6 +758,9 @@ impl Checker<'_, '_> {
                     None => None,
                 }
             }
+            K::TypeNotSized { operand } => self
+                .observed_condition_type_value(operand, fuel)?
+                .map(F::not_sized),
             K::Not(value) => return self.condition_type_fact(value, !positive, fuel, depth + 1),
             // Normal completion delivers the tail's Boolean. Prefix statements
             // remain in the program; immutable TypeValue facts do not depend on

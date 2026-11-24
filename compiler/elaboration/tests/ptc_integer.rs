@@ -41,7 +41,14 @@ fn eval(formula: &F, integers: &BTreeMap<DeclarationId, i128>) -> bool {
         F::Not(f) => !eval(f, integers),
         F::And(fs) => fs.iter().all(|f| eval(f, integers)),
         F::Or(fs) => fs.iter().any(|f| eval(f, integers)),
-        F::Equal(_) | F::NotSized(_) | F::Trait(_) => panic!("integer-only oracle"),
+        F::Equal(_)
+        | F::NotSized(_)
+        | F::Trait(_)
+        | F::IntCongruent(_)
+        | F::HasHeadShape(_)
+        | F::RowContains(_)
+        | F::RowSubset(_)
+        | F::RowDisjoint(_) => panic!("integer-only oracle"),
     }
 }
 

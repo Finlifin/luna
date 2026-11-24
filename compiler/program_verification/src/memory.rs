@@ -5655,6 +5655,7 @@ impl<'a> Infer<'a, '_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.check_guard(value, depth + 1),
             K::BitWindow { value, start, end } => {
@@ -7826,6 +7827,7 @@ impl<'a> Infer<'a, '_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.walk(value, depth + 1)?,
             K::TextQuery { subject, query } => {
@@ -9640,7 +9642,12 @@ fn infer_body(
         if parameter.sort != nir::Sort::Runtime
             && matches!(
                 parameter.ty,
-                Term::Primitive(Primitive::Type) | Term::ClosureContextType
+                Term::Primitive(Primitive::Type)
+                    | Term::ClosureContextType
+                    | Term::EffectRowType
+                    | Term::ErrorRowType
+                    | Term::ReachabilityType
+                    | Term::AnyType
             )
         {
             continue;

@@ -1912,7 +1912,7 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.complete_type_equal(left, right, source)?);
                 }
-                Op::PrepareTypeKind { ty, operand } => {
+                Op::PrepareTypeKind { ty, operand } | Op::PrepareTypeNotSized { ty, operand } => {
                     self.prepare_type_kind(ty, operand, source)?
                 }
                 Op::TypeKind {
@@ -1923,6 +1923,14 @@ impl<'a> Interpreter<'a> {
                     let operand = frame.slots[*operand].take().ok_or_else(missing)?;
                     frame.slots[*destination] =
                         Some(self.complete_type_kind_value(*kind, operand, source)?);
+                }
+                Op::TypeNotSized {
+                    destination,
+                    operand,
+                } => {
+                    let operand = frame.slots[*operand].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_type_not_sized_value(operand, source)?);
                 }
                 Op::PrepareObjectAccess(access) => {
                     use comptime_compiler::objects::ObjectOperation;

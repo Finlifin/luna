@@ -2,6 +2,7 @@
 //! exported binding additionally needs entailment under the supplied problem.
 //! This does not authorize treating an unproved function requirement as a fact.
 use super::*;
+
 mod ambiguity;
 mod symbolic;
 
@@ -12,6 +13,7 @@ pub struct TypeInputSolution {
     pub model: Witness,
     pub bindings: BTreeMap<DeclarationId, (Term, Proof)>,
 }
+
 #[derive(Clone, Debug)]
 pub enum TypeInputOutcome {
     Unique(TypeInputSolution),
@@ -24,6 +26,7 @@ pub enum TypeInputOutcome {
     Unknown(UnknownReason),
     IllFormed(String),
 }
+
 impl Context {
     /// Solve only the explicitly requested rigid Type inputs. The constraint is
     /// the equation problem being solved, temporarily assumed only in the
@@ -213,16 +216,19 @@ impl Context {
             ));
         }
         let mut context = self.fork();
+        context.disallow_synthetic_nominals = true;
         context.assume(Formula::And(parts));
         Ok(context)
     }
 }
+
 fn type_variable(declaration: DeclarationId) -> Term {
     Term::Rigid {
         declaration,
         sort: Sort::Type,
     }
 }
+
 impl fmt::Display for TypeInputOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

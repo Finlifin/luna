@@ -255,6 +255,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::Not(value)
             | K::Loop { body: value, .. } => push!(work, fuel, Node::Expr(value)),

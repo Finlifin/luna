@@ -282,14 +282,64 @@ fn is_not_sized_works_in_requires_and_rejects_comptime_only_prerequisites() {
     "#;
     assert!(check_source(unresolved).is_err());
 
-    // Expression-level `is_not_sized` returns an explicit diagnostic (Wave 2).
+    // Expression-level `is_not_sized` works at comptime, in runtime bodies, and with `requires`.
     let expr_level = r#"
+        struct Pair { a: u8, b: u64 }
+        const C_U32: bool = Type.predicates.is_not_sized(u32);
+        const C_PAIR: bool = Type.predicates.is_not_sized(Pair);
+        fn check_req() -> bool
+        where T, requires not Type.predicates.is_not_sized(T)
+        {
+            not Type.predicates.is_not_sized(T)
+        }
         fn run() -> bool {
-            Type.predicates.is_not_sized(u32)
+            not C_U32
+                and not C_PAIR
+                and not Type.predicates.is_not_sized(u32)
+                and not Type.predicates.is_not_sized(Pair)
+                and not Type.predicates.is_not_sized(*u8)
+                and check_req<u32>()
         }
     "#;
-    let err = check_source(expr_level).expect_err("expression-level is_not_sized should fail");
-    assert!(err.contains("is_not_sized"), "unexpected error: {err}");
+    assert_eq!(run_entry(expr_level), Ok(Value::Bool(true)));
+
+    // Polymorphic expression-level `is_not_sized(T)` resolves at instantiation
+    // and rejects comptime-only instantiations cleanly.
+    let poly_sized = r#"
+        fn check_open() -> bool where T {
+            Type.predicates.is_not_sized(T)
+        }
+        fn run() -> bool { check_open<u32>() }
+    "#;
+    assert_eq!(run_entry(poly_sized), Ok(Value::Bool(false)));
+
+    let poly_comptime_only = r#"
+        fn check_open() -> bool where T {
+            Type.predicates.is_not_sized(T)
+        }
+        fn run() -> bool { check_open<Type>() }
+    "#;
+    assert!(run_entry(poly_comptime_only).is_err());
+
+    // Expression-level `is_not_sized` rejects comptime-only types (IllFormed / Type error).
+    for bad in [
+        "Type",
+        "Integer",
+        "Float",
+        "meta.List<u32>",
+        "Type.vars.Closure",
+        "Type.vars.EffectRow",
+        "Type.vars.ErrorRow",
+        "Type.vars.Reachability",
+        "Type.vars.Any",
+        "comptime fn() -> Type",
+    ] {
+        let src = format!("fn run() -> bool {{ Type.predicates.is_not_sized({bad}) }}");
+        assert!(
+            check_source(&src).is_err(),
+            "expression-level is_not_sized({bad}) must fail"
+        );
+    }
 }
 
 #[test]

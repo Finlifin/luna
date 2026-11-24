@@ -124,7 +124,24 @@ impl Interpreter<'_> {
                     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
                 })
                 .map_err(|error| error.kind)?;
-                Unknown
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let res = nir::layout::evaluate_not_sized(
+                    &observations::InterpreterLayoutWorld(self),
+                    ty,
+                    &mut fuel,
+                );
+                self.budget.steps -= (before - fuel) as u64;
+                match res {
+                    Ok(Some(true)) => Satisfied,
+                    Ok(Some(false)) => Rejected,
+                    Ok(None) => Unknown,
+                    Err(nir::LayoutError::BudgetExhausted) => {
+                        return Err(ErrorKind::StepsExhausted);
+                    }
+                    Err(nir::LayoutError::ComptimeOnly(_)) => return Err(ErrorKind::Type),
+                    Err(_) => Unknown,
+                }
             }
             P::Trait(requirement) => {
                 // A source declaration catalog is not a proof of applicability. Only

@@ -6,7 +6,9 @@ use comptime_runtime::{Budget, Integer};
 use nir::{DeclarationId, Parameter, Primitive as P, Sort, Term as T};
 
 pub const MAX_BYTES: usize = 128 * 1024;
+
 const MAGIC: &[u8] = b"FMD\x01";
+
 const PRIMITIVES: &[P] = &[
     P::Type,
     P::Object,
@@ -34,9 +36,11 @@ const PRIMITIVES: &[P] = &[
     P::F32,
     P::F64,
 ];
+
 fn failure(message: impl std::fmt::Display) -> String {
     format!("metadata wire: {message}")
 }
+
 fn tick(fuel: &mut usize, depth: usize) -> Result<(), String> {
     if depth >= 64 {
         return Err(failure("nesting limit exceeded"));
@@ -46,6 +50,7 @@ fn tick(fuel: &mut usize, depth: usize) -> Result<(), String> {
         .ok_or_else(|| failure("node budget exceeded"))?;
     Ok(())
 }
+
 fn sort_tag(sort: Sort) -> u8 {
     match sort {
         Sort::Type => 0,
@@ -131,6 +136,7 @@ struct Writer {
     fuel: usize,
     arithmetic: Budget,
 }
+
 impl Writer {
     fn put(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.len() > MAX_BYTES - self.bytes.len() {
@@ -139,20 +145,25 @@ impl Writer {
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
+
     fn byte(&mut self, byte: u8) -> Result<(), String> {
         self.put(&[byte])
     }
+
     fn number(&mut self, value: u64) -> Result<(), String> {
         self.put(&value.to_le_bytes())
     }
+
     fn text(&mut self, text: &str) -> Result<(), String> {
         self.number(text.len() as u64)?;
         self.put(text.as_bytes())
     }
+
     fn id(&mut self, id: DeclarationId) -> Result<(), String> {
         self.number(id.package)?;
         self.number(id.local as u64)
     }
+
     fn terms(&mut self, terms: &[T], depth: usize) -> Result<(), String> {
         self.number(terms.len() as u64)?;
         for term in terms {
@@ -160,6 +171,7 @@ impl Writer {
         }
         Ok(())
     }
+
     fn fields(&mut self, fields: &[(String, T)], depth: usize) -> Result<(), String> {
         self.number(fields.len() as u64)?;
         for (name, term) in fields {
@@ -168,6 +180,7 @@ impl Writer {
         }
         Ok(())
     }
+
     fn optional(&mut self, value: Option<&T>, depth: usize) -> Result<(), String> {
         self.byte(u8::from(value.is_some()))?;
         if let Some(value) = value {
@@ -175,6 +188,7 @@ impl Writer {
         }
         Ok(())
     }
+
     fn term(&mut self, term: &T, depth: usize) -> Result<(), String> {
         tick(&mut self.fuel, depth)?;
         let d = depth + 1;
@@ -353,6 +367,10 @@ impl Writer {
                 self.term(signature, d)?;
             }
             T::ClosureContextType => self.byte(29)?,
+            T::EffectRowType => self.byte(37)?,
+            T::ErrorRowType => self.byte(38)?,
+            T::ReachabilityType => self.byte(39)?,
+            T::AnyType => self.byte(40)?,
             T::ClosureContextValue(values) => {
                 self.byte(30)?;
                 self.terms(values, d)?;
@@ -396,6 +414,7 @@ impl Writer {
         Ok(())
     }
 }
+
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -403,6 +422,7 @@ struct Reader<'a> {
     arithmetic: Budget,
     admission_fuel: usize,
 }
+
 impl<'a> Reader<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
         let end = self
@@ -414,22 +434,27 @@ impl<'a> Reader<'a> {
         self.at = end;
         Ok(bytes)
     }
+
     fn byte(&mut self) -> Result<u8, String> {
         Ok(self.take(1)?[0])
     }
+
     fn number(&mut self) -> Result<u64, String> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
+
     fn narrow(&mut self) -> Result<u32, String> {
         self.number()?
             .try_into()
             .map_err(|_| failure("u32 overflow"))
     }
+
     fn index(&mut self) -> Result<usize, String> {
         self.number()?
             .try_into()
             .map_err(|_| failure("index overflow"))
     }
+
     fn count(&mut self) -> Result<usize, String> {
         let n = self.index()?;
         if n > self.bytes.len() - self.at || n > self.fuel {
@@ -438,10 +463,12 @@ impl<'a> Reader<'a> {
         self.fuel -= n;
         Ok(n)
     }
+
     fn text(&mut self) -> Result<&'a str, String> {
         let n = self.index()?;
         std::str::from_utf8(self.take(n)?).map_err(|_| failure("invalid UTF-8"))
     }
+
     fn flag(&mut self) -> Result<bool, String> {
         match self.byte()? {
             0 => Ok(false),
@@ -449,6 +476,7 @@ impl<'a> Reader<'a> {
             _ => Err(failure("invalid flag")),
         }
     }
+
     fn sort(&mut self) -> Result<Sort, String> {
         match self.byte()? {
             0 => Ok(Sort::Type),
@@ -457,12 +485,14 @@ impl<'a> Reader<'a> {
             _ => Err(failure("invalid sort")),
         }
     }
+
     fn id(&mut self) -> Result<DeclarationId, String> {
         Ok(DeclarationId {
             package: self.number()?,
             local: self.narrow()?,
         })
     }
+
     fn terms(&mut self, d: usize) -> Result<Vec<T>, String> {
         let count = self.count()?;
         let mut values = Vec::new();
@@ -471,6 +501,7 @@ impl<'a> Reader<'a> {
         }
         Ok(values)
     }
+
     fn fields(&mut self, d: usize) -> Result<Vec<(String, T)>, String> {
         let count = self.count()?;
         let mut fields = Vec::new();
@@ -479,6 +510,7 @@ impl<'a> Reader<'a> {
         }
         Ok(fields)
     }
+
     fn optional(&mut self, d: usize) -> Result<Option<Box<T>>, String> {
         Ok(if self.flag()? {
             Some(Box::new(self.term(d)?))
@@ -486,6 +518,7 @@ impl<'a> Reader<'a> {
             None
         })
     }
+
     fn term(&mut self, depth: usize) -> Result<T, String> {
         tick(&mut self.fuel, depth)?;
         let d = depth + 1;
@@ -627,6 +660,10 @@ impl<'a> Reader<'a> {
                 signature: Box::new(self.term(d)?),
             },
             29 => T::ClosureContextType,
+            37 => T::EffectRowType,
+            38 => T::ErrorRowType,
+            39 => T::ReachabilityType,
+            40 => T::AnyType,
             30 => T::ClosureContextValue(self.terms(d)?),
             31 => T::ContextualClosure {
                 context: Box::new(self.term(d)?),

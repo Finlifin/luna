@@ -172,6 +172,10 @@ fn local_identity(
                 return Err(Error::Ownership(OwnershipError::OpenBeforeLocalIdentity));
             }
             Term::ClosureContextType
+            | Term::EffectRowType
+            | Term::ErrorRowType
+            | Term::ReachabilityType
+            | Term::AnyType
             | Term::ClosureContextValue(_)
             | Term::ClosureSnapshot { .. }
             | Term::Primitive(_)
@@ -232,6 +236,10 @@ pub(super) fn builtin_subject(subject: &Term) -> bool {
             | Term::ContextualClosure { .. }
             | Term::Computation { .. }
             | Term::ClosureContextType
+            | Term::EffectRowType
+            | Term::ErrorRowType
+            | Term::ReachabilityType
+            | Term::AnyType
     )
 }
 
