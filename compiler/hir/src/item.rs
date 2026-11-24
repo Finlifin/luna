@@ -223,6 +223,10 @@ pub struct FnModifiers {
     pub is_comptime: bool,
     /// Declared unsafe call boundary, separate from purity and phase.
     pub is_unsafe: bool,
+    /// Specification-only function usable in contracts/predicates, never runtime execution.
+    pub is_spec: bool,
+    /// Formally verified function whose implementation must statically discharge all obligations.
+    pub is_verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

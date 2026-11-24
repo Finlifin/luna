@@ -662,6 +662,21 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             "assumes",
             vec![("condition", &a_tree)],
         ),
+        (
+            ExprKind::Asserts(&a),
+            "asserts",
+            vec![("condition", &a_tree)],
+        ),
+        (
+            ExprKind::Invariant(&a),
+            "invariant",
+            vec![("condition", &a_tree)],
+        ),
+        (
+            ExprKind::Decreases(&a),
+            "decreases",
+            vec![("metric", &a_tree)],
+        ),
         (ExprKind::Resume(Some(&a)), "resume", vec![]),
         (ExprKind::Break(name("label")), "break", vec![]),
         (ExprKind::Continue(name("label")), "continue", vec![]),
@@ -849,7 +864,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 91);
+    assert_eq!(cases.len(), 94);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);
@@ -1148,6 +1163,8 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
             is_pure: true,
             is_comptime: true,
             is_unsafe: true,
+            is_spec: false,
+            is_verified: false,
         },
         clause_params: &clauses,
         clause_constraints: &constraints,

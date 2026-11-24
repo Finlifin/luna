@@ -726,6 +726,8 @@ impl BuilderInvocation<'_> {
         source_frontier: u32,
         protocols: &elaboration::program::Protocols,
     ) -> Result<nir::program::Package, String> {
+        elaboration::verification::flow::validate_machine_operations(&nir)
+            .map_err(|failure| failure.to_string())?;
         elaboration::verification::optimization::elide_proven_checks(
             &mut nir,
             &mut elaboration::verification::Limits::default(),

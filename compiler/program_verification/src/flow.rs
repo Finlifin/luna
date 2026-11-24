@@ -53,12 +53,21 @@ pub struct Point {
     field_paths: BTreeMap<FieldPath, ValueId>,
 }
 
+/// Deterministic structural preorder index of an expression inside a function body.
+/// Independent of heap allocation addresses and preserved across `Function::clone()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExprSite(pub usize);
+
+impl fmt::Display for ExprSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(site {})", self.0)
+    }
+}
+
 /// Optional proof queries use an explicit caller budget, independently of the
 /// mandatory arithmetic analysis. Unknown leaves the executable check intact.
 pub struct CheckInput {
-    // Ephemeral identity, consumed only against this exact unchanged tree.
-    // Never serialized or reused after cloning/moving the owning expression.
-    pub(super) site: usize,
+    pub site: ExprSite,
     pub condition: Condition,
     pub facts: Facts,
 }
@@ -73,8 +82,8 @@ impl fmt::Display for CheckInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(check-input (condition {}) {})",
-            self.condition, self.facts
+            "(check-input {} (condition {}) {})",
+            self.site, self.condition, self.facts
         )
     }
 }
@@ -87,6 +96,19 @@ pub enum PointKind {
     Negate,
     BitIndex,
     BitWindow,
+}
+
+impl fmt::Display for PointKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Check => f.write_str("check"),
+            Self::Postcondition => f.write_str("postcondition"),
+            Self::Arithmetic(op) => write!(f, "(arithmetic {op})"),
+            Self::Negate => f.write_str("negate"),
+            Self::BitIndex => f.write_str("bit-index"),
+            Self::BitWindow => f.write_str("bit-window"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -107,8 +129,73 @@ pub enum Reason {
     MissingBitWindowProof,
     MissingPreconditionProof,
     MissingPostconditionProof,
+    MissingAssertionProof,
+    MissingInvariantProof,
+    MissingTerminationProof,
     Phase(&'static str),
     IntegerFormation(String),
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(reason) => reason.fmt(f),
+            Self::Unsupported => f.write_str("unsupported-construct"),
+            Self::DepthLimit => f.write_str("depth-limit"),
+            Self::InvalidSignature => f.write_str("invalid-signature"),
+            Self::MissingBitWindowProof => write!(
+                f,
+                "{:?}",
+                "BitVec slice bounds or constant width are not proven; add an earlier checked assumes or a stronger contract"
+            ),
+            Self::MissingBitIndexProof => write!(
+                f,
+                "{:?}",
+                "BitVec index is not proven in bounds; add an earlier checked assumes or a stronger contract"
+            ),
+            Self::MissingDivisionProof => write!(
+                f,
+                "{:?}",
+                "integer divisor is not proven nonzero; establish a positive or negative range before division"
+            ),
+            Self::MissingMachineProof => write!(
+                f,
+                "{:?}",
+                "machine arithmetic range is not proven; add an earlier checked assumes or a stronger contract"
+            ),
+            Self::MissingPreconditionProof => write!(
+                f,
+                "{:?}",
+                "program precondition is not proven; establish it before the call with checked assumes"
+            ),
+            Self::MissingPostconditionProof => write!(
+                f,
+                "{:?}",
+                "program postcondition is not proven on this return path"
+            ),
+            Self::MissingAssertionProof => write!(
+                f,
+                "{:?}",
+                "assertion is not proven; establish it statically before this point"
+            ),
+            Self::MissingInvariantProof => write!(
+                f,
+                "{:?}",
+                "loop invariant is not proven at loop entry or preserved across the loop body"
+            ),
+            Self::MissingTerminationProof => write!(
+                f,
+                "{:?}",
+                "termination decreases measure is not proven non-negative and strictly decreasing"
+            ),
+            Self::Phase(message) => write!(f, "{message:?}"),
+            Self::IntegerFormation(message) => write!(
+                f,
+                "(integer-formation {})",
+                Literal::String(message.clone())
+            ),
+        }
+    }
 }
 
 // Declaration structure errors reject the interface; exhausted inspection
@@ -126,52 +213,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(flow-error (source {} {}) (reason ",
-            self.source.start, self.source.end
-        )?;
-        match &self.reason {
-            Reason::Unknown(reason) => reason.fmt(f)?,
-            Reason::Unsupported => f.write_str("unsupported-construct")?,
-            Reason::DepthLimit => f.write_str("depth-limit")?,
-            Reason::InvalidSignature => f.write_str("invalid-signature")?,
-            Reason::MissingBitWindowProof => write!(
-                f,
-                "{:?}",
-                "BitVec slice bounds or constant width are not proven; add an earlier checked assumes or a stronger contract"
-            )?,
-            Reason::MissingBitIndexProof => write!(
-                f,
-                "{:?}",
-                "BitVec index is not proven in bounds; add an earlier checked assumes or a stronger contract"
-            )?,
-            Reason::MissingDivisionProof => write!(
-                f,
-                "{:?}",
-                "integer divisor is not proven nonzero; establish a positive or negative range before division"
-            )?,
-            Reason::MissingMachineProof => write!(
-                f,
-                "{:?}",
-                "machine arithmetic range is not proven; add an earlier checked assumes or a stronger contract"
-            )?,
-            Reason::MissingPreconditionProof => write!(
-                f,
-                "{:?}",
-                "program precondition is not proven; establish it before the call with checked assumes"
-            )?,
-            Reason::MissingPostconditionProof => write!(
-                f,
-                "{:?}",
-                "program postcondition is not proven on this return path"
-            )?,
-            Reason::Phase(message) => write!(f, "{message:?}")?,
-            Reason::IntegerFormation(message) => write!(
-                f,
-                "(integer-formation {})",
-                Literal::String(message.clone())
-            )?,
-        }
-        f.write_str("))")
+            "(flow-error (source {} {}) (reason {}))",
+            self.source.start, self.source.end, self.reason
+        )
     }
 }
 
@@ -189,18 +233,9 @@ impl fmt::Display for Point {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(point (source {} {}) (kind ",
-            self.source.start, self.source.end
+            "(point (source {} {}) (kind {}) (closure-context",
+            self.source.start, self.source.end, self.kind
         )?;
-        match self.kind {
-            PointKind::Check => f.write_str("check")?,
-            PointKind::Postcondition => f.write_str("postcondition")?,
-            PointKind::Arithmetic(op) => write!(f, "(arithmetic {op})")?,
-            PointKind::Negate => f.write_str("negate")?,
-            PointKind::BitIndex => f.write_str("bit-index")?,
-            PointKind::BitWindow => f.write_str("bit-window")?,
-        }
-        f.write_str(") (closure-context")?;
         for source in &self.closure_context {
             write!(f, " (source {} {})", source.start, source.end)?;
         }
@@ -790,7 +825,13 @@ pub(crate) fn validate_residual_contracts_with_declarations<'a>(
     function: &Function,
     limits: &mut Limits,
 ) -> Result<(), Error> {
-    let mut required = !function.preconditions.is_empty() || !function.postconditions.is_empty();
+    let mut required = !function.preconditions.is_empty()
+        || !function.postconditions.is_empty()
+        || package.safety_contracts.is_verified(function.declaration)
+        || !package
+            .safety_contracts
+            .decreases_for(function.declaration)
+            .is_empty();
     let mut invalid_target = false;
     iir::visit::expressions(function, &mut limits.arithmetic.steps, |expr, fuel| {
         required |= nir::program::machine_integer_type_in(expr, package.target).is_some()
@@ -1058,6 +1099,27 @@ where
             Default::default(),
         ),
     };
+    let mut site_indices = BTreeMap::new();
+    if collect_points && let Some(body) = function.body {
+        let mut next_site = 0usize;
+        nir::visit::expression(body, &mut limits.arithmetic.steps, |expr, _| {
+            site_indices
+                .entry(expr as *const Expr as usize)
+                .or_insert(ExprSite(next_site));
+            next_site += 1;
+            Ok(())
+        })
+        .map_err(|_| {
+            error(Reason::Unknown(
+                comptime_runtime::Error::BudgetExhausted.into(),
+            ))
+        })?;
+    }
+    let current_declaration = function.declaration();
+    let current_decreases = package
+        .zip(current_declaration)
+        .map(|(pkg, decl)| pkg.safety_contracts.decreases_for(decl).to_vec())
+        .unwrap_or_default();
     let mut walker = Walker {
         handler_unstable_locals: Some(addressed_locals.union(&written_locals).copied().collect()),
         addressed_locals,
@@ -1073,10 +1135,16 @@ where
         associated_world: None,
         declarations,
         points: vec![],
+        site_indices,
         collect_points,
         failure_source: None,
         closure_context: vec![],
         single_pass_exits: BTreeMap::new(),
+        current_declaration,
+        current_parameters: function.parameters.to_vec(),
+        current_decreases,
+        entry_decreases_places: Vec::new(),
+        loop_contexts: BTreeMap::new(),
         next_field: 0,
         captured_values: BTreeMap::new(),
         associated_scalars: Vec::new(),
@@ -1129,6 +1197,25 @@ where
         state
             .frozen
             .insert(place(snapshot.binding), parameters[index].ty.clone());
+    }
+    if !walker.current_decreases.is_empty() {
+        let metrics = walker.current_decreases.clone();
+        for metric in &metrics {
+            let entry_val = walker.eval(metric, &mut state, 0)?;
+            walker
+                .require_non_negative(&entry_val, &state, metric.source)
+                .map_err(|reason| Error {
+                    source: walker.failure_source.unwrap_or(metric.source),
+                    reason,
+                })?;
+            let snapped_place = walker
+                .snapshot_entry_decreases(&mut state, metric, entry_val)
+                .map_err(|reason| Error {
+                    source: walker.failure_source.unwrap_or(metric.source),
+                    reason,
+                })?;
+            walker.entry_decreases_places.push(snapped_place);
+        }
     }
     match function.body {
         Some(body) if function.postconditions.is_empty() => {
@@ -1223,6 +1310,13 @@ impl<'a> MachineOwnerCache<'a> {
     }
 }
 
+struct LoopVerifyContext {
+    header_obligations: BTreeSet<usize>,
+    invariants: Vec<(Expr, SourceRange)>,
+    decreases: Vec<(Expr, Expr, SourceRange)>,
+    exits: Vec<State>,
+}
+
 struct Walker<'a> {
     addressed_locals: BTreeSet<LocalId>,
     // Handler arms can run at arbitrary request points, so preserve only
@@ -1252,11 +1346,17 @@ struct Walker<'a> {
     declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     associated_world: Option<type_resolution::dispatch::DeclarationWorld<'a>>,
     points: Vec<Point>,
+    site_indices: BTreeMap<usize, ExprSite>,
     // Final validation consumes only success/failure, not report snapshots.
     collect_points: bool,
     failure_source: Option<SourceRange>,
     closure_context: Vec<SourceRange>,
     single_pass_exits: BTreeMap<LocalId, Vec<State>>,
+    current_declaration: Option<nir::DeclarationId>,
+    current_parameters: Vec<LocalId>,
+    current_decreases: Vec<Expr>,
+    entry_decreases_places: Vec<PlaceId>,
+    loop_contexts: BTreeMap<LocalId, LoopVerifyContext>,
 }
 
 impl Walker<'_> {
@@ -3435,7 +3535,9 @@ impl Walker<'_> {
             return Ok(());
         }
         match &expr.kind {
-            K::EffectComputation { body, .. } => self.tail(body, state, depth + 1)?,
+            K::UnsafeScope(body) | K::EffectComputation { body, .. } => {
+                self.tail(body, state, depth + 1)?
+            }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 for statement in statements {
                     self.child(statement, state, depth + 1)?;
@@ -3567,7 +3669,9 @@ impl Walker<'_> {
             return Ok(());
         }
         if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target()) {
-            let (signed, width) = self.integer_layout(primitive).unwrap();
+            let (signed, width) = self
+                .integer_layout(primitive)
+                .ok_or(Reason::InvalidSignature)?;
             let target = Interval::machine(width as u16, signed, self.limits)?;
             if !range
                 .map(|range| range.within(&target, self.limits))
@@ -3858,8 +3962,13 @@ impl Walker<'_> {
         let mut postconditions = Vec::new();
         let result_binding = target.and_then(|f| f.result_binding);
         let snapshots = target.map(|f| f.entry_snapshots).unwrap_or_default();
-        let needs_arguments =
-            target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
+        let is_self_recursive_decreases = direct
+            .is_some_and(|(id, _)| Some(id) == self.current_declaration)
+            && !self.current_decreases.is_empty();
+        let needs_arguments = target
+            .is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty())
+            || is_self_recursive_decreases;
+        let mut recursive_call_args: Vec<(usize, Term, Option<Value>)> = Vec::new();
         if let Some(target) = target {
             if needs_arguments && parameter_bindings != target.parameters {
                 return Err(Reason::InvalidSignature);
@@ -4326,6 +4435,18 @@ impl Walker<'_> {
                     },
                 )?
             };
+            let dec_arg_value = if is_self_recursive_decreases && !argument.is_default {
+                Some(self.copy_numeric_value(&value)?)
+            } else {
+                None
+            };
+            if is_self_recursive_decreases {
+                recursive_call_args.push((
+                    argument.parameter,
+                    argument.value.ty.clone(),
+                    dec_arg_value,
+                ));
+            }
             if let Some(binding) = parameter_bindings.get(argument.parameter) {
                 bind_value(
                     &mut defaults,
@@ -4626,6 +4747,84 @@ impl Walker<'_> {
                     .map_err(|_| Reason::MissingPreconditionProof)?;
                 defaults.facts.assume(&condition, true, self.limits)?;
             }
+        }
+        if is_self_recursive_decreases && state.facts.is_reachable() {
+            let mut dec_state = state.fork(self.limits)?;
+            let mut param_remap = BTreeMap::new();
+            let mut default_param_remap = BTreeMap::new();
+            for (slot, ty, maybe_val) in recursive_call_args {
+                let Some(binding) = self.current_parameters.get(slot).copied() else {
+                    return Err(Reason::InvalidSignature);
+                };
+                let arg_val = match maybe_val {
+                    Some(value) => value,
+                    None => {
+                        let arg = arguments
+                            .iter()
+                            .find(|arg| arg.parameter == slot)
+                            .ok_or(Reason::InvalidSignature)?;
+                        if !arg.is_default {
+                            return Err(Reason::InvalidSignature);
+                        }
+                        iir::visit::expression(
+                            &arg.value,
+                            &mut self.limits.arithmetic.steps,
+                            |node, _| {
+                                if let K::Local(local) = node.kind
+                                    && parameter_bindings.contains(&local)
+                                    && !default_param_remap.contains_key(&local)
+                                {
+                                    return Err("unmapped parameter in default argument".into());
+                                }
+                                Ok(())
+                            },
+                        )
+                        .map_err(|_| Reason::Unsupported)?;
+                        let mut remapped_default = arg.value.clone();
+                        let mut default_remap_budget = self.limits.arithmetic.steps.min(50_000);
+                        nir::contracts::remap_predicate_metered(
+                            &mut remapped_default,
+                            &default_param_remap,
+                            &mut default_remap_budget,
+                        )
+                        .map_err(|_| Reason::Unsupported)?;
+                        self.child(&remapped_default, &mut dec_state, depth)?
+                    }
+                };
+                let fresh = LocalId {
+                    owner: u32::MAX - 2,
+                    index: u32::try_from(slot).map_err(|_| Reason::InvalidSignature)?,
+                };
+                param_remap.insert(binding, fresh);
+                if let Some(&callee_binding) = parameter_bindings.get(slot) {
+                    default_param_remap.insert(callee_binding, fresh);
+                }
+                self.bind_related_value(&mut dec_state, fresh, &ty, arg_val)?;
+            }
+            let metrics = self.current_decreases.clone();
+            let entry_places = self.entry_decreases_places.clone();
+            let entry_values = entry_places
+                .iter()
+                .map(|entry_place| self.local_value_at(&dec_state, *entry_place))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut call_metrics = Vec::with_capacity(metrics.len());
+            let mut remap_budget = self.limits.arithmetic.steps.min(50_000);
+            for metric in &metrics {
+                let mut remapped = metric.clone();
+                nir::contracts::remap_predicate_metered(
+                    &mut remapped,
+                    &param_remap,
+                    &mut remap_budget,
+                )
+                .map_err(|_| Reason::Unsupported)?;
+                call_metrics.push(self.child(&remapped, &mut dec_state, depth)?);
+            }
+            self.require_lexicographic_decrease(
+                &entry_values,
+                &call_metrics,
+                &dec_state,
+                expr.source,
+            )?;
         }
         for snapshot in snapshots {
             let index = parameter_bindings
@@ -5037,10 +5236,10 @@ impl Walker<'_> {
                 let condition = self.child(condition, state, depth)?.condition;
                 // The condition has already executed. A proved branch needs
                 // neither a duplicate state nor an impossible-branch merge.
-                if let Some(truth) = self.known_branch(condition.as_ref(), state)? {
-                    state
-                        .facts
-                        .assume(condition.as_ref().unwrap(), truth, self.limits)?;
+                if let Some(cond) = condition.as_ref()
+                    && let Some(truth) = self.known_branch(Some(cond), state)?
+                {
+                    state.facts.assume(cond, truth, self.limits)?;
                     return if truth {
                         self.child(then_branch, state, depth)
                     } else if let Some(branch) = else_branch {
@@ -5135,7 +5334,10 @@ impl Walker<'_> {
             let existing: BTreeSet<_> = state.domains.keys().copied().collect();
             let mut iteration = state.fork(self.limits)?;
             let checked = self.child(body, &mut iteration, depth);
-            let exits = self.single_pass_exits.remove(&identity).unwrap();
+            let exits = self
+                .single_pass_exits
+                .remove(&identity)
+                .ok_or(Reason::InvalidSignature)?;
             checked?;
             let mut merged: Option<State> = None;
             for exit in exits {
@@ -5161,10 +5363,160 @@ impl Walker<'_> {
                     .assume(&Condition::Bool(false), true, self.limits)?;
             }
         } else {
-            self.forget_loop_writes(body, state)?;
-            let mut iteration = state.fork(self.limits)?;
-            self.child(body, &mut iteration, depth)?;
-            self.forget_loop_writes(body, state)?;
+            let (header_obligations, header_invariants, header_decreases) =
+                self.collect_loop_header_obligations(identity, body);
+            if header_invariants.is_empty() && header_decreases.is_empty() {
+                self.forget_loop_writes(body, state)?;
+                let mut iteration = state.fork(self.limits)?;
+                self.child(body, &mut iteration, depth)?;
+                self.forget_loop_writes(body, state)?;
+            } else {
+                if state.facts.is_reachable() {
+                    for (inv, inv_source) in &header_invariants {
+                        self.verify_predicate_expr(
+                            inv,
+                            state,
+                            depth,
+                            *inv_source,
+                            Reason::MissingInvariantProof,
+                            true,
+                        )?;
+                    }
+                    for (metric, metric_source) in &header_decreases {
+                        let val = self.child(metric, state, depth)?;
+                        self.require_non_negative(&val, state, *metric_source)?;
+                    }
+                }
+                let existing: BTreeSet<_> = state.domains.keys().copied().collect();
+                self.forget_loop_writes(body, state)?;
+                let mut iteration = state.fork(self.limits)?;
+                if iteration.facts.is_reachable() {
+                    for (inv, inv_source) in &header_invariants {
+                        let checked = self.child(inv, &mut iteration, depth)?;
+                        let Some(cond) = checked.condition else {
+                            self.record_failure(*inv_source);
+                            return Err(Reason::MissingInvariantProof);
+                        };
+                        iteration.facts.assume(&cond, true, self.limits)?;
+                    }
+                }
+                let mut decreases_entries = Vec::with_capacity(header_decreases.len());
+                if iteration.facts.is_reachable() && !header_decreases.is_empty() {
+                    let mut metric_locals = BTreeMap::new();
+                    for (metric, _) in &header_decreases {
+                        nir::visit::expression(
+                            metric,
+                            &mut self.limits.arithmetic.steps,
+                            |node, _| {
+                                if let K::Local(id) = node.kind {
+                                    metric_locals.entry(id).or_insert_with(|| node.ty.clone());
+                                }
+                                Ok(())
+                            },
+                        )
+                        .map_err(|_| {
+                            Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                        })?;
+                    }
+                    let mut header_remap = BTreeMap::new();
+                    for (loc, ty) in metric_locals {
+                        if iteration.facts.value(place(loc)).is_some() {
+                            let val = self.local_value_at(&iteration, place(loc))?;
+                            let snap_index = self.next_field;
+                            self.next_field =
+                                snap_index.checked_add(1).ok_or(Unknown::VersionExhausted)?;
+                            let snap_local = LocalId {
+                                owner: u32::MAX - 3,
+                                index: snap_index,
+                            };
+                            self.bind_related_value(&mut iteration, snap_local, &ty, val)?;
+                            header_remap.insert(loc, snap_local);
+                        }
+                    }
+                    let mut remap_budget = self.limits.arithmetic.steps.min(50_000);
+                    for (metric, metric_source) in &header_decreases {
+                        let entry_val = self.child(metric, &mut iteration, depth)?;
+                        self.require_non_negative(&entry_val, &iteration, *metric_source)?;
+                        let mut entry_metric = metric.clone();
+                        nir::contracts::remap_predicate_metered(
+                            &mut entry_metric,
+                            &header_remap,
+                            &mut remap_budget,
+                        )
+                        .map_err(|_| Reason::Unsupported)?;
+                        decreases_entries.push((entry_metric, metric.clone(), *metric_source));
+                    }
+                }
+                if self
+                    .loop_contexts
+                    .insert(
+                        identity,
+                        LoopVerifyContext {
+                            header_obligations,
+                            invariants: header_invariants,
+                            decreases: decreases_entries,
+                            exits: Vec::new(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(Reason::InvalidSignature);
+                }
+                let checked = self.child(body, &mut iteration, depth);
+                let ctx = self
+                    .loop_contexts
+                    .remove(&identity)
+                    .ok_or(Reason::InvalidSignature)?;
+                checked?;
+                if iteration.facts.is_reachable() {
+                    for (inv, inv_source) in &ctx.invariants {
+                        self.verify_predicate_expr(
+                            inv,
+                            &mut iteration,
+                            depth,
+                            *inv_source,
+                            Reason::MissingInvariantProof,
+                            false,
+                        )?;
+                    }
+                    if !ctx.decreases.is_empty() {
+                        let mut new_vals = Vec::with_capacity(ctx.decreases.len());
+                        let mut old_vals = Vec::with_capacity(ctx.decreases.len());
+                        let mut dec_source = body.source;
+                        for (entry_metric, metric, metric_source) in &ctx.decreases {
+                            dec_source = *metric_source;
+                            old_vals.push(self.child(entry_metric, &mut iteration, depth)?);
+                            new_vals.push(self.child(metric, &mut iteration, depth)?);
+                        }
+                        self.require_lexicographic_decrease(
+                            &old_vals, &new_vals, &iteration, dec_source,
+                        )?;
+                    }
+                }
+                let mut merged: Option<State> = None;
+                for exit in ctx.exits {
+                    merged = Some(if let Some(previous) = merged {
+                        previous.merge(exit, self.limits)?
+                    } else {
+                        exit
+                    });
+                }
+                if let Some(mut exit) = merged {
+                    let mut retained = existing;
+                    retained.extend(self.captured_values.values().map(|(_, root)| *root));
+                    retained.extend(self.associated_scalars.iter().map(|(_, _, root)| *root));
+                    retained.extend(exit.frozen.keys().copied());
+                    if let Some(binding) = self.exit_contract.as_ref().and_then(|c| c.binding) {
+                        retained.insert(place(binding));
+                    }
+                    exit.keep(&retained, self.limits)?;
+                    *state = exit;
+                } else {
+                    state
+                        .facts
+                        .assume(&Condition::Bool(false), true, self.limits)?;
+                }
+            }
         }
         Ok(())
     }
@@ -5617,11 +5969,13 @@ impl Walker<'_> {
                 source,
             } if matches!(domain, Some(Term::Primitive(primitive)) if self.integer_layout(*primitive).is_some()) =>
             {
-                let ty = domain.unwrap();
+                let ty = domain.ok_or(Reason::InvalidSignature)?;
                 let Term::Primitive(primitive) = ty else {
-                    unreachable!()
+                    return Err(Reason::InvalidSignature);
                 };
-                let (signed, bits) = self.integer_layout(*primitive).unwrap();
+                let (signed, bits) = self
+                    .integer_layout(*primitive)
+                    .ok_or(Reason::InvalidSignature)?;
                 let mut value = self.integer_spelling(spelling)?;
                 if *negative {
                     value = value
@@ -5646,9 +6000,9 @@ impl Walker<'_> {
                 value: L::Integer { spelling, negative },
                 ..
             } if matches!(domain, Some(Term::Primitive(nir::Primitive::BitVec(_)))) => {
-                let ty = domain.unwrap();
+                let ty = domain.ok_or(Reason::InvalidSignature)?;
                 let Term::Primitive(nir::Primitive::BitVec(width)) = ty else {
-                    unreachable!()
+                    return Err(Reason::InvalidSignature);
                 };
                 let mut value = self.integer_spelling(spelling)?;
                 if *negative {
@@ -5732,7 +6086,10 @@ impl Walker<'_> {
                 Some(Term::Primitive(nir::Primitive::Void | nir::Primitive::Type))
             ) =>
             {
-                Ok((Value::default(), domain.unwrap().clone()))
+                Ok((
+                    Value::default(),
+                    domain.ok_or(Reason::InvalidSignature)?.clone(),
+                ))
             }
             A::Tuple { items, .. } => {
                 let ty = domain.ok_or(Reason::Unsupported)?;
@@ -5838,7 +6195,7 @@ impl Walker<'_> {
                 Ok(Value::default())
             }
             K::Break(identity) | K::Continue(identity) => {
-                self.jump_expression(expr, *identity, state)
+                self.jump_expression(expr, *identity, state, depth)
             }
             K::Call {
                 callee,
@@ -5935,13 +6292,28 @@ impl Walker<'_> {
         state: &mut State,
         depth: usize,
     ) -> Result<Value, Reason> {
+        if self.loop_contexts.values().any(|ctx| {
+            ctx.header_obligations
+                .contains(&(expr as *const Expr as usize))
+        }) {
+            return Ok(Value::default());
+        }
         if state.facts.is_reachable() {
-            let failure = || {
-                if matches!(expr.kind, K::RequirePredicate(_)) {
+            let role = self
+                .package
+                .and_then(|pkg| pkg.safety_contracts.role(expr.source));
+            if matches!(role, Some(nir::program::PredicateRole::LoopDecreases)) {
+                self.record_failure(expr.source);
+                return Err(Reason::MissingTerminationProof);
+            }
+            let failure_reason = || match role {
+                Some(nir::program::PredicateRole::Assert) => Reason::MissingAssertionProof,
+                Some(nir::program::PredicateRole::Invariant) => Reason::MissingInvariantProof,
+                Some(nir::program::PredicateRole::LoopDecreases) => Reason::MissingTerminationProof,
+                None if matches!(expr.kind, K::RequirePredicate(_)) => {
                     Reason::MissingPreconditionProof
-                } else {
-                    Reason::MissingPostconditionProof
                 }
+                None => Reason::MissingPostconditionProof,
             };
             // Predicate-local pattern bindings and constructor ghosts
             // cannot escape a void proof obligation. Keep caller roots
@@ -5949,11 +6321,17 @@ impl Walker<'_> {
             self.limits.step(state.domains.len())?;
             let existing = state.domains.keys().copied().collect();
             let checked = self.child(predicate, state, depth)?;
-            let condition = checked.condition.ok_or_else(&failure)?;
+            let Some(condition) = checked.condition else {
+                self.record_failure(expr.source);
+                return Err(failure_reason());
+            };
             state
                 .facts
                 .check_condition(&condition, true, self.limits)
-                .map_err(|_| failure())?;
+                .map_err(|_| {
+                    self.record_failure(expr.source);
+                    failure_reason()
+                })?;
             state.facts.assume(&condition, true, self.limits)?;
             state.keep(&existing, self.limits)?;
         }
@@ -5976,17 +6354,24 @@ impl Walker<'_> {
                 None
             };
             state.facts.assume(&condition, true, self.limits)?;
-            facts.map(|facts| CheckInput {
-                site: expr as *const Expr as usize,
-                condition,
-                facts,
+            facts.and_then(|facts| {
+                self.site_indices
+                    .get(&(expr as *const Expr as usize))
+                    .copied()
+                    .map(|site| CheckInput {
+                        site,
+                        condition,
+                        facts,
+                    })
             })
         } else {
             None
         };
         self.record(expr, state, PointKind::Check, None)?;
-        if self.collect_points {
-            self.points.last_mut().unwrap().check_input = check_input;
+        if self.collect_points
+            && let Some(last) = self.points.last_mut()
+        {
+            last.check_input = check_input;
         }
         Ok(Value::default())
     }
@@ -6015,18 +6400,299 @@ impl Walker<'_> {
         expr: &Expr,
         identity: nir::program::LocalId,
         state: &mut State,
+        depth: usize,
     ) -> Result<Value, Reason> {
-        if matches!(expr.kind, K::Break(_)) && self.single_pass_exits.contains_key(&identity) {
-            let exit = state.fork(self.limits)?;
-            self.single_pass_exits
-                .get_mut(&identity)
-                .unwrap()
-                .push(exit);
+        if matches!(expr.kind, K::Break(_)) {
+            if let Some(exits) = self.single_pass_exits.get_mut(&identity) {
+                let exit = state.fork(self.limits)?;
+                exits.push(exit);
+            } else if let Some(ctx) = self.loop_contexts.get_mut(&identity) {
+                let exit = state.fork(self.limits)?;
+                ctx.exits.push(exit);
+            }
+        } else if matches!(expr.kind, K::Continue(_))
+            && state.facts.is_reachable()
+            && self.loop_contexts.contains_key(&identity)
+        {
+            let invariants = self.loop_contexts[&identity].invariants.clone();
+            let decreases = self.loop_contexts[&identity].decreases.clone();
+            for (inv, inv_source) in &invariants {
+                self.verify_predicate_expr(
+                    inv,
+                    state,
+                    depth,
+                    *inv_source,
+                    Reason::MissingInvariantProof,
+                    false,
+                )?;
+            }
+            if !decreases.is_empty() {
+                let mut old_vals = Vec::with_capacity(decreases.len());
+                let mut new_vals = Vec::with_capacity(decreases.len());
+                let mut dec_source = expr.source;
+                for (entry_metric, metric, metric_source) in &decreases {
+                    dec_source = *metric_source;
+                    old_vals.push(self.child(entry_metric, state, depth)?);
+                    new_vals.push(self.child(metric, state, depth)?);
+                }
+                self.require_lexicographic_decrease(&old_vals, &new_vals, state, dec_source)?;
+            }
         }
         state
             .facts
             .assume(&Condition::Bool(false), true, self.limits)?;
         Ok(Value::default())
+    }
+
+    fn collect_loop_header_obligations(
+        &self,
+        identity: nir::program::LocalId,
+        body: &Expr,
+    ) -> (
+        BTreeSet<usize>,
+        Vec<(Expr, SourceRange)>,
+        Vec<(Expr, SourceRange)>,
+    ) {
+        fn is_while_guard_break(expr: &Expr, identity: nir::program::LocalId) -> bool {
+            let inner = match &expr.kind {
+                K::Discard(inner) => inner.as_ref(),
+                _ => expr,
+            };
+            let K::If {
+                then_branch,
+                else_branch: None,
+                ..
+            } = &inner.kind
+            else {
+                return false;
+            };
+            match &then_branch.kind {
+                K::Break(target) => *target == identity,
+                K::Block { statements, result } => match (statements.as_slice(), result.as_deref())
+                {
+                    ([], Some(expr)) | ([expr], None) => {
+                        matches!(expr.kind, K::Break(target) if target == identity)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+
+        let mut header_obligations = BTreeSet::new();
+        let mut invariants = Vec::new();
+        let mut decreases = Vec::new();
+        let statements = match &body.kind {
+            K::Block {
+                statements,
+                result: Some(inner),
+            }
+            | K::CallPreparation {
+                statements,
+                result: Some(inner),
+            } if statements.len() == 1 && is_while_guard_break(&statements[0], identity) => {
+                match &inner.kind {
+                    K::Block { statements, .. } | K::CallPreparation { statements, .. } => {
+                        statements.as_slice()
+                    }
+                    _ => &[][..],
+                }
+            }
+            K::Block { statements, .. } | K::CallPreparation { statements, .. } => {
+                statements.as_slice()
+            }
+            _ => &[][..],
+        };
+        let Some(package) = self.package else {
+            return (header_obligations, invariants, decreases);
+        };
+        for stmt in statements {
+            let inner = match &stmt.kind {
+                K::Discard(inner) => inner.as_ref(),
+                _ => stmt,
+            };
+            let K::RequirePredicate(predicate) = &inner.kind else {
+                break;
+            };
+            match package.safety_contracts.role(inner.source) {
+                Some(nir::program::PredicateRole::Invariant) => {
+                    header_obligations.insert(inner as *const Expr as usize);
+                    invariants.push((predicate.as_ref().clone(), inner.source));
+                }
+                Some(nir::program::PredicateRole::LoopDecreases) => {
+                    header_obligations.insert(inner as *const Expr as usize);
+                    if let K::ScalarGreaterEqual(metric, _) = &predicate.kind {
+                        decreases.push((metric.as_ref().clone(), inner.source));
+                    }
+                }
+                _ => break,
+            }
+        }
+        (header_obligations, invariants, decreases)
+    }
+
+    fn record_failure(&mut self, source: SourceRange) {
+        self.failure_source.get_or_insert(source);
+    }
+
+    fn snapshot_entry_decreases(
+        &mut self,
+        state: &mut State,
+        metric: &Expr,
+        entry_val: Value,
+    ) -> Result<PlaceId, Reason> {
+        let local = self.next_field;
+        self.next_field = local.checked_add(1).ok_or(Unknown::VersionExhausted)?;
+        let entry_place = PlaceId {
+            owner: u64::MAX,
+            local,
+        };
+        let transfer = self.prepare_copy(&entry_val, state)?;
+        bind_value_place(state, entry_place, &metric.ty, entry_val, self.limits)?;
+        if let Some(transfer) = transfer {
+            let installed = self.install_copy_at(state, entry_place, &[], transfer)?;
+            self.finish_copies(state, installed)?;
+        }
+        state.frozen.insert(entry_place, metric.ty.clone());
+        Ok(entry_place)
+    }
+
+    fn verify_predicate_expr(
+        &mut self,
+        predicate: &Expr,
+        state: &mut State,
+        depth: usize,
+        source: SourceRange,
+        failure: Reason,
+        assume_after: bool,
+    ) -> Result<(), Reason> {
+        if !state.facts.is_reachable() {
+            return Ok(());
+        }
+        self.limits.step(state.domains.len())?;
+        let existing = state.domains.keys().copied().collect();
+        let checked = self.child(predicate, state, depth)?;
+        let Some(condition) = checked.condition else {
+            self.record_failure(source);
+            return Err(failure);
+        };
+        if state
+            .facts
+            .check_condition(&condition, true, self.limits)
+            .is_err()
+        {
+            self.record_failure(source);
+            return Err(failure);
+        }
+        if assume_after {
+            state.facts.assume(&condition, true, self.limits)?;
+        }
+        state.keep(&existing, self.limits)?;
+        Ok(())
+    }
+
+    fn zero_scalar_value(&mut self) -> Result<Value, Unknown> {
+        let zero = Integer::from_u128(0);
+        Ok(Value {
+            range: Some(Interval::singleton(&zero, self.limits)?),
+            scalar: Some(Scalar::Constant(zero)),
+            ..Value::default()
+        })
+    }
+
+    fn copy_numeric_value(&mut self, value: &Value) -> Result<Value, Unknown> {
+        if value.fields.is_some() || value.aggregate_kind.is_some() {
+            return value.snapshot(self.limits, 0);
+        }
+        Ok(Value {
+            unbounded_integer: value.unbounded_integer,
+            range: value
+                .range
+                .as_ref()
+                .map(|r| r.copy(self.limits))
+                .transpose()?,
+            scalar: match &value.scalar {
+                Some(Scalar::Local(id)) => Some(Scalar::Local(*id)),
+                Some(Scalar::Constant(n)) => Some(Scalar::Constant(self.limits.integer(n)?)),
+                None => None,
+            },
+            polynomial: value
+                .polynomial
+                .as_ref()
+                .map(|p| p.copy(self.limits))
+                .transpose()?,
+            ..Value::default()
+        })
+    }
+
+    fn require_non_negative(
+        &mut self,
+        value: &Value,
+        state: &State,
+        source: SourceRange,
+    ) -> Result<(), Reason> {
+        let zero = self.zero_scalar_value()?;
+        let val_copy = self.copy_numeric_value(value)?;
+        let Some(cond) = compare_values(val_copy, zero, C::GreaterEqual, self.limits)? else {
+            self.record_failure(source);
+            return Err(Reason::MissingTerminationProof);
+        };
+        state
+            .facts
+            .check_condition(&cond, true, self.limits)
+            .map_err(|_| {
+                self.record_failure(source);
+                Reason::MissingTerminationProof
+            })
+    }
+
+    fn require_lexicographic_decrease(
+        &mut self,
+        old_vals: &[Value],
+        new_vals: &[Value],
+        state: &State,
+        source: SourceRange,
+    ) -> Result<(), Reason> {
+        if old_vals.len() != new_vals.len() || new_vals.is_empty() {
+            return Err(Reason::InvalidSignature);
+        }
+        for val in new_vals {
+            self.require_non_negative(val, state, source)?;
+        }
+        let mut idx = new_vals.len() - 1;
+        let new_last = self.copy_numeric_value(&new_vals[idx])?;
+        let old_last = self.copy_numeric_value(&old_vals[idx])?;
+        let mut lex =
+            compare_values(new_last, old_last, C::Less, self.limits)?.ok_or_else(|| {
+                self.record_failure(source);
+                Reason::MissingTerminationProof
+            })?;
+        while idx > 0 {
+            idx -= 1;
+            let new_i = self.copy_numeric_value(&new_vals[idx])?;
+            let old_i = self.copy_numeric_value(&old_vals[idx])?;
+            let lt = compare_values(new_i, old_i, C::Less, self.limits)?.ok_or_else(|| {
+                self.record_failure(source);
+                Reason::MissingTerminationProof
+            })?;
+            let new_eq = self.copy_numeric_value(&new_vals[idx])?;
+            let old_eq = self.copy_numeric_value(&old_vals[idx])?;
+            let eq = compare_values(new_eq, old_eq, C::Equal, self.limits)?.ok_or_else(|| {
+                self.record_failure(source);
+                Reason::MissingTerminationProof
+            })?;
+            lex = Condition::Or(
+                Box::new(lt),
+                Box::new(Condition::And(Box::new(eq), Box::new(lex))),
+            );
+        }
+        state
+            .facts
+            .check_condition(&lex, true, self.limits)
+            .map_err(|_| {
+                self.record_failure(source);
+                Reason::MissingTerminationProof
+            })
     }
 
     #[inline(never)]
@@ -6388,44 +7054,78 @@ fn validate_machine_owners(
     let errors: Vec<std::sync::Mutex<Option<Error>>> = (0..work.len())
         .map(|_| std::sync::Mutex::new(None))
         .collect();
+    let work_source = |item: &MachineWorkItem<'_>| match item {
+        MachineWorkItem::Function(function) => function.source,
+        MachineWorkItem::Initializer(_, initializer) => initializer.expression().source,
+    };
+    let fallback_source = work
+        .first()
+        .map(work_source)
+        .unwrap_or(SourceRange { start: 0, end: 0 });
+    let mut spawn_failure: Option<Error> = None;
+    let mut join_failure: Option<Error> = None;
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
-            let handle = builder
-                .spawn_scoped(scope, || {
-                    let mut cache = MachineOwnerCache::new(
-                        package,
-                        type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
-                    );
-                    loop {
-                        let idx = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if idx >= work.len() {
-                            break;
-                        }
-                        if idx > earliest_error.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        if let Err(err) =
-                            run_machine_work_item(package, owners, imports, &work[idx], &mut cache)
-                        {
-                            *errors[idx].lock().expect("verification slot lock poisoned") =
-                                Some(err);
-                            earliest_error.fetch_min(idx, std::sync::atomic::Ordering::Release);
-                        }
+            match builder.spawn_scoped(scope, || {
+                let mut cache = MachineOwnerCache::new(
+                    package,
+                    type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
+                );
+                loop {
+                    let idx = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= work.len() {
+                        break;
                     }
-                })
-                .expect("failed to spawn verification worker thread");
-            handles.push(handle);
+                    if idx > earliest_error.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(err) =
+                        run_machine_work_item(package, owners, imports, &work[idx], &mut cache)
+                    {
+                        match errors[idx].lock() {
+                            Ok(mut guard) => *guard = Some(err),
+                            Err(poisoned) => *poisoned.into_inner() = Some(err),
+                        }
+                        earliest_error.fetch_min(idx, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }) {
+                Ok(handle) => handles.push(handle),
+                Err(_) if handles.is_empty() => {
+                    spawn_failure = Some(Error {
+                        source: fallback_source,
+                        reason: Reason::Phase("failed to spawn verification worker thread"),
+                    });
+                    break;
+                }
+                Err(_) => break,
+            }
         }
         for handle in handles {
-            handle.join().expect("verification worker thread panicked");
+            if handle.join().is_err() && join_failure.is_none() {
+                join_failure = Some(Error {
+                    source: fallback_source,
+                    reason: Reason::Phase("verification worker thread failed"),
+                });
+            }
         }
     });
+    if let Some(err) = spawn_failure {
+        return Err(err);
+    }
     for slot in errors {
-        if let Some(err) = slot.into_inner().expect("verification slot lock poisoned") {
+        let recorded = match slot.into_inner() {
+            Ok(recorded) => recorded,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(err) = recorded {
             return Err(err);
         }
+    }
+    if let Some(err) = join_failure {
+        return Err(err);
     }
     Ok(())
 }
@@ -6467,7 +7167,11 @@ fn validate_machine_instances<'a, B: finite_domains::MachineBody>(
         if platform {
             let mut proof_package = package.clone();
             for width in (8..=128).step_by(8) {
-                proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
+                let target_data = nir::target::TargetData::new(width).map_err(|_| Error {
+                    source: instance.program().parts().source,
+                    reason: Reason::InvalidSignature,
+                })?;
+                proof_package.target = Some(target_data);
                 let mut proof = instance.clone();
                 finite_domains::complete_literals(&mut proof, proof_package.target, limits)?;
                 validate_machine_body(&proof_package, &proof, imports, None)?;
@@ -6687,7 +7391,9 @@ impl Value {
                     top.built.push(leaf);
                 }
             } else {
-                let mut done = stack.pop().expect("snapshot frame");
+                let Some(mut done) = stack.pop() else {
+                    return Err(Unknown::ConditionDepthLimit);
+                };
                 done.partial.fields = Some(done.built);
                 if let Some(parent) = stack.last_mut() {
                     parent.built.push(done.partial);
@@ -6696,7 +7402,7 @@ impl Value {
                 }
             }
         }
-        unreachable!("snapshot loop always returns when root frame completes")
+        Err(Unknown::ConditionDepthLimit)
     }
 
     fn join(&self, other: &Self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
@@ -6830,7 +7536,9 @@ impl Value {
                     top.built.push(node);
                 }
             } else {
-                let mut done = stack.pop().expect("join frame");
+                let Some(mut done) = stack.pop() else {
+                    return Err(Unknown::ConditionDepthLimit);
+                };
                 done.partial.fields = Some(done.built);
                 if let Some(parent) = stack.last_mut() {
                     parent.built.push(done.partial);
@@ -6839,7 +7547,7 @@ impl Value {
                 }
             }
         }
-        unreachable!("join loop always returns when root frame completes")
+        Err(Unknown::ConditionDepthLimit)
     }
 }
 
@@ -7107,7 +7815,9 @@ impl Walker<'_> {
         };
         let enclosed =
             if let Some(primitive) = nir::program::machine_integer_type_in(expr, self.target()) {
-                let (signed, width) = self.integer_layout(primitive).unwrap();
+                let (signed, width) = self
+                    .integer_layout(primitive)
+                    .ok_or(Reason::InvalidSignature)?;
                 let target = Interval::machine(width as u16, signed, self.limits)?;
                 p.enclosure_for_target(&target, &state.facts, self.limits)
             } else {
@@ -7539,10 +8249,16 @@ mod memory_summary_cache_tests {
             associated_world: None,
             declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
             points: vec![],
+            site_indices: BTreeMap::new(),
             collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
+            current_declaration: None,
+            current_parameters: Vec::new(),
+            current_decreases: Vec::new(),
+            entry_decreases_places: Vec::new(),
+            loop_contexts: BTreeMap::new(),
         };
         assert!(walker.call_summary(&callee).is_none());
         assert!(walker.limits.arithmetic.steps < 200);
@@ -7648,10 +8364,16 @@ mod memory_summary_cache_tests {
             associated_world: None,
             declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
             points: vec![],
+            site_indices: BTreeMap::new(),
             collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
+            current_declaration: None,
+            current_parameters: Vec::new(),
+            current_decreases: Vec::new(),
+            entry_decreases_places: Vec::new(),
+            loop_contexts: BTreeMap::new(),
         };
         assert!(walker.call_summary(&callee).is_none());
         let first_cost = 200 - walker.limits.arithmetic.steps;
@@ -7782,10 +8504,16 @@ mod memory_summary_cache_tests {
             associated_world: None,
             declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
             points: vec![],
+            site_indices: BTreeMap::new(),
             collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
+            current_declaration: None,
+            current_parameters: Vec::new(),
+            current_decreases: Vec::new(),
+            entry_decreases_places: Vec::new(),
+            loop_contexts: BTreeMap::new(),
         };
         let caller_summary = walker
             .call_summary(&caller_callee)
@@ -7892,10 +8620,16 @@ mod conditional_origin_tests {
             associated_world: None,
             declarations: std::rc::Rc::new(crate::declarations::Metadata::new(None)),
             points: vec![],
+            site_indices: BTreeMap::new(),
             collect_points: true,
             failure_source: None,
             closure_context: vec![],
             single_pass_exits: BTreeMap::new(),
+            current_declaration: None,
+            current_parameters: Vec::new(),
+            current_decreases: Vec::new(),
+            entry_decreases_places: Vec::new(),
+            loop_contexts: BTreeMap::new(),
         };
         let declaration = nir::DeclarationId {
             package: 0,
@@ -8375,10 +9109,16 @@ mod tuple_storage_tests {
                 associated_world: None,
                 declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
                 points: vec![],
+                site_indices: BTreeMap::new(),
                 collect_points: true,
                 failure_source: None,
                 closure_context: vec![],
                 single_pass_exits: BTreeMap::new(),
+                current_declaration: None,
+                current_parameters: Vec::new(),
+                current_decreases: Vec::new(),
+                entry_decreases_places: Vec::new(),
+                loop_contexts: BTreeMap::new(),
             };
             let opaque = Term::NormalForm {
                 head: nir::DeclarationId {
@@ -9160,6 +9900,223 @@ mod incremental_and_parallel_tests {
         assert_eq!(seq_err.reason, Reason::MissingMachineProof);
         assert_eq!(seq_err.source, SourceRange { start: 40, end: 45 });
         assert_eq!(par_err, seq_err);
+    }
+
+    #[test]
+    fn flow_report_site_indices_survive_function_clone() {
+        let local_id = LocalId { owner: 1, index: 0 };
+        let check_expr = Expr {
+            source: SourceRange { start: 10, end: 20 },
+            ty: Term::Primitive(P::Void),
+            kind: K::CheckPredicate(Box::new(Expr {
+                source: SourceRange { start: 12, end: 19 },
+                ty: Term::Primitive(P::Bool),
+                kind: K::ScalarLess(
+                    Box::new(Expr {
+                        source: SourceRange { start: 12, end: 13 },
+                        ty: Term::Primitive(P::U8),
+                        kind: K::Local(local_id),
+                    }),
+                    Box::new(Expr {
+                        source: SourceRange { start: 16, end: 19 },
+                        ty: Term::Primitive(P::U8),
+                        kind: K::Literal(nir::program::Literal::UnsignedInteger(10)),
+                    }),
+                ),
+            })),
+        };
+        let function = Function {
+            interface: nir::program::FunctionDeclaration {
+                source: SourceRange { start: 1, end: 30 },
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "site_stability".into(),
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: Term::Primitive(P::U8),
+                    }],
+                    result: Box::new(Term::Primitive(P::Void)),
+                },
+                parameters: vec![local_id],
+                env_parameters: vec![],
+                preconditions: vec![Expr {
+                    source: SourceRange { start: 5, end: 9 },
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::ScalarLess(
+                        Box::new(Expr {
+                            source: SourceRange { start: 5, end: 6 },
+                            ty: Term::Primitive(P::U8),
+                            kind: K::Local(local_id),
+                        }),
+                        Box::new(Expr {
+                            source: SourceRange { start: 7, end: 9 },
+                            ty: Term::Primitive(P::U8),
+                            kind: K::Literal(nir::program::Literal::UnsignedInteger(5)),
+                        }),
+                    ),
+                }],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                defaults: vec![],
+            },
+            body: Expr {
+                source: SourceRange { start: 10, end: 25 },
+                ty: Term::Primitive(P::Void),
+                kind: K::Block {
+                    statements: vec![check_expr],
+                    result: None,
+                },
+            },
+            runtime_deliveries: BTreeMap::new(),
+        };
+        let report_a = analyze(&function, &mut Limits::default()).unwrap();
+        let cloned_function = function.clone();
+        let report_b = analyze(&cloned_function, &mut Limits::default()).unwrap();
+        let sites_a: Vec<ExprSite> = report_a
+            .points
+            .iter()
+            .filter_map(|point| point.check_input.as_ref().map(|input| input.site))
+            .collect();
+        let sites_b: Vec<ExprSite> = report_b
+            .points
+            .iter()
+            .filter_map(|point| point.check_input.as_ref().map(|input| input.site))
+            .collect();
+        assert_eq!(sites_a.len(), 1);
+        assert_eq!(sites_a, sites_b);
+
+        let mut pkg = Package {
+            functions: vec![cloned_function],
+            ..Default::default()
+        };
+        let elision = crate::optimization::elide_proven_checks(&mut pkg, &mut Limits::default());
+        assert_eq!(elision.eliminated.len(), 1);
+    }
+
+    #[test]
+    fn recursive_decreases_i64_subtraction_proves() {
+        let param = LocalId { owner: 1, index: 0 };
+        let decl = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let i64_ty = Term::Primitive(P::I64);
+        let n_expr = || Expr {
+            source: SourceRange { start: 10, end: 11 },
+            ty: i64_ty.clone(),
+            kind: K::Local(param),
+        };
+        let lit = |v: i128| Expr {
+            source: SourceRange { start: 12, end: 13 },
+            ty: i64_ty.clone(),
+            kind: K::Literal(Literal::SignedInteger(v)),
+        };
+        let sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: i64_ty.clone(),
+            }],
+            result: Box::new(i64_ty.clone()),
+        };
+        let rec_call = Expr {
+            source: SourceRange { start: 30, end: 45 },
+            ty: i64_ty.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source: SourceRange { start: 30, end: 38 },
+                    ty: sig.clone(),
+                    kind: K::Function(decl),
+                }),
+                arguments: vec![nir::program::CallArgument {
+                    passing: nir::program::ArgumentPassing::Value,
+                    parameter: 0,
+                    is_default: false,
+                    value: Expr {
+                        source: SourceRange { start: 39, end: 44 },
+                        ty: i64_ty.clone(),
+                        kind: K::IntegerBinary {
+                            op: IntegerOp::Subtract,
+                            left: Box::new(n_expr()),
+                            right: Box::new(lit(1)),
+                        },
+                    },
+                }],
+                parameter_bindings: vec![param],
+                env_arguments: vec![],
+            },
+        };
+        let body = Expr {
+            source: SourceRange { start: 20, end: 60 },
+            ty: i64_ty.clone(),
+            kind: K::If {
+                condition: Box::new(Expr {
+                    source: SourceRange { start: 22, end: 28 },
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::ScalarEqual(Box::new(n_expr()), Box::new(lit(0))),
+                }),
+                then_branch: Box::new(lit(0)),
+                else_branch: Some(Box::new(rec_call)),
+            },
+        };
+        let func = Function {
+            interface: nir::program::FunctionDeclaration {
+                source: SourceRange { start: 1, end: 60 },
+                declaration: decl,
+                name: "sum_down".into(),
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: sig,
+                parameters: vec![param],
+                env_parameters: vec![],
+                preconditions: vec![
+                    Expr {
+                        source: SourceRange { start: 2, end: 8 },
+                        ty: Term::Primitive(P::Bool),
+                        kind: K::ScalarGreaterEqual(Box::new(n_expr()), Box::new(lit(0))),
+                    },
+                    Expr {
+                        source: SourceRange { start: 3, end: 9 },
+                        ty: Term::Primitive(P::Bool),
+                        kind: K::ScalarLessEqual(Box::new(n_expr()), Box::new(lit(1000))),
+                    },
+                ],
+                postconditions: vec![],
+                entry_snapshots: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                defaults: vec![],
+            },
+            body,
+            runtime_deliveries: BTreeMap::new(),
+        };
+        let mut safety_contracts = nir::program::SafetyContracts::default();
+        safety_contracts.levels.insert(decl, SafetyLevel::Verified);
+        safety_contracts.decreases.insert(decl, vec![n_expr()]);
+        let pkg = Package {
+            functions: vec![func],
+            safety_contracts,
+            ..Default::default()
+        };
+        validate_machine_operations(&pkg).unwrap();
     }
 }
 

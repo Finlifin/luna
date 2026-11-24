@@ -30,6 +30,7 @@ impl Walker<'_> {
             }
         }
     }
+
     pub(super) fn read_anonymous_field(
         &mut self,
         base: Value,
@@ -60,6 +61,7 @@ impl Walker<'_> {
         self.project_component(state, &mut result, projection, (kind, index))?;
         Ok(result)
     }
+
     pub(super) fn read_record_field(
         &mut self,
         base: Value,
@@ -197,6 +199,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     pub(super) fn replace_field(
         &mut self,
         base: &mut Value,
@@ -257,30 +260,30 @@ impl Walker<'_> {
         if types.as_ref().is_some_and(|types| *index >= types.len()) {
             return Err(Reason::InvalidSignature);
         }
-        if base.fields.is_none() {
-            base.fields = Some(
-                types
-                    .as_ref()
-                    .ok_or(Reason::Unsupported)?
+        let fields = match base.fields.as_mut() {
+            Some(fields) => fields,
+            None => {
+                let types = types.as_ref().ok_or(Reason::Unsupported)?;
+                let initialized = types
                     .iter()
                     .map(|ty| self.unknown_value(ty))
-                    .collect::<Result<_, _>>()?,
-            );
-            base.aggregate_kind = Some(*kind);
-        }
-        let fields = base.fields.as_mut().unwrap();
+                    .collect::<Result<Vec<_>, _>>()?;
+                base.aggregate_kind = Some(*kind);
+                base.fields.insert(initialized)
+            }
+        };
         if *index >= fields.len() || types.as_ref().is_some_and(|t| fields.len() != t.len()) {
             return Err(Reason::InvalidSignature);
         }
         let mut replacement = replacement;
-        if rest.is_empty()
-            && replacement.nominal_type.is_none()
-            && types
+        if rest.is_empty() && replacement.nominal_type.is_none() {
+            if let Some(field_ty) = types
                 .as_ref()
-                .is_some_and(|t| matches!(t[*index], Term::Nominal { .. }))
-        {
-            replacement.nominal_type =
-                Some(std::sync::Arc::new(types.as_ref().unwrap()[*index].clone()));
+                .and_then(|t| t.get(*index))
+                .filter(|ty| matches!(ty, Term::Nominal { .. }))
+            {
+                replacement.nominal_type = Some(std::sync::Arc::new(field_ty.clone()));
+            }
         }
         self.replace_field(&mut fields[*index], rest, replacement, depth + 1)
     }

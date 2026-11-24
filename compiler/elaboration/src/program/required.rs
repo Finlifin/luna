@@ -517,6 +517,7 @@ impl Checker<'_, '_> {
             };
             let mut program_requirements = Vec::new();
             let mut postconditions = Vec::new();
+            let mut decreases_clauses = Vec::new();
             let mut result_binder: Option<(n::LocalId, DeclarationId)> = None;
             let mut result_guarantees = Vec::new();
             let clause_result = (|| -> Result<(), Error> {
@@ -548,6 +549,17 @@ impl Checker<'_, '_> {
                             postconditions.push(*value);
                             continue;
                         }
+                    }
+                    if let hir::clause::ClauseConstraintKind::Decreases(value) = &clause.kind {
+                        if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        {
+                            return Err(error(
+                                clause.span,
+                                "decreases clauses are only supported on functions",
+                            ));
+                        }
+                        decreases_clauses.push(*value);
+                        continue;
                     }
                     let hir::clause::ClauseConstraintKind::Requires(value) = &clause.kind else {
                         return Err(error(
@@ -583,6 +595,7 @@ impl Checker<'_, '_> {
             self.program_requirements
                 .insert(owner, program_requirements);
             self.program_postconditions.insert(owner, postconditions);
+            self.program_decreases.insert(owner, decreases_clauses);
             Ok(requirements)
         })();
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
@@ -866,18 +879,64 @@ impl Checker<'_, '_> {
             .get(&owner)
             .cloned()
             .unwrap_or_default();
-        let mut result = Vec::new();
-        for value in values {
-            let expression = self.boolean_predicate(value)?;
-            if !self.program_predicate_shape(&expression, false, value.span)? {
-                return Err(error(
-                    value.span,
-                    "requires needs a supported effect-free program predicate",
-                ));
+        self.with_program_predicate(|this| {
+            let mut result = Vec::new();
+            for value in values {
+                let expression = this.boolean_predicate(value)?;
+                if !this.program_predicate_shape(&expression, false, value.span)? {
+                    return Err(error(
+                        value.span,
+                        "requires needs a supported effect-free program predicate",
+                    ));
+                }
+                result.push(expression);
             }
-            result.push(expression);
+            Ok(result)
+        })
+    }
+
+    pub(super) fn program_decreases(&mut self, owner: OwnerId) -> Result<Vec<n::Expr>, Error> {
+        let values = self
+            .program_decreases
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        self.with_program_predicate(|this| {
+            let mut result = Vec::new();
+            for value in values {
+                let metric = this.integer_metric_expression(value)?;
+                result.push(metric);
+            }
+            Ok(result)
+        })
+    }
+
+    pub(super) fn integer_metric_expression(&mut self, value: &Expr<'_>) -> Result<n::Expr, Error> {
+        let metric = self.expr(value, None)?;
+        let is_integer = matches!(
+            &metric.ty,
+            Term::Primitive(primitive)
+                if primitive.fixed_integer_layout().is_some()
+                    || matches!(primitive, P::Usize | P::Isize | P::Integer)
+        );
+        if !is_integer {
+            return Err(error(
+                value.span,
+                "decreases metric must be an integer expression",
+            ));
         }
-        Ok(result)
+        let check = n::Expr {
+            source: metric.source,
+            ty: p(P::Bool),
+            kind: K::ScalarGreaterEqual(Box::new(metric.clone()), Box::new(metric.clone())),
+        };
+        if !self.program_predicate_shape(&check, false, value.span)? {
+            return Err(error(
+                value.span,
+                "decreases metric must be an effect-free integer expression",
+            ));
+        }
+        Ok(metric)
     }
 
     pub(super) fn program_postconditions(
@@ -926,19 +985,21 @@ impl Checker<'_, '_> {
         });
         let binding = result.map(|(binding, _)| binding);
         let previous = result.and_then(|(binding, ty)| self.locals.insert(binding, ty.clone()));
-        let result: Result<Vec<n::Expr>, Error> = values
-            .into_iter()
-            .map(|value| {
-                let expr = self.boolean_predicate(value)?;
-                if !self.program_predicate_shape(&expr, false, value.span)? {
-                    return Err(error(
-                        value.span,
-                        "ensures needs a supported effect-free program predicate",
-                    ));
-                }
-                Ok(expr)
-            })
-            .collect();
+        let result: Result<Vec<n::Expr>, Error> = self.with_program_predicate(|this| {
+            values
+                .into_iter()
+                .map(|value| {
+                    let expr = this.boolean_predicate(value)?;
+                    if !this.program_predicate_shape(&expr, false, value.span)? {
+                        return Err(error(
+                            value.span,
+                            "ensures needs a supported effect-free program predicate",
+                        ));
+                    }
+                    Ok(expr)
+                })
+                .collect()
+        });
         if let Some(binding) = binding {
             if let Some(previous) = previous {
                 self.locals.insert(binding, previous);

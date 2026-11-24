@@ -59,6 +59,9 @@ impl Checker<'_, '_> {
             | H::Let(_)
             | H::Defer(_)
             | H::Assumes(_)
+            | H::Asserts(_)
+            | H::Invariant(_)
+            | H::Decreases(_)
             | H::Return(_) => self.control_value_expression(expr, expected, partial),
             H::CollectedProperties(_) | H::Object(_) | H::Tuple(_) | H::InlineControl(_) => {
                 self.aggregates_value_expression(expr, expected, partial)

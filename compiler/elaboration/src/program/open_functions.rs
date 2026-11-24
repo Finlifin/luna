@@ -1454,6 +1454,9 @@ impl Checker<'_, '_> {
                 | H::OptionPropagate(value)
                 | H::EffectRequest(value)
                 | H::Assumes(value)
+                | H::Asserts(value)
+                | H::Invariant(value)
+                | H::Decreases(value)
                 | H::TakeOld(value)
                 | H::TakeBitVec(value)
                 | H::TakeTagName(value)
@@ -2425,10 +2428,25 @@ impl Checker<'_, '_> {
                         .chain(inputs.keys().copied())
                         .chain(abstract_inputs.keys().copied())
                         .collect();
+                    let decl_id =
+                        declaration(this.package, &this.package_identities, owner);
+                    let decreases = this.program_decreases(owner)?;
+                    if sig.modifiers.is_verified {
+                        this.safety_contracts
+                            .levels
+                            .insert(decl_id, n::SafetyLevel::Verified);
+                    } else if sig.modifiers.is_unsafe {
+                        this.safety_contracts
+                            .levels
+                            .insert(decl_id, n::SafetyLevel::Unsafe);
+                    }
+                    if !decreases.is_empty() {
+                        this.safety_contracts.decreases.insert(decl_id, decreases);
+                    }
                     this.ordinary_behavior_functions.push(n::Function {
                         interface: nir::program::FunctionDeclaration {
                             source: source(item.span),
-                            declaration: declaration(this.package, &this.package_identities, owner),
+                            declaration: decl_id,
                             name: format!("{} [ordinary]", item.ident.name),
                             phase: n::FunctionPhase::Runtime,
                             pure: sig.modifiers.is_pure,
@@ -3231,6 +3249,18 @@ impl Checker<'_, '_> {
                     .map_err(|failure| error(condition.span, failure.to_string()))?;
                 self.context.assume(fact);
                 self.definition_refinements.requirements.push(predicate);
+                D::Known(p(P::Void))
+            }
+            H::Assumes(condition) | H::Asserts(condition) | H::Invariant(condition) => {
+                self.with_program_predicate(|this| {
+                    this.describe_open_boolean(condition, locals, returns, depth + 1)
+                })?;
+                D::Known(p(P::Void))
+            }
+            H::Decreases(metric) => {
+                self.with_program_predicate(|this| {
+                    this.describe_open_expression(metric, locals, returns, None, depth + 1)
+                })?;
                 D::Known(p(P::Void))
             }
             H::Loop(body) => {
@@ -8850,6 +8880,19 @@ impl Checker<'_, '_> {
                 .body(*body)
                 .ok_or_else(|| error(span, "missing open function body"))?;
             let body = this.function_body(owner, body.value, result)?;
+            let decreases = this.program_decreases(owner)?;
+            if sig.modifiers.is_verified {
+                this.safety_contracts
+                    .levels
+                    .insert(id, n::SafetyLevel::Verified);
+            } else if sig.modifiers.is_unsafe {
+                this.safety_contracts
+                    .levels
+                    .insert(id, n::SafetyLevel::Unsafe);
+            }
+            if !decreases.is_empty() {
+                this.safety_contracts.decreases.insert(id, decreases);
+            }
             let runtime_deliveries = this
                 .local_runtime_deliveries
                 .iter()

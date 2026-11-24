@@ -982,6 +982,30 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
+            NodeKind::Asserts => {
+                let condition = self.lower_expr(ExprContext::RuntimeProposition, children[1]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Asserts(self.arena.alloc_expr(condition)),
+                    span,
+                }
+            }
+            NodeKind::Invariant => {
+                let condition = self.lower_expr(ExprContext::RuntimeProposition, children[1]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Invariant(self.arena.alloc_expr(condition)),
+                    span,
+                }
+            }
+            NodeKind::Decreases => {
+                let metric = self.lower_expr(ExprContext::RuntimeProposition, children[1]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Decreases(self.arena.alloc_expr(metric)),
+                    span,
+                }
+            }
             NodeKind::RefinedType => {
                 let base = self.lower_expr(ctx, children[1]);
                 self.refinement_depth += 1;

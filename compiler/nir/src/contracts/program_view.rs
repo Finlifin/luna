@@ -43,7 +43,15 @@ impl<'a> CallableProgram<'a> {
     pub fn parts(&self) -> &ProgramParts<'a> {
         &self.parts
     }
+}
 
+impl<'a> ProgramParts<'a> {
+    pub fn declaration(&self) -> Option<DeclarationId> {
+        self.declaration
+    }
+}
+
+impl<'a> CallableProgram<'a> {
     /// Inspect each default alone in its lexical frame, before the call's
     /// preconditions hold. The enclosing body's roots and exit contracts
     /// belong to a different execution.
@@ -549,6 +557,7 @@ mod tests {
         crate::call_safety::validate_program(CallableProgram::method(&method).unwrap(), &mut 100)
             .unwrap();
     }
+
     #[test]
     fn call_safety_resource_failure_is_typed_and_recoverable() {
         let mut method = method();

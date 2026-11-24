@@ -42,6 +42,8 @@ pub enum ItemKindSummary {
         is_comptime: bool,
         is_pure: bool,
         is_unsafe: bool,
+        is_spec: bool,
+        is_verified: bool,
         is_normal_form_head: bool,
         has_return_ty: bool,
     },
@@ -138,6 +140,8 @@ impl ItemKindSummary {
                 is_comptime: sig.modifiers.is_comptime,
                 is_pure: sig.modifiers.is_pure,
                 is_unsafe: sig.modifiers.is_unsafe,
+                is_spec: sig.modifiers.is_spec,
+                is_verified: sig.modifiers.is_verified,
                 is_normal_form_head: sig.modifiers.is_normal_form_head,
                 has_return_ty: sig.return_ty.is_some(),
             },
@@ -239,11 +243,13 @@ impl fmt::Display for ItemKindSummary {
                 is_comptime,
                 is_pure,
                 is_unsafe,
+                is_spec,
+                is_verified,
                 is_normal_form_head,
                 has_return_ty,
             } => write!(
                 f,
-                "(fn (params {param_count}) (clauses {clause_param_count}) (comptime {is_comptime}) (pure {is_pure}) (unsafe {is_unsafe}) (nf-head {is_normal_form_head}) (has-return {has_return_ty}))"
+                "(fn (params {param_count}) (clauses {clause_param_count}) (comptime {is_comptime}) (pure {is_pure}) (unsafe {is_unsafe}) (spec {is_spec}) (verified {is_verified}) (nf-head {is_normal_form_head}) (has-return {has_return_ty}))"
             ),
             Self::Case {
                 param_count,

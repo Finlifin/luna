@@ -912,6 +912,8 @@ impl Action {
                 filter.as_deref(),
             ),
             Action::Invoke { entry, fuel, .. } => {
+                elaboration::verification::flow::validate_machine_operations(&package)
+                    .map_err(|failure| failure.to_string())?;
                 elaboration::verification::optimization::elide_proven_checks(
                     &mut package,
                     &mut elaboration::verification::Limits::default(),

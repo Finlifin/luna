@@ -238,7 +238,7 @@ impl Checker<'_, '_> {
                 (p(P::Void), K::Unit)
             }
             H::Assumes(condition) => {
-                let condition = self.boolean_predicate(condition)?;
+                let condition = self.with_program_predicate(|this| this.boolean_predicate(condition))?;
                 if !self.program_predicate_shape(&condition, false, expr.span)? {
                     if self.program_predicate_shape(&condition, true, expr.span)? {
                         self.require_stable_predicate(&condition, expr.span)?;
@@ -269,6 +269,43 @@ impl Checker<'_, '_> {
                     ));
                 }
                 (p(P::Void), K::CheckPredicate(Box::new(condition)))
+            }
+            H::Asserts(condition) | H::Invariant(condition) => {
+                let role = if matches!(expr.kind, H::Asserts(_)) {
+                    n::PredicateRole::Assert
+                } else {
+                    n::PredicateRole::Invariant
+                };
+                let condition =
+                    self.with_program_predicate(|this| this.boolean_predicate(condition))?;
+                if !self.program_predicate_shape(&condition, false, expr.span)? {
+                    return Err(error(
+                        expr.span,
+                        if role == n::PredicateRole::Assert {
+                            "asserts requires a supported effect-free program predicate"
+                        } else {
+                            "invariant requires a supported effect-free program predicate"
+                        },
+                    ));
+                }
+                let at = source(expr.span);
+                self.safety_contracts.predicate_roles.insert(at, role);
+                (p(P::Void), K::RequirePredicate(Box::new(condition)))
+            }
+            H::Decreases(metric) => {
+                let metric = self
+                    .with_program_predicate(|this| this.integer_metric_expression(metric))?;
+                let at = source(expr.span);
+                let zero = self.zero_for_integer_type(&metric.ty, at, expr.span)?;
+                let non_negative = n::Expr {
+                    source: at,
+                    ty: p(P::Bool),
+                    kind: K::ScalarGreaterEqual(Box::new(metric), Box::new(zero)),
+                };
+                self.safety_contracts
+                    .predicate_roles
+                    .insert(at, n::PredicateRole::LoopDecreases);
+                (p(P::Void), K::RequirePredicate(Box::new(non_negative)))
             }
             H::Return(value) => {
                 if self.control.result.is_none() && self.control.return_observations.is_none() {

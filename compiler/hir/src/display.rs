@@ -469,7 +469,7 @@ impl Display for FnTypeModifiers {
 
 impl Display for FnModifiers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "modifiers", "test" => self.is_test, "test-template" => self.is_test_template, "function-template" => self.is_function_template, "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime, "unsafe" => self.is_unsafe)
+        form!(f, "modifiers", "test" => self.is_test, "test-template" => self.is_test_template, "function-template" => self.is_function_template, "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime, "unsafe" => self.is_unsafe, "spec" => self.is_spec, "verified" => self.is_verified)
     }
 }
 
@@ -849,6 +849,9 @@ impl Display for ExprKind<'_> {
                 form!(f, "assign-op", "op" => op, "place" => place, "value" => value)
             }
             Self::Assumes(value) => form!(f, "assumes", "condition" => value),
+            Self::Asserts(value) => form!(f, "asserts", "condition" => value),
+            Self::Invariant(value) => form!(f, "invariant", "condition" => value),
+            Self::Decreases(value) => form!(f, "decreases", "metric" => value),
             Self::Defer(value) => form!(f, "defer", "value" => value),
             Self::InlineControl(value) => form!(f, "inline-control", "value" => value),
             Self::RefinedType { requirement, base } => {

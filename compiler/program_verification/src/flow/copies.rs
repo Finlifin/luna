@@ -241,12 +241,17 @@ impl Walker<'_> {
         if scalar.is_none() && fields.is_empty() && expression.is_none() && children.is_empty() {
             return Ok(None);
         }
-        if snapshot.is_none() {
-            *snapshot = Some(std::sync::Arc::new(state.facts.fork(self.limits)?));
-        }
+        let snapshot_ref = match snapshot.as_ref() {
+            Some(existing) => existing.clone(),
+            None => {
+                let fresh = std::sync::Arc::new(state.facts.fork(self.limits)?);
+                *snapshot = Some(fresh.clone());
+                fresh
+            }
+        };
         self.limits.step(1)?;
         Ok(Some(std::sync::Arc::new(PreparedCopy {
-            source: snapshot.as_ref().unwrap().clone(),
+            source: snapshot_ref,
             scalar,
             expression,
             range: value

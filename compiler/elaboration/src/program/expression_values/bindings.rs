@@ -302,6 +302,7 @@ impl Checker<'_, '_> {
                     return self.normal_form_value(expr, owner, expected);
                 }
                 self.check_quote_callable(owner, expr.span)?;
+                self.check_spec_callable(owner, expr.span)?;
                 self.require_non_trait_body_reference(owner, expr.span)?;
                 self.ensure_signature(owner, expr.span)?;
                 if self

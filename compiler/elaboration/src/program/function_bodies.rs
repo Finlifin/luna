@@ -100,12 +100,55 @@ impl Checker<'_, '_> {
                 this.in_required_comptime = false;
                 this.in_staged_input = false;
             }
+            if sig.modifiers.is_spec {
+                if sig.modifiers.is_unsafe {
+                    return Err(error(span, "spec function cannot be unsafe"));
+                }
+                if sig.modifiers.is_verified {
+                    return Err(error(span, "spec function cannot be verified"));
+                }
+                if matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty())
+                {
+                    return Err(error(span, "spec function cannot have algebraic effects"));
+                }
+            }
+            if sig.modifiers.is_verified && sig.modifiers.is_unsafe {
+                return Err(error(
+                    span,
+                    "verified function cannot be unsafe; use an unsafe block inside its body",
+                ));
+            }
             this.definition_refinements.closed_source_body = interface.phase
                 == n::FunctionPhase::Runtime
                 && !sig.modifiers.is_quote
                 && !this.open_functions.contains_key(&owner);
-            let body = this.function_body(owner, body.value, result)?;
+            let body = if sig.modifiers.is_spec {
+                let body = this.with_program_predicate(|this| {
+                    this.function_body(owner, body.value, result)
+                })?;
+                this.validate_spec_body(&body, span)?;
+                body
+            } else {
+                this.function_body(owner, body.value, result)?
+            };
             this.verify_returned_type_guarantees(&body, span)?;
+            let decreases = this.program_decreases(owner)?;
+            let decl_id = interface.declaration;
+            let safety_level = if sig.modifiers.is_spec {
+                n::SafetyLevel::Spec
+            } else if sig.modifiers.is_verified {
+                n::SafetyLevel::Verified
+            } else if sig.modifiers.is_unsafe {
+                n::SafetyLevel::Unsafe
+            } else {
+                n::SafetyLevel::Safe
+            };
+            if safety_level != n::SafetyLevel::Safe {
+                this.safety_contracts.levels.insert(decl_id, safety_level);
+            }
+            if !decreases.is_empty() {
+                this.safety_contracts.decreases.insert(decl_id, decreases);
+            }
             if matches!(request, SourceBody::Package)
                 && sig.modifiers.is_function_template
                 && sig.modifiers.is_pure

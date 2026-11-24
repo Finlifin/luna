@@ -237,6 +237,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         "__flurry_kw_quote" => modifiers.is_quote = true,
                         "__flurry_kw_pure" => modifiers.is_pure = true,
                         "__flurry_kw_unsafe" => modifiers.is_unsafe = true,
+                        "__flurry_kw_spec" => modifiers.is_spec = true,
+                        "__flurry_kw_verified" => modifiers.is_verified = true,
                         "__flurry_kw_async" => effect_modifiers.is_async = true,
                         "__flurry_kw_inline" => effect_modifiers.is_inline = true,
                         _ => break,
@@ -247,6 +249,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     && !modifiers.is_quote
                     && !modifiers.is_pure
                     && !modifiers.is_unsafe
+                    && !modifiers.is_spec
+                    && !modifiers.is_verified
                     && !effect_modifiers.is_async
                     && !effect_modifiers.is_inline
                 {
@@ -270,6 +274,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     && !modifiers.is_pure
                     && !modifiers.is_quote
                     && !modifiers.is_unsafe
+                    && !modifiers.is_spec
+                    && !modifiers.is_verified
                 {
                     return self.lower_callable(
                         cursor,
@@ -281,6 +287,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     || modifiers.is_pure
                     || modifiers.is_quote
                     || modifiers.is_unsafe
+                    || modifiers.is_spec
+                    || modifiers.is_verified
                     || effect_modifiers.is_inline)
                     && !effect_modifiers.is_async
                     && matches!(
@@ -293,6 +301,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         )
                     )
                 {
+                    if modifiers.is_spec && modifiers.is_unsafe {
+                        self.emit_malformed("spec function cannot be unsafe", span);
+                        modifiers.is_unsafe = false;
+                    }
+                    if modifiers.is_spec && modifiers.is_verified {
+                        self.emit_malformed("spec function cannot be verified", span);
+                        modifiers.is_verified = false;
+                    }
+                    if modifiers.is_verified && modifiers.is_unsafe {
+                        self.emit_malformed(
+                            "verified function cannot be unsafe; use an unsafe block inside its body",
+                            span,
+                        );
+                        modifiers.is_unsafe = false;
+                    }
                     if self.ast.get_node_kind(cursor) == Some(NodeKind::CaseDef) {
                         if modifiers.is_quote {
                             self.emit_malformed(
@@ -300,6 +323,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 span,
                             );
                             modifiers.is_quote = false;
+                        }
+                        if modifiers.is_spec {
+                            self.emit_malformed(
+                                "spec modifier is not valid on case declarations",
+                                span,
+                            );
+                            modifiers.is_spec = false;
                         }
                         if modifiers.is_unsafe && modifiers.is_comptime {
                             self.package
@@ -311,6 +341,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     }
                     if modifiers.is_quote && modifiers.is_comptime {
                         self.emit_malformed("quote fn is not a comptime fn", span);
+                    }
+                    if modifiers.is_quote && modifiers.is_spec {
+                        self.emit_malformed("quote fn cannot be a spec fn", span);
+                        modifiers.is_spec = false;
+                    }
+                    if modifiers.is_quote && modifiers.is_verified {
+                        self.emit_malformed("quote fn cannot be verified", span);
+                        modifiers.is_verified = false;
                     }
                     if modifiers.is_unsafe && modifiers.is_comptime {
                         self.package

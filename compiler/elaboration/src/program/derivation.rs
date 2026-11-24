@@ -1571,6 +1571,9 @@ mod splice_auto {
             | E::Assign(..)
             | E::AssignOp(..)
             | E::Assumes(_)
+            | E::Asserts(_)
+            | E::Invariant(_)
+            | E::Decreases(_)
             | E::Defer(_)
             | E::InlineControl(_)
             | E::RefinementSubject

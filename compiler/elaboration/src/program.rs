@@ -850,6 +850,11 @@ fn elaborate_in_mode(
         result_guarantees: BTreeMap::new(),
         program_requirements: BTreeMap::new(),
         program_postconditions: BTreeMap::new(),
+        program_decreases: BTreeMap::new(),
+        safety_contracts: n::SafetyContracts::default(),
+        in_program_predicate: 0,
+        spec_functions: BTreeMap::new(),
+        active_spec_functions: BTreeSet::new(),
         old_scope: None,
         tactic_frame: None,
         capabilities: BTreeMap::new(),
@@ -1903,6 +1908,12 @@ fn elaborate_candidate<'a, 'h>(
             && incremental
                 .record_upstream_packages
                 .contains(&decl_id.package);
+        if sig.modifiers.is_spec
+            && let Some(cached) = checker.spec_functions.get(&owner).cloned()
+        {
+            output.functions.push(cached);
+            continue;
+        }
         let before_state = should_record.then(|| checker_body_side_state(checker));
         let function = checker.check_source_function(
             owner,
@@ -1910,6 +1921,12 @@ fn elaborate_candidate<'a, 'h>(
             function_bodies::SourceBody::Package,
             item.span,
         )?;
+        if sig.modifiers.is_spec {
+            checker
+                .spec_functions
+                .entry(owner)
+                .or_insert_with(|| function.clone());
+        }
         if let Some(expected_state) = before_state
             && checker_body_side_state(checker) == expected_state
             && let Some(cache) = recorded_bodies.as_mut()
@@ -2005,6 +2022,7 @@ fn elaborate_candidate<'a, 'h>(
     output.definition_attributes = checker.definition_attributes.clone();
     output.volatile_storage = checker.volatile_storage.clone();
     output.match_plans = checker.match_plans.clone();
+    output.safety_contracts = checker.safety_contracts.clone();
     let mut verified_upstream = crate::verification::flow::VerifiedUpstream::default();
     if !incremental.verified_upstream_packages.is_empty() {
         for function in output
@@ -3688,6 +3706,11 @@ struct Checker<'a, 'h> {
     result_guarantees: BTreeMap<OwnerId, (DeclarationId, Vec<n::TypePredicate>)>,
     program_requirements: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
     program_postconditions: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
+    program_decreases: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
+    safety_contracts: n::SafetyContracts,
+    in_program_predicate: usize,
+    spec_functions: BTreeMap<OwnerId, n::Function>,
+    active_spec_functions: BTreeSet<OwnerId>,
     old_scope: Option<OldScope>,
     tactic_frame: Option<(n::SourceRange, Vec<hir::HirId>, bool)>,
     capabilities: BTreeMap<OwnerId, Vec<n::TraitRequirement>>,
@@ -7507,6 +7530,7 @@ impl Checker<'_, '_> {
         call_use: CallUse,
     ) -> Result<n::Expr, Error> {
         self.check_quote_callable(owner, expr.span)?;
+        self.check_spec_callable(owner, expr.span)?;
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.hir_id, expr.span)?;
         }
@@ -8867,6 +8891,12 @@ impl Checker<'_, '_> {
                         self.comptime_callee_result = block.expr.map(|tail| tail.hir_id);
                     }
                     let is_unsafe = matches!(expr.kind, H::UnsafeBlock(_));
+                    if is_unsafe && self.in_program_predicate > 0 {
+                        return Err(error(
+                            expr.span,
+                            "unsafe block is not allowed inside specifications or spec functions",
+                        ));
+                    }
                     if is_unsafe {
                         self.unsafe_depth = self.unsafe_depth.saturating_add(1);
                     }
@@ -8947,6 +8977,7 @@ impl Checker<'_, '_> {
             && let Some(owner) = self.package.definition_owner(def_id)
         {
             self.check_quote_callable(owner, expr.span)?;
+            self.check_spec_callable(owner, expr.span)?;
             if self.is_quote_function(owner) {
                 self.record_quote_application(expr.hir_id, expr.span)?;
             }
@@ -9264,6 +9295,322 @@ impl std::fmt::Display for CheckedQuoteFnArm {
             self.pattern,
             self.body
         )
+    }
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn with_program_predicate<R>(&mut self, check: impl FnOnce(&mut Self) -> R) -> R {
+        self.in_program_predicate = self.in_program_predicate.saturating_add(1);
+        let result = check(self);
+        self.in_program_predicate = self.in_program_predicate.saturating_sub(1);
+        result
+    }
+
+    pub(super) fn is_spec_function(&self, owner: OwnerId) -> bool {
+        self.package.item(owner).is_some_and(|item| {
+            matches!(
+                &item.kind,
+                ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
+                    if sig.modifiers.is_spec
+            )
+        })
+    }
+
+    pub(super) fn check_spec_callable(&self, owner: OwnerId, span: Span) -> Result<(), Error> {
+        if self.is_spec_function(owner) && self.in_program_predicate == 0 {
+            return Err(error(
+                span,
+                "spec function can only be used in specifications or other spec functions",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn zero_for_integer_type(
+        &self,
+        ty: &Term,
+        source: n::SourceRange,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let literal = match ty {
+            Term::Primitive(primitive) => {
+                if let Some((signed, _)) = primitive.fixed_integer_layout() {
+                    if signed {
+                        n::Literal::SignedInteger(0)
+                    } else {
+                        n::Literal::UnsignedInteger(0)
+                    }
+                } else {
+                    match primitive {
+                        P::Isize => n::Literal::SignedInteger(0),
+                        P::Usize => n::Literal::UnsignedInteger(0),
+                        P::Integer => n::Literal::Integer("0".into()),
+                        _ => {
+                            return Err(error(
+                                span,
+                                "decreases metric must be an integer expression",
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(error(
+                    span,
+                    "decreases metric must be an integer expression",
+                ));
+            }
+        };
+        Ok(n::Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Literal(literal),
+        })
+    }
+
+    pub(super) fn validate_spec_body(&self, body: &n::Expr, span: Span) -> Result<(), Error> {
+        let mut fuel = 200_000usize;
+        nir::visit::expression(body, &mut fuel, |node, _| -> Result<(), String> {
+            match &node.kind {
+                K::UnsafeScope(_) => {
+                    return Err("unsafe block is not allowed inside spec function".into());
+                }
+                K::WritePointer { .. } | K::BitWritePointer { .. } | K::ReadPointer(_) => {
+                    return Err(
+                        "pointer memory operations are not allowed inside spec function".into(),
+                    );
+                }
+                K::StaticAddress(_) => {
+                    return Err(
+                        "static mutable addresses are not allowed inside spec function".into(),
+                    );
+                }
+                K::Loop { .. } => {
+                    return Err("loops are not allowed inside spec function".into());
+                }
+                K::Intrinsic { .. } => {
+                    return Err("intrinsics are not allowed inside spec function".into());
+                }
+                K::EffectRequest { .. }
+                | K::EffectComputation { .. }
+                | K::EffectResume(_)
+                | K::EffectHandle { .. }
+                | K::EffectRun { .. } => {
+                    return Err("algebraic effects are not allowed inside spec function".into());
+                }
+                K::DynCall { .. } => {
+                    return Err("dynamic calls are not allowed inside spec function".into());
+                }
+                K::Call { callee, .. } => {
+                    let allowed_spec = match &callee.kind {
+                        K::Function(decl_id) => self
+                            .source_declarations
+                            .owner(*decl_id)
+                            .is_some_and(|owner| self.is_spec_function(owner)),
+                        _ => false,
+                    };
+                    if !allowed_spec {
+                        return Err(
+                            "spec function cannot call runtime or effectful functions".into()
+                        );
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .map_err(|msg| error(span, msg))
+    }
+
+    fn ensure_spec_function(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Option<n::Function>, Error> {
+        if let Some(cached) = self.spec_functions.get(&owner) {
+            return Ok(Some(cached.clone()));
+        }
+        if !self.is_spec_function(owner) {
+            return Ok(None);
+        }
+        if !self.active_spec_functions.insert(owner) {
+            return Err(error(
+                span,
+                "recursive spec function cannot be unfolded in predicate",
+            ));
+        }
+        let checked = (|| -> Result<n::Function, Error> {
+            self.ensure_signature(owner, span)?;
+            let signature = self.signatures[&owner].clone();
+            let function = self.check_source_function(
+                owner,
+                signature,
+                function_bodies::SourceBody::Package,
+                span,
+            )?;
+            Ok(function)
+        })();
+        self.active_spec_functions.remove(&owner);
+        let function = checked?;
+        self.spec_functions.insert(owner, function.clone());
+        Ok(Some(function))
+    }
+
+    pub(super) fn maybe_unfold_spec_call(
+        &mut self,
+        expr: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if self.in_program_predicate == 0 {
+            return Ok(expr);
+        }
+        let K::Call {
+            callee,
+            arguments,
+            env_arguments,
+            ..
+        } = &expr.kind
+        else {
+            return Ok(expr);
+        };
+        if !env_arguments.is_empty() {
+            return Ok(expr);
+        }
+        let K::Function(decl_id) = callee.kind else {
+            return Ok(expr);
+        };
+        let Some(owner) = self.source_declarations.owner(decl_id) else {
+            return Ok(expr);
+        };
+        if !self.is_spec_function(owner) {
+            return Ok(expr);
+        }
+        let Some(spec_fn) = self.ensure_spec_function(owner, span)? else {
+            return Ok(expr);
+        };
+        if !spec_fn.interface.type_parameters.is_empty()
+            || !spec_fn.interface.env_parameters.is_empty()
+            || arguments.len() != spec_fn.interface.parameters.len()
+        {
+            return Ok(expr);
+        }
+        let mut remap = BTreeMap::new();
+        let mut seen_params = BTreeSet::new();
+        let mut statements = Vec::with_capacity(
+            spec_fn.interface.parameters.len() + spec_fn.interface.preconditions.len(),
+        );
+        let call_source = expr.source;
+        let ty = expr.ty.clone();
+        let K::Call { arguments, .. } = expr.kind else {
+            unreachable!()
+        };
+        for arg in arguments {
+            let Some(&param_id) = spec_fn.interface.parameters.get(arg.parameter) else {
+                return Err(error(span, "invalid argument index in spec function call"));
+            };
+            if !seen_params.insert(arg.parameter) {
+                return Err(error(span, "duplicate argument in spec function call"));
+            }
+            let fresh = self.spread_binding(span)?;
+            remap.insert(param_id, fresh);
+            statements.push(n::Expr {
+                source: arg.value.source,
+                ty: p(P::Void),
+                kind: K::Let {
+                    binding: fresh,
+                    value: Box::new(arg.value),
+                },
+            });
+        }
+        let mut declared_locals = BTreeSet::new();
+        let mut visit_fuel = 100_000usize;
+        nir::visit::expression(
+            &spec_fn.body,
+            &mut visit_fuel,
+            |node, _| -> Result<(), String> {
+                match &node.kind {
+                    K::Let { binding, .. } => {
+                        declared_locals.insert(*binding);
+                    }
+                    K::LetPattern { pattern, .. } => {
+                        collect_pattern_bindings(pattern, &mut declared_locals);
+                    }
+                    K::Match { arms, .. } => {
+                        for arm in arms {
+                            collect_pattern_bindings(&arm.pattern, &mut declared_locals);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+        )
+        .map_err(|_| {
+            error(
+                span,
+                "spec function body exceeds unfolding complexity budget",
+            )
+        })?;
+        for local_id in declared_locals {
+            if !remap.contains_key(&local_id) {
+                remap.insert(local_id, self.spread_binding(span)?);
+            }
+        }
+        let mut remaining = 50_000usize;
+        for precondition in spec_fn.interface.preconditions {
+            let mut pred = precondition;
+            nir::contracts::remap_predicate_metered(&mut pred, &remap, &mut remaining)
+                .map_err(|msg| error(span, msg))?;
+            statements.push(n::Expr {
+                source: pred.source,
+                ty: p(P::Void),
+                kind: K::RequirePredicate(Box::new(pred)),
+            });
+        }
+        let mut body = spec_fn.body;
+        nir::contracts::remap_predicate_metered(&mut body, &remap, &mut remaining)
+            .map_err(|msg| error(span, msg))?;
+        Ok(n::Expr {
+            source: call_source,
+            ty,
+            kind: K::CallPreparation {
+                statements,
+                result: Some(Box::new(body)),
+            },
+        })
+    }
+}
+
+fn collect_pattern_bindings(pattern: &n::Pattern, out: &mut BTreeSet<n::LocalId>) {
+    let mut stack = vec![pattern];
+    while let Some(pat) = stack.pop() {
+        match pat {
+            n::Pattern::Binding { binding, inner } | n::Pattern::Observe { binding, inner } => {
+                out.insert(*binding);
+                stack.push(inner);
+            }
+            n::Pattern::Remap { pattern, bindings } => {
+                for (from, to) in bindings {
+                    out.insert(*from);
+                    out.insert(*to);
+                }
+                stack.push(pattern);
+            }
+            n::Pattern::OptionalPresent(inner) | n::Pattern::ErrorResult { inner, .. } => {
+                stack.push(inner);
+            }
+            n::Pattern::Guard { pattern, .. } => stack.push(pattern),
+            n::Pattern::Then { first, next, .. } => {
+                stack.push(first);
+                stack.push(next);
+            }
+            n::Pattern::Tuple(items)
+            | n::Pattern::Record { fields: items, .. }
+            | n::Pattern::AnonymousRecord { fields: items, .. }
+            | n::Pattern::Or(items)
+            | n::Pattern::Variant { fields: items, .. } => stack.extend(items),
+            _ => {}
+        }
     }
 }
 

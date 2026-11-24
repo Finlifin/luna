@@ -114,6 +114,9 @@ pub enum ExprKind<'hir> {
     Assign(&'hir Expr<'hir>, &'hir Expr<'hir>),
     AssignOp(BinOp, &'hir Expr<'hir>, &'hir Expr<'hir>),
     Assumes(&'hir Expr<'hir>),
+    Asserts(&'hir Expr<'hir>),
+    Invariant(&'hir Expr<'hir>),
+    Decreases(&'hir Expr<'hir>),
     /// Explicit permission to retain the computation for instantiation.
     /// Does not relax ordinary definition-side operation checks.
     Defer(&'hir Expr<'hir>),

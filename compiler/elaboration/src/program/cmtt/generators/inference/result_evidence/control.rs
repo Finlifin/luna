@@ -188,12 +188,16 @@ impl Observation<'_> {
                 };
                 Ok(value)
             }
-            H::Assumes(guard) => {
+            H::Assumes(guard) | H::Asserts(guard) | H::Invariant(guard) => {
                 let guard = self.expr(checker, guard, Some(&p(P::Bool)), depth)?;
                 Ok(match guard {
                     Paths::Known(Term::Bool(false)) => Paths::Closed,
                     _ => guard.discarded(expected),
                 })
+            }
+            H::Decreases(metric) => {
+                let _ = self.expr(checker, metric, None, depth)?;
+                Ok(Paths::void(expected))
             }
             H::Application(callee, args) => {
                 let observed = checker.call_result_paths(

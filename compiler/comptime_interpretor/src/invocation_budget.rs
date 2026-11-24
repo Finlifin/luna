@@ -83,6 +83,7 @@ pub(super) fn charge_world_tables(
         enums,
         volatile_storage,
         match_plans,
+        safety_contracts: _,
         statics: _,
         global_runtime_deliveries,
     } = package;

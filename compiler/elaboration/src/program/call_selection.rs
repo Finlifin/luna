@@ -174,9 +174,10 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        self.with_call_operand_scope(expr, |checker| {
+        let result = self.with_call_operand_scope(expr, |checker| {
             checker.select_call(expr, callee, args, expected, partial)
-        })
+        })?;
+        self.maybe_unfold_spec_call(result, expr.span)
     }
 
     #[inline(never)]
@@ -513,6 +514,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             .and_then(|id| self.source_declarations.owner(id));
         if let Some(owner) = direct {
             self.check_quote_callable(owner, expr.span)?;
+            self.check_spec_callable(owner, expr.span)?;
         }
         if direct.is_some_and(|owner| self.is_quote_function(owner)) {
             self.record_quote_application(expr.hir_id, expr.span)?;

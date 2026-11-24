@@ -3,7 +3,7 @@
 use super::{Limits, PredicateProof, flow};
 use nir::{
     DeclarationId, Primitive, Term,
-    program::{Expr, ExprKind as K, Package, SourceRange},
+    program::{ExprKind as K, Package, SourceRange},
 };
 use std::{collections::BTreeMap, fmt};
 
@@ -12,11 +12,13 @@ pub struct ElisionReport {
     pub eliminated: Vec<ElidedCheck>,
     pub fallback_functions: usize,
 }
+
 pub struct ElidedCheck {
     pub function: DeclarationId,
     pub source: SourceRange,
     pub proof: PredicateProof,
 }
+
 impl fmt::Display for ElisionReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -30,6 +32,7 @@ impl fmt::Display for ElisionReport {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for ElidedCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -94,7 +97,7 @@ pub(crate) fn elide_function_checks(
     let Ok(analysis) = flow::analyze_in_package(package, &candidate, limits) else {
         return Err(());
     };
-    let mut proven = BTreeMap::<usize, Option<PredicateProof>>::new();
+    let mut proven = BTreeMap::<flow::ExprSite, Option<PredicateProof>>::new();
     for input in analysis
         .points
         .iter()
@@ -119,11 +122,13 @@ pub(crate) fn elide_function_checks(
         return Ok(None);
     }
     let mut eliminated = Vec::new();
+    let mut next_site = 0usize;
     let result = nir::visit::expression_mut(
         &mut candidate.body,
         &mut limits.arithmetic.steps,
         |expr, steps| {
-            let site = expr as *const Expr as usize;
+            let site = flow::ExprSite(next_site);
+            next_site += 1;
             if expr.ty != Term::Primitive(Primitive::Void) {
                 return Ok(());
             }

@@ -1940,6 +1940,9 @@ impl<'a> IndexBuilder<'a> {
             ExprKind::Unary(_, inner)
             | ExprKind::EffectRequest(inner)
             | ExprKind::Assumes(inner)
+            | ExprKind::Asserts(inner)
+            | ExprKind::Invariant(inner)
+            | ExprKind::Decreases(inner)
             | ExprKind::Defer(inner)
             | ExprKind::InlineControl(inner)
             | ExprKind::OptionPropagate(inner)
@@ -3200,6 +3203,12 @@ fn format_fn_modifiers(m: FnModifiers) -> String {
     }
     if m.is_unsafe {
         parts.push("unsafe");
+    }
+    if m.is_spec {
+        parts.push("spec");
+    }
+    if m.is_verified {
+        parts.push("verified");
     }
     if m.is_function_template {
         parts.push("template");

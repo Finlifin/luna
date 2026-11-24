@@ -41,11 +41,13 @@ mod predicate_shape;
 
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 
+mod safety;
 mod volatile_storage;
 
 pub use crate::match_plan::{
     ListObservationMode, ListViewOps, MatchPlan, MatchPlanKey, MatchPlans,
 };
+pub use safety::{PredicateRole, SafetyContracts, SafetyLevel};
 pub use volatile_storage::{VolatileNominal, VolatileStorage};
 
 /// Explicit struct layout packing mode derived from `__flurry_packed_mode` or
@@ -2427,6 +2429,7 @@ pub struct Package {
     pub definition_attributes: DefinitionAttributes,
     pub volatile_storage: VolatileStorage,
     pub match_plans: MatchPlans,
+    pub safety_contracts: SafetyContracts,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
     pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
@@ -4221,6 +4224,9 @@ impl fmt::Display for Package {
         }
         if !self.match_plans.is_empty() {
             write!(f, "\n {}", self.match_plans)?;
+        }
+        if !self.safety_contracts.is_empty() {
+            write!(f, "\n {}", self.safety_contracts)?;
         }
         if !self.runtime_domains.is_empty() {
             f.write_str("\n (runtime-domains")?;

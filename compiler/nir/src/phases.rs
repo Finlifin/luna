@@ -279,8 +279,40 @@ impl<'a> PhaseContext<'a> {
             .iter()
             .chain(&self.package.quote_templates)
         {
-            if self.inspect(CallableProgram::function(function), fuel)? {
+            if self.inspect(CallableProgram::function(function), fuel)?
+                || self
+                    .package
+                    .safety_contracts
+                    .is_verified(function.declaration)
+                || !self
+                    .package
+                    .safety_contracts
+                    .decreases_for(function.declaration)
+                    .is_empty()
+            {
                 machine_owners.functions.insert(function.declaration);
+            }
+            for metric in self
+                .package
+                .safety_contracts
+                .decreases_for(function.declaration)
+            {
+                let signature = Term::Function {
+                    parameters: match function.signature.callable_signature() {
+                        Term::Function { parameters, .. } => parameters.clone(),
+                        _ => vec![],
+                    },
+                    result: Box::new(metric.ty.clone()),
+                };
+                let mut metric_program = CallableProgram::framed_body(
+                    metric,
+                    &signature,
+                    function.phase,
+                    &function.parameters,
+                    &function.type_parameters,
+                );
+                metric_program.parts.declaration = Some(function.declaration);
+                self.inspect(metric_program, fuel)?;
             }
             if !function.runtime_deliveries.is_empty() {
                 if function.phase != Phase::Runtime {
@@ -529,6 +561,12 @@ impl<'a> PhaseContext<'a> {
                     .map_err(|error| Error::storage(function.source, error))?;
             }
         }
+        let is_spec_function = function
+            .declaration
+            .is_some_and(|id| package.safety_contracts.is_spec(id));
+        if is_spec_function && function.is_unsafe {
+            return Err(fail(function.source, "spec function cannot be unsafe"));
+        }
         let mut work = Worklist::new(function.source, function.is_unsafe);
         let mut safety_error = None;
         work.extend(
@@ -761,6 +799,9 @@ impl<'a> PhaseContext<'a> {
                         return Err(error(message));
                     }
                     if let K::UnsafeScope(body) = &expr.kind {
+                        if is_spec_function {
+                            return Err(error("spec function cannot contain an unsafe block"));
+                        }
                         work.permits_unsafe = true;
                         if body.ty != expr.ty {
                             return Err(error("unsafe scope changes its body type"));
@@ -883,6 +924,11 @@ impl<'a> PhaseContext<'a> {
                         | K::FunctionInstance {
                             declaration: id, ..
                         } => {
+                            if package.safety_contracts.is_spec(*id) && !is_spec_function {
+                                return Err(error(
+                                    "spec function cannot be called or referenced in executable code",
+                                ));
+                            }
                             if callables.source.quote(id).is_some() {
                                 if !_callee {
                                     return Err(error(

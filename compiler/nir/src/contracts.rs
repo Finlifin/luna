@@ -341,6 +341,9 @@ pub fn remap_predicate_metered(
             | K::TypeLayout { operand: v, .. }
             | K::UnsafeScope(v)
             | K::Discard(v)
+            | K::RequirePredicate(v)
+            | K::EnsurePredicate(v)
+            | K::CheckPredicate(v)
             | K::AnonymousField { value: v, .. }
             | K::Field { value: v, .. }
             | K::BitSlice { value: v, .. } => pending.push(v),

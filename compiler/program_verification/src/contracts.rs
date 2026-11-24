@@ -211,10 +211,21 @@ fn prepare(
     flow::Error,
 > {
     let metadata = super::declarations::Metadata::new(Some(package));
-    let source = SourceRange { start: 0, end: 0 };
+    let fallback_source = package
+        .functions
+        .first()
+        .map(|f| f.source)
+        .or_else(|| {
+            package
+                .traits
+                .first()
+                .and_then(|t| t.methods.first())
+                .map(|m| m.source)
+        })
+        .unwrap_or(SourceRange { start: 0, end: 0 });
     let domains = metadata
         .domains(&mut limits.arithmetic.steps)
-        .map_err(|error| preparation(source, error))?;
+        .map_err(|error| preparation(fallback_source, error))?;
     // These describe abstract definition inputs. Completed domain substitution
     // below, not this initial classification, admits concrete Type values.
     let rigid = |id: &nir::DeclarationId| Term::Rigid {
@@ -233,7 +244,7 @@ fn prepare(
                 .saturating_add(package.method_links.len())
                 .saturating_add(1),
         )
-        .map_err(|_| budget(source))?;
+        .map_err(|_| budget(fallback_source))?;
     let mut traits_by_id = BTreeMap::new();
     let mut trait_methods = BTreeMap::new();
     for definition in &package.traits {
@@ -241,9 +252,14 @@ fn prepare(
             traits_by_id.entry(definition.declaration)
         {
             slot.insert(definition);
+            let trait_source = definition
+                .methods
+                .first()
+                .map(|m| m.source)
+                .unwrap_or(fallback_source);
             limits
                 .step(definition.methods.len().saturating_add(1))
-                .map_err(|_| budget(source))?;
+                .map_err(|_| budget(trait_source))?;
             for method in &definition.methods {
                 trait_methods
                     .entry((definition.declaration, method.name.as_str()))
@@ -270,7 +286,16 @@ fn prepare(
     let mut drafts = BTreeMap::new();
     let mut obligations = Vec::new();
     for implementation in &package.implementations {
-        limits.step(1).map_err(|_| budget(source))?;
+        let impl_source = implementation
+            .methods
+            .iter()
+            .find_map(|(_, body)| {
+                function_indices
+                    .get(body)
+                    .map(|&i| package.functions[i].source)
+            })
+            .unwrap_or(fallback_source);
+        limits.step(1).map_err(|_| budget(impl_source))?;
         let skip_all = matches!(
             verified,
             Some(IncrementalFilter::SkipAll(v)) if v.implementations.contains(&implementation.declaration)
@@ -285,23 +310,20 @@ fn prepare(
         let Some(interface) = implementation.interface else {
             continue;
         };
-        let definition = traits_by_id.get(&interface).copied().ok_or_else(|| {
-            failure(
-                SourceRange { start: 0, end: 0 },
-                "trait contract is missing",
-            )
-        })?;
+        let definition = traits_by_id
+            .get(&interface)
+            .copied()
+            .ok_or_else(|| failure(impl_source, "trait contract is missing"))?;
         for (name, body) in &implementation.methods {
-            limits.step(1).map_err(|_| budget(source))?;
+            let member_source = function_indices
+                .get(body)
+                .map(|&i| package.functions[i].source)
+                .unwrap_or(impl_source);
+            limits.step(1).map_err(|_| budget(member_source))?;
             let method = trait_methods
                 .get(&(interface, name.as_str()))
                 .copied()
-                .ok_or_else(|| {
-                    failure(
-                        SourceRange { start: 0, end: 0 },
-                        "trait member contract is missing",
-                    )
-                })?;
+                .ok_or_else(|| failure(member_source, "trait member contract is missing"))?;
             if method.default == Some(*body) {
                 continue;
             }
@@ -323,7 +345,7 @@ fn prepare(
                     continue;
                 }
                 return Err(failure(
-                    SourceRange { start: 0, end: 0 },
+                    method.source,
                     "implementation contract body is missing",
                 ));
             };
