@@ -1,5 +1,6 @@
 //! Error elimination is ordinary result matching, never effect installation.
 use super::*;
+
 mod catches;
 mod layouts;
 mod type_labels;
@@ -784,11 +785,17 @@ impl Checker<'_, '_> {
                 else {
                     return Err("invalid pending error conversion".into());
                 };
+                let payload_view = self
+                    .flatten_error_result_view(&payload.ty, span)
+                    .map_err(|e| e.message)?;
+                let target_view = self
+                    .flatten_error_result_view(&target, span)
+                    .map_err(|e| e.message)?;
                 let frames = self.context.scope().to_vec();
                 nir::error_results::validate_conversion_in_scope(
                     *conversion,
-                    &payload.ty,
-                    &target,
+                    &payload_view,
+                    &target_view,
                     &frames,
                     &mut 100_000,
                     &mut |a, b| self.require(a, b, span).is_ok(),
@@ -876,6 +883,75 @@ impl Checker<'_, '_> {
         Ok(n::SourceRange::generated(index))
     }
 
+    fn assumed_error_result_view(&self, ty: &Term, span: Span) -> Option<Term> {
+        use crate::ptc::{Equality, Formula};
+        if !matches!(
+            ty,
+            Term::Bound { .. }
+                | Term::AssociatedType { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::Hole { .. }
+        ) {
+            return None;
+        }
+        let mut pending: Vec<&Formula> = self.context.assumptions().iter().collect();
+        while let Some(formula) = pending.pop() {
+            match formula {
+                Formula::And(items) => pending.extend(items.iter()),
+                Formula::Equal(Equality(left, right)) => {
+                    for candidate in [left, right] {
+                        if matches!(candidate, Term::ErrorResult { .. })
+                            && candidate.check_scope(self.context.scope()).is_ok()
+                            && self.require(ty, candidate, span).is_ok()
+                        {
+                            return Some(candidate.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub(super) fn flatten_error_result_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        let mut current = self
+            .type_identity_view(ty, span)
+            .unwrap_or_else(|_| ty.clone());
+        if !matches!(current, Term::ErrorResult { .. })
+            && let Some(assumed) = self.assumed_error_result_view(&current, span)
+        {
+            current = assumed;
+        }
+        let mut errors = Vec::new();
+        let mut steps = 0usize;
+        while let Term::ErrorResult {
+            errors: inner_errors,
+            result,
+        } = current
+        {
+            steps += 1;
+            if steps > 64 {
+                return Err(error(span, "error result expansion depth exceeded"));
+            }
+            errors.extend(inner_errors);
+            current = self
+                .type_identity_view(&result, span)
+                .unwrap_or_else(|_| (*result).clone());
+            if !matches!(current, Term::ErrorResult { .. })
+                && let Some(assumed) = self.assumed_error_result_view(&current, span)
+            {
+                current = assumed;
+            }
+        }
+        if errors.is_empty() {
+            Ok(current)
+        } else {
+            Ok(Term::error_result(errors, current))
+        }
+    }
+
     fn error_delivery(
         &mut self,
         value: n::Expr,
@@ -885,8 +961,10 @@ impl Checker<'_, '_> {
         if is_never(&value.ty) {
             return Ok(value);
         }
-        if matches!(target, Term::ErrorResult { .. }) {
-            let conversion = if matches!(value.ty, Term::ErrorResult { .. }) {
+        let target_view = self.flatten_error_result_view(target, span)?;
+        if matches!(target_view, Term::ErrorResult { .. }) {
+            let value_view = self.flatten_error_result_view(&value.ty, span)?;
+            let conversion = if matches!(value_view, Term::ErrorResult { .. }) {
                 nir::error_results::Conversion::Embed
             } else {
                 nir::error_results::Conversion::Success
@@ -1001,17 +1079,38 @@ impl Checker<'_, '_> {
             let target = if let Some(target) = expected {
                 target.clone()
             } else {
-                let mut result = success.clone();
                 let mut output_errors = residual.clone();
+                let mut result = success.clone();
+                let mut has_error_arm = false;
+                let mut arm_views = Vec::with_capacity(checked.len());
                 for arm in &checked {
                     if is_never(&arm.body.ty) {
                         continue;
                     }
-                    let body_success = if let Term::ErrorResult { errors, result } = &arm.body.ty {
+                    let view = self.flatten_error_result_view(&arm.body.ty, expression.span)?;
+                    if matches!(view, Term::ErrorResult { .. }) {
+                        has_error_arm = true;
+                    }
+                    arm_views.push((&arm.body.ty, view));
+                }
+                if !output_errors.is_empty() || has_error_arm {
+                    if let Term::ErrorResult {
+                        errors: tail_errors,
+                        result: tail_result,
+                    } = self.flatten_error_result_view(&result, expression.span)?
+                    {
+                        output_errors.extend(tail_errors);
+                        result = *tail_result;
+                    }
+                }
+                for (raw_ty, view) in &arm_views {
+                    let body_success = if let Term::ErrorResult { errors, result } = view {
                         output_errors.extend(errors.iter().cloned());
                         result.as_ref()
+                    } else if output_errors.is_empty() && !has_error_arm {
+                        raw_ty
                     } else {
-                        &arm.body.ty
+                        view
                     };
                     if is_never(body_success) {
                         continue;

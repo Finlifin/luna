@@ -810,34 +810,47 @@ impl Checker<'_, '_> {
                 if let Some(view) = self.case_pattern(pattern, callee, Some(fields), ty)? {
                     return Ok(view);
                 }
-                let Some((variant_type, index)) = self.variant_target(callee, Some(ty))? else {
-                    return Err(error(
-                        pattern.span,
-                        "enum payload pattern requires an enum context",
-                    ));
-                };
-                self.require(&variant_type, ty, pattern.span)?;
-                let Term::Nominal { declaration, .. } = variant_type else {
-                    unreachable!()
-                };
-                let variant = self
-                    .instantiated_variants(&variant_type, pattern.span)?
-                    .into_iter()
-                    .nth(index)
-                    .ok_or_else(|| error(pattern.span, "enum variant index out of bounds"))?;
-                if variant.shape != n::VariantShape::Tuple || fields.len() != variant.fields.len() {
-                    return Err(error(pattern.span, "enum payload pattern arity mismatch"));
+                if !self.is_type_head(callee)
+                    && let Some((variant_type, index)) = self.variant_target(callee, Some(ty))?
+                {
+                    self.require(&variant_type, ty, pattern.span)?;
+                    let Term::Nominal { declaration, .. } = variant_type else {
+                        unreachable!()
+                    };
+                    let variant = self
+                        .instantiated_variants(&variant_type, pattern.span)?
+                        .into_iter()
+                        .nth(index)
+                        .ok_or_else(|| error(pattern.span, "enum variant index out of bounds"))?;
+                    if variant.shape != n::VariantShape::Tuple
+                        || fields.len() != variant.fields.len()
+                    {
+                        return Err(error(pattern.span, "enum payload pattern arity mismatch"));
+                    }
+                    let fields = fields
+                        .iter()
+                        .zip(&variant.fields)
+                        .map(|(pattern, ty)| self.pattern(pattern, ty))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(n::Pattern::Variant {
+                        declaration,
+                        index,
+                        fields,
+                    });
                 }
-                let fields = fields
-                    .iter()
-                    .zip(&variant.fields)
-                    .map(|(pattern, ty)| self.pattern(pattern, ty))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(n::Pattern::Variant {
-                    declaration,
-                    index,
-                    fields,
-                })
+                if let Some((newtype_ty, repr)) = self.newtype_target(callee, Some(ty))? {
+                    return self.newtype_payload_pattern(
+                        fields,
+                        &newtype_ty,
+                        &repr,
+                        ty,
+                        pattern.span,
+                    );
+                }
+                Err(error(
+                    pattern.span,
+                    "enum payload pattern requires an enum context",
+                ))
             }
             HP::Wild => Ok(n::Pattern::Wild),
             HP::Binding(hir::common::BindingMode::ByValue, _, inner) => {
@@ -1426,6 +1439,134 @@ impl Checker<'_, '_> {
                 )
                 .map_err(|message| error(span, message)),
         }
+    }
+
+    pub(super) fn newtype_declaration(&self, callee: &Expr<'_>) -> Option<DeclarationId> {
+        let def_id = match &callee.kind {
+            H::ResolvedDef { def_id, .. } => *def_id,
+            H::Projection(..) => self
+                .package
+                .member_projections
+                .get(&callee.hir_id)
+                .copied()?,
+            _ => return None,
+        };
+        let owner = self.package.definition_owner(def_id)?;
+        let id = declaration(self.package, &self.package_identities, owner);
+        self.newtypes.contains_key(&id).then_some(id)
+    }
+
+    fn is_type_alias_expr(&self, callee: &Expr<'_>) -> bool {
+        let def_id = match &callee.kind {
+            H::ResolvedDef { def_id, .. } => Some(*def_id),
+            H::Projection(..) => self.package.member_projections.get(&callee.hir_id).copied(),
+            _ => None,
+        };
+        def_id
+            .and_then(|def_id| self.package.definition_owner(def_id))
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| matches!(item.kind, ItemKind::TypeAlias(..)))
+    }
+
+    pub(super) fn newtype_target(
+        &mut self,
+        callee: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<Option<(Term, Term)>, Error> {
+        let resolved_ty = if let Some(owner) = self.newtype_declaration(callee) {
+            let Some(def) = self.newtypes.get(&owner) else {
+                return Ok(None);
+            };
+            if def.type_parameters.is_empty() {
+                Term::Nominal {
+                    declaration: owner,
+                    arguments: Vec::new(),
+                }
+            } else if let Some(expected) = expected {
+                let view = self.type_identity_view(expected, callee.span)?;
+                if let Term::Nominal { declaration, .. } = &view
+                    && *declaration == owner
+                {
+                    view
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        } else {
+            let is_applied_nominal_or_alias = match &callee.kind {
+                H::NFApplication(head, _) => {
+                    self.newtype_declaration(head).is_some() || self.is_type_alias_expr(head)
+                }
+                _ => false,
+            };
+            if !self.is_type_head(callee)
+                && !self.is_type_alias_expr(callee)
+                && !is_applied_nominal_or_alias
+            {
+                return Ok(None);
+            }
+            let ty = self.type_expr(callee)?;
+            self.type_identity_view(&ty, callee.span)?
+        };
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = &resolved_ty
+        else {
+            return Ok(None);
+        };
+        let Some(definition) = self.newtypes.get(declaration).cloned() else {
+            return Ok(None);
+        };
+        let allowance = self.required_steps.min(100_000) as usize;
+        let mut fuel = allowance;
+        let repr = definition
+            .representation_budgeted(arguments, &self.call_input_frames(), &mut fuel)
+            .map_err(|e| error(callee.span, e.to_string()))?;
+        self.required_steps = self
+            .required_steps
+            .checked_sub((allowance - fuel) as u64)
+            .ok_or_else(|| error(callee.span, "newtype pattern budget exhausted"))?;
+        Ok(Some((resolved_ty, repr)))
+    }
+
+    pub(super) fn newtype_payload_pattern(
+        &mut self,
+        fields: &[hir::pattern::Pattern<'_>],
+        newtype_ty: &Term,
+        repr: &Term,
+        expected: &Term,
+        span: Span,
+    ) -> Result<n::Pattern, Error> {
+        self.require(newtype_ty, expected, span)?;
+        if fields.len() != 1 {
+            return Err(error(
+                span,
+                "newtype payload pattern expects a single argument",
+            ));
+        }
+        let next = self.pattern(&fields[0], repr)?;
+        let binding = self.spread_binding(span)?;
+        let subject = n::Expr {
+            ty: newtype_ty.clone(),
+            source: source(span),
+            kind: K::Local(binding),
+        };
+        let converted = n::Expr {
+            ty: repr.clone(),
+            source: source(span),
+            kind: K::NewtypeConvert(Box::new(subject)),
+        };
+        Ok(n::Pattern::Observe {
+            binding,
+            inner: Box::new(n::Pattern::Then {
+                first: Box::new(n::Pattern::Wild),
+                value: Box::new(converted),
+                next: Box::new(next),
+            }),
+        })
     }
 }
 

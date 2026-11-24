@@ -423,6 +423,14 @@ impl Walker<'_> {
             K::UnsafeScope(value) => {
                 result = self.child(value, state, depth)?;
             }
+            K::NewtypeConvert(value) => {
+                result = self.child(value, state, depth)?;
+                result.nominal_type = matches!(
+                    expr.ty,
+                    Term::Nominal { .. } | Term::Tuple(_) | Term::Record(_)
+                )
+                .then(|| std::sync::Arc::new(expr.ty.clone()));
+            }
             K::Discard(value) => {
                 self.child(value, state, depth)?;
             }

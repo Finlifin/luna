@@ -82,6 +82,7 @@ impl Parser<'_> {
                     if depth == 0 {
                         return self.tokens.get(index + 1).is_some_and(|token| {
                             token.kind == TokenKind::Dot
+                                || token.kind == TokenKind::LParen
                                 || (token.kind == TokenKind::LBrace && !option.no_extended_call)
                         });
                     }

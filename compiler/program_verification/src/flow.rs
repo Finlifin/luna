@@ -6714,7 +6714,7 @@ impl Walker<'_> {
             | K::Assign { .. }
             | K::BitAssign { .. }
             | K::BitUpdate { .. } => self.write_expression(expr, state, depth),
-            K::Closure { .. } | K::UnsafeScope(_) | K::Discard(_) => {
+            K::Closure { .. } | K::UnsafeScope(_) | K::Discard(_) | K::NewtypeConvert(_) => {
                 self.transparent_expression(expr, state, depth)
             }
             K::PlannedFunctionInstance { .. }

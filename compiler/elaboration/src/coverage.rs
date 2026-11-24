@@ -178,6 +178,22 @@ struct Engine<'a> {
 
 static WILD: Pattern = Pattern::Wild;
 
+fn newtype_observe_inner(pat: &Pattern) -> Option<(&Pattern, &nir::program::Expr, &Pattern)> {
+    let Pattern::Observe { binding, inner } = pat else {
+        return None;
+    };
+    let Pattern::Then { first, value, next } = inner.as_ref() else {
+        return None;
+    };
+    let nir::program::ExprKind::NewtypeConvert(arg) = &value.kind else {
+        return None;
+    };
+    let nir::program::ExprKind::Local(source) = arg.kind else {
+        return None;
+    };
+    (source == *binding).then_some((first.as_ref(), value.as_ref(), next.as_ref()))
+}
+
 impl Engine<'_> {
     fn covers_candidate(
         &mut self,
@@ -342,6 +358,14 @@ impl Engine<'_> {
                     }
                 }
                 Ok(false)
+            }
+            Pattern::Observe { .. } => {
+                if let Some((first, value, next)) = newtype_observe_inner(pat) {
+                    Ok(self.unconditional(first, depth + 1)?
+                        && self.matrix(vec![&value.ty], vec![vec![next]], depth + 1)?)
+                } else {
+                    Ok(false)
+                }
             }
             _ => Ok(false),
         }
@@ -732,6 +756,10 @@ impl Engine<'_> {
             self.spend(1)?;
             match pat {
                 Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
+                    pending.push(inner);
+                    continue;
+                }
+                Pattern::Observe { inner, .. } if newtype_observe_inner(pat).is_some() => {
                     pending.push(inner);
                     continue;
                 }

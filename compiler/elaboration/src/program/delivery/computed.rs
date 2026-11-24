@@ -89,13 +89,15 @@ impl Checker<'_, '_> {
         if is_never(actual) {
             return Ok(ComputedDelivery::default());
         }
-        let Term::ErrorResult { result, .. } = target else {
+        let target_view = self.flatten_error_result_view(target, span)?;
+        let Term::ErrorResult { result, .. } = &target_view else {
             return Err(error(
                 span,
                 "error delivery requires an error-result destination",
             ));
         };
-        let conversion = if matches!(actual, Term::ErrorResult { .. }) {
+        let actual_view = self.flatten_error_result_view(actual, span)?;
+        let conversion = if matches!(actual_view, Term::ErrorResult { .. }) {
             nir::error_results::Conversion::Embed
         } else {
             nir::error_results::Conversion::Success
@@ -103,7 +105,7 @@ impl Checker<'_, '_> {
         let optionals = if conversion == nir::error_results::Conversion::Success
             && self.optional_payload(result, span).is_ok()
         {
-            self.optional_injection_layers(actual, result, span)?
+            self.optional_injection_layers(&actual_view, result, span)?
         } else {
             Vec::new()
         };
@@ -137,10 +139,12 @@ impl Checker<'_, '_> {
         conversion: nir::error_results::Conversion,
         span: Span,
     ) -> Result<(), Error> {
+        let actual_view = self.flatten_error_result_view(actual, span)?;
+        let target_view = self.flatten_error_result_view(target, span)?;
         nir::error_results::validate_conversion_in_scope(
             conversion,
-            actual,
-            target,
+            &actual_view,
+            &target_view,
             self.context.scope(),
             &mut 100_000,
             &mut |a, b| self.require(a, b, span).is_ok(),

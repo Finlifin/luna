@@ -189,11 +189,26 @@ impl Checker<'_, '_> {
                 let mut output_errors = residual.clone();
                 let mut output = success.clone();
                 if !is_never(&after.body.ty) {
-                    let returned = if let Term::ErrorResult { errors, result } = &after.body.ty {
+                    let after_view =
+                        self.flatten_error_result_view(&after.body.ty, expression.span)?;
+                    let has_error_after = matches!(after_view, Term::ErrorResult { .. });
+                    if !output_errors.is_empty() || has_error_after {
+                        if let Term::ErrorResult {
+                            errors: tail_errors,
+                            result: tail_result,
+                        } = self.flatten_error_result_view(&output, expression.span)?
+                        {
+                            output_errors.extend(tail_errors);
+                            output = *tail_result;
+                        }
+                    }
+                    let returned = if let Term::ErrorResult { errors, result } = &after_view {
                         output_errors.extend(errors.iter().cloned());
                         result.as_ref()
-                    } else {
+                    } else if output_errors.is_empty() && !has_error_after {
                         &after.body.ty
+                    } else {
+                        &after_view
                     };
                     if !is_never(returned) {
                         if is_never(&output) {
