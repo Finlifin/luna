@@ -448,6 +448,10 @@ pub(crate) fn validate(
                 && head.parameters[0].kind == Kind::Type
         } else {
             head.role == Role::Tuple
+                && matches!(
+                    head.collector,
+                    Some(nir::normal_forms::Collector { slot: 0, .. })
+                )
                 && head.parameters.len() == 1
                 && head.parameters[0].kind == Kind::Value
                 && matches!(&head.parameters[0].ty, nir::Term::NormalForm {head, ..} if Some(*head) == protocols.meta_list)

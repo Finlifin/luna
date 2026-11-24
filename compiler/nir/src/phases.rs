@@ -1322,30 +1322,102 @@ impl<'a> PhaseContext<'a> {
                                     "normal-form type construction requires comptime",
                                 ));
                             }
-                            if !matches!(
-                                expr.ty,
-                                Term::Primitive(Primitive::Type | Primitive::Never)
-                            ) {
-                                return Err(error("normal-form application must produce Type"));
+                            if expr.ty.sort() != Sort::Type {
+                                return Err(error(
+                                    "normal-form application result must be a type-sorted term",
+                                ));
                             }
                             let count = match &expr.kind {
-                                K::NormalFormType { head, .. } => package
-                                    .normal_forms
-                                    .iter()
-                                    .find(|h| h.declaration == *head)
-                                    .ok_or_else(|| {
-                                        error("normal-form constructor metadata is missing")
-                                    })?
-                                    .parameters
-                                    .len(),
+                                K::NormalFormType { head, .. } => {
+                                    let meta = package
+                                        .normal_forms
+                                        .iter()
+                                        .find(|h| h.declaration == *head)
+                                        .ok_or_else(|| {
+                                            error("normal-form constructor metadata is missing")
+                                        })?;
+                                    if matches!(
+                                        meta.role,
+                                        crate::normal_forms::Role::Tuple
+                                            | crate::normal_forms::Role::TypeList
+                                    ) && !matches!(
+                                        expr.ty,
+                                        Term::Primitive(Primitive::Type | Primitive::Never)
+                                    ) {
+                                        return Err(error(
+                                            "normal-form application must produce Type",
+                                        ));
+                                    }
+                                    if let Some(function) =
+                                        package.functions.iter().find(|f| f.declaration == *head)
+                                        && let Term::Function { result, .. } = &function.signature
+                                        && result.check_scope(&[]).is_ok()
+                                    {
+                                        let mut referenced = BTreeSet::new();
+                                        crate::type_computations::rigid_declarations_bounded(
+                                            result,
+                                            inspection_fuel,
+                                            &mut referenced,
+                                        )
+                                        .map_err(|failure| match failure {
+                                            crate::type_computations::Error::Budget => {
+                                                Error::budget(
+                                                    expr.source,
+                                                    "normal-form result inspection exhausted its budget",
+                                                )
+                                            }
+                                            _ => error("invalid normal-form head result"),
+                                        })?;
+                                        if function
+                                            .type_parameters
+                                            .iter()
+                                            .all(|id| !referenced.contains(id))
+                                            && expr.ty != Term::Primitive(Primitive::Never)
+                                            && expr.ty != **result
+                                        {
+                                            return Err(error(
+                                                "normal-form application result disagrees with head signature",
+                                            ));
+                                        }
+                                    }
+                                    meta.parameters.len()
+                                }
                                 K::ApplyNormalForm {
                                     callee, input_ids, ..
                                 } => {
-                                    crate::normal_forms::open_inputs(&callee.ty, input_ids, inspection_fuel)
-                                        .map_err(|failure| match failure {
-                                            crate::type_computations::Error::Budget => Error::budget(expr.source, "normal-form interface inspection exhausted its budget"),
-                                            _ => error("invalid normal-form application interface"),
-                                        })?;
+                                    let (_, opened_result) = crate::normal_forms::open_signature(
+                                        &callee.ty,
+                                        input_ids,
+                                        inspection_fuel,
+                                    )
+                                    .map_err(|failure| match failure {
+                                        crate::type_computations::Error::Budget => Error::budget(
+                                            expr.source,
+                                            "normal-form interface inspection exhausted its budget",
+                                        ),
+                                        _ => error("invalid normal-form application interface"),
+                                    })?;
+                                    let mut referenced = BTreeSet::new();
+                                    crate::type_computations::rigid_declarations_bounded(
+                                        &opened_result,
+                                        inspection_fuel,
+                                        &mut referenced,
+                                    )
+                                    .map_err(|failure| match failure {
+                                        crate::type_computations::Error::Budget => Error::budget(
+                                            expr.source,
+                                            "normal-form result inspection exhausted its budget",
+                                        ),
+                                        _ => error("invalid normal-form application result"),
+                                    })?;
+                                    if input_ids.iter().all(|id| !referenced.contains(id))
+                                        && expr.ty != Term::Primitive(Primitive::Never)
+                                        && expr.ty != opened_result
+                                    {
+                                        return Err(error(
+                                            "normal-form application result disagrees with callable signature",
+                                        ));
+                                    }
                                     work.push(Work::Expr(callee, false, ct), inspection_fuel)?;
                                     input_ids.len()
                                 }

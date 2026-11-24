@@ -7,6 +7,7 @@ use std::{
 };
 
 mod validation;
+
 pub use validation::{ValidationError, validate, validate_in};
 
 /// Open a callable's positional binder frame in the private namespace of one
@@ -16,6 +17,14 @@ pub fn open_inputs(
     ids: &[DeclarationId],
     fuel: &mut usize,
 ) -> Result<Vec<(DeclarationId, Sort, Term)>, crate::type_computations::Error> {
+    Ok(open_signature(callable, ids, fuel)?.0)
+}
+
+pub fn open_signature(
+    callable: &Term,
+    ids: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<(Vec<(DeclarationId, Sort, Term)>, Term), crate::type_computations::Error> {
     use crate::{
         TypeError,
         type_computations::{Error, visit_rigid_declarations},
@@ -27,9 +36,6 @@ pub fn open_inputs(
     let Term::Function { parameters, result } = signature.callable_signature() else {
         return Err(invalid());
     };
-    if **result != Term::Primitive(Primitive::Type) {
-        return Err(invalid());
-    }
     if parameters.len() != ids.len() {
         return Err(Error::Scope(TypeError::ArgumentCount {
             expected: parameters.len(),
@@ -67,7 +73,19 @@ pub fn open_inputs(
             sort: parameter.sort,
         });
     }
-    Ok(opened)
+    let mut collision = None;
+    visit_rigid_declarations(result, fuel, |capture| {
+        if private_ids.contains(&capture) {
+            collision = Some(capture);
+        }
+    })?;
+    if let Some(capture) = collision {
+        return Err(Error::Scope(TypeError::CapturedDeclarationParameter(
+            capture,
+        )));
+    }
+    let result = result.substitute(&replacements).map_err(Error::Scope)?;
+    Ok((opened, result))
 }
 
 /// Compiler-provided callable identities and their ordinary signatures.
@@ -78,6 +96,7 @@ pub enum BuiltinCallable {
     List,
     Tuple,
 }
+
 impl BuiltinCallable {
     pub fn from_symbol(symbol: &str) -> Option<Self> {
         match symbol {
@@ -115,6 +134,7 @@ pub enum Kind {
     Type,
     Value,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parameter {
     pub declaration: DeclarationId,
@@ -122,6 +142,7 @@ pub struct Parameter {
     pub kind: Kind,
     pub ty: Term,
 }
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
     #[default]
@@ -130,6 +151,7 @@ pub enum Role {
     /// Compiler-bound immutable meta.List constructor; the head stays opaque.
     TypeList,
 }
+
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -139,6 +161,7 @@ impl fmt::Display for Role {
         })
     }
 }
+
 /// The slot accepts positional collection; a published name also admits a
 /// complete value at that slot. Anonymous interfaces promise only collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +203,7 @@ pub struct Head {
     pub parameters: Vec<Parameter>,
     pub requirements: Vec<TypePredicate>,
 }
+
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -188,6 +212,7 @@ impl fmt::Display for Kind {
         })
     }
 }
+
 impl fmt::Display for Parameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -197,6 +222,7 @@ impl fmt::Display for Parameter {
         )
     }
 }
+
 impl fmt::Display for Head {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -228,15 +254,26 @@ pub fn callable_type_from_declarations<'a>(
     collector: Option<usize>,
     fuel: &mut usize,
 ) -> Result<Term, crate::type_computations::Error> {
+    callable_type_with_result_from_declarations(
+        inputs,
+        &Term::Primitive(Primitive::Type),
+        collector,
+        fuel,
+    )
+}
+
+pub fn callable_type_with_result_from_declarations<'a>(
+    inputs: impl IntoIterator<Item = (DeclarationId, Sort, &'a Term)>,
+    result: &Term,
+    collector: Option<usize>,
+    fuel: &mut usize,
+) -> Result<Term, crate::type_computations::Error> {
     use crate::type_computations::{Error, charge_term};
     let mut telescope = crate::callable_types::DeclarationTelescope::default();
     for (declaration, sort, domain) in inputs {
         telescope.push(declaration, sort, domain, fuel)?;
     }
-    let ty = Term::NormalFormFunction(
-        Box::new(telescope.finish(&Term::Primitive(Primitive::Type), fuel)?),
-        collector,
-    );
+    let ty = Term::NormalFormFunction(Box::new(telescope.finish(result, fuel)?), collector);
     charge_term(&ty, fuel)?;
     ty.check_scope(&[]).map_err(Error::Scope)?;
     Ok(ty)
@@ -525,6 +562,7 @@ pub enum ApplicationError {
     InputType { index: usize },
     InputDependency { index: usize },
 }
+
 impl fmt::Display for ApplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -552,6 +590,7 @@ impl fmt::Display for ApplicationError {
         }
     }
 }
+
 impl Head {
     /// Prepare structural substitution from the declared input domains. Values
     /// must still pass this head's collection/layout and formation checks.
@@ -573,6 +612,7 @@ impl Head {
         }
         crate::DeclarationSubstitution::bounded(&ids, &domains, arguments, frames, fuel)
     }
+
     /// Reconstruct the callable's dependent input frame without unfolding the head.
     pub fn callable_type(&self) -> Result<Term, crate::type_computations::Error> {
         self.callable_type_in(&mut 100_000)
@@ -600,6 +640,7 @@ impl Head {
             fuel,
         )
     }
+
     /// Inspect the trusted list representation without unfolding its opaque head.
     pub fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
         if self.role != Role::TypeList
@@ -664,6 +705,7 @@ impl Head {
             .all(|element| element.sort() == Sort::Type)
             .then_some(elements)
     }
+
     /// Check ordered NF inputs using the same receiving-world evidence service
     /// as ordinary values. This never executes the head or grants formation
     /// predicates; the caller retains those separate obligations.
@@ -796,6 +838,7 @@ pub fn nominal_value_fields(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_budgeted(package, ty, variant, &mut 100_000)
 }
+
 #[derive(Clone, Copy)]
 pub enum NominalValueDeclaration<'a> {
     Struct(&'a crate::program::Struct),
@@ -942,6 +985,7 @@ pub fn nominal_value_fields_with_lookup<'a>(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_with_lookup_in(ty, variant, fuel, lookup, None)
 }
+
 pub fn nominal_value_fields_with_lookup_in<'a>(
     ty: &Term,
     variant: Option<u32>,
@@ -951,6 +995,7 @@ pub fn nominal_value_fields_with_lookup_in<'a>(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_with_collections_in(ty, variant, fuel, lookup, &|_, _| Ok(None), target)
 }
+
 /// Query nominal layouts with separately supplied collection representation
 /// evidence. Both callbacks charge their work to the shared budget.
 pub fn nominal_value_fields_with_collections_in<'a>(
@@ -1124,6 +1169,7 @@ fn nominal_value_fields_at<'a>(
         _ => Err("nominal declaration identity or variant kind mismatch".into()),
     }
 }
+
 // Legacy layout callers use None plus exhausted fuel to distinguish resource
 // failure from invalid metadata. Admission can fail a multi-step charge while
 // leaving positive fuel, so preserve its typed error before erasing it here.
@@ -1142,6 +1188,7 @@ fn layout_admission<T>(
         ) => None,
     }
 }
+
 /// Compatibility for optional representation observers.
 pub fn instantiate_value_fields<'a>(
     parameters: &[DeclarationId],

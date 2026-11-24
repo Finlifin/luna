@@ -7,6 +7,7 @@ pub enum ValidationError {
     Invalid(&'static str),
     Newtype(crate::newtypes::ValidationError),
 }
+
 impl ValidationError {
     pub fn message(&self) -> &'static str {
         match self {
@@ -16,20 +17,24 @@ impl ValidationError {
         }
     }
 }
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
     }
 }
+
 impl std::error::Error for ValidationError {}
 
 fn spend(fuel: &mut usize, amount: usize) -> Result<(), ValidationError> {
     *fuel = fuel.checked_sub(amount).ok_or(ValidationError::Budget)?;
     Ok(())
 }
+
 fn charge_term(term: &Term, fuel: &mut usize) -> Result<(), ValidationError> {
     crate::type_computations::charge_term(term, fuel).map_err(|_| ValidationError::Budget)
 }
+
 fn charge_predicate(predicate: &TypePredicate, fuel: &mut usize) -> Result<(), ValidationError> {
     crate::copy_budget::charge_predicate_substitution(predicate, &[], &[], fuel)
         .map_err(|_| ValidationError::Budget)
@@ -209,7 +214,9 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
         let Term::Function { parameters, result } = &function.signature else {
             return Err(Invalid("normal-form body signature is not a function"));
         };
-        if **result != Term::Primitive(Primitive::Type)
+        if (matches!(head.role, Role::Tuple | Role::TypeList)
+            && **result != Term::Primitive(Primitive::Type))
+            || result.sort() != Sort::Type
             || parameters.len() != values.len()
             || parameters
                 .iter()

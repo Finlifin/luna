@@ -370,6 +370,49 @@ impl Context {
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
 
+    /// Fast outer-constructor disjointness consistent with PTC's type theory.
+    /// Never grants disjointness to opaque normal-form heads, unclosed
+    /// computations, or empty error-result wrappers.
+    pub fn distinct_outer_types(&self, left: &Term, right: &Term) -> bool {
+        if distinct_outer_type_heads(left, right) {
+            return true;
+        }
+        if (self.is_tuple_type(left) && self.evaluate_kind(TypeKind::Tuple, right) == Some(false))
+            || (self.is_tuple_type(right)
+                && self.evaluate_kind(TypeKind::Tuple, left) == Some(false))
+        {
+            return true;
+        }
+        let non_list = |term: &Term| {
+            constructor(term).is_some()
+                || self.is_tuple_type(term)
+                || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
+                || matches!(term, Term::ErrorResult { errors, .. } if !errors.is_empty())
+        };
+        if (self.is_list_type(left) && non_list(right))
+            || (self.is_list_type(right) && non_list(left))
+        {
+            return true;
+        }
+        if (matches!(left, Term::Record(_))
+            && (constructor(right).is_some() || matches!(right, Term::Primitive(Primitive::Unit))))
+            || (matches!(right, Term::Record(_))
+                && (constructor(left).is_some()
+                    || matches!(left, Term::Primitive(Primitive::Unit))))
+        {
+            return true;
+        }
+        let non_error = |term: &Term| {
+            constructor(term).is_some()
+                || self.is_tuple_type(term)
+                || self.is_list_type(term)
+                || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
+        };
+        (matches!(left, Term::ErrorResult { errors, .. } if !errors.is_empty()) && non_error(right))
+            || (matches!(right, Term::ErrorResult { errors, .. } if !errors.is_empty())
+                && non_error(left))
+    }
+
     /// Validate that `ty` lies in the runtime-representable domain of A11 `NotSized`.
     pub fn check_not_sized_domain(&self, ty: &Term) -> Result<(), &'static str> {
         match not_sized::evaluate(
@@ -1438,6 +1481,76 @@ mod outer_type_head_tests {
             &Term::Pointer(Box::new(Term::Primitive(Primitive::Char)))
         ));
     }
+
+    #[test]
+    fn distinct_outer_types_respects_unit_alias_error_results_and_opaque_heads() {
+        let tuple_head = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let list_head = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let opaque_head = DeclarationId {
+            package: 2,
+            local: 1,
+        };
+        let other_opaque = DeclarationId {
+            package: 2,
+            local: 2,
+        };
+        let mut context = Context::default();
+        context.admit_tuple_head(tuple_head);
+        context.admit_list_inference_head(list_head);
+
+        let empty_tuple = Term::NormalForm {
+            head: tuple_head,
+            sort: Sort::Type,
+            arguments: vec![Term::TupleValue(vec![])],
+        };
+        let list_bool = Term::NormalForm {
+            head: list_head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let opaque = Term::NormalForm {
+            head: opaque_head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let opaque2 = Term::NormalForm {
+            head: other_opaque,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let empty_error = Term::ErrorResult {
+            errors: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let non_empty_error = Term::ErrorResult {
+            errors: vec![Term::Primitive(Primitive::Char)],
+            result: Box::new(list_bool.clone()),
+        };
+
+        assert!(!context.distinct_outer_types(&Term::Primitive(Primitive::Unit), &empty_tuple));
+        assert!(!context.distinct_outer_types(&empty_error, &Term::Primitive(Primitive::Bool)));
+        assert!(context.distinct_outer_types(&Term::Primitive(Primitive::Unit), &list_bool));
+        assert!(context.distinct_outer_types(&non_empty_error, &list_bool));
+
+        for other in [
+            Term::Primitive(Primitive::Bool),
+            Term::Primitive(Primitive::Unit),
+            empty_tuple,
+            list_bool,
+            Term::Record(vec![]),
+            non_empty_error,
+            opaque2,
+        ] {
+            assert!(!context.distinct_outer_types(&opaque, &other));
+            assert!(!context.distinct_outer_types(&other, &opaque));
+        }
+    }
 }
 
 impl Context {
@@ -1767,41 +1880,13 @@ impl Search<'_> {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
                 let (ta, tb) = (&self.terms.nodes[a], &self.terms.nodes[b]);
                 if classes.root(a) == classes.root(b) {
-                    // A trusted Tuple descriptor grants classification,
-                    // not unfolding, injectivity or arbitrary head disjointness.
-                    if (self.context.is_tuple_type(ta)
-                        && self.context.evaluate_kind(TypeKind::Tuple, tb) == Some(false))
-                        || (self.context.is_tuple_type(tb)
-                            && self.context.evaluate_kind(TypeKind::Tuple, ta) == Some(false))
-                    {
-                        return Ok(None);
-                    }
-                    // The compiler-bound List family is distinct from
-                    // established structural constructors. This says nothing
-                    // about arbitrary opaque normal-form heads or List input
-                    // injectivity, and never unfolds a factory body.
-                    let non_list = |term: &Term| {
-                        constructor(term).is_some()
-                            || self.context.is_tuple_type(term)
-                            || matches!(term, Term::Record(_))
-                    };
-                    if (self.context.is_list_type(ta) && non_list(tb))
-                        || (self.context.is_list_type(tb) && non_list(ta))
-                    {
+                    if self.context.distinct_outer_types(ta, tb) {
                         return Ok(None);
                     }
                     if self.error_result_distinct(a, b, &classes, assignment)? {
                         return Ok(None);
                     }
                     if self.computation_distinct(a, b, &classes, assignment)? {
-                        return Ok(None);
-                    }
-                    // A named structural product is distinct from the
-                    // established positional/nominal constructor families.
-                    // Do not decide record permutations or decompose them.
-                    if (matches!(ta, Term::Record(_)) && constructor(tb).is_some())
-                        || (matches!(tb, Term::Record(_)) && constructor(ta).is_some())
-                    {
                         return Ok(None);
                     }
                     if let (Some(ha), Some(hb)) = (constructor(ta), constructor(tb)) {

@@ -939,43 +939,7 @@ impl ImplementationHead {
         // `subject`, without granting injectivity or disjointness to opaque
         // normal-form heads. Freshen head parameters when they collide with
         // caller rigid identifiers so refutation quantifies over the head.
-        let nominal = |ty: &Term| {
-            matches!(ty,
-            Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration))
-        };
-        let ordinary = |ty: &Term| {
-            nominal(ty)
-                || context.is_tuple_type(ty)
-                || context.is_list_type(ty)
-                || matches!(
-                    ty,
-                    Term::Primitive(_)
-                        | Term::Tuple(_)
-                        | Term::Record(_)
-                        | Term::Optional(_)
-                        | Term::Pointer(_)
-                        | Term::Lift(_)
-                        | Term::Function { .. }
-                        | Term::ComptimeFunction(_)
-                        | Term::NormalFormFunction(..)
-                        | Term::UnsafeFunction(_)
-                )
-        };
-        let non_tuple =
-            |ty: &Term| ordinary(ty) && !context.is_tuple_type(ty) && !matches!(ty, Term::Tuple(_));
-        let non_list = |ty: &Term| ordinary(ty) && !context.is_list_type(ty);
-        let distinct_record = |a: &Term, b: &Term| {
-            matches!(a, Term::Record(_)) && ordinary(b) && !matches!(b, Term::Record(_))
-        };
-        let outer_disjoint = crate::ptc::distinct_outer_type_heads(&self.subject, &shape)
-            || (context.is_list_type(&shape) && non_list(&self.subject))
-            || (context.is_list_type(&self.subject) && non_list(&shape))
-            || (context.is_tuple_type(&shape) && non_tuple(&self.subject))
-            || (context.is_tuple_type(&self.subject) && non_tuple(&shape))
-            || (matches!(&self.subject, Term::ErrorResult { .. }) && ordinary(&shape))
-            || (matches!(&shape, Term::ErrorResult { .. }) && ordinary(&self.subject))
-            || distinct_record(&self.subject, &shape)
-            || distinct_record(&shape, &self.subject);
+        let outer_disjoint = context.distinct_outer_types(&self.subject, &shape);
         let symbolic_alternatives = eligibility_proof
             .as_ref()
             .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
@@ -2764,5 +2728,107 @@ mod shared_requirement_budget {
             panic!("independent negative evidence must still exclude: {assessment:?}");
         };
         context.verify_proof(&proof, Budget::default()).unwrap();
+    }
+
+    #[test]
+    fn outer_disjointness_matches_ptc_for_unit_empty_errors_and_opaque_heads() {
+        let mut context = Context::default();
+        let tuple_head = DeclarationId {
+            package: 93,
+            local: 1,
+        };
+        let list_head = DeclarationId {
+            package: 93,
+            local: 2,
+        };
+        let opaque_head = DeclarationId {
+            package: 94,
+            local: 1,
+        };
+        context.admit_tuple_head(tuple_head);
+        context.admit_list_inference_head(list_head);
+
+        let head_for = |local, subject| ImplementationHead {
+            parameter_types: Vec::new(),
+            type_parameters: Vec::new(),
+            requirements: Vec::new(),
+            declaration: DeclarationId { package: 95, local },
+            interface: None,
+            interface_arguments: Vec::new(),
+            subject,
+        };
+
+        let empty_tuple = Term::NormalForm {
+            head: tuple_head,
+            sort: Sort::Type,
+            arguments: vec![Term::TupleValue(vec![])],
+        };
+        let unit = Term::Primitive(nir::Primitive::Unit);
+        assert!(!matches!(
+            head_for(1, Term::Tuple(Vec::new())).match_subject_types(
+                &unit,
+                &[],
+                &context,
+                Budget::default()
+            ),
+            Err(TypeAssessment::Excluded(_))
+        ));
+        assert!(!matches!(
+            head_for(1, empty_tuple.clone()).match_subject_types(
+                &unit,
+                &[],
+                &context,
+                Budget::default()
+            ),
+            Err(TypeAssessment::Excluded(_))
+        ));
+        assert!(matches!(
+            head_for(1, empty_tuple).match_subject_types(
+                &Term::Primitive(nir::Primitive::Bool),
+                &[],
+                &context,
+                Budget::default()
+            ),
+            Err(TypeAssessment::Excluded(_))
+        ));
+
+        let list_bool = Term::NormalForm {
+            head: list_head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Bool)],
+        };
+        assert!(matches!(
+            head_for(2, list_bool).match_subject_types(&unit, &[], &context, Budget::default()),
+            Err(TypeAssessment::Excluded(_))
+        ));
+
+        let opaque = Term::NormalForm {
+            head: opaque_head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Bool)],
+        };
+        assert!(matches!(
+            head_for(3, opaque).match_subject_types(
+                &Term::Primitive(nir::Primitive::Bool),
+                &[],
+                &context,
+                Budget::default()
+            ),
+            Err(TypeAssessment::Pending(_))
+        ));
+
+        let empty_error = Term::ErrorResult {
+            errors: Vec::new(),
+            result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+        };
+        assert!(!matches!(
+            head_for(4, empty_error).match_subject_types(
+                &Term::Primitive(nir::Primitive::Bool),
+                &[],
+                &context,
+                Budget::default()
+            ),
+            Err(TypeAssessment::Excluded(_))
+        ));
     }
 }

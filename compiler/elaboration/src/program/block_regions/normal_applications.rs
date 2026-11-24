@@ -11,25 +11,35 @@ pub(super) struct Complete {
 
 impl Completion for Complete {
     const CHECKING: InputChecking = InputChecking::Contextual;
+
     type Output = n::Expr;
 
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        _: declaration_inputs::PreparedTelescope,
+        telescope: declaration_inputs::PreparedTelescope,
         inputs: PreparedDeclarationInputs,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        let ty = if inputs.diverges() {
-            p(P::Never)
-        } else {
-            p(P::Type)
-        };
-        checker.check_formation_application(
-            self.head,
-            inputs.observations.into_formation(),
+        let result_template = checker
+            .signatures
+            .get(&self.head)
+            .or_else(|| checker.interface_signatures.get(&self.head))
+            .and_then(|ty| match ty {
+                Term::Function { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .cloned()
+            .ok_or_else(|| error(span, "normal-form callable is missing result signature"))?;
+        let diverges = inputs.diverges();
+        let (ty, formation) = checker.instantiate_normal_result(
+            &telescope.local,
+            &result_template,
+            inputs.observations,
+            diverges,
             span,
         )?;
+        checker.check_formation_application(self.head, formation, span)?;
         if let Some(expected) = self.destination.expected() {
             checker.require_expression(&ty, expected, span)?;
         }

@@ -759,18 +759,72 @@ impl Checker<'_, '_> {
             .normal_parameters
             .get(&owner)
             .ok_or_else(|| error(span, "normal-form callable is missing declaration metadata"))?;
+        let result = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+            .and_then(|ty| match ty {
+                Term::Function { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .ok_or_else(|| error(span, "normal-form callable is missing result signature"))?;
         let collector = self.clause_collector(owner).map(|(slot, _)| slot);
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let signature = nir::normal_forms::callable_type_from_declarations(
+        let signature = nir::normal_forms::callable_type_with_result_from_declarations(
             inputs.iter().map(|(declaration, _, domain)| {
                 (*declaration, Sort::of_comptime_domain(domain), domain)
             }),
+            result,
             collector,
             &mut fuel,
         );
         self.required_steps -= (before - fuel) as u64;
         signature.map_err(|reason| error(span, reason.to_string()))
+    }
+
+    pub(in crate::program) fn instantiate_normal_result(
+        &mut self,
+        parameters: &[(DeclarationId, Sort, Term)],
+        result: &Term,
+        observations: declaration_inputs::Observations,
+        diverges: bool,
+        span: Span,
+    ) -> Result<(Term, super::FormationInputs), Error> {
+        let formation = observations.into_formation();
+        if diverges {
+            return Ok((p(P::Never), formation));
+        }
+        if *result == p(P::Type) {
+            return Ok((p(P::Type), formation));
+        }
+        let mut referenced = std::collections::BTreeSet::new();
+        nominal_fields::metered(&mut self.required_steps, |fuel| {
+            nir::type_computations::rigid_declarations_bounded(result, fuel, &mut referenced)
+        })
+        .map_err(|reason| error(span, reason.to_string()))?;
+        if referenced.iter().any(|id| formation.deferred.contains(id)) {
+            return Err(error(
+                span,
+                "normal-form result depends on an unobserved input",
+            ));
+        }
+        if parameters.iter().all(|(id, _, _)| !referenced.contains(id)) {
+            return Ok((result.clone(), formation));
+        }
+        let observed: std::collections::BTreeMap<DeclarationId, (&Term, &Term)> = parameters
+            .iter()
+            .zip(&formation.terms)
+            .filter_map(|((id, _, domain), term)| {
+                (!formation.deferred.contains(id)).then_some((*id, (domain, term)))
+            })
+            .collect();
+        let frames = self.call_input_frames();
+        let ty = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            nir::instantiate_observed_domain(result, |id| observed.get(&id).copied(), &frames, fuel)
+        })
+        .map_err(|reason| error(span, reason.to_string()))?;
+        Ok((ty, formation))
     }
 
     pub(super) fn static_normal_application(
@@ -1235,7 +1289,7 @@ impl Checker<'_, '_> {
                 )?;
                 Ok(Term::NormalForm {
                     head: *head,
-                    sort: Sort::Type,
+                    sort: Sort::of_comptime_domain(&expr.ty),
                     arguments,
                 })
             }

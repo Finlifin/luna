@@ -4453,12 +4453,6 @@ impl Checker<'_, '_> {
             let open_functions::Annotation::Known(result) = result_annotation else {
                 unreachable!()
             };
-            if sig.modifiers.is_normal_form_head && result != p(P::Type) {
-                return Err(error(
-                    item.span,
-                    "only Type-result normal-form heads are currently supported",
-                ));
-            }
             let signatures = if matches!(item.kind, ItemKind::FnDeclaration(_)) {
                 &mut self.interface_signatures
             } else {

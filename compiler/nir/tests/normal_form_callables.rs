@@ -195,3 +195,128 @@ fn forming_a_telescope_cannot_bind_a_declaration_already_read_as_free() {
         }
     );
 }
+
+#[test]
+fn non_type_and_dependent_normal_form_callables_open_and_validate() {
+    use nir::DeclarationId;
+    use nir::normal_forms::{
+        Head, Kind, Parameter as NfParam, Role, callable_type_with_result_from_declarations,
+        open_inputs, open_signature, validate_in,
+    };
+    use nir::program::{
+        Expr, ExprKind, Function, FunctionDeclaration, FunctionPhase, LocalId, Package, SourceRange,
+    };
+
+    let id = |local| DeclarationId { package: 23, local };
+    let ty = Term::Primitive(P::Type);
+    let bool_ty = Term::Primitive(P::Bool);
+    let rigid_t = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::Type,
+    };
+
+    let fixed = callable_type_with_result_from_declarations(
+        [(id(1), Sort::ComptimeValue, &bool_ty)],
+        &bool_ty,
+        None,
+        &mut 1000,
+    )
+    .unwrap();
+    let (opened_params, opened_result) = open_signature(&fixed, &[id(10)], &mut 1000).unwrap();
+    assert_eq!(
+        opened_params,
+        vec![(id(10), Sort::ComptimeValue, bool_ty.clone())]
+    );
+    assert_eq!(opened_result, bool_ty);
+    assert_eq!(
+        open_inputs(&fixed, &[id(10)], &mut 1000).unwrap(),
+        opened_params
+    );
+
+    let dependent = callable_type_with_result_from_declarations(
+        [
+            (id(1), Sort::Type, &ty),
+            (id(2), Sort::ComptimeValue, &rigid_t),
+        ],
+        &rigid_t,
+        None,
+        &mut 1000,
+    )
+    .unwrap();
+    let (dep_params, dep_result) =
+        open_signature(&dependent, &[id(20), id(21)], &mut 1000).unwrap();
+    assert_eq!(dep_params[0], (id(20), Sort::Type, ty));
+    assert_eq!(
+        dep_params[1],
+        (
+            id(21),
+            Sort::ComptimeValue,
+            Term::Rigid {
+                declaration: id(20),
+                sort: Sort::Type,
+            }
+        )
+    );
+    assert_eq!(
+        dep_result,
+        Term::Rigid {
+            declaration: id(20),
+            sort: Sort::Type,
+        }
+    );
+
+    let local = LocalId { owner: 1, index: 0 };
+    let mut package = Package::default();
+    package.normal_forms.push(Head {
+        declaration: id(1),
+        role: Role::Opaque,
+        parameters: vec![NfParam {
+            declaration: id(2),
+            binding: local,
+            kind: Kind::Value,
+            ty: bool_ty.clone(),
+        }],
+        collector: None,
+        requirements: Vec::new(),
+    });
+    package.functions.push(Function {
+        interface: FunctionDeclaration {
+            source: SourceRange { start: 0, end: 0 },
+            phase: FunctionPhase::NormalForm,
+            inline: false,
+            pure: true,
+            is_unsafe: false,
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            result_binding: None,
+            result_type_binder: None,
+            result_guarantees: Vec::new(),
+            entry_snapshots: Vec::new(),
+            capabilities: Vec::new(),
+            requirements: Vec::new(),
+            type_parameters: Vec::new(),
+            declaration: id(1),
+            name: "flag".into(),
+            signature: Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: bool_ty.clone(),
+                }],
+                result: Box::new(bool_ty.clone()),
+            },
+            parameters: vec![local],
+            env_parameters: Vec::new(),
+            defaults: Vec::new(),
+        },
+        body: Expr {
+            source: SourceRange { start: 0, end: 0 },
+            ty: bool_ty,
+            kind: ExprKind::Local(local),
+        },
+        runtime_deliveries: Default::default(),
+    });
+    validate_in(&package, &mut 1000).unwrap();
+
+    package.normal_forms[0].role = Role::Tuple;
+    assert!(validate_in(&package, &mut 1000).is_err());
+}
