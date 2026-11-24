@@ -22,6 +22,8 @@ pub(super) struct Progress {
     checked_order: Vec<usize>,
     caller_frames: Vec<Vec<Sort>>,
     captured: KnownInputs,
+    dependencies: local_dependencies::WatcherRegistry,
+    slot_goals: Vec<local_dependencies::GoalRef>,
 }
 
 impl Progress {
@@ -67,6 +69,46 @@ impl Progress {
                 nir::TypeError::DuplicateDeclarationParameter(*id).to_string(),
             ));
         }
+        let mut dependencies = local_dependencies::WatcherRegistry::new();
+        let mut slot_goals = Vec::with_capacity(count);
+        for (slot, (decl_id, _, _)) in telescope.parameters.iter().enumerate() {
+            let goal = dependencies.spawn_waiting_goal(Some(format!("declaration-slot-{slot}")));
+            dependencies.bind_producer(local_dependencies::DependencyKey::Slot(slot), goal);
+            dependencies.bind_producer(
+                local_dependencies::DependencyKey::Declaration(*decl_id),
+                goal,
+            );
+            slot_goals.push(goal);
+        }
+        for slot in 0..count {
+            if known_bindings.contains_key(&bindings[slot]) {
+                dependencies.publish_update(&local_dependencies::DependencyKey::Slot(slot));
+                dependencies.publish_update(&local_dependencies::DependencyKey::Declaration(
+                    telescope.parameters[slot].0,
+                ));
+                dependencies.complete_goal(slot_goals[slot]);
+                continue;
+            }
+            for &dep in telescope.direct(slot) {
+                if !known_bindings.contains_key(&bindings[dep]) {
+                    let (rep, ver) =
+                        dependencies.observe_version(&local_dependencies::DependencyKey::Slot(dep));
+                    let _ = dependencies.register_watch(slot_goals[slot], rep, ver);
+                }
+            }
+            if let Some(captures) = telescope.waiting_captures.get(&slot) {
+                for &cap in captures {
+                    if known.observed(cap).is_none() {
+                        let (rep, ver) = dependencies
+                            .observe_version(&local_dependencies::DependencyKey::Declaration(cap));
+                        let _ = dependencies.register_watch(slot_goals[slot], rep, ver);
+                    }
+                }
+            }
+        }
+        if !dependencies.cancel_cycles().is_empty() {
+            return Err(error(span, "cyclic declaration input dependencies"));
+        }
         Ok(Self {
             slots: bindings
                 .into_iter()
@@ -83,6 +125,8 @@ impl Progress {
             caller_frames,
             captured: known,
             telescope,
+            dependencies,
+            slot_goals,
         })
     }
 
@@ -193,12 +237,15 @@ impl Progress {
     pub fn current(&self) -> Option<usize> {
         self.schedule.get(self.source_prefix).copied()
     }
+
     pub fn binding(&self, slot: usize) -> n::LocalId {
         self.slots[slot].binding
     }
+
     pub fn is_prepared(&self, slot: usize) -> bool {
         self.slots[slot].prepared.is_some()
     }
+
     pub fn identity(&self, slot: usize) -> Option<&Term> {
         self.known_bindings
             .get(&self.binding(slot))
@@ -249,7 +296,14 @@ impl Progress {
         if let Some(identity) = identity {
             self.known_bindings
                 .insert(input.binding, std::sync::Arc::new(identity));
+            self.dependencies
+                .publish_update(&local_dependencies::DependencyKey::Slot(slot));
+            self.dependencies
+                .publish_update(&local_dependencies::DependencyKey::Declaration(
+                    self.telescope.parameters[slot].0,
+                ));
         }
+        self.dependencies.complete_goal(self.slot_goals[slot]);
         self.slots[slot].prepared = Some(Prepared {
             producer,
             expected_domain,
@@ -276,6 +330,8 @@ impl Progress {
             return Err(error(span, "declaration input preparation is incomplete"));
         }
         self.check_observations(fuel, span)?;
+        let report = self.dependencies.finish();
+        debug_assert!(report.is_clean(), "{report}");
         let mut arguments = Vec::with_capacity(self.slots.len());
         let mut bindings = Vec::with_capacity(self.slots.len());
         let mut slots = Vec::with_capacity(self.slots.len());

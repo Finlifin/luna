@@ -66,6 +66,7 @@ mod interfaces;
 mod iteration;
 mod lexical_inputs;
 mod local_bindings;
+mod local_dependencies;
 mod variant_fields;
 
 use local_bindings::{DeclarationBindings, LocalBindings, SourceBindings};

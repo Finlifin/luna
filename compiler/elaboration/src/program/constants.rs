@@ -1517,37 +1517,46 @@ impl Checker<'_, '_> {
             for binding in tail_references {
                 *counts.entry(*binding).or_default() += 1;
             }
-            let mut pending = Vec::new();
-            let mut waiters: BTreeMap<n::LocalId, Vec<usize>> = BTreeMap::new();
+            let mut registry = local_dependencies::WatcherRegistry::new();
+            let mut goal_to_statement = BTreeMap::new();
             for (index, (_, snapshot)) in initialized {
                 if removed.contains(index) || !snapshot.parts.is_empty() {
                     continue;
                 }
-                pending.push(*index);
-                fuel = fuel
-                    .checked_sub(snapshot.staged.len())
-                    .ok_or("staged pattern liveness budget exhausted")?;
-                for binding in &snapshot.staged {
-                    waiters.entry(*binding).or_default().push(*index);
-                }
+                let goal = registry.spawn_goal(None);
+                goal_to_statement.insert(goal, *index);
             }
             let mut replaced = BTreeSet::new();
-            while let Some(index) = pending.pop() {
+            while let Some(goal) = registry.pop_ready() {
                 fuel = fuel
                     .checked_sub(1)
                     .ok_or("staged pattern liveness budget exhausted")?;
+                let index = goal_to_statement[&goal];
                 if replaced.contains(&index) {
+                    registry.complete_goal(goal);
                     continue;
                 }
                 let (_, snapshot) = &initialized[&index];
                 fuel = fuel
                     .checked_sub(snapshot.staged.len())
                     .ok_or("staged pattern liveness budget exhausted")?;
-                if snapshot
+                let live_staged: Vec<_> = snapshot
                     .staged
                     .iter()
-                    .any(|binding| counts.get(binding).is_some_and(|count| *count != 0))
-                {
+                    .filter(|binding| counts.get(binding).is_some_and(|count| *count != 0))
+                    .copied()
+                    .collect();
+                if !live_staged.is_empty() {
+                    for binding in live_staged {
+                        let key = local_dependencies::DependencyKey::Local(binding);
+                        let (rep, observed_version) = registry.observe_version(&key);
+                        if registry
+                            .register_watch(goal, rep, observed_version)
+                            .is_err()
+                        {
+                            return Err("staged pattern liveness dependency failed".to_string());
+                        }
+                    }
                     continue;
                 }
                 let K::LetPattern {
@@ -1580,16 +1589,17 @@ impl Checker<'_, '_> {
                         .checked_sub(1)
                         .ok_or("staged pattern reference count underflow")?;
                     if *count == 0 {
-                        if let Some(waiting) = waiters.get(binding) {
-                            fuel = fuel
-                                .checked_sub(waiting.len())
-                                .ok_or("staged pattern liveness budget exhausted")?;
-                            pending.extend(waiting);
-                        }
+                        let woken = registry
+                            .publish_update(&local_dependencies::DependencyKey::Local(*binding));
+                        fuel = fuel
+                            .checked_sub(woken)
+                            .ok_or("staged pattern liveness budget exhausted")?;
                     }
                 }
+                registry.complete_goal(goal);
                 replaced.insert(index);
             }
+            let _ = registry.finish();
             Ok::<_, String>(
                 counts
                     .into_iter()

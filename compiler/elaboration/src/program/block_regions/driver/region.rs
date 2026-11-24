@@ -76,6 +76,7 @@ impl<'h, R> PendingChild<'h, R> {
     }
 
     fn deliver(mut self, result: Result<CheckedBlock, Error>) -> Region<'h, R> {
+        self.parent.finish_active_wait(&result);
         self.parent.returned = result.map(Some);
         self.parent
     }
@@ -96,11 +97,13 @@ pub(super) struct PendingInvocation<'h, R: Root<'h>> {
 
 impl<'h, R: Root<'h>> PendingInvocation<'h, R> {
     pub(super) fn execute(mut self, checker: &mut Checker<'_, '_>) -> Region<'h, R> {
-        self.parent.returned = self
+        let reply = self
             .operation
             .execute(checker)
             .and_then(|reply| self.parent.root.resume(checker, reply))
             .map(|()| None);
+        self.parent.finish_active_wait(&reply);
+        self.parent.returned = reply;
         self.parent
     }
 }
@@ -122,32 +125,144 @@ pub(super) struct Region<'h, R = ExpressionResult> {
     root: R,
     frames: Vec<RegionFrame<'h>>,
     returned: Result<Option<CheckedBlock>, Error>,
+    dependencies: local_dependencies::WatcherRegistry,
+    root_goal: local_dependencies::GoalRef,
+    frame_checkpoints: Vec<local_dependencies::Checkpoint>,
+    wait_checkpoint: Option<local_dependencies::Checkpoint>,
+    active_wait: Option<(local_dependencies::GoalRef, local_dependencies::WaitTicket)>,
 }
 
 impl<'h> Region<'h> {
     pub(super) fn new(root: RegionFrame<'h>) -> Self {
+        let mut dependencies = local_dependencies::WatcherRegistry::new();
+        let root_goal = dependencies.spawn_goal(Some("region-root".to_string()));
+        let popped = dependencies.pop_ready();
+        debug_assert_eq!(popped, Some(root_goal));
+        let frame_checkpoints = vec![dependencies.checkpoint()];
         Self {
             root: ExpressionResult,
             frames: vec![root],
             returned: Ok(None),
+            dependencies,
+            root_goal,
+            frame_checkpoints,
+            wait_checkpoint: None,
+            active_wait: None,
         }
+    }
+}
+
+fn refresh_root_goal_in(
+    dependencies: &mut local_dependencies::WatcherRegistry,
+    root_goal: &mut local_dependencies::GoalRef,
+) {
+    *root_goal = dependencies
+        .live_goal_in_slot(root_goal.slot)
+        .unwrap_or_else(|| {
+            let goal = dependencies.spawn_goal(Some("region-root".to_string()));
+            let _ = dependencies.pop_ready();
+            goal
+        });
+}
+
+impl<'h, R> Region<'h, R> {
+    fn begin_wait(&mut self, label: &str) {
+        self.wait_checkpoint = Some(self.dependencies.checkpoint());
+        let subgoal = self
+            .dependencies
+            .spawn_waiting_goal(Some(label.to_string()));
+        let key = local_dependencies::DependencyKey::Goal(subgoal);
+        self.dependencies.bind_producer(key.clone(), subgoal);
+        let (rep, version) = self.dependencies.observe_version(&key);
+        match self
+            .dependencies
+            .register_watch(self.root_goal, rep, version)
+        {
+            Ok(ticket) => self.active_wait = Some((subgoal, ticket)),
+            Err(reason) => {
+                self.dependencies.cancel_goal(subgoal, reason.to_string());
+            }
+        }
+    }
+
+    fn finish_active_wait<T>(&mut self, result: &Result<T, Error>) {
+        let Some((subgoal, ticket)) = self.active_wait.take() else {
+            return;
+        };
+        let key = local_dependencies::DependencyKey::Goal(subgoal);
+        match result {
+            Ok(_) => {
+                self.wait_checkpoint = None;
+                self.dependencies.publish_update(&key);
+                self.dependencies.wake_ticket(&ticket);
+                self.dependencies.complete_goal(subgoal);
+                let _ = self.dependencies.pop_ready();
+            }
+            Err(failure) => {
+                if !failure.needs_context {
+                    self.dependencies.fail_producer(&key, &failure.message);
+                } else {
+                    self.dependencies.cancel_goal(subgoal, &failure.message);
+                }
+                if !self.dependencies.is_live(self.root_goal) {
+                    self.root_goal = self
+                        .dependencies
+                        .spawn_goal(Some("region-root".to_string()));
+                    let _ = self.dependencies.pop_ready();
+                }
+            }
+        }
+    }
+
+    fn recover_root_wait(&mut self, outer_checkpoint: Option<local_dependencies::Checkpoint>) {
+        let wait_checkpoint = self.wait_checkpoint.take();
+        if let Some(cp) = outer_checkpoint.or(wait_checkpoint) {
+            self.dependencies.rollback(cp);
+        }
+        refresh_root_goal_in(&mut self.dependencies, &mut self.root_goal);
+    }
+
+    fn finish_root_completion(&mut self) -> local_dependencies::FinishReport {
+        self.dependencies.complete_goal(self.root_goal);
+        let report = self.dependencies.finish();
+        debug_assert!(report.is_clean(), "{report}");
+        report
     }
 }
 
 impl<'h, R: Root<'h>> Region<'h, R> {
     pub(super) fn with_consumer(root: R) -> Self {
+        let mut dependencies = local_dependencies::WatcherRegistry::new();
+        let root_goal = dependencies.spawn_goal(Some("region-root".to_string()));
+        let popped = dependencies.pop_ready();
+        debug_assert_eq!(popped, Some(root_goal));
         Self {
             root,
             frames: vec![],
             returned: Ok(None),
+            dependencies,
+            root_goal,
+            frame_checkpoints: Vec::new(),
+            wait_checkpoint: None,
+            active_wait: None,
         }
     }
 
     pub(super) fn with_child(root: R, child: RegionFrame<'h>) -> Self {
+        let mut dependencies = local_dependencies::WatcherRegistry::new();
+        let root_goal = dependencies.spawn_goal(Some("region-root".to_string()));
+        let popped = dependencies.pop_ready();
+        debug_assert_eq!(popped, Some(root_goal));
+        let frame_checkpoints = vec![dependencies.checkpoint()];
         Self {
             root,
             frames: vec![child],
             returned: Ok(None),
+            dependencies,
+            root_goal,
+            frame_checkpoints,
+            wait_checkpoint: None,
+            active_wait: None,
         }
     }
 
@@ -159,22 +274,49 @@ impl<'h, R: Root<'h>> Region<'h, R> {
             match self.step(checker) {
                 Ok(Poll::Continue) => {}
                 Ok(Poll::Child(child)) => {
+                    self.begin_wait("region-child");
                     return Ok(Handoff::Child(PendingChild {
                         parent: self,
                         child,
                     }));
                 }
                 Ok(Poll::Invoke(operation)) => {
+                    self.begin_wait("region-invocation");
                     return Ok(Handoff::Invoke(PendingInvocation {
                         parent: self,
                         operation,
                     }));
                 }
-                Ok(Poll::Complete(value)) => return Ok(Handoff::Complete(value)),
+                Ok(Poll::Complete(value)) => {
+                    let _ = self.finish_root_completion();
+                    return Ok(Handoff::Complete(value));
+                }
                 Err(failure) => {
-                    let recovered = recover(&mut self.frames, checker, failure)
-                        .or_else(|failure| self.root.recover(checker, failure));
+                    let mut outer_checkpoint = None;
+                    let recovered = recover(
+                        &mut self.frames,
+                        &mut self.frame_checkpoints,
+                        &mut self.dependencies,
+                        &mut self.root_goal,
+                        &mut outer_checkpoint,
+                        checker,
+                        failure,
+                    );
+                    let recovered = match recovered {
+                        Ok(()) => {
+                            self.wait_checkpoint = None;
+                            Ok(())
+                        }
+                        Err(failure) => {
+                            let recovered = self.root.recover(checker, failure);
+                            if recovered.is_ok() {
+                                self.recover_root_wait(outer_checkpoint);
+                            }
+                            recovered
+                        }
+                    };
                     if let Err(failure) = recovered {
+                        let _ = self.dependencies.finish();
                         self.root.unwind(checker);
                         return Err(failure);
                     }
@@ -210,6 +352,7 @@ impl<'h, R: Root<'h>> Region<'h, R> {
                     let RegionFrame::Block(frame) = self.frames.pop().unwrap() else {
                         unreachable!("only blocks complete a tail")
                     };
+                    self.frame_checkpoints.pop();
                     let value = frame.finish(checker, tail)?;
                     self.returned = Ok(Some(value));
                     return Ok(Poll::Continue);
@@ -217,6 +360,7 @@ impl<'h, R: Root<'h>> Region<'h, R> {
                 Step::Completed(value) => {
                     // The owning frame restores its remaining branch/region boundaries.
                     self.frames.pop().unwrap().unwind(checker);
+                    self.frame_checkpoints.pop();
                     self.returned = Ok(Some(value));
                     return Ok(Poll::Continue);
                 }
@@ -230,21 +374,33 @@ impl<'h, R: Root<'h>> Region<'h, R> {
                 Poll::Child(request) => request,
             }
         };
+        let frame_count = self.frames.len();
+        let checkpoint = self.dependencies.checkpoint();
         match children::enter(&mut self.frames, checker, request)? {
             Some(child) => Ok(Poll::Child(child)),
-            None => Ok(Poll::Continue),
+            None => {
+                if self.frames.len() > frame_count {
+                    self.frame_checkpoints.push(checkpoint);
+                }
+                Ok(Poll::Continue)
+            }
         }
     }
 }
 
 fn recover(
     frames: &mut Vec<RegionFrame<'_>>,
+    checkpoints: &mut Vec<local_dependencies::Checkpoint>,
+    dependencies: &mut local_dependencies::WatcherRegistry,
+    root_goal: &mut local_dependencies::GoalRef,
+    outer_checkpoint: &mut Option<local_dependencies::Checkpoint>,
     checker: &mut Checker<'_, '_>,
     mut failure: Error,
 ) -> Result<(), Error> {
     // Lexical exits must run before their enclosing checkpoint.
     // Only a recoverable context request resumes a branch search.
     while let Some(mut frame) = frames.pop() {
+        let checkpoint = checkpoints.pop();
         let recovered = match &mut frame {
             RegionFrame::Conditional(conditional) => conditional.recover_probe(checker, failure),
             RegionFrame::When(frame) => frame.recover_probe(checker, failure),
@@ -259,10 +415,21 @@ fn recover(
         };
         match recovered {
             Ok(()) => {
+                if let Some(cp) = checkpoint {
+                    let restored_cp = cp.clone();
+                    dependencies.rollback(cp);
+                    refresh_root_goal_in(dependencies, root_goal);
+                    checkpoints.push(restored_cp);
+                }
                 frames.push(frame);
                 return Ok(());
             }
-            Err(error) => failure = error,
+            Err(error) => {
+                if checkpoint.is_some() {
+                    *outer_checkpoint = checkpoint;
+                }
+                failure = error;
+            }
         }
         frame.unwind(checker);
     }
@@ -285,7 +452,11 @@ impl<R: std::fmt::Display> std::fmt::Display for Region<'_, R> {
         for frame in &self.frames {
             write!(f, " {frame}")?;
         }
-        f.write_str("))")
+        if self.active_wait.is_some() || self.dependencies.has_activity() {
+            write!(f, ") (local-dependencies {}))", self.dependencies)
+        } else {
+            f.write_str("))")
+        }
     }
 }
 
@@ -327,5 +498,36 @@ mod tests {
         assert!(dump.contains("(needs-context true)"), "{dump}");
         assert!(dump.contains(r#"need \"type\"\nnext"#), "{dump}");
         assert!(dump.contains("(aggregate-frame (kind tuple)"), "{dump}");
+    }
+
+    #[test]
+    fn root_recover_after_failed_child_rolls_back_dependencies_cleanly() {
+        let mut region = Region::with_consumer(ExpressionResult);
+        let field = Expr {
+            hir_id: hir::HirId::INVALID,
+            kind: H::Unit,
+            span: Span::default(),
+        };
+        for needs_context in [false, true] {
+            region.begin_wait("region-child");
+            let pending = PendingChild {
+                parent: region,
+                child: Child {
+                    expr: arguments::RoutedSource::Expression(std::borrow::Cow::Borrowed(&field)),
+                    destination: Destination::ContextualInput,
+                },
+            };
+            let failure = if needs_context {
+                context_error(Span::default(), "probe needs context")
+            } else {
+                error(Span::default(), "probe failed")
+            };
+            region = pending.deliver(Err(failure));
+            assert!(region.returned.is_err());
+            region.returned = Ok(None);
+            region.recover_root_wait(None);
+        }
+        let report = region.finish_root_completion();
+        assert!(report.is_clean(), "{report}");
     }
 }

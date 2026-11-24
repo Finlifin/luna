@@ -14,6 +14,7 @@ enum Task {
         stores: BTreeSet<usize>,
     },
 }
+
 impl std::fmt::Display for Task {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -48,16 +49,41 @@ struct Progress {
     tasks: Vec<Task>,
     path: Vec<usize>,
     active: BTreeSet<usize>,
+    dependencies: local_dependencies::WatcherRegistry,
+    slot_goals: BTreeMap<usize, local_dependencies::GoalRef>,
 }
+
 impl Progress {
-    #[cfg(test)]
-    fn new(slot: usize) -> Self {
+    fn with_tasks(tasks: Vec<Task>) -> Self {
         Self {
-            tasks: vec![Task::Enter(slot)],
+            tasks,
             path: vec![],
             active: BTreeSet::new(),
+            dependencies: local_dependencies::WatcherRegistry::new(),
+            slot_goals: BTreeMap::new(),
         }
     }
+
+    #[cfg(test)]
+    fn new(slot: usize) -> Self {
+        Self::with_tasks(vec![Task::Enter(slot)])
+    }
+
+    fn ensure_slot_goal(&mut self, slot: usize) -> local_dependencies::GoalRef {
+        if let Some(&goal) = self.slot_goals.get(&slot)
+            && self.dependencies.is_live(goal)
+        {
+            return goal;
+        }
+        let goal = self
+            .dependencies
+            .spawn_waiting_goal(Some(format!("dependent-input-{slot}")));
+        self.dependencies
+            .bind_producer(local_dependencies::DependencyKey::Slot(slot), goal);
+        self.slot_goals.insert(slot, goal);
+        goal
+    }
+
     fn next(&mut self, fuel: &mut u64, span: Span) -> Result<Option<Task>, Error> {
         if self.tasks.is_empty() {
             return Ok(None);
@@ -65,16 +91,20 @@ impl Progress {
         spend(fuel, 1, span)?;
         Ok(self.tasks.pop())
     }
+
     fn enter(&mut self, slot: usize, span: Span) -> Result<(), Error> {
         if !self.active.insert(slot) {
+            let _ = self.dependencies.cancel_cycles();
             return Err(error(
                 span,
                 format!("cyclic dependent input preparation at input {slot}"),
             ));
         }
         self.path.push(slot);
+        self.ensure_slot_goal(slot);
         Ok(())
     }
+
     fn after(
         &mut self,
         dependencies: impl DoubleEndedIterator<Item = usize> + ExactSizeIterator,
@@ -83,10 +113,27 @@ impl Progress {
         span: Span,
     ) -> Result<(), Error> {
         spend(fuel, dependencies.len().saturating_add(1), span)?;
+        let deps: Vec<usize> = dependencies.collect();
+        if let Some(&waiter_slot) = self.path.last() {
+            let waiter_goal = self.ensure_slot_goal(waiter_slot);
+            for &dep in &deps {
+                self.ensure_slot_goal(dep);
+                let (rep, ver) = self
+                    .dependencies
+                    .observe_version(&local_dependencies::DependencyKey::Slot(dep));
+                if let Err(reason) = self.dependencies.register_watch(waiter_goal, rep, ver) {
+                    return Err(error(
+                        span,
+                        format!("dependent input producer failed: {reason}"),
+                    ));
+                }
+            }
+        }
         self.tasks.push(continuation);
-        self.tasks.extend(dependencies.rev().map(Task::Enter));
+        self.tasks.extend(deps.into_iter().rev().map(Task::Enter));
         Ok(())
     }
+
     fn schedule_default(
         &mut self,
         writes: &Writes,
@@ -101,6 +148,20 @@ impl Progress {
             .iter()
             .map(|(&id, &arg)| writes.read(id, arg, slot));
         let (dependencies, stores) = writes.dependencies(reads, fuel, span)?;
+        if let Some(&waiter_slot) = self.path.last() {
+            let waiter_goal = self.ensure_slot_goal(waiter_slot);
+            for &store in &stores {
+                let (rep, ver) = self
+                    .dependencies
+                    .observe_version(&local_dependencies::DependencyKey::Store(store));
+                if let Err(reason) = self.dependencies.register_watch(waiter_goal, rep, ver) {
+                    return Err(error(
+                        span,
+                        format!("dependent default store producer failed: {reason}"),
+                    ));
+                }
+            }
+        }
         self.after(
             dependencies.into_iter(),
             Task::Default {
@@ -114,6 +175,7 @@ impl Progress {
             span,
         )
     }
+
     fn complete(&mut self, slot: usize, span: Span) -> Result<(), Error> {
         if self.path.last() != Some(&slot) {
             return Err(error(
@@ -123,9 +185,26 @@ impl Progress {
         }
         self.path.pop();
         self.active.remove(&slot);
+        self.dependencies
+            .publish_update(&local_dependencies::DependencyKey::Slot(slot));
+        if let Some(goal) = self.slot_goals.remove(&slot) {
+            self.dependencies.complete_goal(goal);
+        }
         Ok(())
     }
+
+    fn fail_slot(&mut self, slot: usize, detail: &str) {
+        self.dependencies
+            .fail_producer(&local_dependencies::DependencyKey::Slot(slot), detail);
+        self.slot_goals.remove(&slot);
+    }
+
+    fn finish(&mut self) {
+        let _ = self.dependencies.finish();
+        self.slot_goals.clear();
+    }
 }
+
 impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(input-dependencies (path")?;
@@ -139,6 +218,7 @@ impl std::fmt::Display for Progress {
         f.write_str("))")
     }
 }
+
 pub(in crate::program) fn spend(fuel: &mut u64, steps: usize, span: Span) -> Result<(), Error> {
     *fuel = fuel
         .checked_sub(steps as u64)
@@ -368,11 +448,7 @@ impl Frame {
             site: source.hir_id,
             span: source.span,
             prepared,
-            progress: Progress {
-                tasks: demanded.into_iter().rev().map(Task::Enter).collect(),
-                path: vec![],
-                active: BTreeSet::new(),
-            },
+            progress: Progress::with_tasks(demanded.into_iter().rev().map(Task::Enter).collect()),
             phase: Phase::Ready,
         })
     }
@@ -395,7 +471,11 @@ impl Frame {
             }
         }
         let result = self.step(checker, site);
-        if result.is_err() {
+        if let Err(ref failure) = result {
+            if let Some(&slot) = self.progress.path.last() {
+                self.progress.fail_slot(slot, &failure.message);
+            }
+            self.progress.finish();
             self.phase = Phase::Failed;
         }
         result
@@ -413,6 +493,7 @@ impl Frame {
         let prepared = &mut self.prepared;
         let progress = &mut self.progress;
         let Some(task) = progress.next(&mut checker.required_steps, source.span)? else {
+            progress.finish();
             self.phase = Phase::Complete;
             let (signature, binding) = self
                 .call
@@ -590,8 +671,17 @@ impl Frame {
                 stores,
             } => {
                 let symbols = call.binding().observations();
-                self.default_writes
-                    .observe(checker, stores, call.binding(), source.span)?;
+                self.default_writes.observe(
+                    checker,
+                    stores.clone(),
+                    call.binding(),
+                    source.span,
+                )?;
+                for store in stores {
+                    progress
+                        .dependencies
+                        .publish_update(&local_dependencies::DependencyKey::Store(store));
+                }
                 let receiver = checker.has_comptime_value_receiver(owner);
                 let mut captures = BTreeMap::new();
                 for (&id, &arg) in &references {
@@ -668,8 +758,20 @@ impl Frame {
     }
 
     pub(in crate::program) fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
-        if let Phase::Child { caller_staged, .. } = self.phase {
+        if let Phase::Child {
+            slot,
+            caller_staged,
+        } = self.phase
+        {
             checker.in_staged_input = caller_staged;
+            self.progress
+                .fail_slot(slot, "dependent input child unwound");
+            self.progress.finish();
+            self.phase = Phase::Failed;
+        } else if let Phase::Invoking { slot, .. } | Phase::AwaitOperand(slot) = self.phase {
+            self.progress
+                .fail_slot(slot, "dependent input invocation unwound");
+            self.progress.finish();
             self.phase = Phase::Failed;
         }
     }
