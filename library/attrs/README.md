@@ -13,7 +13,6 @@
 命名子模块另提供：
 - `attrs.packed.byte` 与 `attrs.packed.bit`：分别产生 `{ __flurry_packed_mode: .byte }` 与 `{ __flurry_packed_mode: .bit }`，对应字节级紧凑布局（`align = 1`）与直接翻译为 `BitVec<W>` 并复用 `bitvec_opt` 的位级紧凑布局（`attrs.packed.bit` 总位宽超过 256 位时发出非致命编译警告）。
 - `attrs.mem.volatile`（及 `attrs.volatile`）：产生 `{ __flurry_volatile: true }`，标示易失内存／MMIO 结构体、newtype 或结构体字段；LLVM 后端对对应访问发射 `load volatile` / `store volatile`，程序纯度分析归入 P0（禁止 `memory(none)`/`speculatable`/`nosync`/`readonly`）。不允许以裸 key 或 definition configuration 形式附着，且不能与 `packed` 混用。
-- `attrs.layout.{packed, packed_layout}`：过渡期旧入口，产生 `{ packed: bool }`，供当前结构体字节级紧凑布局检查与降码消费（随 `__flurry_packed_mode` 消费者接通后统一收口）。
 - `attrs.macros.ast(variadic)`、`attrs.macros.peg(grammar)`、`attrs.macros.macro3` 与 `attrs.macros.macro4` 声明宏处理器的输入模式，展开器读取顶层的 `__flurry_macro_kind` 及对应参数。
 - `attrs.effects.direct_passing`：产生 `{ __flurry_direct_passing: true }`，供直接传递效应声明检查消费。
 - `attrs.derivation`：编译器已消费 `{ __flurry_derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
@@ -46,7 +45,7 @@ python3 -B development/cargo.py run -p luna -- \
 按属性规则选中的原始条目位置，不重新构造或丢失条目的类型信息。
 不合法的合并输入会报错；使用 `--output` 时，检查失败不会覆盖已有输出。
 
-检查属性对象可使用上述两个入口。普通 NIR 编译会将 `attrs.abi(.c)` 应用于 runtime 函数，host 在支持的签名上生成 C 入口。
+检查属性对象可使用上述两个入口。普通 NIR 编译会将 `attrs.abi(.c | .system | .stdcall | .win64 | .sysv64)` 应用于 runtime 函数，host 在支持的签名上生成对应调用约定入口。
 
 trait 成员可以使用普通属性值及别名：
 

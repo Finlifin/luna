@@ -15,16 +15,26 @@ pub struct SelectedValue<'a> {
 #[derive(Debug)]
 pub struct MergedTarget<'a> {
     pub target: hir::AttributeTarget,
+    pub source: n::SourceRange,
     values: BTreeMap<&'a str, SelectedValue<'a>>,
 }
+
 impl<'a> MergedTarget<'a> {
     pub fn get(&self, key: &str) -> Option<SelectedValue<'a>> {
         self.values.get(key).copied()
     }
+
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, SelectedValue<'a>)> + '_ {
         self.values.iter().map(|(key, value)| (*key, *value))
     }
+
+    pub fn source(&self) -> n::SourceRange {
+        self.iter()
+            .next()
+            .map_or(self.source, |(_, value)| value.origin.source)
+    }
 }
+
 impl std::fmt::Display for MergedTarget<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(merged-attributes (target {}) (properties", self.target)?;
@@ -53,6 +63,7 @@ pub struct MergeFailure {
     pub source: n::SourceRange,
     pub message: String,
 }
+
 impl std::fmt::Display for MergeFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -62,7 +73,9 @@ impl std::fmt::Display for MergeFailure {
         )
     }
 }
+
 impl std::error::Error for MergeFailure {}
+
 fn failure(attribute: &EvaluatedAttribute, message: impl ToString) -> MergeFailure {
     MergeFailure {
         source: attribute.source,
@@ -113,6 +126,7 @@ pub(super) fn merge_entries<'a>(
             }
             let group = groups.entry(key).or_insert_with(|| MergedTarget {
                 target: attribute.target,
+                source: attribute.source,
                 values: BTreeMap::new(),
             });
             if let Some(name) = &attribute.configuration_key {

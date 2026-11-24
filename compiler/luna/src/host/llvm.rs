@@ -3265,6 +3265,28 @@ impl Emitter<'_> {
     }
 }
 
+/// Map a Flurry `__flurry_abi` calling convention to its LLVM IR calling-convention
+/// prefix (`""` denotes the default C calling convention `ccc`).
+pub(super) fn abi_calling_convention(
+    convention: nir::program::CallingConvention,
+    target: Option<nir::target::TargetData>,
+) -> &'static str {
+    use nir::program::CallingConvention;
+    match convention {
+        CallingConvention::C => "",
+        CallingConvention::System => {
+            if cfg!(target_os = "windows") && target.is_some_and(|t| t.pointer_bits() == 32) {
+                "x86_stdcallcc "
+            } else {
+                ""
+            }
+        }
+        CallingConvention::Stdcall => "x86_stdcallcc ",
+        CallingConvention::Win64 => "win64cc ",
+        CallingConvention::Sysv64 => "x86_64_sysvcc ",
+    }
+}
+
 pub(super) enum EntryMode {
     Display,
     Silent,
@@ -4418,5 +4440,35 @@ mod layout_budget_tests {
         let mut remaining = 3;
         enums::EnumLayout::build(&graph, &definition, 0, true, &mut remaining).unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn abi_calling_convention_maps_standard_platform_conventions() {
+        use nir::program::CallingConvention;
+        let t64 = nir::target::TargetData::new(64).ok();
+        let t32 = nir::target::TargetData::new(32).ok();
+        assert_eq!(abi_calling_convention(CallingConvention::C, t64), "");
+        assert_eq!(
+            abi_calling_convention(CallingConvention::Stdcall, t32),
+            "x86_stdcallcc "
+        );
+        assert_eq!(
+            abi_calling_convention(CallingConvention::Win64, t64),
+            "win64cc "
+        );
+        assert_eq!(
+            abi_calling_convention(CallingConvention::Sysv64, t64),
+            "x86_64_sysvcc "
+        );
+        assert_eq!(abi_calling_convention(CallingConvention::System, t64), "");
+        let expected_system_32 = if cfg!(target_os = "windows") {
+            "x86_stdcallcc "
+        } else {
+            ""
+        };
+        assert_eq!(
+            abi_calling_convention(CallingConvention::System, t32),
+            expected_system_32
+        );
     }
 }

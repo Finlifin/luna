@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) const FAILURE: &str = "inttoptr (i32 1 to ptr)";
+
 pub(super) const LIKELY: &str = "!prof !{!\"branch_weights\", i32 2000, i32 1}";
 
 pub(super) fn packet(payload: &Ty) -> Ty {
@@ -161,8 +162,8 @@ impl Emitter<'_> {
     }
 }
 
-/// A C caller owns neither a Flurry control continuation nor task-local state.
-/// Admit only representations whose C classification the host already knows.
+/// A foreign ABI caller owns neither a Flurry control continuation nor task-local state.
+/// Admit only representations whose foreign ABI classification the host already knows.
 pub(super) fn export_c_entries(
     graph: &iir::Package,
     attributes: &nir::program::DefinitionAttributes,
@@ -174,28 +175,28 @@ pub(super) fn export_c_entries(
         return Ok(());
     }
     // Only published entries need a symbol check. Backend symbols here are bare
-    // LLVM names; C export names (which may be Unicode) are emitted quoted.
+    // LLVM names; foreign export names (which may be Unicode) are emitted quoted.
     let mut names = None;
     for (index, instance) in graph.functions.iter().enumerate() {
         let function = &instance.function;
         *fuel = fuel
             .checked_sub(1)
-            .ok_or("C ABI admission budget exhausted")?;
-        if !attributes.has_c_abi(function.declaration, fuel)? {
+            .ok_or("foreign ABI admission budget exhausted")?;
+        let Some(convention) = attributes.calling_convention(function.declaration, fuel)? else {
             continue;
-        }
+        };
         if !checked {
-            return Err("C ABI boundaries require a cleanup-checked host graph".into());
+            return Err("foreign ABI boundaries require a cleanup-checked host graph".into());
         }
         let Term::Function { parameters, result } = &function.signature else {
-            return Err("C ABI requires a concrete function".into());
+            return Err("foreign ABI requires a concrete function".into());
         };
         let (row, result) = effects::row_result(result);
         if !row.is_empty()
             || !function.env_parameters.is_empty()
             || !instance.key.arguments.is_empty()
         {
-            return Err("C ABI requires a closed function with an empty effect row and no implicit environment".into());
+            return Err("foreign ABI requires a closed function with an empty effect row and no implicit environment".into());
         }
         let scalar = |term: &Term| {
             matches!(
@@ -220,7 +221,7 @@ pub(super) fn export_c_entries(
         };
         let never = *result == Term::Primitive(P::Never);
         if !scalar(result) && !matches!(result, Term::Primitive(P::Void | P::Never)) {
-            return Err("unsupported C ABI result representation".into());
+            return Err("unsupported foreign ABI result representation".into());
         }
         let result = return_repr(graph, result, true)?;
         let name = &function.name;
@@ -237,7 +238,7 @@ pub(super) fn export_c_entries(
                 .collect::<BTreeSet<_>>()
         });
         if !published.insert(name.clone()) {
-            return Err(format!("conflicting host C symbol {name}"));
+            return Err(format!("conflicting host foreign ABI symbol {name}"));
         }
         let extension = |ty: &Ty| match ty {
             Ty::Bool | Ty::Int(8 | 16, false) => "zeroext ",
@@ -248,7 +249,7 @@ pub(super) fn export_c_entries(
         let mut parameters_c = Vec::new();
         for (i, parameter) in parameters.iter().enumerate() {
             if parameter.sort != Sort::Runtime || !scalar(&parameter.ty) {
-                return Err("unsupported C ABI parameter representation".into());
+                return Err("unsupported foreign ABI parameter representation".into());
             }
             let ty = repr(graph, &parameter.ty, true)?;
             inputs.push(format!("{} %arg{i}", ty.llvm()));
@@ -268,8 +269,9 @@ pub(super) fn export_c_entries(
                 result.llvm()
             )
         };
+        let cc = super::abi_calling_convention(convention, graph.target);
         let symbol: String = name.bytes().map(|b| format!("\\{b:02X}")).collect();
-        module.push_str(&format!("define {}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %r = call {packet} @flurry_{index}({args})\n  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
+        module.push_str(&format!("define {cc}{}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %r = call {packet} @flurry_{index}({args})\n  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
     }
     Ok(())
 }

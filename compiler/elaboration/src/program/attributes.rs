@@ -6,21 +6,27 @@ mod demands;
 
 pub(super) use demands::{Demands, index_suppliers};
 
+mod abi;
 mod derivation;
 mod effects;
 mod layout;
 mod layouts;
+mod macros;
 mod merge;
 mod metadata;
 mod phases;
+mod stability;
 mod volatile;
 
+pub use abi::{AbiEntry, calling_conventions};
 pub use derivation::{DefaultStrategyMarker, default_strategy_markers};
 pub use effects::{EffectDirectPassing, direct_passing_effects};
 pub use layout::{PackedStructLayout, packed_structs};
+pub use macros::{MacroHandlerAttr, MacroKindTag, macro_handlers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
 pub use phases::{MemberPhase, member_phases};
+pub use stability::{StableSinceEntry, is_valid_semver, stable_since_versions};
 pub use volatile::{VolatileTarget, volatile_targets};
 
 /// An independently materialized attribute in HIR application order. Configuration
@@ -45,6 +51,18 @@ impl std::fmt::Display for EvaluatedAttribute {
             write!(f, " {key:?}")?;
         }
         write!(f, ") (value {}))", self.value)
+    }
+}
+
+fn merge_error(failure: MergeFailure) -> Error {
+    Error {
+        source: failure.source,
+        message: failure.message,
+        notes: Vec::new(),
+        needs_context: false,
+        needs_tactic: false,
+        retry_after_capability_progress: false,
+        incompatible_context: false,
     }
 }
 
@@ -103,51 +121,24 @@ impl Checker<'_, '_> {
             let direct_passing = direct_passing_effects(self.package, &selected, &mut budget)?;
             let _metadata = metadata_entries(self.package, &selected, &mut budget)?;
             let _defaults = default_strategy_markers(self.package, &selected, &mut budget)?;
+            let _abi = calling_conventions(self.package, &selected, &mut budget)?;
+            let _stability = stable_since_versions(self.package, &selected, &mut budget)?;
+            let _macros = macro_handlers(self.package, &selected, &mut budget)?;
             for target in &selected {
                 for (key, value) in target.iter() {
-                    if key == "__flurry_abi" {
-                        let runtime_function = matches!(target.target,
-                            hir::AttributeTarget::Definition(owner)
-                            if matches!(self.package.item(owner).map(|item| &item.kind),
-                                Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig))
-                                if !sig.modifiers.is_comptime && !sig.modifiers.is_quote));
-                        let c = matches!(&value.value.kind,
-                            K::Literal(n::Literal::Symbol(name)) if name == "c")
-                            || matches!(&value.value.kind, K::ComptimeValue(Term::Symbol(name)) if name.as_ref() == "c");
-                        if !runtime_function || value.value.ty != p(P::Symbol) || !c {
-                            return Err(MergeFailure {
-                                source: value.origin.source,
-                                message:
-                                    "the C ABI requires a runtime function and the .c convention"
-                                        .into(),
-                            });
-                        }
-                    }
-                    let domain = match key {
-                        "__flurry_macro_kind" => Some(P::Symbol),
-                        "__flurry_macro_variadic" => Some(P::Bool),
-                        "__flurry_macro_grammar" | "__flurry_stable_since" => Some(P::Str),
-                        _ => None,
-                    };
-                    if let Some(domain) = domain
-                        && value.value.ty != p(domain)
-                    {
-                        return Err(MergeFailure {
-                            source: value.origin.source,
-                            message: format!("{key} requires the {domain:?} domain"),
-                        });
-                    }
-                    if domain.is_none()
-                        && !inspect_only
+                    if !inspect_only
                         && !matches!(
                             key,
                             "__flurry_comptime_phase"
-                                | "packed"
                                 | "__flurry_direct_passing"
                                 | "__flurry_metadata"
                                 | "__flurry_packed_mode"
                                 | "__flurry_volatile"
                                 | "__flurry_abi"
+                                | "__flurry_stable_since"
+                                | "__flurry_macro_kind"
+                                | "__flurry_macro_variadic"
+                                | "__flurry_macro_grammar"
                         )
                     {
                         return Err(MergeFailure {
@@ -178,11 +169,7 @@ impl Checker<'_, '_> {
         if inspect_only && result.is_err() {
             return Ok(attributes);
         }
-        let (phases, packed, volatile, direct_passing, frozen) = result.map_err(|failure| {
-            let mut diagnostic = error(Span::default(), failure.message);
-            diagnostic.source = failure.source;
-            diagnostic
-        })?;
+        let (phases, packed, volatile, direct_passing, frozen) = result.map_err(merge_error)?;
         self.member_phases = phases
             .into_iter()
             .map(|entry| {

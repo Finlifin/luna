@@ -8461,23 +8461,25 @@ fn symbol_indexed_default_method_delegates_to_selected_member() {
 
 #[test]
 fn c_abi_attachment_requires_a_runtime_function_and_supported_convention() {
+    let attrs_src = include!("support/attrs_source.rs");
     for source in [
         "^attrs.abi(.c) struct Foreign {}",
         "^attrs.abi(.c) comptime fn identity(value:bool)->bool {value}",
-        "^attrs.abi(.unknown) fn identity(value:bool)->bool {value}",
     ] {
-        let source = format!(
-            "mod attrs {{{}}} {source}",
-            include!("support/attrs_source.rs")
-        );
-        rejected(&source, "C ABI requires a runtime function");
+        let source = format!("mod attrs {{{attrs_src}}} {source}");
+        rejected(&source, "__flurry_abi requires a runtime function");
     }
-    let effectful = format!(
-        "mod attrs {{{}}} effect read()->bool;
-        ^attrs.abi(.c) fn foreign()->#read bool {{read()#}}",
-        include!("support/attrs_source.rs")
+    let unknown = format!(
+        "mod attrs {{{attrs_src}}} ^attrs.abi(.unknown) fn identity(value:bool)->bool {{value}}"
     );
-    rejected(&effectful, "C ABI requires an empty effect row");
+    rejected(&unknown, "unsupported __flurry_abi calling convention");
+    for convention in [".c", ".system", ".stdcall", ".win64", ".sysv64"] {
+        let effectful = format!(
+            "mod attrs {{{attrs_src}}} effect read()->bool;
+            ^attrs.abi({convention}) fn foreign()->#read bool {{read()#}}"
+        );
+        rejected(&effectful, "requires an empty effect row");
+    }
 }
 
 #[test]

@@ -149,7 +149,9 @@ impl Checker<'_, '_> {
             .package
             .item(owner)
             .ok_or_else(|| error(span, "missing source function declaration"))?;
-        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &item.kind
+        else {
             return Err(error(span, "source declaration needs a function signature"));
         };
         self.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
@@ -163,13 +165,21 @@ impl Checker<'_, '_> {
             )
         {
             let declaration = declaration(self.package, &self.package_identities, owner);
-            if self
+            if let Some(convention) = self
                 .with_call_type_fuel(|checker, fuel| {
-                    checker.definition_attributes.has_c_abi(declaration, fuel)
+                    checker
+                        .definition_attributes
+                        .calling_convention(declaration, fuel)
                 })
                 .map_err(|failure| error(span, failure))?
             {
-                return Err(error(span, "C ABI requires an empty effect row"));
+                return Err(error(
+                    span,
+                    format!(
+                        "__flurry_abi (.{}) requires an empty effect row",
+                        convention.as_str()
+                    ),
+                ));
             }
         }
         for (index, (parameter, ty)) in sig.params.iter().zip(parameters).enumerate() {

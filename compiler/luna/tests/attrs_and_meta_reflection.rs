@@ -1,9 +1,10 @@
 //! End-to-end Stage E1 tests against the real built-in packages (`--sysroot library`):
 //! - default derivation selection, visibility, parametric matching, and orphan coherence
-//! - packed struct layout consumer (`.packed` / `attrs.layout.packed`), LLVM `<{...}>` / align 1,
+//! - packed struct layout consumer (`attrs.packed.byte` / `__flurry_packed_mode`), LLVM `<{...}>` / align 1,
 //!   native execution at O0 and O3 (including `Vec<Packed>`), and aligned field pointer rejection
 //! - `attrs.effects.direct_passing` ABI lowering, aliases/overrides, and invalid target checks
-//! - `attrs.metadata`, `target'attribute`, `Type.is_packed`, cycle rejection, and C ABI metadata
+//! - `attrs.metadata`, `target'attribute`, `Type.is_packed`, cycle rejection, and foreign ABI conventions
+//! - `attrs.stable_since` SemVer/target checks and `attrs.macros.*` target/combination checks
 //! - `meta.Object.{is_empty, has_key, keys, merge}` and `Symbol.{byte_length, byte}`
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
@@ -352,7 +353,7 @@ fn packed_structs_layout_llvm_and_native_execution_o0_and_o3() {
     let source = r#"
         use std.collections.Vec;
 
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct PackedPair {
             a: u8,
             b: u64,
@@ -366,20 +367,19 @@ fn packed_structs_layout_llvm_and_native_execution_o0_and_o3() {
 
         impl Copy for PackedPair {}
 
-        struct ConfigPacked {
-            .packed true,
-            tag: u8,
-            wide: u64,
-        }
-
-        ^attrs.layout.packed_layout(.enabled = false)
-        struct UnpackedOverride {
-            .packed true,
+        struct PlainPair {
             a: u8,
             b: u64,
         }
 
-        ^attrs.layout.packed
+        ^attrs.packed.byte
+        ^attrs.packed.bit
+        struct ByteOverBit {
+            tag: u8,
+            wide: u64,
+        }
+
+        ^attrs.packed.byte
         struct NestedPacked {
             lead: u8,
             inner: PackedPair,
@@ -393,7 +393,7 @@ fn packed_structs_layout_llvm_and_native_execution_o0_and_o3() {
             let deref_read = p.b.*;
             p.b.* = deref_read + 2;
             p.*.b = p.b.* + 3;
-            let c = ConfigPacked { tag: 5, wide: 99 };
+            let c = ByteOverBit { tag: 5, wide: 99 };
 
             var nested = NestedPacked {
                 lead: 3,
@@ -429,10 +429,10 @@ fn packed_structs_layout_llvm_and_native_execution_o0_and_o3() {
 
             let layout_ok = Type.size_of(PackedPair) == 9
                 and Type.align_of(PackedPair) == 1
-                and Type.size_of(ConfigPacked) == 9
-                and Type.align_of(ConfigPacked) == 1
-                and Type.size_of(UnpackedOverride) == 16
-                and Type.align_of(UnpackedOverride) == 8
+                and Type.size_of(ByteOverBit) == 9
+                and Type.align_of(ByteOverBit) == 1
+                and Type.size_of(PlainPair) == 16
+                and Type.align_of(PlainPair) == 8
                 and Type.size_of(NestedPacked) == 10
                 and Type.align_of(NestedPacked) == 1;
 
@@ -471,7 +471,7 @@ fn packed_structs_layout_llvm_and_native_execution_o0_and_o3() {
 #[test]
 fn packed_structs_reject_aligned_field_pointers_and_wrong_targets() {
     let header = r#"
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct PackedPair {
             a: u8,
             b: u64,
@@ -500,12 +500,36 @@ fn packed_structs_reject_aligned_field_pointers_and_wrong_targets() {
     }
 
     let wrong_target = r#"
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         fn bad() -> bool { true }
         fn run() -> bool { bad() }
     "#;
     let err = support::compile(wrong_target).unwrap_err();
-    assert!(err.contains("packed requires a struct definition"), "{err}");
+    assert!(
+        err.contains("__flurry_packed_mode requires a struct definition"),
+        "{err}"
+    );
+    assert!(
+        !err.starts_with("0..0:"),
+        "diagnostic lost source span: {err}"
+    );
+
+    for legacy in [
+        "^{ packed: true } struct LegacyBare { a: u8 }",
+        "struct LegacyConfig { .packed true, a: u8 }",
+    ] {
+        let err = support::compile(legacy).unwrap_err();
+        assert!(
+            err.contains(
+                "elaboration is not implemented for definition attribute or modifier `packed`"
+            ),
+            "{legacy}: {err}"
+        );
+        assert!(
+            !err.starts_with("0..0:"),
+            "diagnostic lost source span: {err}"
+        );
+    }
 }
 
 #[test]
@@ -604,7 +628,7 @@ fn direct_passing_effect_attribute_aliases_overrides_and_validation() {
 fn metadata_attribute_view_reflection_cycle_and_c_abi() {
     let source = r#"
         ^attrs.metadata({ version: 2, author: .luna })
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct Record {
             tag: u8,
             value: u64,
@@ -633,7 +657,7 @@ fn metadata_attribute_view_reflection_cycle_and_c_abi() {
                     and (m.get<Symbol>(.author) matches .luna?),
                 null => false,
             };
-            let direct_ok = direct_attrs.get<bool>(.packed) matches true?;
+            let direct_ok = direct_attrs.get<Symbol>(.__flurry_packed_mode) matches .byte?;
             let fn_meta_ok = fn_attrs.get<meta.Object>(.__flurry_metadata) match {
                 m? => m.get<Symbol>(.role) matches .entry?,
                 null => false,
@@ -751,9 +775,9 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
     let source = r#"
         ^attrs.metadata({ left: has_packed(middle), right: has_packed(middle) })
         struct First {}
-        ^attrs.metadata({ inherited: Last'attribute.has_key(.packed) })
+        ^attrs.metadata({ inherited: Last'attribute.has_key(.__flurry_packed_mode) })
         fn middle() -> bool { true }
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct Last { tag: u8 }
         comptime fn has_packed(f: fn() -> bool) -> bool {
             f'attribute.get<meta.Object>(.__flurry_metadata) match {
@@ -789,12 +813,12 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
 #[test]
 fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
     let source = r#"
-        ^attrs.metadata({ disabled: Target'attribute.get<bool>(.packed) matches false?, empty: Empty'attribute.is_empty() })
+        ^attrs.metadata({ overridden: Target'attribute.get<Symbol>(.__flurry_packed_mode) matches .byte?, empty: Empty'attribute.is_empty() })
         struct Reader {}
 
-        ^attrs.layout.packed_layout(.enabled = false)
+        ^attrs.packed.byte
+        ^attrs.packed.bit
         struct Target {
-            .packed true,
             tag: u8,
         }
 
@@ -804,8 +828,8 @@ fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
 
         comptime fn run() -> bool {
             Reader'attribute.get<meta.Object>(.__flurry_metadata) match {
-                data? => (data.get<bool>(.disabled) matches true?)
-                    and (Target'attribute.get<bool>(.packed) matches false?)
+                data? => (data.get<bool>(.overridden) matches true?)
+                    and (Target'attribute.get<Symbol>(.__flurry_packed_mode) matches .byte?)
                     and (data.get<bool>(.empty) matches true?)
                     and Empty'attribute.is_empty(),
                 null => false,
@@ -820,12 +844,12 @@ fn early_attribute_reads_still_require_the_final_consumer_to_accept_the_target()
     let source = r#"
         ^attrs.metadata(late'attribute)
         struct Reader {}
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         fn late() -> bool { true }
     "#;
     let failure = support::compile(source).unwrap_err();
     assert!(
-        failure.contains("packed requires a struct definition"),
+        failure.contains("__flurry_packed_mode requires a struct definition"),
         "{failure}"
     );
 
@@ -958,4 +982,214 @@ fn normal_form_instances_read_the_head_version_through_aliases() {
         fn run() -> bool { result }
     "#;
     assert_eq!(support::run(source), Value::Bool(true));
+}
+
+#[test]
+fn stable_since_and_macro_attributes_enforce_targets_semver_and_combinations() {
+    let valid_stable = r#"
+        ^attrs.stable_since("0.1.0-alpha.1+build.42")
+        struct AnchoredStruct { value: u32 }
+
+        ^attrs.stable_since("2.0.0")
+        enum AnchoredEnum { a, b(u32) }
+
+        ^attrs.stable_since("1.0.0")
+        newtype AnchoredNewtype = u32;
+
+        ^attrs.stable_since("1.2.3-rc.1")
+        pure comptime fn AnchoredNf<T> -> Type { T }
+
+        comptime fn check() -> bool {
+            (AnchoredStruct'attribute.get<str>(.__flurry_stable_since) matches "0.1.0-alpha.1+build.42"?)
+                and (AnchoredEnum'attribute.get<str>(.__flurry_stable_since) matches "2.0.0"?)
+                and (AnchoredNewtype'attribute.get<str>(.__flurry_stable_since) matches "1.0.0"?)
+                and (AnchoredNf<u32>'attribute.get<str>(.__flurry_stable_since) matches "1.2.3-rc.1"?)
+        }
+        const result = check();
+        fn run() -> bool { result }
+    "#;
+    assert_eq!(support::run(valid_stable), Value::Bool(true));
+
+    for bad_semver in [
+        "\"1.0\"",
+        "\"v1.0.0\"",
+        "\"01.0.0\"",
+        "\"1.0.0-01\"",
+        "\"1.0.0-\"",
+        "\"\"",
+    ] {
+        let src = format!("^attrs.stable_since({bad_semver}) struct S {{}}");
+        let err = support::compile(&src).unwrap_err();
+        assert!(err.contains("SemVer 2.0.0"), "{bad_semver}: {err}");
+        assert!(
+            !err.starts_with("0..0:"),
+            "zero span on {bad_semver}: {err}"
+        );
+    }
+
+    for bad_stable_target in [
+        "^attrs.stable_since(\"1.0.0\") fn ordinary() -> bool { true }",
+        "^attrs.stable_since(\"1.0.0\") comptime fn helper() -> bool { true }",
+        "^attrs.stable_since(\"1.0.0\") typealias Alias = u32;",
+        "^attrs.stable_since(\"1.0.0\") const C: u32 = 1;",
+        "struct Holder { ^attrs.stable_since(\"1.0.0\") field: u32 }",
+        "struct ConfigS { .__flurry_stable_since \"1.0.0\", field: u32 }",
+    ] {
+        let err = support::compile(bad_stable_target).unwrap_err();
+        assert!(
+            err.contains("__flurry_stable_since"),
+            "{bad_stable_target}: {err}"
+        );
+        assert!(
+            !err.starts_with("0..0:"),
+            "zero span on {bad_stable_target}: {err}"
+        );
+    }
+
+    let valid_macros = r#"
+        use meta.ast.TokenBuffer;
+
+        ^attrs.macros.macro3
+        comptime fn m3(tb: TokenBuffer) -> TokenBuffer { tb }
+
+        ^attrs.macros.macro4
+        comptime fn m4(src: str) -> TokenBuffer { TokenBuffer.empty() }
+
+        ^attrs.macros.ast(false)
+        comptime fn m1(tb: TokenBuffer) -> TokenBuffer { tb }
+
+        const VARIADIC_FLAG: bool = true;
+        ^attrs.macros.ast(VARIADIC_FLAG)
+        comptime fn m1_const(tb: TokenBuffer) -> TokenBuffer { tb }
+
+        ^attrs.macros.peg("Entry -> \"x\";")
+        comptime fn m2(tb: TokenBuffer) -> TokenBuffer { tb }
+
+        comptime fn check() -> bool {
+            (m3'attribute.get<Symbol>(.__flurry_macro_kind) matches .tokens?)
+                and (m4'attribute.get<Symbol>(.__flurry_macro_kind) matches .source?)
+                and (m1'attribute.get<Symbol>(.__flurry_macro_kind) matches .ast?)
+                and (m1'attribute.get<bool>(.__flurry_macro_variadic) matches false?)
+                and (m1_const'attribute.get<Symbol>(.__flurry_macro_kind) matches .ast?)
+                and (m1_const'attribute.get<bool>(.__flurry_macro_variadic) matches true?)
+                and (m2'attribute.get<Symbol>(.__flurry_macro_kind) matches .peg?)
+        }
+        const result = check();
+        fn run() -> bool { result }
+    "#;
+    assert_eq!(support::run(valid_macros), Value::Bool(true));
+
+    for bad_macro in [
+        "^attrs.macros.macro3 fn runtime_fn() -> bool { true }",
+        "^attrs.macros.macro3 struct NotMacro {}",
+        "^attrs.macros.macro3 pure comptime fn Nf<T> -> Type { T }",
+        "struct Holder { ^attrs.macros.macro3 field: u32 }",
+        "^{ __flurry_macro_kind: .unknown } comptime fn bad() -> bool { true }",
+        "^{ __flurry_macro_kind: .peg } comptime fn missing_grammar() -> bool { true }",
+        "^{ __flurry_macro_kind: .tokens, __flurry_macro_variadic: true } comptime fn bad_var() -> bool { true }",
+        "^{ __flurry_macro_kind: .ast, __flurry_macro_grammar: \"Entry -> \\\"x\\\";\" } comptime fn bad_gram() -> bool { true }",
+        "^{ __flurry_macro_variadic: true } comptime fn orphan_var() -> bool { true }",
+        "struct ConfigM { .__flurry_macro_kind .tokens, field: u32 }",
+    ] {
+        let err = support::compile(bad_macro).unwrap_err();
+        assert!(err.contains("__flurry_macro_"), "{bad_macro}: {err}");
+        assert!(!err.starts_with("0..0:"), "zero span on {bad_macro}: {err}");
+    }
+}
+
+#[test]
+fn foreign_abi_conventions_emit_llvm_cc_and_execute_natively() {
+    let source = r#"
+        ^attrs.abi(.c)
+        fn c_add(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+
+        ^attrs.abi(.system)
+        fn sys_add(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+
+        ^attrs.abi(.stdcall)
+        fn std_add(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+
+        ^attrs.abi(.win64)
+        fn win_add(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+
+        ^attrs.abi(.sysv64)
+        fn sysv_add(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+
+        fn run() -> bool {
+            c_add(1, 2) == 3
+                and sys_add(3, 4) == 7
+                and std_add(5, 6) == 11
+                and win_add(7, 8) == 15
+                and sysv_add(9, 10) == 19
+        }
+    "#;
+    let case = NativeCase::new(source);
+    let ir = case.emit_llvm().unwrap();
+    assert!(ir.contains("define i32 @\"\\63\\5F\\61\\64\\64\"("), "{ir}");
+    assert!(
+        ir.contains("define i32 @\"\\73\\79\\73\\5F\\61\\64\\64\"("),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("define x86_stdcallcc i32 @\"\\73\\74\\64\\5F\\61\\64\\64\"("),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("define win64cc i32 @\"\\77\\69\\6E\\5F\\61\\64\\64\"("),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("define x86_64_sysvcc i32 @\"\\73\\79\\73\\76\\5F\\61\\64\\64\"("),
+        "{ir}"
+    );
+
+    if cfg!(target_arch = "x86_64") {
+        let abi_case = NativeCase::new(
+            "
+            ^attrs.abi(.c)
+            fn abi_c(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+            ^attrs.abi(.system)
+            fn abi_sys(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+            ^attrs.abi(.win64)
+            fn abi_win(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+            ^attrs.abi(.sysv64)
+            fn abi_sysv(a: u32, b: u32) -> u32 { assumes a <= 1000 and b <= 1000; a + b }
+            fn run() -> bool {
+                abi_c(1, 2) == 3
+                    and abi_sys(3, 4) == 7
+                    and abi_win(5, 6) == 11
+                    and abi_sysv(7, 8) == 15
+            }
+            ",
+        );
+        let ir = abi_case
+            .emit_llvm()
+            .unwrap()
+            .replace("define i32 @main()", "define i32 @unused_main()");
+        let harness = format!(
+            "{ir}
+            define i32 @main() {{
+                %a = call i32 @abi_c(i32 10, i32 1)
+                %b = call i32 @abi_sys(i32 20, i32 2)
+                %c = call win64cc i32 @abi_win(i32 30, i32 3)
+                %d = call x86_64_sysvcc i32 @abi_sysv(i32 40, i32 4)
+                %s1 = add i32 %a, %b
+                %s2 = add i32 %c, %d
+                %sum = add i32 %s1, %s2
+                %status = sub i32 %sum, 110
+                ret i32 %status
+            }}"
+        );
+        for optimization in [
+            luna::host::OptimizationLevel::O0,
+            luna::host::OptimizationLevel::O3,
+        ] {
+            luna::host::Toolchain {
+                optimization,
+                ..Default::default()
+            }
+            .execute_test(&harness, std::time::Duration::from_secs(5))
+            .unwrap();
+        }
+    }
 }

@@ -537,7 +537,7 @@ fn error_qualified_sum_type_abi_layout_indexing_and_drop_work_natively() {
             tag: u8,
         }
 
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct Packed9Err {
             head: u64,
             tail: u8,
@@ -724,7 +724,7 @@ fn aggregate_enum_sum_type_abi_layout_const_vec_and_drop_work_natively() {
             huge(u128),
         }
 
-        ^attrs.layout.packed
+        ^attrs.packed.byte
         struct Packed9 {
             head: u64,
             tail: u8,

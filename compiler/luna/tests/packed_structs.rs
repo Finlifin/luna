@@ -444,6 +444,14 @@ fn packed_bit_rejects_non_pod_fields_drop_cycles_and_field_pointers() {
             "^attrs.packed.bit struct Gen where T { x: T } fn f(g: Gen<*u8>) -> bool { true }",
             &["not allowed"],
         ),
+        (
+            "^{ packed: true } struct LegacyBare { a: u8 }",
+            &["elaboration is not implemented for definition attribute or modifier `packed`"],
+        ),
+        (
+            "struct LegacyConfig { .packed true, a: u8 }",
+            &["elaboration is not implemented for definition attribute or modifier `packed`"],
+        ),
     ] {
         let err = support::compile(bad).unwrap_err();
         assert!(

@@ -53,11 +53,7 @@ pub fn volatile_targets(
 ) -> Result<Vec<VolatileTarget>, MergeFailure> {
     let mut output = Vec::new();
     for target in merged {
-        let location = target
-            .iter()
-            .next()
-            .map(|(_, value)| value.origin.source)
-            .unwrap_or(n::SourceRange { start: 0, end: 0 });
+        let location = target.source();
         budget.consume(1).map_err(|e| MergeFailure {
             source: location,
             message: e.to_string(),

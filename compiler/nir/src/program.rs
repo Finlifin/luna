@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 mod definition_attributes;
 
-pub use definition_attributes::DefinitionAttributes;
+pub use definition_attributes::{CallingConvention, DefinitionAttributes};
 
 mod formed_nominals;
 mod observed_types;

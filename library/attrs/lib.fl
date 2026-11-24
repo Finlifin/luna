@@ -17,10 +17,6 @@ pub mod packed {
     pub use .layout_impl.constructors.{bit, byte}
 }
 
-pub mod layout {
-    pub use .layout_impl.constructors.{packed, packed_layout}
-}
-
 pub mod effects {
     pub use .effects_impl.strategy.direct_passing;
 }

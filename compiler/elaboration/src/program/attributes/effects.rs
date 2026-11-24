@@ -7,6 +7,7 @@ pub struct EffectDirectPassing {
     pub enabled: bool,
     pub source: n::SourceRange,
 }
+
 impl std::fmt::Display for EffectDirectPassing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -25,11 +26,7 @@ pub fn direct_passing_effects(
 ) -> Result<Vec<EffectDirectPassing>, MergeFailure> {
     let mut output = Vec::new();
     for target in merged {
-        let location = target
-            .iter()
-            .next()
-            .map(|(_, value)| value.origin.source)
-            .unwrap_or(n::SourceRange { start: 0, end: 0 });
+        let location = target.source();
         budget.consume(1).map_err(|e| MergeFailure {
             source: location,
             message: e.to_string(),

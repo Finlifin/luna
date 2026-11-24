@@ -7,6 +7,7 @@ pub struct MemberPhase {
     pub phase: hir::ImplementationPhase,
     pub source: n::SourceRange,
 }
+
 impl std::fmt::Display for MemberPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -62,11 +63,7 @@ pub fn member_phases(
         }
     }
     for target in merged {
-        let location = target
-            .iter()
-            .next()
-            .map(|(_, value)| value.origin.source)
-            .unwrap_or(n::SourceRange { start: 0, end: 0 });
+        let location = target.source();
         budget
             .consume(1)
             .map_err(|e| failure(location, e.to_string()))?;

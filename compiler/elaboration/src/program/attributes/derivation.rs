@@ -28,20 +28,7 @@ pub fn default_strategy_markers(
 ) -> Result<Vec<DefaultStrategyMarker>, MergeFailure> {
     let mut output = Vec::new();
     for target in merged {
-        let location = target
-            .iter()
-            .next()
-            .map(|(_, value)| value.origin.source)
-            .unwrap_or_else(|| {
-                let owner = match target.target {
-                    hir::AttributeTarget::Definition(owner) => owner,
-                    hir::AttributeTarget::Member(id) => id.owner,
-                };
-                package
-                    .item(owner)
-                    .map(|item| source(item.span))
-                    .unwrap_or(n::SourceRange { start: 0, end: 0 })
-            });
+        let location = target.source();
         budget.consume(1).map_err(|e| MergeFailure {
             source: location,
             message: e.to_string(),

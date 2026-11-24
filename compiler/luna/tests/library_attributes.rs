@@ -81,8 +81,11 @@ fn repository_attribute_package_preserves_abi_through_nir() {
         String::from_utf8_lossy(&output.stderr)
     );
     let dump = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
-    assert!(dump.contains("(property \"__flurry_abi\")"), "{dump}");
+    assert_eq!(
+        dump.matches("(property \"__flurry_abi\")").count(),
+        1,
+        "{dump}"
+    );
     assert!(dump.contains("(symbol \"c\")"), "{dump}");
 
     let mut merged = arguments;
@@ -99,12 +102,8 @@ fn repository_attribute_package_preserves_abi_through_nir() {
         "{selected}"
     );
     assert_eq!(
-        selected.matches("(merged-attributes ").count(),
+        selected.matches("(key \"__flurry_abi\") (entry 0)").count(),
         1,
-        "{selected}"
-    );
-    assert!(
-        selected.contains("(key \"__flurry_abi\") (entry 0)"),
         "{selected}"
     );
 
@@ -343,9 +342,9 @@ fn repository_attribute_package_inspects_stable_since_without_claiming_abi_stabi
         String::from_utf8_lossy(&output.stderr)
     );
     let dump = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
-    assert!(
-        dump.contains("(property \"__flurry_stable_since\")"),
+    assert_eq!(
+        dump.matches("(property \"__flurry_stable_since\")").count(),
+        1,
         "{dump}"
     );
     assert!(dump.contains("(string \"1.0.0\")"), "{dump}");
@@ -364,12 +363,10 @@ fn repository_attribute_package_inspects_stable_since_without_claiming_abi_stabi
         "{selected}"
     );
     assert_eq!(
-        selected.matches("(merged-attributes ").count(),
+        selected
+            .matches("(key \"__flurry_stable_since\") (entry 0)")
+            .count(),
         1,
-        "{selected}"
-    );
-    assert!(
-        selected.contains("(key \"__flurry_stable_since\") (entry 0)"),
         "{selected}"
     );
 
@@ -445,7 +442,6 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
         String::from_utf8_lossy(&output.stderr)
     );
     let dump = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(dump.matches("(evaluated-attribute ").count(), 4, "{dump}");
     assert_eq!(
         dump.matches("(property \"__flurry_packed_mode\")").count(),
         4,
@@ -463,11 +459,6 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
         String::from_utf8_lossy(&selected.stderr)
     );
     let selected = String::from_utf8_lossy(&selected.stdout);
-    assert_eq!(
-        selected.matches("(merged-attributes ").count(),
-        3,
-        "{selected}"
-    );
     assert_eq!(
         selected.matches("(key \"__flurry_packed_mode\")").count(),
         3,
@@ -504,8 +495,12 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
             "struct definition",
         ),
         (
-            "^attrs.layout.packed ^attrs.packed.bit struct MixedPacked { a: u8 }",
-            "cannot combine legacy packed",
+            "^{ packed: true } struct LegacyPacked { a: u8 }",
+            "elaboration is not implemented for definition attribute or modifier `packed`",
+        ),
+        (
+            "struct ConfigLegacyPacked { .packed true, a: u8 }",
+            "elaboration is not implemented for definition attribute or modifier `packed`",
         ),
         (
             "^attrs.packed.bit ^attrs.mem.volatile struct BitVol { a: u8 }",
@@ -629,9 +624,88 @@ fn repository_attribute_package_validates_and_rejects_invalid_volatile_targets()
             "Bool",
         ),
         (
-            "^attrs.layout.packed ^attrs.mem.volatile struct PackedVol { value: u32 }",
+            "^attrs.packed.byte ^attrs.mem.volatile struct PackedVol { value: u32 }",
             "packed",
         ),
+    ] {
+        let rejected = run(invalid_source, "nir");
+        assert_eq!(
+            rejected.status.code(),
+            Some(1),
+            "expected failure for `{invalid_source}`"
+        );
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            stderr.contains(expected_diag),
+            "expected `{expected_diag}` in stderr for `{invalid_source}`:\n{stderr}"
+        );
+    }
+
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn repository_attribute_package_validates_abi_conventions_semver_and_macro_targets() {
+    let directory = std::env::temp_dir().join(format!(
+        "luna-library-attrs-validation-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let run = |file: &str, emit: &str| {
+        std::fs::write(directory.join("input.fl"), file).unwrap();
+        std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+            .current_dir(&directory)
+            .args([
+                "dump",
+                "input.fl",
+                "--sysroot",
+                library.to_str().unwrap(),
+                "--build-target",
+                "x86_64",
+                "linux",
+                "64",
+                "--emit",
+                emit,
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let valid = r#"
+        ^attrs.abi(.c) fn f_c(x: u32) -> u32 { x }
+        ^attrs.abi(.system) fn f_sys(x: u32) -> u32 { x }
+        ^attrs.abi(.stdcall) fn f_std(x: u32) -> u32 { x }
+        ^attrs.abi(.win64) fn f_win(x: u32) -> u32 { x }
+        ^attrs.abi(.sysv64) fn f_sysv(x: u32) -> u32 { x }
+        ^attrs.stable_since("1.2.3-rc.1+build.9") struct Anchored { x: u32 }
+        ^attrs.macros.macro3 comptime fn m3(tb: meta.ast.TokenBuffer) -> meta.ast.TokenBuffer { tb }
+    "#;
+    let nir_out = run(valid, "nir");
+    assert!(
+        nir_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nir_out.stderr)
+    );
+    let nir_dump = String::from_utf8_lossy(&nir_out.stdout);
+    for conv in ["c", "system", "stdcall", "win64", "sysv64"] {
+        assert!(
+            nir_dump.contains(&format!("(symbol \"{conv}\")")),
+            "missing `{conv}` in NIR:\n{nir_dump}"
+        );
+    }
+
+    for (invalid_source, expected_diag) in [
+        ("^attrs.abi(.bogus) fn bad() {}", "unsupported __flurry_abi"),
+        (
+            "^attrs.stable_since(\"1.0\") struct BadVer {}",
+            "SemVer 2.0.0",
+        ),
+        (
+            "^attrs.stable_since(\"1.0.0\") fn bad_fn() {}",
+            "__flurry_stable_since",
+        ),
+        ("^attrs.macros.macro3 fn bad_macro() {}", "__flurry_macro_"),
     ] {
         let rejected = run(invalid_source, "nir");
         assert_eq!(
