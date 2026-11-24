@@ -1827,12 +1827,6 @@ impl Emitter<'_> {
             return Ok(Value::unit());
         }
         if matches!(function.ty, Ty::Closure(_)) {
-            if !env_arguments.is_empty() {
-                return Err(
-                    "LLVM lowering does not support runtime environment arguments on closures"
-                        .into(),
-                );
-            }
             if self.checked && !self.has_checked_closure_call(expr.source)? {
                 // This invocation has no acquired resource frame within
                 // an otherwise checked parent. Keep the syntactic arm,
@@ -1847,16 +1841,14 @@ impl Emitter<'_> {
             self.check_closure_receiver(callee, arguments)?;
         }
         let (function, environment) = self.closure_callee(callee, function)?;
-        if !env_arguments.is_empty() && environment.is_some() {
-            return Err(
-                "LLVM lowering does not support runtime environment arguments on closures".into(),
-            );
-        }
         let function = self.specialize_closure_call(expr.source, function)?;
         let specialized_named = self.specialize_named_call(expr.source, function.clone())?;
         let ext_closure_envs = self.call_external_cleanup_env_slots(expr.source)?;
         if !ext_closure_envs.is_empty()
-            && (!env_arguments.is_empty() || specialized_named.text != function.text)
+            && (matches!(
+                callee.kind,
+                K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+            ) || specialized_named.text != function.text)
         {
             return Err(
                 "host mixed named and closure dispatch with external cleanup environments is not supported"
@@ -3432,6 +3424,21 @@ pub(super) fn emit_with_entry_mode(
                         format!("{} %env{i}", ty.llvm()),
                         (ty == Ty::Pointer).then_some(parameters.len() + i),
                     ));
+                }
+                e.bind(
+                    env.binding,
+                    &Value {
+                        ty,
+                        text: format!("%env{i}"),
+                    },
+                )?;
+            }
+        } else if let Some(node) = closure {
+            let closure_envs = graph.closure_runtime_env_parameters(&node.ty)?;
+            for (i, env) in closure_envs.iter().enumerate() {
+                let ty = repr(graph, &env.ty, checked)?;
+                if ty != Ty::Unit {
+                    raw_inputs.push((format!("{} %env{i}", ty.llvm()), None));
                 }
                 e.bind(
                     env.binding,

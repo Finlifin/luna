@@ -1206,7 +1206,7 @@ fn closures_keep_prior_storage_addresses_and_own_their_by_value_captures() {
     let output = expired.build();
     assert!(!output.status.success());
     let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(diagnostic.contains("escaping provenance"), "{diagnostic}");
+    assert!(diagnostic.contains("no longer in scope"), "{diagnostic}");
 }
 
 #[test]

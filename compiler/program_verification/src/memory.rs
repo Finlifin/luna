@@ -7237,13 +7237,7 @@ impl<'a> Infer<'a, '_> {
                 }
                 let code_inputs = borrow_code_inputs(&prepared);
                 let mut combined: Option<CallFootprint> = None;
-                if !env_arguments.is_empty() && !closures.is_empty() {
-                    return Err(
-                        "memory analysis does not yet support runtime environment arguments on closures"
-                            .into(),
-                    );
-                }
-                let mut next_capture_slot = parameters.len();
+                let mut next_capture_slot = parameters.len() + env_arguments.len();
                 for (id, closure, captures, prepared_captures, pointer_captures) in closures {
                     let K::Closure {
                         captures: definitions,
@@ -7252,11 +7246,23 @@ impl<'a> Infer<'a, '_> {
                     else {
                         unreachable!()
                     };
+                    let closure_envs = nir::program::implicit_runtime_env_parameters(
+                        &package.runtime_domains,
+                        &package.global_runtime_deliveries,
+                        std::slice::from_ref(&closure.ty),
+                        &[],
+                    )
+                    .map_err(|reason| reason.to_string())?;
+                    if closure_envs.len() != env_arguments.len() {
+                        return Err(
+                            "closure memory runtime environment argument count mismatch".into()
+                        );
+                    }
                     let transition_slots = closure_transition_slots_for(
                         package,
                         self.round.layout_cache.as_mut(),
                         definitions,
-                        parameters.len(),
+                        parameters.len() + closure_envs.len(),
                         true,
                         self.round.text_provenance,
                         self.fuel,
@@ -7292,7 +7298,7 @@ impl<'a> Infer<'a, '_> {
                     };
                     if !transition_slots.is_empty() {
                         let mut remap = BTreeMap::new();
-                        let mut original = parameters.len();
+                        let mut original = parameters.len() + closure_envs.len();
                         for capture in definitions {
                             if let Some(origins) = pointer_captures.get(&capture.binding) {
                                 self.step(depth)?;
@@ -7314,7 +7320,7 @@ impl<'a> Infer<'a, '_> {
                         }
                         let mut updated = BTreeMap::new();
                         let mut code_updates = BTreeMap::new();
-                        let mut original = parameters.len();
+                        let mut original = parameters.len() + closure_envs.len();
                         for capture in definitions {
                             if let Some(fields) = pointer_captures.get(&capture.binding) {
                                 let mut output = BTreeMap::new();
@@ -10416,11 +10422,18 @@ fn infer_closure_with_borrowed_in_round(
     else {
         return Err("closure memory requires a function signature".into());
     };
+    let closure_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        std::slice::from_ref(&definition.ty),
+        &[],
+    )
+    .map_err(|reason| reason.to_string())?;
     let capture_slots = closure_transition_slots_for(
         package,
         round.layout_cache.as_mut(),
         captures,
-        signature_parameters.len(),
+        signature_parameters.len() + closure_envs.len(),
         transition_code_captures,
         round.text_provenance,
         fuel,
@@ -10481,6 +10494,13 @@ fn infer_closure_with_borrowed_in_round(
         unreachable!()
     };
     let mut inputs_ty = parameters.clone();
+    for env in &closure_envs {
+        bindings.push(env.binding);
+        inputs_ty.push(nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: env.ty.clone(),
+        });
+    }
     let mut lifted = captures
         .iter()
         .filter_map(|capture| {
@@ -11274,6 +11294,37 @@ fn infer_closure_pass(
                 *binding,
                 Some(BTreeSet::from([PointerPlace {
                     root: PointerRoot::Parameter(index),
+                    input_fields: vec![],
+                    through: vec![],
+                    conditions: BTreeMap::new(),
+                    fields: vec![],
+                }])),
+            );
+        }
+    }
+    let closure_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        std::slice::from_ref(&closure_ty),
+        &[],
+    )
+    .map_err(|reason| reason.to_string())?;
+    for (offset, env) in closure_envs.iter().enumerate() {
+        if bindings.contains(&env.binding) {
+            continue;
+        }
+        let slot = parameters.len() + offset;
+        infer.step(0)?;
+        let env_ty = infer.ty(&env.ty)?;
+        infer.locals.insert(env.binding, env_ty.clone());
+        if !intrinsic_pointer_value(&env_ty) && !infer.local_pointer_value(&env_ty)? {
+            infer.install_input_pointer_fields(env.binding, slot, &env_ty)?;
+        }
+        if infer.local_pointer_value(&env_ty)? {
+            infer.environment.pointers.insert(
+                env.binding,
+                Some(BTreeSet::from([PointerPlace {
+                    root: PointerRoot::Parameter(slot),
                     input_fields: vec![],
                     through: vec![],
                     conditions: BTreeMap::new(),

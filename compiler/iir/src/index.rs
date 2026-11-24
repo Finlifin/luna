@@ -8,6 +8,8 @@ pub(super) struct CallableLinks<'a> {
     functions: HashMap<(DeclarationId, &'a [Term]), &'a Function>,
     templates: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     identities: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    runtime_domains: &'a std::collections::BTreeMap<RuntimeId, Term>,
+    global_runtime_deliveries: &'a std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
     methods: HashMap<
         crate::type_links::MethodKey<'a>,
         (
@@ -68,6 +70,26 @@ impl CallableLinks<'_> {
                 for (argument, parameter) in env_arguments.iter().zip(&target.env_parameters) {
                     if argument.ty != parameter.ty {
                         return Err("IIR call runtime environment argument type mismatch".into());
+                    }
+                }
+            } else if !comptime && matches!(callee.ty.callable_signature(), Term::Function { .. }) {
+                let expected = nir::program::implicit_runtime_env_parameters(
+                    self.runtime_domains,
+                    self.global_runtime_deliveries,
+                    std::slice::from_ref(&callee.ty),
+                    &[],
+                )
+                .map_err(|reason| reason.to_string())?;
+                if env_arguments.len() != expected.len() {
+                    return Err(
+                        "IIR indirect call runtime environment argument count mismatch".into(),
+                    );
+                }
+                for (argument, parameter) in env_arguments.iter().zip(&expected) {
+                    if argument.ty != parameter.ty {
+                        return Err(
+                            "IIR indirect call runtime environment argument type mismatch".into(),
+                        );
                     }
                 }
             } else if !env_arguments.is_empty() {
@@ -455,6 +477,8 @@ impl Package {
             functions,
             templates: template_targets,
             identities,
+            runtime_domains: &self.runtime_domains,
+            global_runtime_deliveries: &self.global_runtime_deliveries,
             methods,
         })
     }

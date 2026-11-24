@@ -249,6 +249,7 @@ fn collect_pattern_bound_locals(
 }
 
 fn collect_closure_bound_locals(
+    graph: &iir::Package,
     node: &Expr,
     fuel: &mut usize,
 ) -> Result<BTreeSet<LocalId>, String> {
@@ -266,6 +267,9 @@ fn collect_closure_bound_locals(
     }
     for parameter in parameters {
         bound.insert(*parameter);
+    }
+    for env in graph.closure_runtime_env_parameters(&node.ty)? {
+        bound.insert(env.binding);
     }
     nir::visit::expression_in_closure_environment(body, fuel, |expr, fuel| {
         match &expr.kind {
@@ -460,7 +464,7 @@ pub(super) fn scope_external_cleanup_env_slots(
             continue;
         }
         let cand_node = definition(graph, schedule, candidate, &candidate.context, fuel)?;
-        let bound = collect_closure_bound_locals(cand_node, fuel)?;
+        let bound = collect_closure_bound_locals(graph, cand_node, fuel)?;
         for desc in &schedule.functions {
             *fuel = fuel
                 .checked_sub(1 + desc.context.len())
@@ -485,7 +489,7 @@ pub(super) fn scope_external_cleanup_env_slots(
                     if matches!(key, ContextKey::Closure { .. }) {
                         let prefix = &desc.context[..candidate.context.len() + offset + 1];
                         let nested_node = definition(graph, schedule, desc, prefix, fuel)?;
-                        combined.extend(collect_closure_bound_locals(nested_node, fuel)?);
+                        combined.extend(collect_closure_bound_locals(graph, nested_node, fuel)?);
                     }
                 }
                 Some(combined)

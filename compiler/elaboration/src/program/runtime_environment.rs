@@ -163,7 +163,40 @@ impl Checker<'_, '_> {
                     .collect();
                 self.owner_environment_inputs(contract_owner, &args, span)
             }
-            _ => Ok(vec![]),
+            _ => {
+                if !callee.ty.is_comptime_callable()
+                    && matches!(callee.ty.callable_signature(), Term::Function { .. })
+                    && self.runtime_domains.len() != self.global_runtime_deliveries.len()
+                {
+                    let dependencies = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                        nir::type_computations::runtime_dependencies_bounded(
+                            std::slice::from_ref(&callee.ty),
+                            fuel,
+                        )
+                    })
+                    .map_err(|reason| error(span, reason.to_string()))?;
+                    // Materialization delivers operational closure envs once all
+                    // runtime identities in the callee type are concrete.
+                    if dependencies.may_change || dependencies.ids.is_empty() {
+                        return Ok(vec![]);
+                    }
+                    let implicit = n::implicit_runtime_env_ids(
+                        &self.runtime_domains,
+                        &self.global_runtime_deliveries,
+                        dependencies.ids,
+                        std::iter::empty(),
+                    )
+                    .map_err(|reason| error(span, reason))?;
+                    let mut env_args = Vec::with_capacity(implicit.len());
+                    for id in implicit {
+                        let term = Term::Runtime(id);
+                        let domain = self.runtime_root_payload(&term, span)?;
+                        env_args.push((term, domain));
+                    }
+                    return Ok(env_args);
+                }
+                Ok(vec![])
+            }
         }
     }
 }
@@ -369,11 +402,30 @@ impl Checker<'_, '_> {
         let mut operands: Vec<n::Expr> = Vec::new();
         let mut bind =
             !written_types.is_empty() || receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
+        let mut deferred_rigid_closure_env = false;
+        let in_runtime_closure = self.captures.last().is_some_and(|frame| !frame.comptime);
+        let mut deferred_rigid_slots = BTreeSet::new();
         for (identity, mut domain) in inputs {
             let (root, fields) = self.runtime_field_path(&identity, site.span)?;
+            let is_enclosing_rigid = in_runtime_closure
+                && matches!(
+                    root,
+                    Term::Rigid {
+                        declaration,
+                        sort: Sort::Runtime,
+                    } if self
+                        .active_env_parameters
+                        .get(declaration)
+                        .is_some_and(|(binding, _)| self.captures.last().unwrap().outer.contains(binding))
+                );
+            if is_enclosing_rigid {
+                deferred_rigid_closure_env = true;
+            }
             if !fields.is_empty() {
                 domain = self.runtime_root_payload(root, site.span)?;
-                bind = true;
+                if !is_enclosing_rigid {
+                    bind = true;
+                }
             }
             let identity =
                 declaration_inputs::copy_input_domain(root, &mut self.required_steps, site.span)?;
@@ -395,15 +447,23 @@ impl Checker<'_, '_> {
             } else {
                 self.deliver_runtime_dependency(&identity, &domain, site.span)?
             };
-            bind |= match self.runtime_place(&value, site.span)? {
-                Some(runtime_origins::Place::Local(LocalRuntimeOrigin::LocalValue {
-                    binding,
-                    ..
-                })) => !self.immutable.contains(&binding),
-                Some(_) => false,
-                None => true,
-            };
+            if !is_enclosing_rigid {
+                bind |= match self.runtime_place(&value, site.span)? {
+                    Some(runtime_origins::Place::Local(LocalRuntimeOrigin::LocalValue {
+                        binding,
+                        ..
+                    })) => {
+                        binding.owner != n::IMPLICIT_RUNTIME_ENV_OWNER
+                            && !self.immutable.contains(&binding)
+                    }
+                    Some(_) => false,
+                    None => true,
+                };
+            }
             let slot = operands.len();
+            if is_enclosing_rigid {
+                deferred_rigid_slots.insert(slot);
+            }
             slots.push(EnvironmentSlot {
                 operand: slot,
                 fields,
@@ -460,7 +520,7 @@ impl Checker<'_, '_> {
                     .map(InputStep::Operand),
             );
 
-            if !producers.is_empty() {
+            if !producers.is_empty() && !deferred_rigid_closure_env {
                 let result_ids = self.result_dependencies(&call.ty, site.span)?;
                 producers.retain(|_, id| result_ids.contains(id));
             }
@@ -475,6 +535,7 @@ impl Checker<'_, '_> {
                 // The enclosing source argument establishes this binding at
                 // its own position, after explicit quote suppliers have run.
                 if defaults.contains_key(&slot)
+                    || deferred_rigid_slots.contains(&slot)
                     || matches!(&operands[slot].kind, K::Local(binding) if argument_bindings.contains(binding))
                 {
                     continue;
@@ -503,7 +564,9 @@ impl Checker<'_, '_> {
             let base = &operands[slot.operand];
             constants::charge_copy(base, &mut self.required_steps, site.span)?;
             let value = self.apply_runtime_fields(base.clone(), slot.fields, site.span)?;
-            env_arguments.push(value);
+            if !deferred_rigid_closure_env {
+                env_arguments.push(value);
+            }
         }
         Ok(CallEnvironment {
             before_arguments: Acquisition(statements),

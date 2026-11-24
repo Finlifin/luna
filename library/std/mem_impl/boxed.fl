@@ -144,12 +144,6 @@ where
     quote alloc: lift *A,
 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        let addr = self.raw_addr.*;
-        var val = unsafe { builtin.mem.raw_read<T>(addr) }
-        let res = val.ref.as(Debug).write_debug(output);
-        unsafe {
-            builtin.mem.raw_write<T>(addr, val);
-        }
-        res
+        self.with_ref(|inner| inner.as(Debug).write_debug(output))
     }
 }

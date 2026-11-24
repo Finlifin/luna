@@ -1858,6 +1858,7 @@ fn bound_callable_copy(
 #[derive(Clone)]
 struct ClosureArguments {
     pointers: MemoryTargets,
+    env_pointers: MemoryTargets,
     callables: BTreeMap<usize, Callable>,
     fields: BTreeMap<usize, BTreeMap<Vec<usize>, Callable>>,
     domains: BTreeMap<usize, EnumDomains>,
@@ -6216,12 +6217,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         expr: &Expr,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
-        self.call_temporary_with_origins(expr, callee, arguments, parameter_bindings, flow, depth)
-            .map(|(pointer, _, _)| pointer)
+        self.call_temporary_with_origins(
+            expr,
+            callee,
+            arguments,
+            env_arguments,
+            parameter_bindings,
+            flow,
+            depth,
+        )
+        .map(|(pointer, _, _)| pointer)
     }
 
     fn call_temporary_with_origins(
@@ -6229,6 +6239,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         expr: &Expr,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
@@ -6244,6 +6255,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         &place,
                         &callable,
                         arguments,
+                        env_arguments,
                         flow,
                         expr.source,
                         depth + 1,
@@ -6255,6 +6267,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         K::Function(_) | K::FunctionInstance { .. }
                     )
                 {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            expr.source,
+                            "move analysis does not yet support runtime environment arguments on indirect named calls",
+                        ));
+                    }
                     bound_callable_copy(&callable, &mut self.fuel, callee.source, 0)?;
                     self.observe_named_callee(callee, flow)?;
                     if !callable.alternatives.is_empty() {
@@ -6337,6 +6355,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut result_origins = BTreeMap::new();
         let mut result_guards = BTreeMap::new();
         if !callable.alternatives.is_empty() {
+            if !env_arguments.is_empty() {
+                return Err(error(
+                    expr.source,
+                    "move analysis does not yet support runtime environment arguments on indirect named calls",
+                ));
+            }
             (pointer_result, result_origins, result_guards) = self
                 .call_named_candidates_with_origins(
                     expr,
@@ -6354,11 +6378,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 },
                 &callable,
                 arguments,
+                env_arguments,
                 flow,
                 expr.source,
                 depth + 1,
             )?;
         } else {
+            if !env_arguments.is_empty() {
+                return Err(error(
+                    expr.source,
+                    "move analysis does not yet support runtime environment arguments on indirect named calls",
+                ));
+            }
             let mut target = callable.definition;
             target.source = callee.source;
             let declaration = match target.kind {
@@ -6454,6 +6485,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         binding: PlaceId,
         callable: &Callable,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         flow: &mut Flow,
         source: SourceRange,
         depth: usize,
@@ -6465,6 +6497,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             },
             callable,
             arguments,
+            env_arguments,
             flow,
             source,
             depth,
@@ -6477,6 +6510,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         binding: &Place,
         callable: &Callable,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         flow: &mut Flow,
         source: SourceRange,
         depth: usize,
@@ -6542,12 +6576,28 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
         }
-        let Some(prepared) =
-            self.prepare_closure_arguments(callable, arguments, flow, source, depth)?
+        for env_arg in env_arguments {
+            memory |= self.pointer_representation(&env_arg.ty, source)?.is_some();
+            if self.package.is_some() && self.storage_inputs_are_closed(&env_arg.ty, source)? {
+                memory |= !self.pointer_input_layout(&env_arg.ty, source)?.is_empty();
+            }
+        }
+        let Some(prepared) = self.prepare_closure_arguments(
+            callable,
+            arguments,
+            env_arguments,
+            flow,
+            source,
+            depth,
+        )?
         else {
             return Ok((None, BTreeMap::new(), BTreeMap::new()));
         };
-        memory |= prepared.pointers.values().any(|fields| !fields.is_empty());
+        memory |= prepared.pointers.values().any(|fields| !fields.is_empty())
+            || prepared
+                .env_pointers
+                .values()
+                .any(|fields| !fields.is_empty());
         // Arguments can mutate state. Do not resurrect a callable moved while
         // evaluating an argument, or confuse a replacement with this receiver.
         if flow.callable_at(binding) != Some(callable) {
@@ -6584,8 +6634,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                 }
                 let mut pointer_inputs = prepared.pointers.clone();
+                for (&offset, fields) in &prepared.env_pointers {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(fields.len().saturating_add(1))
+                        .ok_or_else(|| {
+                            error(source, "closure env pointer input budget exhausted")
+                        })?;
+                    for (path, targets) in fields {
+                        self.fuel = self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                            error(source, "closure env input path budget exhausted")
+                        })?;
+                        self.pointer_work(targets, source)?;
+                    }
+                    pointer_inputs.insert(parameters.len() + offset, fields.clone());
+                }
                 if let K::Closure { captures, .. } = &candidate.definition.kind {
-                    let mut slot = parameters.len();
+                    let mut slot = parameters.len() + env_arguments.len();
                     for (index, capture) in captures.iter().enumerate() {
                         let domains = copy_enum_domains(
                             candidate
@@ -6871,6 +6936,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         &mut self,
         callable: &Callable,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         flow: &mut Flow,
         source: SourceRange,
         depth: usize,
@@ -6904,9 +6970,30 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // Later arguments may replace the source local without changing the
         // already prepared callable value delivered to this parameter.
         let mut argument_pointers = BTreeMap::new();
+        let mut env_pointers = BTreeMap::new();
         let mut argument_callables = BTreeMap::new();
         let mut argument_fields = BTreeMap::new();
         let mut argument_domains = BTreeMap::new();
+        let expected_envs = if let Some(package) = self.package {
+            let globals = self
+                .global_runtime_deliveries
+                .unwrap_or(&package.global_runtime_deliveries);
+            nir::program::implicit_runtime_env_parameters(
+                &package.runtime_domains,
+                globals,
+                std::slice::from_ref(&definition.ty),
+                &[],
+            )
+            .map_err(|reason| error(source, reason))?
+        } else {
+            vec![]
+        };
+        if self.package.is_some() && expected_envs.len() != env_arguments.len() {
+            return Err(error(
+                source,
+                "closure runtime environment argument count mismatch",
+            ));
+        }
         self.pending_frame(source, |this| {
             for argument in arguments {
                 let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
@@ -6954,6 +7041,39 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     copy_enum_domains(&flow.value_variants, &mut this.fuel, source)?,
                 );
             }
+            for (offset, env_arg) in env_arguments.iter().enumerate() {
+                if !flow.live {
+                    break;
+                }
+                if let Some(expected) = expected_envs.get(offset)
+                    && expected.ty != env_arg.ty
+                {
+                    return Err(error(
+                        source,
+                        "closure runtime environment argument type mismatch",
+                    ));
+                }
+                let origins = this.evaluate_value_origins(env_arg, flow, depth + 1)?;
+                if !flow.live {
+                    break;
+                }
+                let mut symbolic =
+                    this.memory_input_targets(&env_arg.ty, &origins, &flow.value_variants, source)?;
+                let layout = if symbolic.values().any(|targets| !targets.is_empty()) {
+                    this.pointer_input_layout(&env_arg.ty, source)?
+                } else {
+                    vec![]
+                };
+                for leaf in &layout {
+                    if let Some(actual) = symbolic.get_mut(&leaf.input_fields) {
+                        if !actual.is_empty() {
+                            *actual =
+                                this.guarded_request_targets(env_arg, leaf, actual, flow, true)?;
+                        }
+                    }
+                }
+                env_pointers.insert(offset, symbolic);
+            }
             Ok(())
         })?;
         if !flow.live {
@@ -6961,6 +7081,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(Some(ClosureArguments {
             pointers: argument_pointers,
+            env_pointers,
             callables: argument_callables,
             fields: argument_fields,
             domains: argument_domains,
@@ -7016,6 +7137,71 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }]),
         );
         flow.memory_exposed = true;
+        Ok(())
+    }
+
+    pub(super) fn declare_closure_env_parameter(
+        &mut self,
+        inner: &mut Flow,
+        slot: usize,
+        env: &nir::program::RuntimeEnvParameter,
+        borrowed_roots: &mut BTreeMap<PlaceId, BorrowedRoot>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let id = root(env.binding);
+        if !inner.types.contains_key(&id) {
+            let shape = (self.shape)(&env.ty).map_err(|reason| error(source, reason))?;
+            inner
+                .state
+                .declare(id, &shape, true, &mut self.fuel)
+                .map_err(|reason| {
+                    error(source, format!("closure runtime env shape: {reason:?}"))
+                })?;
+            inner.types.insert(id, env.ty.clone());
+            inner.stable_handler_slots.insert(id);
+        }
+        if let Some((_, subject)) = self.pointer_representation(&env.ty, source)? {
+            self.declare_closure_borrow(inner, slot, env.binding, &subject, source)?;
+            borrowed_roots.insert(
+                PlaceId {
+                    owner: u64::MAX - 1,
+                    local: u32::try_from(slot)
+                        .map_err(|_| error(source, "too many closure pointer parameters"))?,
+                },
+                BorrowedRoot::Parameter {
+                    parameter: slot,
+                    input_fields: vec![],
+                    pointee: subject,
+                },
+            );
+        } else if self.package.is_some() && self.storage_inputs_are_closed(&env.ty, source)? {
+            let layout = self.pointer_input_layout(&env.ty, source)?;
+            let premises = layout
+                .into_iter()
+                .filter(|leaf| !leaf.input_fields.is_empty())
+                .map(|leaf| (leaf.input_fields, BTreeSet::new()))
+                .collect();
+            let fields =
+                self.declare_input_field_borrows(inner, env.binding, &env.ty, &premises, source)?;
+            for (path, targets) in fields {
+                for target in targets {
+                    let pointee = inner
+                        .types
+                        .get(&target.root)
+                        .ok_or_else(|| error(source, "closure env field type missing"))?;
+                    super::memory::bound_type(pointee, &mut self.fuel)
+                        .map_err(|reason| error(source, reason))?;
+                    borrowed_roots.insert(
+                        target.root,
+                        BorrowedRoot::Parameter {
+                            parameter: slot,
+                            input_fields: path.clone(),
+                            pointee: pointee.clone(),
+                        },
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -7244,6 +7430,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let outward_effects = matches!(closure_result.as_ref(), Term::Computation {effects,..} if !effects.is_empty());
         let ClosureArguments {
             pointers: argument_pointers,
+            env_pointers,
             callables: mut argument_callables,
             fields: mut argument_fields,
             domains: mut argument_domains,
@@ -7505,12 +7692,98 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )?;
             }
         }
+        let closure_envs = if let Some(package) = self.package {
+            let globals = self
+                .global_runtime_deliveries
+                .unwrap_or(&package.global_runtime_deliveries);
+            nir::program::implicit_runtime_env_parameters(
+                &package.runtime_domains,
+                globals,
+                std::slice::from_ref(&definition.ty),
+                &[],
+            )
+            .map_err(|reason| error(source, reason))?
+        } else {
+            vec![]
+        };
+        let closure_env_slot_base = parameters.len().saturating_add(captures.len());
+        for (offset, env) in closure_envs.iter().enumerate() {
+            let slot = closure_env_slot_base.saturating_add(offset);
+            let id = root(env.binding);
+            if !inner.types.contains_key(&id) {
+                let shape = (self.shape)(&env.ty).map_err(|reason| error(source, reason))?;
+                inner
+                    .state
+                    .declare(id, &shape, true, &mut self.fuel)
+                    .map_err(|reason| {
+                        error(source, format!("closure runtime env shape: {reason:?}"))
+                    })?;
+                inner.types.insert(id, env.ty.clone());
+                inner.stable_handler_slots.insert(id);
+            }
+            if let Some((_, subject)) = self.pointer_representation(&env.ty, source)? {
+                self.declare_closure_borrow(&mut inner, slot, env.binding, &subject, source)?;
+                borrowed_roots.insert(
+                    PlaceId {
+                        owner: u64::MAX - 1,
+                        local: u32::try_from(slot)
+                            .map_err(|_| error(source, "too many closure pointer parameters"))?,
+                    },
+                    BorrowedRoot::Parameter {
+                        parameter: slot,
+                        input_fields: vec![],
+                        pointee: subject.clone(),
+                    },
+                );
+                if outward_effects && !self.effect_memory_inputs.is_empty() {
+                    let targets = env_pointers
+                        .get(&offset)
+                        .and_then(|fields| fields.get(&vec![]))
+                        .ok_or_else(|| {
+                            error(
+                                source,
+                                "closure runtime env pointer provenance is not established",
+                            )
+                        })?;
+                    self.authorize_effect_borrow(flow, targets, &mut inner, env.binding, source)?;
+                }
+            }
+            if let Some(actual) = env_pointers.get(&offset) {
+                if !actual.is_empty() {
+                    let fields = self.declare_input_field_borrows(
+                        &mut inner,
+                        env.binding,
+                        &env.ty,
+                        actual,
+                        source,
+                    )?;
+                    for (path, targets) in fields {
+                        for target in targets {
+                            let pointee = inner.types.get(&target.root).ok_or_else(|| {
+                                error(source, "closure env borrowed field type missing")
+                            })?;
+                            super::memory::bound_type(pointee, &mut self.fuel)
+                                .map_err(|e| error(source, e))?;
+                            borrowed_roots.insert(
+                                target.root,
+                                BorrowedRoot::Parameter {
+                                    parameter: slot,
+                                    input_fields: path.clone(),
+                                    pointee: pointee.clone(),
+                                },
+                            );
+                        }
+                    }
+                    cleanup_targets.insert(slot, actual.clone());
+                }
+            }
+        }
         let remapped_env_roots =
             self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
         let effect_inputs = self.effect_inputs_for(&callable.definition.ty, source)?;
         let memory_inputs = self.copy_effect_memory_inputs(source)?;
         self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
-        let env_slot_base = parameters.len().saturating_add(captures.len());
+        let env_slot_base = closure_env_slot_base.saturating_add(closure_envs.len());
         for (offset, (dest_root, orig_root, target_ty)) in
             remapped_env_roots.into_iter().enumerate()
         {
@@ -12387,6 +12660,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let targets = self
                 .map_memory_target(&access.target, targets, flow, source)?
                 .ok_or_else(|| error(source, "memory call target is not established"))?;
+            if access.write {
+                self.check_const_global_writes(&targets, source)?;
+            }
             for target in targets {
                 let guarded = access
                     .target
@@ -14021,17 +14297,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callee.kind,
             K::Local(_) | K::Function(_) | K::FunctionInstance { .. }
         ) {
-            if !env_arguments.is_empty() {
-                return Err(error(
-                    expr.source,
-                    "move analysis does not yet support runtime environment call arguments",
-                ));
-            }
             return self
                 .call_temporary_with_origins(
                     expr,
                     callee,
                     arguments,
+                    env_arguments,
                     parameter_bindings,
                     flow,
                     depth + 1,
@@ -14039,14 +14310,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map(|(_, origins, guards)| (origins, guards));
         }
         if matches!(callee.kind, K::Local(_)) {
-            if !env_arguments.is_empty() {
-                return Err(error(
-                    expr.source,
-                    "move analysis does not yet support runtime environment call arguments",
-                ));
-            }
             // Resolve identity before arguments while retaining the observed code slot.
             if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                if !env_arguments.is_empty() {
+                    return Err(error(
+                        expr.source,
+                        "move analysis does not yet support runtime environment call arguments",
+                    ));
+                }
                 self.observe_named_callee(callee, flow)?;
                 let origins = self.evaluate_value_origins(&resolved, flow, depth + 1)?;
                 return Ok((origins, std::mem::take(&mut flow.value_pointer_guards)));
@@ -14068,11 +14339,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         },
                         &callable,
                         arguments,
+                        env_arguments,
                         flow,
                         expr.source,
                         depth + 1,
                     )
                     .map(|(_, origins, guards)| (origins, guards));
+            }
+            if !env_arguments.is_empty() {
+                return Err(error(
+                    expr.source,
+                    "move analysis does not yet support runtime environment call arguments",
+                ));
             }
             let callable = flow
                 .callables
@@ -14406,16 +14684,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             | K::FunctionInstance { .. }
                             | K::TraitMethod { .. }
                     ) {
-                        if !env_arguments.is_empty() {
-                            return Err(error(
-                                expr.source,
-                                "move analysis does not yet support runtime environment call arguments",
-                            ));
-                        }
                         return self.call_temporary(
                             expr,
                             callee,
                             arguments,
+                            env_arguments,
                             parameter_bindings,
                             flow,
                             depth + 1,
@@ -14454,16 +14727,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .filter(|c| matches!(c.definition.kind, K::Closure { .. }))
                             .cloned()
                     {
-                        if !env_arguments.is_empty() {
-                            return Err(error(
-                                expr.source,
-                                "move analysis does not yet support runtime environment call arguments",
-                            ));
-                        }
                         return self.call_closure(
                             root(binding),
                             &callable,
                             arguments,
+                            env_arguments,
                             flow,
                             expr.source,
                             depth + 1,

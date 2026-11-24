@@ -135,6 +135,8 @@ impl Checker<'_, '_> {
             const_regions: ClosureConstRegions::default(),
             site: local(expr.hir_id),
             addresses: BTreeMap::new(),
+            operational_runtime_envs: BTreeMap::new(),
+            operational_rigid_envs: BTreeMap::new(),
             comptime,
             outer,
             values: Vec::new(),
@@ -196,7 +198,7 @@ impl Checker<'_, '_> {
             self.control.result = result_type.clone();
             self.control.return_observations = Some(ReturnObservations::Infer(Vec::new()));
             let result_context = partial.and_then(|context| context.result_context.as_deref());
-            let (body, result) =
+            let (mut body, result) =
                 self.stage_closure_body(body, result_type, result_context, expr.span)?;
             // Definition-only selectors and computed values are formal inputs
             // of the enclosing behavior function. A lambda must acquire the
@@ -223,7 +225,6 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let captures = self.captures.last().unwrap().values.clone();
             let signature = Term::Function {
                 parameters: parameter_types,
                 result: Box::new(
@@ -233,14 +234,108 @@ impl Checker<'_, '_> {
                 ),
             }
             .with_comptime_phase(comptime);
-            let ty = if captures.is_empty() {
-                signature
-            } else {
-                Term::Closure {
-                    environment: captures.iter().map(|capture| capture.ty.clone()).collect(),
-                    signature: Box::new(signature),
+            let build_closure_ty = |captures: &[n::Capture], signature: &Term| {
+                if captures.is_empty() {
+                    signature.clone()
+                } else {
+                    Term::Closure {
+                        environment: captures.iter().map(|capture| capture.ty.clone()).collect(),
+                        signature: Box::new(signature.clone()),
+                    }
                 }
             };
+            let mut captures = self.captures.last().unwrap().values.clone();
+            let mut ty = build_closure_ty(&captures, &signature);
+            // Any operational runtime dependency already carried by the closure
+            // type stays out of semantic captures and is delivered operationally
+            // at call sites. Dependencies absent from the closure type cannot
+            // be known to callers and must be promoted to semantic captures.
+            if !comptime {
+                let operational_runtime =
+                    std::mem::take(&mut self.captures.last_mut().unwrap().operational_runtime_envs);
+                let operational_rigid =
+                    std::mem::take(&mut self.captures.last_mut().unwrap().operational_rigid_envs);
+                if !operational_runtime.is_empty() || !operational_rigid.is_empty() {
+                    let runtime_deps = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                        nir::type_computations::runtime_dependencies_bounded(
+                            std::slice::from_ref(&ty),
+                            fuel,
+                        )
+                    })
+                    .map_err(|reason| error(expr.span, reason.to_string()))?;
+                    let mut rigid_deps = BTreeSet::new();
+                    nominal_fields::metered(&mut self.required_steps, |fuel| {
+                        nir::type_computations::rigid_declarations_bounded(
+                            &ty,
+                            fuel,
+                            &mut rigid_deps,
+                        )
+                    })
+                    .map_err(|reason| error(expr.span, reason.to_string()))?;
+                    let mut promoted = false;
+                    let mut rewrites = BTreeMap::new();
+                    for (rt_id, (op_binding, address_owner, operand)) in operational_runtime {
+                        if !runtime_deps.ids.contains(&rt_id) {
+                            let replacement = self.capture_runtime_operand(
+                                rt_id,
+                                address_owner,
+                                operand,
+                                expr.span,
+                            )?;
+                            rewrites.insert(op_binding, replacement);
+                            promoted = true;
+                        }
+                    }
+                    if !rewrites.is_empty() {
+                        let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = work;
+                        let rewrite_res = nir::visit::expression_mut_in_closure_environment(
+                            &mut body,
+                            &mut work,
+                            |node, fuel| {
+                                if let K::Local(binding) = node.kind
+                                    && let Some(replacement) = rewrites.get(&binding)
+                                {
+                                    let mut rem = u64::try_from(*fuel).unwrap_or(u64::MAX);
+                                    nir::copy_budget::charge_expression(replacement, &mut rem)
+                                        .map_err(|_| "closure capture rewrite budget exhausted")?;
+                                    *fuel = usize::try_from(rem).unwrap_or(usize::MAX);
+                                    let src = node.source;
+                                    *node = replacement.clone();
+                                    node.source = src;
+                                }
+                                Ok(())
+                            },
+                        );
+                        self.required_steps =
+                            self.required_steps.saturating_sub((before - work) as u64);
+                        rewrite_res.map_err(|reason| error(expr.span, reason.to_string()))?;
+                    }
+                    for (decl, (outer_binding, inner_ty)) in operational_rigid {
+                        if !rigid_deps.contains(&decl) {
+                            for frame in &mut self.captures {
+                                if frame.outer.contains(&outer_binding)
+                                    && !frame
+                                        .values
+                                        .iter()
+                                        .any(|entry| entry.binding == outer_binding)
+                                {
+                                    frame.values.push(n::Capture {
+                                        binding: outer_binding,
+                                        ty: inner_ty.clone(),
+                                        value: None,
+                                    });
+                                }
+                            }
+                            promoted = true;
+                        }
+                    }
+                    if promoted {
+                        captures = self.captures.last().unwrap().values.clone();
+                        ty = build_closure_ty(&captures, &signature);
+                    }
+                }
+            }
             if let Some(expected) = expected {
                 self.require(&ty, expected, expr.span)?;
             }

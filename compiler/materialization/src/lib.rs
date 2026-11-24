@@ -104,6 +104,12 @@ enum Task {
     Type(Term),
 }
 
+#[derive(Clone)]
+struct ClosureScope {
+    allowed: BTreeSet<n::LocalId>,
+    env_parameters: Vec<n::RuntimeEnvParameter>,
+}
+
 struct Builder<'a, 'e> {
     expansion: Option<&'e dyn Expansion>,
     quote_cursor: u32,
@@ -131,6 +137,7 @@ struct Builder<'a, 'e> {
     budget: Budget,
     instances: Option<Vec<iir::FunctionInstance>>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
+    runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
@@ -144,7 +151,7 @@ struct Builder<'a, 'e> {
         Vec<n::RuntimeEnvParameter>,
         BTreeMap<nir::RuntimeId, n::Expr>,
     )>,
-    active_closure_scopes: Vec<BTreeSet<n::LocalId>>,
+    active_closure_scopes: Vec<ClosureScope>,
 }
 
 /// Bounded, transactional: failure returns no partially materialized world.
@@ -485,6 +492,7 @@ struct IncrementalIir<'a> {
     output: Vec<n::DispatchInstance>,
     instances: Vec<iir::FunctionInstance>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
+    runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
@@ -554,6 +562,7 @@ impl<'a> InstantiationSession<'a> {
             expansion_sources,
             effect_contracts,
             callable_identities,
+            runtime_domains,
             global_runtime_deliveries,
             frozen_methods,
             mut type_cores,
@@ -612,6 +621,7 @@ impl<'a> InstantiationSession<'a> {
             templates,
             dispatch,
             runtime_bindings,
+            runtime_domains,
             global_runtime_deliveries,
             volatile_storage: source_volatile.clone(),
             match_plans: source_match_plans.clone(),
@@ -698,6 +708,7 @@ impl<'a> InstantiationSession<'a> {
                     budget: construction_budget,
                     instances: Some(prev.instances),
                     runtime_bindings: prev.runtime_bindings,
+                    runtime_domains: prev.runtime_domains,
                     global_runtime_deliveries: prev.global_runtime_deliveries,
                     nominals: prev.nominals,
                     interface_contracts: prev.interface_contracts,
@@ -755,6 +766,7 @@ impl<'a> InstantiationSession<'a> {
                     budget: construction_budget,
                     instances: Some(Vec::new()),
                     runtime_bindings,
+                    runtime_domains: BTreeMap::new(),
                     global_runtime_deliveries: BTreeMap::new(),
                     nominals: vec![],
                     interface_contracts: vec![],
@@ -848,6 +860,7 @@ impl<'a> InstantiationSession<'a> {
             templates,
             dispatch,
             runtime_bindings: builder.runtime_bindings.clone(),
+            runtime_domains: builder.runtime_domains.clone(),
             global_runtime_deliveries: builder.global_runtime_deliveries.clone(),
             volatile_storage: source_volatile.clone(),
             match_plans: source_match_plans.clone(),
@@ -879,6 +892,7 @@ impl<'a> InstantiationSession<'a> {
             output: builder.output,
             instances: functions,
             runtime_bindings: builder.runtime_bindings,
+            runtime_domains: builder.runtime_domains,
             global_runtime_deliveries: builder.global_runtime_deliveries,
             nominals: builder.nominals,
             interface_contracts: builder.interface_contracts,
@@ -933,6 +947,7 @@ struct BuildResult {
     effect_contracts: Vec<iir::effects::Contract>,
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
+    runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     type_cores: nir::TypeInterner,
 }
@@ -1032,6 +1047,7 @@ fn build(
         budget,
         instances: matches!(roots, Roots::Iir(_)).then(Vec::new),
         runtime_bindings,
+        runtime_domains: BTreeMap::new(),
         global_runtime_deliveries: BTreeMap::new(),
         nominals: vec![],
         interface_contracts: vec![],
@@ -1189,6 +1205,7 @@ fn build(
         effect_contracts: builder.effect_contracts,
         frozen_methods: builder.frozen_methods,
         callable_identities: builder.callable_identities,
+        runtime_domains: builder.runtime_domains,
         global_runtime_deliveries: builder.global_runtime_deliveries,
         type_cores: builder.type_cores,
     })
@@ -2688,9 +2705,20 @@ impl Builder<'_, '_> {
             self.check_expanded_requirements(&instance.function, "quote")?;
             let mut generated = Vec::new();
             let empty_deliveries = BTreeMap::new();
-            let (caller_envs, caller_deliveries) = match &self.active_caller_env {
+            let (outer_envs, caller_deliveries) = match &self.active_caller_env {
                 Some((envs, deliveries)) => (envs.as_slice(), deliveries),
                 None => (&[][..], &empty_deliveries),
+            };
+            let effective_envs;
+            let caller_envs = if let Some(scope) = self.active_closure_scopes.last() {
+                effective_envs = Self::effective_closure_env_parameters(
+                    &scope.env_parameters,
+                    outer_envs,
+                    &scope.allowed,
+                );
+                effective_envs.as_slice()
+            } else {
+                outer_envs
             };
             let in_closure = !self.active_closure_scopes.is_empty();
             self.expansion
@@ -2764,9 +2792,20 @@ impl Builder<'_, '_> {
         }
         let mut generated = Vec::new();
         let empty_deliveries = BTreeMap::new();
-        let (caller_envs, caller_deliveries) = match &self.active_caller_env {
+        let (outer_envs, caller_deliveries) = match &self.active_caller_env {
             Some((envs, deliveries)) => (envs.as_slice(), deliveries),
             None => (&[][..], &empty_deliveries),
+        };
+        let effective_envs;
+        let caller_envs = if let Some(scope) = self.active_closure_scopes.last() {
+            effective_envs = Self::effective_closure_env_parameters(
+                &scope.env_parameters,
+                outer_envs,
+                &scope.allowed,
+            );
+            effective_envs.as_slice()
+        } else {
+            outer_envs
         };
         let in_closure = !self.active_closure_scopes.is_empty();
         if !self
@@ -2884,6 +2923,62 @@ impl Builder<'_, '_> {
         Ok(allowed)
     }
 
+    fn closure_env_parameters(
+        &mut self,
+        closure_ty: &Term,
+    ) -> Result<Vec<n::RuntimeEnvParameter>, String> {
+        if closure_ty.is_comptime_callable()
+            || !matches!(closure_ty.callable_signature(), Term::Function { .. })
+        {
+            return Ok(vec![]);
+        }
+        let normalized_ty = self.normalized_type(closure_ty)?;
+        let mut envs = nir::program::implicit_runtime_env_parameters(
+            &self.package.runtime_domains,
+            &self.package.global_runtime_deliveries,
+            std::slice::from_ref(&normalized_ty),
+            &[],
+        )?;
+        for env in &mut envs {
+            env.ty = self.normalized_type(&env.ty)?;
+            if self.instances.is_some()
+                && let Some(id) = env.runtime_id
+                && !self.runtime_domains.contains_key(&id)
+                && let Some(domain) = self.package.runtime_domains.get(&id).cloned()
+            {
+                let normalized_domain = self.normalized_type(&domain)?;
+                self.runtime_domains.insert(id, normalized_domain.clone());
+                self.queue.push_back(Task::Type(normalized_domain));
+            }
+        }
+        Ok(envs)
+    }
+
+    fn effective_closure_env_parameters(
+        closure_envs: &[n::RuntimeEnvParameter],
+        outer_envs: &[n::RuntimeEnvParameter],
+        allowed: &BTreeSet<n::LocalId>,
+    ) -> Vec<n::RuntimeEnvParameter> {
+        let mut combined = closure_envs.to_vec();
+        for ep in outer_envs {
+            if !allowed.contains(&ep.binding) {
+                continue;
+            }
+            let already =
+                combined
+                    .iter()
+                    .any(|existing| match (existing.runtime_id, ep.runtime_id) {
+                        (Some(a), Some(b)) => a == b,
+                        (None, None) => existing.declaration == ep.declaration,
+                        _ => false,
+                    });
+            if !already {
+                combined.push(ep.clone());
+            }
+        }
+        combined
+    }
+
     fn walk_pruned_tracking_closures<F>(
         &mut self,
         expression: &mut n::Expr,
@@ -2906,13 +3001,18 @@ impl Builder<'_, '_> {
                         self.walk_pruned_tracking_closures(value, action)?;
                     }
                 }
-                let allowed = Self::collect_closure_allowed_bindings(
+                let closure_envs = self.closure_env_parameters(&expr.ty)?;
+                let mut allowed = Self::collect_closure_allowed_bindings(
                     parameters,
                     captures,
                     body,
                     &mut self.fuel,
                 )?;
-                self.active_closure_scopes.push(allowed);
+                allowed.extend(closure_envs.iter().map(|ep| ep.binding));
+                self.active_closure_scopes.push(ClosureScope {
+                    allowed,
+                    env_parameters: closure_envs,
+                });
                 let res =
                     self.walk_pruned_tracking_closures(std::sync::Arc::make_mut(body), action);
                 self.active_closure_scopes.pop();
@@ -2948,7 +3048,7 @@ impl Builder<'_, '_> {
     fn target_env_parameters(
         &mut self,
         callee: &n::Expr,
-    ) -> Result<Option<Vec<n::RuntimeEnvParameter>>, String> {
+    ) -> Result<Option<Vec<(n::RuntimeEnvParameter, Option<Term>)>>, String> {
         let (target_decl, target_args) = match &callee.kind {
             K::Function(id) => (*id, vec![]),
             K::FunctionInstance {
@@ -2973,7 +3073,22 @@ impl Builder<'_, '_> {
                     self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
                 (method.body, method.arguments)
             }
-            _ => return Ok(None),
+            _ => {
+                if !callee.ty.is_comptime_callable()
+                    && matches!(callee.ty.callable_signature(), Term::Function { .. })
+                {
+                    let envs = self.closure_env_parameters(&callee.ty)?;
+                    return Ok(Some(
+                        envs.into_iter()
+                            .map(|env| {
+                                let id = env.runtime_id.map(Term::Runtime);
+                                (env, id)
+                            })
+                            .collect(),
+                    ));
+                }
+                return Ok(None);
+            }
         };
         if let Some(staged) = self
             .staged_functions
@@ -2982,7 +3097,18 @@ impl Builder<'_, '_> {
             if staged.phase != n::FunctionPhase::Runtime {
                 return Ok(None);
             }
-            return Ok(Some(staged.interface.env_parameters.clone()));
+            return Ok(Some(
+                staged
+                    .interface
+                    .env_parameters
+                    .iter()
+                    .cloned()
+                    .map(|env| {
+                        let id = env.runtime_id.map(Term::Runtime);
+                        (env, id)
+                    })
+                    .collect(),
+            ));
         }
         let target_fn = self
             .world
@@ -3011,6 +3137,7 @@ impl Builder<'_, '_> {
         )
         .map_err(|e| e.to_string())?;
         let mut envs = Vec::with_capacity(target_fn.interface.env_parameters.len());
+        let mut identities = Vec::with_capacity(target_fn.interface.env_parameters.len());
         for env in &target_fn.interface.env_parameters {
             let substituted = substitution
                 .instantiate_bounded(
@@ -3021,13 +3148,18 @@ impl Builder<'_, '_> {
                     &mut self.fuel,
                 )
                 .map_err(|e| e.to_string())?;
-            let (declaration, runtime_id) = match substituted {
-                Term::Runtime(id) => (env.declaration, Some(id)),
+            let (declaration, runtime_id, identity) = match &substituted {
+                Term::Runtime(id) => (env.declaration, Some(*id), Some(Term::Runtime(*id))),
+                Term::RuntimeField { .. } => (env.declaration, None, Some(substituted.clone())),
                 Term::Rigid {
                     declaration: next,
                     sort: nir::Sort::Runtime,
-                } => (next, env.runtime_id),
-                _ => (env.declaration, env.runtime_id),
+                } => (*next, env.runtime_id, env.runtime_id.map(Term::Runtime)),
+                _ => (
+                    env.declaration,
+                    env.runtime_id,
+                    env.runtime_id.map(Term::Runtime),
+                ),
             };
             let ty = substitution
                 .instantiate_bounded(&env.ty, &mut self.fuel)
@@ -3038,6 +3170,7 @@ impl Builder<'_, '_> {
                 binding: env.binding,
                 ty,
             });
+            identities.push(identity);
         }
         let implicit = nir::program::implicit_runtime_env_parameters(
             &self.package.runtime_domains,
@@ -3045,21 +3178,93 @@ impl Builder<'_, '_> {
             &target_args,
             &envs,
         )?;
-        envs.extend(implicit);
-        for env in &mut envs {
-            env.ty = self.normalized_type(&env.ty)?;
+        for env in implicit {
+            let id = env.runtime_id.map(Term::Runtime);
+            envs.push(env);
+            identities.push(id);
         }
-        Ok(Some(envs))
+        let mut result = Vec::with_capacity(envs.len());
+        for (mut env, identity) in envs.into_iter().zip(identities) {
+            env.ty = self.normalized_type(&env.ty)?;
+            result.push((env, identity));
+        }
+        Ok(Some(result))
     }
 
     fn deliver_env_requirement(
         &mut self,
         req: &n::RuntimeEnvParameter,
+        identity: Option<&Term>,
         source: n::SourceRange,
         caller_env_parameters: &[n::RuntimeEnvParameter],
         caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
         closure_allowed: Option<&BTreeSet<n::LocalId>>,
     ) -> Result<n::Expr, String> {
+        if let Some(term @ Term::RuntimeField { .. }) = identity {
+            let (root, fields) =
+                nir::runtime_fields::path(term, &mut self.fuel).map_err(|e| e.to_string())?;
+            let (root_decl, root_id, root_ty) = match root {
+                Term::Runtime(id) => {
+                    let Some(Term::Lift(inner)) = self.package.runtime_domains.get(id) else {
+                        return Err(
+                            "materialized call runtime projection root domain is missing".into(),
+                        );
+                    };
+                    (
+                        nir::DeclarationId {
+                            package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                            local: id.local,
+                        },
+                        Some(*id),
+                        (**inner).clone(),
+                    )
+                }
+                Term::Rigid {
+                    declaration,
+                    sort: nir::Sort::Runtime,
+                } => {
+                    let ep = caller_env_parameters
+                        .iter()
+                        .find(|ep| ep.declaration == *declaration)
+                        .ok_or("materialized call cannot deliver runtime environment parameter")?;
+                    (*declaration, ep.runtime_id, ep.ty.clone())
+                }
+                _ => {
+                    return Err(
+                        "materialized call cannot deliver runtime environment parameter".into(),
+                    );
+                }
+            };
+            let root_req = n::RuntimeEnvParameter {
+                declaration: root_decl,
+                runtime_id: root_id,
+                binding: req.binding,
+                ty: root_ty,
+            };
+            let base = self.deliver_env_requirement(
+                &root_req,
+                root_id.map(Term::Runtime).as_ref(),
+                source,
+                caller_env_parameters,
+                caller_runtime_deliveries,
+                closure_allowed,
+            )?;
+            let mut delivered = nir::runtime_fields::address(
+                base,
+                &fields,
+                source,
+                &mut self.fuel,
+                |ty, index, fuel| {
+                    nir::runtime_fields::struct_field(ty, index, Some(self.package), &[], fuel)
+                },
+            )?;
+            delivered.ty = self.normalized_type(&delivered.ty)?;
+            let expected_ty = self.normalized_type(&req.ty)?;
+            if delivered.ty != expected_ty {
+                return Err("materialized call runtime environment type mismatch".into());
+            }
+            return Ok(delivered);
+        }
         let mut delivered = if let Some(ep) = caller_env_parameters.iter().find(|ep| {
             let matches_id = match (req.runtime_id, ep.runtime_id) {
                 (Some(req_id), Some(ep_id)) => req_id == ep_id,
@@ -3134,15 +3339,22 @@ impl Builder<'_, '_> {
                         )?;
                     }
                 }
-                let allowed = Self::collect_closure_allowed_bindings(
+                let closure_envs = self.closure_env_parameters(&node.ty)?;
+                let mut allowed = Self::collect_closure_allowed_bindings(
                     parameters,
                     captures,
                     body,
                     &mut self.fuel,
                 )?;
+                allowed.extend(closure_envs.iter().map(|ep| ep.binding));
+                let combined_envs = Self::effective_closure_env_parameters(
+                    &closure_envs,
+                    caller_env_parameters,
+                    &allowed,
+                );
                 self.deliver_missing_call_env_arguments(
                     std::sync::Arc::make_mut(body),
-                    caller_env_parameters,
+                    &combined_envs,
                     caller_runtime_deliveries,
                     Some(&allowed),
                 )?;
@@ -3166,9 +3378,10 @@ impl Builder<'_, '_> {
                 }
                 if existing_len < target_envs.len() {
                     let mut extra = Vec::with_capacity(target_envs.len() - existing_len);
-                    for req in &target_envs[existing_len..] {
+                    for (req, identity) in &target_envs[existing_len..] {
                         extra.push(self.deliver_env_requirement(
                             req,
+                            identity.as_ref(),
                             call_source,
                             caller_env_parameters,
                             caller_runtime_deliveries,
@@ -3205,19 +3418,32 @@ impl Builder<'_, '_> {
             }
         };
         let active_env = self.active_caller_env.clone();
-        let (caller_envs, caller_deliveries) = match &active_env {
+        let (outer_envs, caller_deliveries) = match &active_env {
             Some((envs, deliveries)) => (envs.as_slice(), deliveries),
             None => (&[][..], &BTreeMap::new()),
         };
-        let closure_allowed = self.active_closure_scopes.last().cloned();
+        let closure_scope = self.active_closure_scopes.last().cloned();
+        let combined_envs;
+        let (caller_envs, closure_allowed) = match &closure_scope {
+            Some(scope) => {
+                combined_envs = Self::effective_closure_env_parameters(
+                    &scope.env_parameters,
+                    outer_envs,
+                    &scope.allowed,
+                );
+                (combined_envs.as_slice(), Some(&scope.allowed))
+            }
+            None => (outer_envs, None),
+        };
         let mut delivered = Vec::with_capacity(reqs.len());
         for req in reqs {
             delivered.push(self.deliver_env_requirement(
                 req,
+                req.runtime_id.map(Term::Runtime).as_ref(),
                 call_source,
                 caller_envs,
                 caller_deliveries,
-                closure_allowed.as_ref(),
+                closure_allowed,
             )?);
         }
         let inner = Self::inner_call_mut(call)
@@ -3533,6 +3759,14 @@ impl Builder<'_, '_> {
         }
         if self.instances.is_some() {
             iir::completed_dependencies(&ty, &self.runtime_bindings, &mut self.fuel)?;
+            if let Term::Runtime(id) = &ty
+                && !self.runtime_domains.contains_key(id)
+                && let Some(domain) = self.package.runtime_domains.get(id).cloned()
+            {
+                let normalized = self.normalized_type(&domain)?;
+                self.runtime_domains.insert(*id, normalized.clone());
+                self.queue.push_back(Task::Type(normalized));
+            }
         } else if let Term::Nominal { arguments, .. } = &ty {
             let selected = self.dispatch_type_view(&ty)?;
             if selected != ty {

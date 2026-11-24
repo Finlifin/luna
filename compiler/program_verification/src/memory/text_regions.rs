@@ -2316,6 +2316,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         resolved: &CodeValue,
         environment: &Regions,
         actual: &[(usize, Regions, Option<CodeValue>)],
+        actual_envs: &[(Regions, Option<CodeValue>)],
         locals: &mut Locals,
         depth: usize,
     ) -> Result<Option<Regions>, String> {
@@ -2327,7 +2328,23 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         else {
             return Err("text closure alternative has no closure body".into());
         };
-        charge(self.fuel, parameters.len().saturating_add(captures.len()))?;
+        let closure_envs = nir::program::implicit_runtime_env_parameters(
+            &self.package.runtime_domains,
+            &self.package.global_runtime_deliveries,
+            std::slice::from_ref(&resolved.expression.ty),
+            &[],
+        )
+        .map_err(|reason| reason.to_string())?;
+        if closure_envs.len() != actual_envs.len() {
+            return Err("text region closure runtime environment arity mismatch".into());
+        }
+        charge(
+            self.fuel,
+            parameters
+                .len()
+                .saturating_add(captures.len())
+                .saturating_add(closure_envs.len()),
+        )?;
         let mut scope = Locals::new();
         for (index, capture) in captures.iter().enumerate() {
             charge_regions(environment, self.fuel)?;
@@ -2346,6 +2363,13 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 return Err("text closure parameter overlaps another binding".into());
             }
             input_code.push((parameters[*parameter], callable.clone()));
+        }
+        for (env, (value, callable)) in closure_envs.iter().zip(actual_envs) {
+            charge_regions(value, self.fuel)?;
+            if scope.insert(env.binding, value.clone()).is_some() {
+                return Err("text closure runtime environment overlaps another binding".into());
+            }
+            input_code.push((env.binding, callable.clone()));
         }
         let mut storage_map = BTreeMap::new();
         let mut storage_restore = BTreeMap::new();
@@ -2476,6 +2500,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         environment: &Regions,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[LocalId],
         locals: &mut Locals,
         returned: &mut Option<Regions>,
@@ -2494,6 +2519,16 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 return Err("text closure candidate is invalid".into());
             };
             validate_argument_plan(arguments, parameter_bindings, parameters.len())?;
+            let closure_envs = nir::program::implicit_runtime_env_parameters(
+                &self.package.runtime_domains,
+                &self.package.global_runtime_deliveries,
+                std::slice::from_ref(&code.expression.ty),
+                &[],
+            )
+            .map_err(|reason| reason.to_string())?;
+            if closure_envs.len() != env_arguments.len() {
+                return Err("text region closure runtime environment arity mismatch".into());
+            }
         }
         let mut actual = Vec::new();
         for argument in arguments {
@@ -2503,9 +2538,24 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             let code = self.result_code(&value, &argument.value)?;
             actual.push((argument.parameter, value, code));
         }
+        let mut actual_envs = Vec::with_capacity(env_arguments.len());
+        for env_arg in env_arguments {
+            let Some(value) = self.expr(env_arg, locals, returned, depth)? else {
+                return Ok(None);
+            };
+            let code = self.result_code(&value, env_arg)?;
+            actual_envs.push((value, code));
+        }
         if candidates.len() == 1 {
             let resolved = self.code_value(&CallbackKey::Closure(candidates[0]), callee)?;
-            return self.invoke_closed_callback(&resolved, environment, &actual, locals, depth);
+            return self.invoke_closed_callback(
+                &resolved,
+                environment,
+                &actual,
+                &actual_envs,
+                locals,
+                depth,
+            );
         }
         let bindings = locals.keys().copied().collect::<Vec<_>>();
         let mut exits = None;
@@ -2514,8 +2564,14 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             charge(self.fuel, 1)?;
             let resolved = self.code_value(&CallbackKey::Closure(*id), callee)?;
             let mut scope = self.locals_copy(locals)?;
-            let result =
-                self.invoke_closed_callback(&resolved, environment, &actual, &mut scope, depth)?;
+            let result = self.invoke_closed_callback(
+                &resolved,
+                environment,
+                &actual,
+                &actual_envs,
+                &mut scope,
+                depth,
+            )?;
             if result.is_some() {
                 join_locals(&mut exits, &scope, &bindings, self.fuel)?;
             }

@@ -75,7 +75,7 @@ enum Step<'a> {
     Bind(LocalId),
     Remove(LocalId),
     Capture(&'a Capture),
-    ClosureBody(&'a [LocalId], &'a [Capture], &'a Expr),
+    ClosureBody(&'a crate::Term, &'a [LocalId], &'a [Capture], &'a Expr),
     LeaveClosure(Box<Environment>),
     Call(Box<Call<'a>>),
     AfterDefault(Box<Call<'a>>, Option<LocalId>),
@@ -144,9 +144,24 @@ impl<'a> Walk<'a> {
                         self.read(capture.binding, dependencies, fuel)?;
                     }
                 }
-                Step::ClosureBody(parameters, captures, body) => {
+                Step::ClosureBody(ty, parameters, captures, body) => {
                     let mut scope = LexicalScope::with_parameters(parameters);
                     scope.extend(captures.iter().map(|capture| capture.binding));
+                    let dependencies = crate::type_computations::runtime_dependencies_bounded(
+                        std::slice::from_ref(ty),
+                        fuel,
+                    )
+                    .map_err(|_| Error::Budget("capture analysis budget exhausted"))?;
+                    scope.extend(
+                        dependencies
+                            .ids
+                            .into_iter()
+                            .filter(|id| id.instance == 0)
+                            .map(|id| LocalId {
+                                owner: crate::program::IMPLICIT_RUNTIME_ENV_OWNER,
+                                index: id.local,
+                            }),
+                    );
                     let caller = std::mem::replace(
                         &mut self.current,
                         Environment {
@@ -329,7 +344,7 @@ impl<'a> Walk<'a> {
             } => {
                 charge(fuel, parameters.len())?;
                 self.tasks
-                    .push(Step::ClosureBody(parameters, captures, body));
+                    .push(Step::ClosureBody(&expr.ty, parameters, captures, body));
                 self.sequence(captures, Step::Capture, fuel)?;
             }
             K::Call {

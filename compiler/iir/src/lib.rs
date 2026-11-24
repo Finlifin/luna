@@ -229,6 +229,8 @@ pub struct Package {
     /// Explicitly supplied external runtime identities. Availability is not an
     /// ownership/lifetime proof; responsible resource passes retain that duty.
     pub runtime_bindings: BTreeSet<RuntimeId>,
+    /// Concrete lift domains for runtime identities referenced by this graph.
+    pub runtime_domains: std::collections::BTreeMap<RuntimeId, Term>,
     /// Package-level canonical runtime environment deliveries (e.g. global const
     /// addresses keyed by their `RuntimeId`).
     pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
@@ -358,6 +360,23 @@ impl Package {
 
     pub fn function(&self, key: &InstanceKey) -> Option<&FunctionInstance> {
         self.functions.iter().find(|function| &function.key == key)
+    }
+
+    /// Canonical operational runtime environment parameters required by a
+    /// closure or indirect callable of type `callable_ty`. Derived strictly
+    /// from non-global `RuntimeId`s in `callable_ty` so semantic captures and
+    /// operational delivery stay separated and ABI-uniform across all call sites.
+    pub fn closure_runtime_env_parameters(
+        &self,
+        callable_ty: &Term,
+    ) -> Result<Vec<nir::program::RuntimeEnvParameter>, String> {
+        nir::program::implicit_runtime_env_parameters(
+            &self.runtime_domains,
+            &self.global_runtime_deliveries,
+            std::slice::from_ref(callable_ty),
+            &[],
+        )
+        .map_err(|reason| reason.to_string())
     }
 
     pub fn type_is_volatile(&self, ty: &Term, fuel: &mut usize) -> bool {
@@ -597,6 +616,14 @@ impl Package {
             }
             Ok(())
         };
+        for (id, domain) in &self.runtime_domains {
+            if !self.runtime_bindings.contains(id) {
+                return Err(format!(
+                    "IIR runtime domain references unknown runtime binding {id}"
+                ));
+            }
+            self.validate_type_cached(&links, &mut validated_types, domain, fuel)?;
+        }
         for (id, expr) in &self.global_runtime_deliveries {
             if !self.runtime_bindings.contains(id) {
                 return Err(format!(
@@ -969,6 +996,13 @@ impl fmt::Display for Package {
             write!(f, " (runtime {} {})", binding.instance, binding.local)?;
         }
         f.write_str(")")?;
+        if !self.runtime_domains.is_empty() {
+            f.write_str(" (runtime-domains")?;
+            for (id, domain) in &self.runtime_domains {
+                write!(f, " (domain {id} {domain})")?;
+            }
+            f.write_str(")")?;
+        }
         if !self.global_runtime_deliveries.is_empty() {
             f.write_str(" (global-runtime-deliveries")?;
             for (id, expr) in &self.global_runtime_deliveries {

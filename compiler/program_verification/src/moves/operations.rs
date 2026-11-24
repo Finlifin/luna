@@ -582,6 +582,30 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 // Analyze a possible invocation independently from construction.
                 // Its surviving environment remains stored; return only cleans
                 // invocation-local responsibilities, never retained captures.
+                let closure_envs = if let Some(package) = self.package {
+                    let globals = self
+                        .global_runtime_deliveries
+                        .unwrap_or(&package.global_runtime_deliveries);
+                    nir::program::implicit_runtime_env_parameters(
+                        &package.runtime_domains,
+                        globals,
+                        std::slice::from_ref(&expr.ty),
+                        &[],
+                    )
+                    .map_err(|reason| error(source, reason))?
+                } else {
+                    vec![]
+                };
+                for (offset, env) in closure_envs.iter().enumerate() {
+                    let slot = parameters.len() + captures.len() + offset;
+                    self.declare_closure_env_parameter(
+                        &mut inner,
+                        slot,
+                        env,
+                        &mut borrowed_roots,
+                        source,
+                    )?;
+                }
                 self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
                 self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
                 let outer_report = std::mem::take(&mut self.report);
@@ -693,17 +717,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         | K::FunctionInstance { .. }
                         | K::TraitMethod { .. }
                 ) {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            source,
-                            "move analysis does not yet support runtime environment arguments on temporary calls",
-                        ));
-                    }
                     return self
                         .call_temporary(
                             expr,
                             callee,
                             arguments,
+                            env_arguments,
                             parameter_bindings,
                             flow,
                             depth + 1,
@@ -758,14 +777,16 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .filter(|c| matches!(c.definition.kind, K::Closure { .. }))
                         .cloned()
                 {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            source,
-                            "move analysis does not yet support runtime environment arguments on closures",
-                        ));
-                    }
                     return self
-                        .call_closure(root(binding), &callable, arguments, flow, source, depth + 1)
+                        .call_closure(
+                            root(binding),
+                            &callable,
+                            arguments,
+                            env_arguments,
+                            flow,
+                            source,
+                            depth + 1,
+                        )
                         .map(|_| ());
                 }
                 let mut pointer_arguments = false;
@@ -861,8 +882,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         return Ok(());
                     }
                 }
-                if env_arguments.is_empty()
-                    && self.defer_unknown_calls
+                if self.defer_unknown_calls
                     && matches!(callee.kind, K::Local(_))
                     && matches!(
                         callee.ty.callable_signature(),
@@ -878,6 +898,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         flow,
                         depth + 1,
                     )?;
+                    for env_arg in env_arguments {
+                        if !flow.live {
+                            break;
+                        }
+                        self.expr(env_arg, flow, depth + 1)?;
+                    }
                     self.report.deferred_calls.push(source);
                     flow.value_callable = None;
                     flow.value_callables.clear();
@@ -892,17 +918,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 }
                 if let K::Local(binding) = &callee.kind {
                     if let Some(definition) = flow.callables.get(&root(*binding)).cloned() {
-                        if !env_arguments.is_empty() {
-                            return Err(error(
-                                source,
-                                "move analysis does not yet support runtime environment arguments on closures",
-                            ));
-                        }
                         return self
                             .call_closure(
                                 root(*binding),
                                 &definition,
                                 arguments,
+                                env_arguments,
                                 flow,
                                 source,
                                 depth + 1,

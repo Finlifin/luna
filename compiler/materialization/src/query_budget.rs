@@ -65,6 +65,7 @@ mod tests {
             budget,
             instances: None,
             runtime_bindings: BTreeSet::new(),
+            runtime_domains: BTreeMap::new(),
             global_runtime_deliveries: BTreeMap::new(),
             nominals: vec![],
             interface_contracts: vec![],

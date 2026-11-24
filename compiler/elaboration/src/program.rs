@@ -3422,6 +3422,8 @@ struct CaptureFrame {
     const_regions: ClosureConstRegions,
     site: n::LocalId,
     addresses: BTreeMap<nir::RuntimeId, n::LocalId>,
+    operational_runtime_envs: BTreeMap<nir::RuntimeId, (n::LocalId, Option<n::LocalId>, n::Expr)>,
+    operational_rigid_envs: BTreeMap<DeclarationId, (n::LocalId, Term)>,
     comptime: bool,
     outer: BTreeSet<n::LocalId>,
     values: Vec<n::Capture>,
@@ -3812,6 +3814,20 @@ impl Checker<'_, '_> {
                     ));
                 };
                 self.require_expression(&inner_ty, expected_inner, span)?;
+                if let Some(frame) = self.captures.last_mut()
+                    && !frame.comptime
+                    && frame.outer.contains(&binding)
+                {
+                    frame
+                        .operational_rigid_envs
+                        .entry(*declaration)
+                        .or_insert_with(|| (binding, inner_ty.clone()));
+                    return Ok(n::Expr {
+                        source: source(span),
+                        ty: inner_ty,
+                        kind: K::Local(binding),
+                    });
+                }
                 let expr = n::Expr {
                     source: source(span),
                     ty: inner_ty,
@@ -3843,7 +3859,61 @@ impl Checker<'_, '_> {
                     constants::charge_copy(&entry.expr, &mut self.required_steps, span)?;
                     let owner = entry.address_owner;
                     let operand = entry.expr.clone();
-                    self.capture_runtime_operand(*id, owner, operand, span)?
+                    if id.instance == 0 && self.captures.last().is_some_and(|frame| !frame.comptime)
+                    {
+                        let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = work;
+                        let free = nir::free_bindings::collect(&operand, &mut work);
+                        self.required_steps =
+                            self.required_steps.saturating_sub((before - work) as u64);
+                        let free = free.map_err(|reason| error(span, reason.to_string()))?;
+                        for binding in &free {
+                            if !self.locals.contains_key(binding) {
+                                return Err(error(
+                                    span,
+                                    "runtime dependency refers to a local binding that is no longer in scope",
+                                ));
+                            }
+                        }
+                        if matches!(operand.kind, K::AddressOf(ref place) if matches!(place.kind, K::Local(_)))
+                            && let Some(owner_site) = owner
+                            && !self.captures.iter().any(|frame| frame.site == owner_site)
+                        {
+                            return Err(error(
+                                span,
+                                "runtime address belongs to a closure that is no longer in scope",
+                            ));
+                        }
+                        let frame = self.captures.last().unwrap();
+                        let is_enclosing = free.iter().any(|b| frame.outer.contains(b))
+                            && owner != Some(frame.site);
+                        if is_enclosing {
+                            let ty = declaration_inputs::copy_input_domain(
+                                &operand.ty,
+                                &mut self.required_steps,
+                                span,
+                            )?;
+                            let op_binding = n::LocalId {
+                                owner: n::IMPLICIT_RUNTIME_ENV_OWNER,
+                                index: id.local,
+                            };
+                            self.captures
+                                .last_mut()
+                                .unwrap()
+                                .operational_runtime_envs
+                                .entry(*id)
+                                .or_insert_with(|| (op_binding, owner, operand));
+                            n::Expr {
+                                source: source(span),
+                                ty,
+                                kind: K::Local(op_binding),
+                            }
+                        } else {
+                            self.capture_runtime_operand(*id, owner, operand, span)?
+                        }
+                    } else {
+                        self.capture_runtime_operand(*id, owner, operand, span)?
+                    }
                 } else if let Some(global_expr) = self.global_runtime_deliveries.get(id) {
                     constants::charge_copy(global_expr, &mut self.required_steps, span)?;
                     global_expr.clone()
