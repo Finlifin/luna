@@ -80,12 +80,24 @@ class CargoCacheTests(unittest.TestCase):
         self.assertNotIn("1", args)
         self.assertIn("--locked", args)
         self.assertIn("--offline", args)
+        with patch.object(cargo, "total_memory_bytes", return_value=30 * 1024**3), patch.object(
+            cargo.os, "cpu_count", return_value=32
+        ):
+            self.assertEqual(cargo.default_build_jobs(), 4)
+            self.assertEqual(cargo.default_test_threads(), 2)
+            self.assertEqual(cargo.default_codegen_units(), 4)
+        with patch.object(cargo, "total_memory_bytes", return_value=12 * 1024**3), patch.object(
+            cargo.os, "cpu_count", return_value=32
+        ):
+            self.assertEqual(cargo.default_build_jobs(), 2)
+            self.assertEqual(cargo.default_test_threads(), 2)
+            self.assertEqual(cargo.default_codegen_units(), 2)
         explicit = cargo.cargo_arguments(["test", "-j", "4", "-p", "luna"], Path("/tmp/test-target"))
         self.assertEqual(explicit[1:4], ["test", "-j", "4"])
         with patch.dict(os.environ, {}, clear=True):
             runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
             self.assertEqual(runner.env["CARGO_BUILD_JOBS"], str(cargo.default_build_jobs()))
-            self.assertEqual(runner.env["RUST_TEST_THREADS"], str(cargo.default_build_jobs()))
+            self.assertEqual(runner.env["RUST_TEST_THREADS"], str(cargo.default_test_threads()))
             self.assertEqual(
                 runner.env["CARGO_PROFILE_DEV_CODEGEN_UNITS"],
                 str(cargo.default_codegen_units()),
@@ -109,9 +121,41 @@ class CargoCacheTests(unittest.TestCase):
             self.assertEqual(runner.env["RUST_TEST_THREADS"], "2")
             self.assertEqual(runner.env["CARGO_PROFILE_DEV_CODEGEN_UNITS"], "8")
             self.assertEqual(runner.env["CARGO_PROFILE_TEST_CODEGEN_UNITS"], "4")
-        with patch.object(cargo.os, "cpu_count", return_value=32):
-            self.assertEqual(cargo.default_build_jobs(), 32)
-            self.assertEqual(cargo.default_codegen_units(), 32)
+
+    def test_memory_headroom_refuses_launch_when_available_ram_is_low(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                cargo, "available_memory_bytes", return_value=1024 * 1024**2
+            ):
+                runner = cargo.Runner(Path(temporary), Path(temporary) / "target")
+                runner.reclaim = Mock()
+                runner.execute = Mock(return_value=(0, False))
+                stderr = io.StringIO()
+                with patch.object(cargo.sys, "stderr", stderr):
+                    status = runner.run(["--no-fmt", "check", "-p", "example"])
+                self.assertEqual(status, 75)
+                runner.execute.assert_not_called()
+                self.assertIn("refusing to start cargo", stderr.getvalue())
+
+            with patch.dict(os.environ, {"LUNA_MIN_AVAILABLE_MEM_MIB": "0"}, clear=True), patch.object(
+                cargo, "available_memory_bytes", return_value=1024 * 1024**2
+            ):
+                runner = cargo.Runner(Path(temporary), Path(temporary) / "target")
+                runner.reclaim = Mock()
+                runner.execute = Mock(return_value=(0, False))
+                status = runner.run(["--no-fmt", "check", "-p", "example"])
+                self.assertEqual(status, 0)
+                runner.execute.assert_called_once()
+
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                cargo, "available_memory_bytes", return_value=8 * 1024**3
+            ):
+                runner = cargo.Runner(Path(temporary), Path(temporary) / "target")
+                runner.reclaim = Mock()
+                runner.execute = Mock(return_value=(0, False))
+                status = runner.run(["--no-fmt", "check", "-p", "example"])
+                self.assertEqual(status, 0)
+                runner.execute.assert_called_once()
 
     def test_cleanup_is_scoped_to_managed_target(self):
         runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))

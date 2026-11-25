@@ -14,6 +14,10 @@ item-level blank-line separation, ignoring configured fragment files). Pass
 Only /tmp/luna-dev-002/target is cleaned. Source files, Cargo.lock, and the
 registry/download cache are never cleanup targets. Builds and cleanup share
 one lock; use this entrypoint instead of concurrent direct Cargo commands.
+Builds also cap default concurrency (`CARGO_BUILD_JOBS<=4`,
+`CARGO_PROFILE_{DEV,TEST}_CODEGEN_UNITS<=4`, `RUST_TEST_THREADS<=2`) and
+verify `MemAvailable` headroom (>= 3 GiB by default) before starting Cargo to
+avoid host OOM exhaustion.
 
 After an observed storage failure, retain a soft cache cap at 75% of the
 pre-cleanup target footprint (64 MiB minimum, never above the current cap).
@@ -41,6 +45,11 @@ TARGET = Path("/tmp/luna-dev-002/target")
 MAX_CACHE = 4 * 1024**3
 MIN_CACHE = 64 * 1024**2
 MIN_FREE = 2 * 1024**3
+MAX_DEFAULT_BUILD_JOBS = 4
+MAX_DEFAULT_TEST_THREADS = 2
+MAX_DEFAULT_CODEGEN_UNITS = 4
+MIN_AVAILABLE_MEM = 3 * 1024**3
+MEMINFO_PATH = Path("/proc/meminfo")
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
 SPACE_ERRORS = ("quota exceeded", "no space left on device", "os error 122", "os error 28")
 SPACE_ERRNOS = (errno.EDQUOT, errno.ENOSPC)
@@ -111,12 +120,45 @@ def cargo_arguments(arguments: list[str], target: Path) -> list[str]:
     return ["cargo", *options, *common, *tail]
 
 
+def _read_meminfo_bytes(field: str, meminfo_path: Path = MEMINFO_PATH) -> int | None:
+    try:
+        content = meminfo_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    prefix = f"{field}:"
+    for line in content.splitlines():
+        if line.startswith(prefix):
+            parts = line[len(prefix) :].strip().split()
+            if not parts:
+                return None
+            try:
+                return int(parts[0]) * 1024
+            except ValueError:
+                return None
+    return None
+
+
+def total_memory_bytes() -> int | None:
+    return _read_meminfo_bytes("MemTotal")
+
+
+def available_memory_bytes() -> int | None:
+    return _read_meminfo_bytes("MemAvailable")
+
+
 def default_build_jobs() -> int:
-    return max(1, os.cpu_count() or 1)
+    cpu_cap = max(1, os.cpu_count() or 1)
+    total_bytes = total_memory_bytes()
+    mem_cap = max(1, total_bytes // (6 * 1024**3)) if total_bytes is not None else MAX_DEFAULT_BUILD_JOBS
+    return min(MAX_DEFAULT_BUILD_JOBS, cpu_cap, mem_cap)
+
+
+def default_test_threads() -> int:
+    return min(MAX_DEFAULT_TEST_THREADS, default_build_jobs())
 
 
 def default_codegen_units() -> int:
-    return min(256, max(16, default_build_jobs()))
+    return min(MAX_DEFAULT_CODEGEN_UNITS, max(1, default_build_jobs()))
 
 
 def manifest_root(default_root: Path, arguments: list[str]) -> Path:
@@ -212,9 +254,10 @@ class Runner:
         self.root, self.target = root, target
         self.env = dict(os.environ)
         jobs = str(default_build_jobs())
+        test_threads = str(default_test_threads())
         codegen_units = str(default_codegen_units())
         self.env.setdefault("CARGO_BUILD_JOBS", jobs)
-        self.env.setdefault("RUST_TEST_THREADS", jobs)
+        self.env.setdefault("RUST_TEST_THREADS", test_threads)
         self.env.setdefault("CARGO_PROFILE_DEV_CODEGEN_UNITS", codegen_units)
         self.env.setdefault("CARGO_PROFILE_TEST_CODEGEN_UNITS", codegen_units)
         self.env.update(CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
@@ -223,6 +266,30 @@ class Runner:
         if not any(key in self.env for key in wrappers):
             self.env['RUSTC_WRAPPER'] = str(ROOT / 'development/rustc_rebuild.py')
             self.env['LUNA_MANAGED_RUSTC_PRUNE'] = '1'
+
+    def min_available_memory(self) -> int:
+        raw = self.env.get("LUNA_MIN_AVAILABLE_MEM_MIB", "").strip()
+        if raw:
+            try:
+                value = int(raw)
+                if value >= 0:
+                    return value * 1024**2
+            except ValueError:
+                pass
+        return MIN_AVAILABLE_MEM
+
+    def check_memory_headroom(self) -> bool:
+        min_mem = self.min_available_memory()
+        if min_mem <= 0:
+            return True
+        avail = available_memory_bytes()
+        if avail is None or avail >= min_mem:
+            return True
+        diagnostic(
+            f"cargo-cache: refusing to start cargo with {avail // (1024**2)} MiB available "
+            f"(< {min_mem // (1024**2)} MiB minimum)"
+        )
+        return False
 
     def cache_size(self) -> int:
         if not self.target.exists():
@@ -574,6 +641,8 @@ class Runner:
                 self.ensure_source_root(source_root)
             self.reclaim()
             try:
+                if remaining[0] != "clean" and not self.check_memory_headroom():
+                    return 75
                 status, quota_failure = self.execute(command)
                 if status and quota_failure and remaining[0] != "clean":
                     # This process is already inside the sandbox: recovery does
