@@ -8,6 +8,7 @@ use std::{
 };
 
 mod capture;
+
 pub use capture::{
     CaptureBody, CapturedEntry, capture_entry, capture_entry_domains, capture_sparse_entry,
 };
@@ -28,6 +29,7 @@ pub struct Invocation {
     inputs: Vec<Input>,
     dependencies: BTreeSet<usize>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Scope(TypeError),
@@ -39,6 +41,7 @@ pub enum Error {
     MissingCapture(LocalId),
     Structure(String),
 }
+
 impl From<crate::copy_budget::CopyBudgetExhausted> for Error {
     fn from(_: crate::copy_budget::CopyBudgetExhausted) -> Self {
         Self::Budget
@@ -53,6 +56,7 @@ impl From<crate::visit::Error> for Error {
         }
     }
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -158,7 +162,9 @@ fn entry_with_bound_locals(
         runtime_deliveries: Default::default(),
     })
 }
+
 impl std::error::Error for Error {}
+
 impl Invocation {
     /// Prepare the input frame from the declaration of a Type computation.
     /// This is an invocation input frame: ordinary parameters execute inside
@@ -211,6 +217,7 @@ impl Invocation {
             .collect();
         Self::new(function.declaration, scope, inputs, fuel)
     }
+
     /// Capture a checked direct call whose operands are immutable values or
     /// input bindings. Calls/control flow in operands need a saved code body;
     /// never evaluate or discard them while extracting a value-only residual.
@@ -311,6 +318,7 @@ impl Invocation {
             .ok_or(Error::InvalidCall(call.source))?;
         Self::new(target, scope, inputs, fuel)
     }
+
     pub fn new(
         target: DeclarationId,
         scope: Vec<Sort>,
@@ -345,19 +353,24 @@ impl Invocation {
             dependencies,
         })
     }
+
     pub fn target(&self) -> DeclarationId {
         self.target
     }
+
     pub fn scope(&self) -> &[Sort] {
         &self.scope
     }
+
     pub fn inputs(&self) -> &[Input] {
         &self.inputs
     }
+
     pub fn dependencies(&self) -> &BTreeSet<usize> {
         &self.dependencies
     }
 }
+
 fn capture_value(
     expr: &Expr,
     bindings: &BTreeMap<LocalId, Input>,
@@ -493,6 +506,7 @@ fn freeze_list(
         },
     )
 }
+
 pub(crate) use charge_term as bounded;
 
 /// Charge term structure and payloads before cloning or recursive binder work.
@@ -594,7 +608,10 @@ pub fn contains_associated_projection(
 ) -> Result<bool, Error> {
     let mut found = false;
     visit_expanded_term(root, fuel, depth, &BTreeMap::new(), &mut |term| {
-        found |= matches!(term, Term::AssociatedType { .. });
+        found |= matches!(
+            term,
+            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+        );
     })?;
     Ok(found)
 }
@@ -622,7 +639,10 @@ pub fn runtime_dependencies_bounded(
             // A nested callable owns these inner frames even when supplied as
             // a type argument. Only free references can gain new identities.
             Term::Bound { depth, .. } => dependencies.may_change |= *depth >= nesting,
-            Term::Rigid { .. } | Term::Hole { .. } | Term::AssociatedType { .. } => {
+            Term::Rigid { .. }
+            | Term::Hole { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_) => {
                 dependencies.may_change = true;
             }
             _ => {}
@@ -775,6 +795,18 @@ impl Term {
         charge_frame_slots(self, |index| arguments.get(index)?.as_ref(), fuel)?;
         self.substitute_partial(arguments).map_err(Error::Scope)
     }
+
+    /// Bounded partial substitution for comptime-callable signatures where
+    /// `Sort::Runtime` parameters receive comptime arguments at call sites.
+    pub fn substitute_partial_comptime_bounded(
+        &self,
+        arguments: &[Option<Term>],
+        fuel: &mut usize,
+    ) -> Result<Term, Error> {
+        charge_frame_slots(self, |index| arguments.get(index)?.as_ref(), fuel)?;
+        self.substitute_partial_comptime(arguments)
+            .map_err(Error::Scope)
+    }
 }
 
 pub(crate) fn charge_frame_slots<'a>(
@@ -830,6 +862,7 @@ fn visit_replacements<'a>(
     }
     Ok(())
 }
+
 impl fmt::Display for Invocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

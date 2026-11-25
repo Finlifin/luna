@@ -9421,6 +9421,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let K::Block {
             statements,
             result: Some(result),
+        }
+        | K::CallPreparation {
+            statements,
+            result: Some(result),
         } = &expr.kind
         {
             if statements.is_empty() && matches!(expr.ty, Term::Pointer(_)) {
@@ -9435,7 +9439,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // projection independently would retire its temporary before later
         // operands execute. Closure bodies belong to separate invocations.
         let mut owned_observation = false;
-        if self.package.is_some() && !matches!(expr.kind, K::Block { .. }) {
+        if self.package.is_some()
+            && !matches!(expr.kind, K::Block { .. } | K::CallPreparation { .. })
+        {
             nir::visit::expression_pruned(expr, &mut self.fuel, |node, _| {
                 if owned_observation || matches!(node.kind, K::Closure { .. }) {
                     return Ok(false);
@@ -9458,7 +9464,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let pointer_match =
             matches!(expr.kind, K::Match { .. }) && matches!(expr.ty, Term::Pointer(_));
-        if (matches!(expr.kind, K::Block { .. }) || pointer_match || owned_observation)
+        if (matches!(expr.kind, K::Block { .. } | K::CallPreparation { .. })
+            || pointer_match
+            || owned_observation)
             && let Some(package) = self.package
         {
             let locals = super::observation_region::check(expr, package, &mut self.fuel)
@@ -9808,7 +9816,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 checked?;
                 result_code = self.observe_checked_expression(expr, flow, depth + 1)?;
             }
-            K::Block { statements, result } => {
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 self.fuel = self
                     .fuel
                     .checked_sub(flow.types.len().saturating_add(1))

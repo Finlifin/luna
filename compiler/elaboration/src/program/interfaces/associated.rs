@@ -941,10 +941,58 @@ impl Checker<'_, '_> {
             let result = (|| {
                 let contract = self.associated_contract(owner, false)?;
                 if contract.ty != p(P::Type) {
-                    return Err(error(
-                        span,
-                        "associated value signature requires the interface world to be established",
-                    ));
+                    let returns_type = contract.ty.is_comptime_callable()
+                        && matches!(
+                            contract.ty.callable_signature(),
+                            Term::Function { parameters, result }
+                                if parameters.iter().all(|param| param.sort == Sort::Runtime)
+                                    && **result == p(P::Type)
+                        );
+                    if !returns_type {
+                        return Err(error(
+                            span,
+                            "associated value signature requires the interface world to be established",
+                        ));
+                    }
+                    let ItemKind::Impl(def) = &self.package.item(parent).unwrap().kind else {
+                        unreachable!()
+                    };
+                    let trait_ref = def.trait_ref.ok_or_else(|| {
+                        error(
+                            span,
+                            "associated trait member requires a trait implementation",
+                        )
+                    })?;
+                    let own_subject = self.type_expr(def.self_ty)?;
+                    let interface = self.interface_expr_for(trait_ref, &own_subject)?;
+                    let trait_owner =
+                        self.associated_owner(interface.declaration)
+                            .ok_or_else(|| {
+                                error(span, "associated value has no originating interface owner")
+                            })?;
+                    let name = self.package.item(owner).unwrap().ident.name.as_str();
+                    let trait_def = match &self.package.item(trait_owner).unwrap().kind {
+                        ItemKind::Trait(t) => t,
+                        _ => return Err(error(span, "originating interface must be a trait")),
+                    };
+                    let member_owner = trait_def
+                        .items
+                        .iter()
+                        .copied()
+                        .find(|m| self.package.item(*m).unwrap().ident.name.as_str() == name)
+                        .ok_or_else(|| {
+                            error(span, "associated value has no originating interface member")
+                        })?;
+                    let member = declaration(self.package, &self.package_identities, member_owner);
+                    return Ok(n::Expr {
+                        ty: contract.ty,
+                        source: source(span),
+                        kind: K::AssociatedValue {
+                            interface,
+                            member,
+                            subject: own_subject,
+                        },
+                    });
                 }
                 let mut value =
                     self.associated_contract(owner, true)?
@@ -1232,6 +1280,88 @@ impl Checker<'_, '_> {
                     pending.push(Work::Finish(member, term, value.clone()));
                     pending.push(Work::Visit(value, depth + 1));
                 }
+                Term::AssociatedTypeCall(ref call)
+                    if call.origin.interface == interface.declaration
+                        && call.subject == *subject
+                        && call.arguments == arguments =>
+                {
+                    let member = call.origin.member;
+                    let contract = interface
+                        .associated
+                        .iter()
+                        .find(|a| a.declaration == member)
+                        .ok_or_else(|| error(span, "associated signature has an unknown member"))?;
+                    let (declaration, substitution) =
+                        if let Some(actual) = supplied.get(&contract.name) {
+                            (actual.declaration, false)
+                        } else {
+                            (contract.declaration, true)
+                        };
+                    let owner = self.associated_owner(declaration).unwrap();
+                    if let Some(mut callee) = self.associated_contract(owner, true)?.default {
+                        constants::charge_copy(&callee, &mut self.required_steps, span)?;
+                        if substitution {
+                            let inputs: Vec<_> = std::iter::once(subject.clone())
+                                .chain(arguments.iter().cloned())
+                                .collect();
+                            let binders = interface
+                                .binders_with_self_checked(&mut fuel)
+                                .map_err(|e| error(span, e.to_string()))?;
+                            let binder_ids: Vec<_> =
+                                binders.iter().map(|b| b.declaration).collect();
+                            callee = callee
+                                .instantiate_declaration_parameters_bounded(
+                                    &binder_ids,
+                                    &std::iter::once(p(P::Type))
+                                        .chain(interface.type_parameters.iter().map(|id| {
+                                            self.trait_input_domain(*id)
+                                                .unwrap_or_else(|| p(P::Type))
+                                        }))
+                                        .collect::<Vec<_>>(),
+                                    &inputs,
+                                    &[],
+                                    &mut fuel,
+                                )
+                                .map_err(|e| error(span, e.to_string()))?;
+                        }
+                        if let Some(resolved) = self.try_constant_associated_type_call(
+                            callee,
+                            &call.call_arguments,
+                            span,
+                        )? {
+                            crate::associated::charge_projection_copy(&resolved, &mut fuel)
+                                .map_err(|message| error(span, message))?;
+                            equations.push((term, resolved));
+                            continue;
+                        }
+                    }
+                    pending.push(Work::Visit(call.subject.clone(), depth + 1));
+                    pending.extend(
+                        call.arguments
+                            .iter()
+                            .cloned()
+                            .map(|t| Work::Visit(t, depth + 1)),
+                    );
+                    pending.extend(
+                        call.call_arguments
+                            .iter()
+                            .cloned()
+                            .map(|t| Work::Visit(t, depth + 1)),
+                    );
+                }
+                Term::AssociatedTypeCall(call) => {
+                    pending.push(Work::Visit(call.subject, depth + 1));
+                    pending.extend(
+                        call.arguments
+                            .into_iter()
+                            .map(|t| Work::Visit(t, depth + 1)),
+                    );
+                    pending.extend(
+                        call.call_arguments
+                            .into_iter()
+                            .map(|t| Work::Visit(t, depth + 1)),
+                    );
+                }
                 Term::AssociatedType {
                     arguments, subject, ..
                 } => {
@@ -1308,6 +1438,123 @@ impl Checker<'_, '_> {
             }
         }
         Ok(equations)
+    }
+
+    fn try_constant_associated_type_call(
+        &mut self,
+        callee: n::Expr,
+        call_arguments: &[Term],
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let Term::Function { parameters, result } = callee.ty.callable_signature().clone() else {
+            return Ok(None);
+        };
+        if !callee.ty.is_comptime_callable()
+            || parameters.len() != call_arguments.len()
+            || *result != p(P::Type)
+        {
+            return Ok(None);
+        }
+        const ABSTRACT_CALL_ARG_PACKAGE: u64 = u64::MAX - 10;
+        let mut inserted_locals = Vec::new();
+        let mut expr_args = Vec::with_capacity(call_arguments.len());
+        for (slot, (arg, param)) in call_arguments.iter().zip(&parameters).enumerate() {
+            let value = if arg.check_scope(&[]).is_ok()
+                && !nir::type_computations::has_rigid_parameters_bounded(arg, &mut 10_000)
+                    .unwrap_or(true)
+            {
+                let kind = if param.ty == p(P::Type) {
+                    K::TypeValue(arg.clone())
+                } else {
+                    K::ComptimeValue(arg.clone())
+                };
+                n::Expr {
+                    source: source(span),
+                    ty: param.ty.clone(),
+                    kind,
+                }
+            } else {
+                let id = n::LocalId {
+                    owner: u32::MAX - 2,
+                    index: slot as u32,
+                };
+                let declaration = DeclarationId {
+                    package: ABSTRACT_CALL_ARG_PACKAGE,
+                    local: slot as u32,
+                };
+                let prev = self.callable_type_inputs.insert(
+                    id,
+                    Some(super::function_types::StagedParameter {
+                        declaration,
+                        domain: param.ty.clone(),
+                    }),
+                );
+                inserted_locals.push((id, prev));
+                let kind = if param.ty == p(P::Type) {
+                    K::TypeValue(Term::Rigid {
+                        declaration,
+                        sort: Sort::Type,
+                    })
+                } else {
+                    K::ComptimeValue(Term::Rigid {
+                        declaration,
+                        sort: Sort::of_comptime_domain(&param.ty),
+                    })
+                };
+                n::Expr {
+                    source: source(span),
+                    ty: param.ty.clone(),
+                    kind,
+                }
+            };
+            expr_args.push(n::CallArgument {
+                passing: n::ArgumentPassing::Value,
+                parameter: slot,
+                is_default: false,
+                value,
+            });
+        }
+        let dummy = Expr {
+            hir_id: hir::HirId::new(
+                self.signature_owner.unwrap_or(OwnerId::INVALID),
+                hir::ItemLocalId::new(0),
+            ),
+            span,
+            kind: H::Unit,
+        };
+        let call_expr = n::Expr {
+            source: source(span),
+            ty: p(P::Type),
+            kind: K::Call {
+                callee: Box::new(callee),
+                arguments: expr_args,
+                env_arguments: Vec::new(),
+                parameter_bindings: Vec::new(),
+            },
+        };
+        let evaluated = self.with_staged_input(true, |this| {
+            this.required_normal_input(&dummy, call_expr, Vec::new())
+        });
+        for (id, prev) in inserted_locals.into_iter().rev() {
+            if let Some(prev) = prev {
+                self.callable_type_inputs.insert(id, prev);
+            } else {
+                self.callable_type_inputs.remove(&id);
+            }
+        }
+        let Ok((comptime_interpretor::Value::Type(resolved), _)) = evaluated else {
+            return Ok(None);
+        };
+        let leaked_abstract = resolved.structural_terms().any(|term| {
+            matches!(
+                term,
+                Term::Rigid { declaration, .. } if declaration.package == ABSTRACT_CALL_ARG_PACKAGE
+            )
+        });
+        if leaked_abstract {
+            return Ok(None);
+        }
+        Ok(Some(resolved))
     }
 }
 

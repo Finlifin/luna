@@ -981,6 +981,7 @@ where
                 | Term::Rigid { .. }
                 | Term::NormalForm { .. }
                 | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
                 | Term::Hole { .. }
         ) {
             let (resolved, used) = type_context.structural_view_metered(
@@ -1014,6 +1015,7 @@ where
                 | Term::Rigid { .. }
                 | Term::NormalForm { .. }
                 | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
                 | Term::Hole { .. }
         ) {
             let (resolved, used) = type_context.structural_view_metered(
@@ -1429,6 +1431,7 @@ impl Walker<'_> {
                 | Term::Bound { .. }
                 | Term::Rigid { .. }
                 | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
                 | Term::Hole { .. }
         ) {
             return Ok(None);
@@ -1495,6 +1498,7 @@ impl Walker<'_> {
                 | Term::Rigid { .. }
                 | Term::NormalForm { .. }
                 | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
                 | Term::Hole { .. }
         ) {
             return Ok(ty.clone());

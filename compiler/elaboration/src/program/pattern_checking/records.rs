@@ -249,6 +249,41 @@ impl Checker<'_, '_> {
         rest: bool,
         span: Span,
     ) -> Result<n::Pattern, Error> {
+        let has_map = self
+            .protocols
+            .map_pattern
+            .is_some_and(|id| self.has_record_protocol_impl(id, ty, None));
+        let has_struct = self
+            .protocols
+            .struct_pattern
+            .is_some_and(|id| self.has_record_protocol_impl(id, ty, None));
+        if has_map && has_struct {
+            return Err(error(
+                span,
+                "ambiguous record pattern view: type implements both StructPatternView and MapPatternView",
+            ));
+        }
+        if has_struct {
+            return self.record_view_pattern(
+                ty,
+                fields,
+                rest,
+                span,
+                self.protocols.struct_pattern.unwrap(),
+                false,
+            );
+        }
+        if has_map {
+            return self.record_view_pattern(
+                ty,
+                fields,
+                rest,
+                span,
+                self.protocols.map_pattern.unwrap(),
+                true,
+            );
+        }
+
         let shape = self.structural_type(ty, span)?;
         let (declaration, declared) = match shape {
             Term::Record(fields) => (None, fields),
@@ -295,6 +330,269 @@ impl Checker<'_, '_> {
                 names: declared.into_iter().map(|(name, _)| name).collect(),
                 fields: checked,
             },
+        })
+    }
+
+    fn has_record_protocol_impl(
+        &self,
+        protocol: DeclarationId,
+        ty: &Term,
+        required_phase: Option<n::TraitPhase>,
+    ) -> bool {
+        let iface = n::InterfaceInstance {
+            declaration: protocol,
+            arguments: vec![],
+        };
+        if self.symbolic_interface_evidence(ty, &iface).ok() == Some(true) {
+            return true;
+        }
+        self.resolve_trait_capability(&iface, ty, crate::ptc::Budget::default())
+            .ok()
+            .is_some_and(|res| {
+                matches!(
+                    res.selection,
+                    crate::implementation::Selection::Selected(impl_id)
+                        if self
+                            .implementation_positions
+                            .get(&impl_id)
+                            .and_then(|pos| self.checked_implementations.get(*pos))
+                            .is_some_and(|imp| required_phase.is_none_or(|p| imp.phases.contains(p)))
+                )
+            })
+    }
+
+    fn record_view_pattern(
+        &mut self,
+        ty: &Term,
+        fields: &[FieldPat<'_>],
+        rest: bool,
+        span: Span,
+        protocol: DeclarationId,
+        is_map: bool,
+    ) -> Result<n::Pattern, Error> {
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        let active_phase = if comptime {
+            n::TraitPhase::Comptime
+        } else {
+            n::TraitPhase::Runtime
+        };
+        let contract = if is_map {
+            crate::record_patterns::map_for_phase(&self.checked_traits, protocol, comptime)
+        } else {
+            crate::record_patterns::struct_for_phase(&self.checked_traits, protocol, comptime)
+        }
+        .map_err(|message| error(span, message))?;
+        if contract.comptime != comptime
+            || !self.has_record_protocol_impl(protocol, ty, Some(active_phase))
+        {
+            return Err(error(
+                span,
+                if is_map {
+                    if comptime {
+                        "map patterns require the comptime MapPatternView phase"
+                    } else {
+                        "map patterns require the runtime MapPatternView phase"
+                    }
+                } else if comptime {
+                    "struct view patterns require the comptime StructPatternView phase"
+                } else {
+                    "struct view patterns require the runtime StructPatternView phase"
+                },
+            ));
+        }
+        if is_map && !rest {
+            return Err(error(
+                span,
+                "open MapPatternView pattern requires trailing `...` to ignore remaining keys",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for field in fields {
+            if !seen.insert(field.ident.name.as_str()) {
+                return Err(error(field.span, "duplicate struct pattern field"));
+            }
+        }
+        let binding = n::LocalId {
+            owner: u32::MAX,
+            index: self.next_temporary_binding,
+        };
+        self.next_temporary_binding = self
+            .next_temporary_binding
+            .checked_add(1)
+            .ok_or_else(|| error(span, "pattern temporary binding space exhausted"))?;
+        self.locals.insert(binding, ty.clone());
+        let subject = n::Expr {
+            source: source(span),
+            ty: ty.clone(),
+            kind: K::Local(binding),
+        };
+        let receiver = if contract.by_value {
+            subject
+        } else if comptime {
+            return Err(error(
+                span,
+                "comptime record view patterns require value-reference self; replace *self with self",
+            ));
+        } else {
+            n::Expr {
+                source: source(span),
+                ty: Term::Pointer(Box::new(ty.clone())),
+                kind: K::AddressOf(Box::new(subject)),
+            }
+        };
+        let iface = n::InterfaceInstance {
+            declaration: protocol,
+            arguments: vec![],
+        };
+        let assoc_contract = self
+            .checked_traits
+            .by_id(protocol)
+            .and_then(|t| t.associated.iter().find(|a| a.name == contract.field_type))
+            .ok_or_else(|| error(span, "record pattern view protocol lacks FieldType member"))?
+            .clone();
+        let has_rigids = {
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let res = nir::type_computations::has_rigid_parameters_bounded(ty, &mut fuel)
+                .map_err(|failure| error(span, failure.to_string()))?;
+            self.required_steps -= (before - fuel) as u64;
+            res
+        };
+        let bridge_span = span.shrink_to_hi();
+        let mut steps = Vec::with_capacity(fields.len());
+        for field in fields {
+            let prop_name = field.ident.name.as_str();
+            let key_expr = n::Expr {
+                source: source(field.span),
+                ty: p(P::Symbol),
+                kind: K::Literal(n::Literal::Symbol(prop_name.to_owned())),
+            };
+            let concrete_field_ty = if !has_rigids {
+                let (parameters, inputs) = self.interface_substitution(&iface, ty);
+                let fn_ty = self.instantiate_input_types(
+                    &assoc_contract.ty,
+                    &parameters,
+                    &inputs,
+                    field.span,
+                )?;
+                let assoc_expr = n::Expr {
+                    source: source(field.span),
+                    ty: fn_ty,
+                    kind: K::AssociatedValue {
+                        interface: iface.clone(),
+                        member: assoc_contract.declaration,
+                        subject: ty.clone(),
+                    },
+                };
+                let call_site = Expr {
+                    hir_id: field.pat.hir_id,
+                    span: field.span,
+                    kind: H::Unit,
+                };
+                let field_type_call = self.with_staged_input(true, |this| {
+                    this.finish_call(
+                        &call_site,
+                        assoc_expr,
+                        &[],
+                        vec![key_expr.clone()],
+                        Some(&p(P::Type)),
+                        None,
+                    )
+                })?;
+                let (value, _) =
+                    self.required_normal_input(&call_site, field_type_call, Vec::new())?;
+                let resolved_ty =
+                    crate::program::type_data::CompletedType::from_value(value, field.span)?
+                        .identity(field.span)?;
+                if is_never(&resolved_ty) {
+                    return Err(error(
+                        field.span,
+                        format!(
+                            "unknown {} field `{prop_name}` has NoReturn type",
+                            if is_map {
+                                "MapPatternView"
+                            } else {
+                                "StructPatternView"
+                            }
+                        ),
+                    ));
+                }
+                Some(resolved_ty)
+            } else {
+                None
+            };
+            let site = Expr {
+                hir_id: field.pat.hir_id,
+                span: field.span,
+                kind: H::Unit,
+            };
+            let method = self
+                .selected_method(ty.clone(), Some(iface.clone()), contract.get, field.span)?
+                .ok_or_else(|| {
+                    error(field.span, "record pattern view has no selected get method")
+                })?;
+            let call_value = self.finish_call(
+                &site,
+                method,
+                &[],
+                vec![receiver.clone(), key_expr],
+                None,
+                None,
+            )?;
+            let next = if is_map {
+                let payload = self.optional_payload(&call_value.ty, field.span)?;
+                if let Some(expected_ty) = &concrete_field_ty {
+                    self.require(&payload, expected_ty, field.span)?;
+                }
+                if is_never(&payload) {
+                    return Err(error(
+                        field.span,
+                        format!("unknown MapPatternView field `{prop_name}` has NoReturn type"),
+                    ));
+                }
+                let inner = self.pattern(&field.pat, &payload)?;
+                n::Pattern::OptionalPresent(Box::new(inner))
+            } else {
+                if let Some(expected_ty) = &concrete_field_ty {
+                    self.require(&call_value.ty, expected_ty, field.span)?;
+                }
+                if is_never(&call_value.ty) {
+                    return Err(error(
+                        field.span,
+                        format!("unknown StructPatternView field `{prop_name}` has NoReturn type"),
+                    ));
+                }
+                self.pattern(&field.pat, &call_value.ty)?
+            };
+            steps.push(n::Pattern::Then {
+                first: Box::new(n::Pattern::Wild),
+                value: Box::new(call_value),
+                next: Box::new(next),
+            });
+        }
+        while steps.len() > 1 {
+            let mut balanced = Vec::with_capacity(steps.len().div_ceil(2));
+            let mut pending = steps.into_iter();
+            while let Some(first) = pending.next() {
+                balanced.push(match pending.next() {
+                    Some(next) => n::Pattern::Then {
+                        first: Box::new(first),
+                        value: Box::new(n::Expr {
+                            source: source(bridge_span),
+                            ty: p(P::Void),
+                            kind: K::Unit,
+                        }),
+                        next: Box::new(next),
+                    },
+                    None => first,
+                });
+            }
+            steps = balanced;
+        }
+        let result = steps.pop().unwrap_or(n::Pattern::Wild);
+        Ok(n::Pattern::Observe {
+            binding,
+            inner: Box::new(result),
         })
     }
 }

@@ -38,6 +38,10 @@ pub struct Options {
     pub stable_range_pattern_protocol: Option<String>,
     pub concat_pattern_protocol: Option<String>,
     pub stable_concat_pattern_protocol: Option<String>,
+    pub map_pattern_protocol: Option<String>,
+    pub stable_map_pattern_protocol: Option<String>,
+    pub struct_pattern_protocol: Option<String>,
+    pub stable_struct_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub variadic_collector_protocol: Option<String>,
@@ -204,6 +208,10 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut stable_range_pattern_protocol = None;
     let mut concat_pattern_protocol = None;
     let mut stable_concat_pattern_protocol = None;
+    let mut map_pattern_protocol = None;
+    let mut stable_map_pattern_protocol = None;
+    let mut struct_pattern_protocol = None;
+    let mut stable_struct_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut variadic_collector_protocol = None;
@@ -702,6 +710,32 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--map-pattern-protocol") => {
+                    if map_pattern_protocol.is_some() {
+                        return Err("--map-pattern-protocol may only be specified once".into());
+                    }
+                    map_pattern_protocol = Some(
+                        option_value(&mut args, "--map-pattern-protocol")?
+                            .into_string()
+                            .map_err(|_| "MapPatternView protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--stable-map-pattern-protocol") => {
+                    if stable_map_pattern_protocol.is_some() {
+                        return Err(
+                            "--stable-map-pattern-protocol may only be specified once".into()
+                        );
+                    }
+                    stable_map_pattern_protocol = Some(
+                        option_value(&mut args, "--stable-map-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StableMapPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--concat-pattern-protocol") => {
                     if concat_pattern_protocol.is_some() {
                         return Err("--concat-pattern-protocol may only be specified once".into());
@@ -711,6 +745,19 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                             .into_string()
                             .map_err(
                                 |_| "ConcatPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--struct-pattern-protocol") => {
+                    if struct_pattern_protocol.is_some() {
+                        return Err("--struct-pattern-protocol may only be specified once".into());
+                    }
+                    struct_pattern_protocol = Some(
+                        option_value(&mut args, "--struct-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StructPatternView protocol selector must be valid UTF-8",
                             )?,
                     );
                     continue;
@@ -726,6 +773,21 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                             .into_string()
                             .map_err(
                                 |_| "StableConcatPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--stable-struct-pattern-protocol") => {
+                    if stable_struct_pattern_protocol.is_some() {
+                        return Err(
+                            "--stable-struct-pattern-protocol may only be specified once".into(),
+                        );
+                    }
+                    stable_struct_pattern_protocol = Some(
+                        option_value(&mut args, "--stable-struct-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StableStructPatternView protocol selector must be valid UTF-8",
                             )?,
                     );
                     continue;
@@ -1100,6 +1162,10 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         stable_range_pattern_protocol,
         concat_pattern_protocol,
         stable_concat_pattern_protocol,
+        map_pattern_protocol,
+        stable_map_pattern_protocol,
+        struct_pattern_protocol,
+        stable_struct_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         variadic_collector_protocol,
@@ -1275,6 +1341,10 @@ mod tests {
                 stable_range_pattern_protocol: None,
                 concat_pattern_protocol: None,
                 stable_concat_pattern_protocol: None,
+                map_pattern_protocol: None,
+                stable_map_pattern_protocol: None,
+                struct_pattern_protocol: None,
+                stable_struct_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,
@@ -1324,6 +1394,10 @@ mod tests {
                 stable_range_pattern_protocol: None,
                 concat_pattern_protocol: None,
                 stable_concat_pattern_protocol: None,
+                map_pattern_protocol: None,
+                stable_map_pattern_protocol: None,
+                struct_pattern_protocol: None,
+                stable_struct_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,

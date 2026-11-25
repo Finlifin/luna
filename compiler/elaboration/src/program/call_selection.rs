@@ -541,7 +541,6 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         if let Some(owner) = direct
             && self.open_functions.contains_key(&owner)
             && call_use == CallUse::Invocation
-            && prefix.is_empty()
         {
             let clauses = match &callee.kind {
                 K::Function(_) => Some(Vec::new()),
@@ -555,7 +554,8 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     self.alias_substitution
                         .insert(binder.declaration, std::sync::Arc::new(argument));
                 }
-                let result = self.instantiated_open_call(expr, owner, args, expected);
+                let result =
+                    self.instantiated_open_call_with_prefix(expr, owner, args, prefix, expected);
                 self.alias_substitution = saved;
                 return result.map(block_regions::CallPlan::Ready);
             }
@@ -577,10 +577,39 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     .map(block_regions::CallPlan::Ready);
             }
         }
+        if call_use == CallUse::Invocation
+            && let K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                method_arguments,
+                member,
+            } = &callee.kind
+            && let Some((impl_owner, clauses)) = self.selected_open_trait_method_target(
+                *interface,
+                interface_arguments,
+                subject,
+                *member,
+                method_arguments,
+            )
+        {
+            self.check_type_application(impl_owner, &clauses, expr.span)?;
+            let saved = self.alias_substitution.clone();
+            for (binder, argument) in self
+                .declaration_binders(impl_owner)
+                .into_iter()
+                .zip(clauses)
+            {
+                self.alias_substitution
+                    .insert(binder.declaration, std::sync::Arc::new(argument));
+            }
+            let result =
+                self.instantiated_open_call_with_prefix(expr, impl_owner, args, prefix, expected);
+            self.alias_substitution = saved;
+            return result.map(block_regions::CallPlan::Ready);
+        }
         let retained_callable = self.structural_type(&callee.ty, expr.span)?;
-        let callable = self
-            .observe_call_type(&retained_callable, expr)?
-            .into_callable_signature();
+        let callable = self.observe_call_type(&retained_callable, expr)?;
         let Some(signature) = dependent_inputs::CallSignature::of(&callable) else {
             return Err(error(
                 expr.span,
@@ -640,5 +669,59 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             parameter_bindings,
             expected,
         )
+    }
+
+    fn selected_open_trait_method_target(
+        &mut self,
+        interface: DeclarationId,
+        interface_arguments: &[Term],
+        subject: &Term,
+        member: DeclarationId,
+        method_arguments: &[Term],
+    ) -> Option<(OwnerId, Vec<Term>)> {
+        let instance = n::InterfaceInstance {
+            declaration: interface,
+            arguments: interface_arguments.to_vec(),
+        };
+        let resolution = self
+            .resolve_trait_capability(&instance, subject, crate::ptc::Budget::default())
+            .ok()?;
+        let crate::implementation::Selection::Selected(impl_id) = resolution.selection else {
+            return None;
+        };
+        let crate::implementation::TypeAssessment::Applicable(evidence) =
+            resolution.assessments.get(&impl_id)?
+        else {
+            return None;
+        };
+        let implementation = &self.checked_implementations[self.implementation_positions[&impl_id]];
+        let contract = self
+            .checked_traits
+            .by_id(interface)
+            .and_then(|t| t.methods.iter().find(|m| m.declaration == member))?;
+        let body = implementation
+            .methods
+            .iter()
+            .find(|(method, _)| *method == contract.name)
+            .map(|(_, body)| *body)
+            .or(contract.default)?;
+        let impl_owner = self.source_declarations.owner(body)?;
+        if !self.open_functions.contains_key(&impl_owner) {
+            return None;
+        }
+        let clauses = if contract.default == Some(body) {
+            std::iter::once(subject.clone())
+                .chain(interface_arguments.iter().cloned())
+                .chain(method_arguments.iter().cloned())
+                .collect()
+        } else {
+            evidence
+                .type_arguments
+                .iter()
+                .cloned()
+                .chain(method_arguments.iter().cloned())
+                .collect()
+        };
+        Some((impl_owner, clauses))
     }
 }

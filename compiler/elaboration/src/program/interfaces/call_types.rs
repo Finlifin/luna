@@ -171,30 +171,36 @@ impl crate::associated::TypeProjectionEnvironment for CallTypeEnvironment<'_, '_
             ready @ TypeProjection::Ready(_) => return Ok(ready),
             TypeProjection::Initializer(pending) => pending,
         };
-        let Term::AssociatedType {
-            origin,
-            subject,
-            arguments,
-        } = key
-        else {
-            unreachable!()
+        let root = match key {
+            Term::AssociatedType {
+                origin,
+                subject,
+                arguments,
+            } => n::Expr {
+                source: source(self.site.span),
+                ty: p(P::Type),
+                kind: K::AssociatedValue {
+                    interface: n::InterfaceInstance {
+                        declaration: origin.interface,
+                        arguments: arguments.clone(),
+                    },
+                    subject: subject.as_ref().clone(),
+                    member: origin.member,
+                },
+            },
+            Term::AssociatedTypeCall(call) => crate::associated::associated_call_expression(
+                world.traits,
+                call,
+                source(self.site.span),
+                world.context.scope(),
+                &mut budget.steps,
+            )?,
+            _ => unreachable!(),
         };
         if pending.needs_inputs() {
             return Ok(TypeProjection::Initializer(pending));
         }
         crate::associated::charge_projection_copy(key, &mut budget.steps)?;
-        let root = n::Expr {
-            source: source(self.site.span),
-            ty: p(P::Type),
-            kind: K::AssociatedValue {
-                interface: n::InterfaceInstance {
-                    declaration: origin.interface,
-                    arguments: arguments.clone(),
-                },
-                subject: subject.as_ref().clone(),
-                member: origin.member,
-            },
-        };
         let read = (|| {
             let (prepared, ()) = self.checker.prepare_required_root_with_live_inputs(
                 self.site,

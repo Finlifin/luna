@@ -800,6 +800,7 @@ pub fn concrete_payload(ty: &Term) -> bool {
                     | Term::Bound { .. }
                     | Term::Hole { .. }
                     | Term::AssociatedType { .. }
+                    | Term::AssociatedTypeCall(_)
                     | Term::ListConcat { .. }
             )
         })

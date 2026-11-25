@@ -138,6 +138,7 @@ fn term_rank(term: &Term) -> u8 {
         Term::Float(_) => 50,
         Term::Value { .. } => 51,
         Term::PureFunction(_) => 52,
+        Term::AssociatedTypeCall(_) => 53,
     }
 }
 
@@ -189,6 +190,14 @@ pub(super) fn cmp_term(a: &Term, b: &Term) -> Ordering {
             .then_with(|| ao.member.cmp(&bo.member))
             .then_with(|| cmp_term_slice(aa, ba))
             .then_with(|| cmp_term(asub, bsub)),
+        (Term::AssociatedTypeCall(a), Term::AssociatedTypeCall(b)) => a
+            .origin
+            .interface
+            .cmp(&b.origin.interface)
+            .then_with(|| a.origin.member.cmp(&b.origin.member))
+            .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
+            .then_with(|| cmp_term(&a.subject, &b.subject))
+            .then_with(|| cmp_term_slice(&a.call_arguments, &b.call_arguments)),
         (
             Term::Nominal {
                 declaration: ad,

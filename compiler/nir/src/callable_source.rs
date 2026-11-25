@@ -8,6 +8,7 @@ enum Slot {
     Quote { index: usize, staged: bool },
     Runtime(usize),
     Link(usize),
+    Open(usize),
 }
 
 #[derive(Default)]
@@ -73,6 +74,7 @@ pub struct Callables<'a> {
     quotes: &'a [Function],
     runtime: &'a [RuntimeFunctionIdentity],
     links: &'a [MethodLink],
+    open: &'a [MethodLink],
     positions: Arc<Positions>,
 }
 
@@ -84,7 +86,8 @@ impl Positions {
             .len()
             .saturating_add(package.quote_templates.len())
             .saturating_add(package.runtime_function_identities.len())
-            .saturating_add(package.method_links.len());
+            .saturating_add(package.method_links.len())
+            .saturating_add(package.open_function_identities.len());
         *fuel = fuel
             .checked_sub(count)
             .ok_or_else(|| Error::budget(source, "callable directory budget exhausted"))?;
@@ -106,6 +109,20 @@ impl Positions {
                 Slot::Link(i),
                 link.source,
                 "duplicate method link identity",
+            )?;
+        }
+        for (i, open) in package.open_function_identities.iter().enumerate() {
+            if open.phase == FunctionPhase::NormalForm {
+                return Err(Error::invalid(
+                    open.source,
+                    "invalid open function identity phase",
+                ));
+            }
+            insert(
+                open.declaration,
+                Slot::Open(i),
+                open.source,
+                "duplicate open function identity",
             )?;
         }
         for (i, f) in package.functions.iter().enumerate() {
@@ -190,6 +207,7 @@ impl Positions {
             quotes: &package.quote_templates,
             runtime: &package.runtime_function_identities,
             links: &package.method_links,
+            open: &package.open_function_identities,
             positions: self.clone(),
         }
     }
@@ -266,6 +284,11 @@ impl<'a> Callables<'a> {
                 self.links[i].phase,
                 self.links[i].is_quote,
                 &self.links[i].type_parameters,
+            ),
+            Slot::Open(i) => (
+                self.open[i].phase,
+                self.open[i].is_quote,
+                &self.open[i].type_parameters,
             ),
         })
     }

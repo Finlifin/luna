@@ -307,6 +307,61 @@ where
     bytes: Vec<u8, .A = A, .allocator = allocator>,
 }
 
+struct RawVecBytes {
+    raw_addr: usize,
+    raw_len: usize,
+    raw_cap: usize,
+}
+
+impl Clone for RawVecBytes {
+    fn clone(*self) -> Self {
+        RawVecBytes {
+            raw_addr: self.raw_addr.*,
+            raw_len: self.raw_len.*,
+            raw_cap: self.raw_cap.*,
+        }
+    }
+}
+
+impl Copy for RawVecBytes {}
+
+pub fn raw_slot_equals_str(slot_addr: usize, other: str) -> bool {
+    let header = unsafe { builtin.mem.raw_read<RawVecBytes>(slot_addr) }
+    let other_u64 = builtin.compiler.str_byte_length(other);
+    let other_len = builtin.compiler.try_u64_to_usize(other_u64) match {
+        v? => v,
+        null => return false,
+    }
+    if header.raw_len != other_len {
+        return false;
+    }
+    if header.raw_len == 0 {
+        return true;
+    }
+    if header.raw_addr == 0 {
+        return false;
+    }
+    var i: usize = 0;
+    var j: u64 = 0;
+    while i < header.raw_len and j < other_u64 {
+        let addr = builtin.mem.checked_add_usize(header.raw_addr, i) match {
+            v? => v,
+            null => return false,
+        }
+        let left = unsafe { builtin.mem.raw_read<u8>(addr) }
+        let right = builtin.compiler.str_byte(other, j) match {
+            v? => v,
+            null => return false,
+        }
+        if left != right {
+            return false;
+        }
+        i = i + 1;
+        j = j + 1;
+    }
+    i == header.raw_len
+}
+
 impl String<.A = A, .allocator = a>
 where
     A: Type,

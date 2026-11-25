@@ -323,7 +323,7 @@ impl Checker<'_, '_> {
         sig: &hir::item::FnSig<'_>,
         symbols: &[Option<Term>],
         parameters: &[Parameter],
-        span: Span,
+        site: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
         let domains = parameters
             .iter()
@@ -331,7 +331,7 @@ impl Checker<'_, '_> {
             .collect::<Vec<_>>();
         if !annotation.awaits_inputs() {
             return self
-                .instantiate_open_annotation_in_scope(annotation, sig, symbols, &domains, span);
+                .instantiate_open_annotation_in_scope(annotation, sig, symbols, &domains, site);
         }
         self.instantiate_open_annotation_with_live_in_scope(
             owner,
@@ -341,7 +341,7 @@ impl Checker<'_, '_> {
             symbols,
             &domains,
             &vec![None; sig.params.len()],
-            span,
+            site,
         )
     }
 
@@ -354,14 +354,14 @@ impl Checker<'_, '_> {
         symbols: &[Option<Term>],
         parameters: &[Parameter],
         live: &[Option<comptime_interpretor::Value>],
-        span: Span,
+        site: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
         let domains = parameters
             .iter()
             .map(|p| (p.sort, Some(p.ty.clone())))
             .collect::<Vec<_>>();
         self.instantiate_open_annotation_with_live_in_scope(
-            owner, slot, annotation, sig, symbols, &domains, live, span,
+            owner, slot, annotation, sig, symbols, &domains, live, site,
         )
     }
 
@@ -374,8 +374,9 @@ impl Checker<'_, '_> {
         symbols: &[Option<Term>],
         parameters: &[(Sort, Option<Term>)],
         live: &[Option<comptime_interpretor::Value>],
-        span: Span,
+        site: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
+        let span = site.span;
         // A checked computation already selected its captures, including inputs
         // referenced only in another capture's domain. Source-only annotations
         // still require the caller environment until their source is checked.
@@ -398,7 +399,7 @@ impl Checker<'_, '_> {
         };
         if !needs_call_world {
             return self
-                .instantiate_open_annotation_in_scope(annotation, sig, symbols, parameters, span);
+                .instantiate_open_annotation_in_scope(annotation, sig, symbols, parameters, site);
         }
         let source =
             annotation_source(sig, slot).ok_or_else(|| error(span, "missing live annotation"))?;
@@ -436,23 +437,28 @@ impl Checker<'_, '_> {
                 this.required_expression_with_live_inputs(value, Some(&p(P::Type)), graph)?;
             CompletedType::from_value(value, span)
         })?;
-        self.specialize_completed_annotation(ty, symbols, span)
+        self.specialize_completed_annotation(ty, symbols, sig.modifiers.is_comptime, site)
     }
 
     fn specialize_completed_annotation(
         &mut self,
         data: CompletedType,
         symbols: &[Option<Term>],
-        span: Span,
+        allow_comptime_slots: bool,
+        site: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
         let CompletedType::Identity(ty) = data else {
             return Ok(data);
         };
         let ty = nominal_fields::metered(&mut self.required_steps, |fuel| {
-            ty.substitute_partial_bounded(symbols, fuel)
+            if allow_comptime_slots {
+                ty.substitute_partial_comptime_bounded(symbols, fuel)
+            } else {
+                ty.substitute_partial_bounded(symbols, fuel)
+            }
         })
-        .map_err(|failure| error(span, failure.to_string()))?;
-        self.callable_input_view(&ty, span)
+        .map_err(|failure| error(site.span, failure.to_string()))?;
+        self.observe_call_type(&ty, site)
             .map(CompletedType::Identity)
     }
 
@@ -462,8 +468,9 @@ impl Checker<'_, '_> {
         sig: &hir::item::FnSig<'_>,
         symbols: &[Option<Term>],
         parameters: &[(Sort, Option<Term>)],
-        span: Span,
+        site: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
+        let span = site.span;
         let ty = match annotation {
             Annotation::Known(ty) => CompletedType::Identity(ty.clone()),
             Annotation::Description(data) => CompletedType::Description(data.clone()),
@@ -533,7 +540,7 @@ impl Checker<'_, '_> {
                 CompletedType::from_value(value, span)?
             }
         };
-        self.specialize_completed_annotation(ty, symbols, span)
+        self.specialize_completed_annotation(ty, symbols, sig.modifiers.is_comptime, site)
     }
 }
 

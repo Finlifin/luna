@@ -341,7 +341,12 @@ fn prepare(
             let Some(index) = function_indices.get(body).copied() else {
                 // In a required snapshot this slot can name a declaration whose
                 // body belongs to a different receiver. Full source checks it.
-                if method_links.contains(body) {
+                if method_links.contains(body)
+                    || package
+                        .open_function_identities
+                        .iter()
+                        .any(|open| open.declaration == *body)
+                {
                     continue;
                 }
                 return Err(failure(

@@ -3848,12 +3848,20 @@ impl Builder<'_, '_> {
         let mut pending = vec![(root, 0usize)];
         while let Some((node, depth)) = pending.pop() {
             self.tick(depth)?;
-            if let Term::AssociatedType {
-                origin,
-                arguments,
-                subject,
-            } = node
-                && node.check_scope(&[]).is_ok()
+            if let Some((origin, arguments, subject, call_arguments)) = match node {
+                Term::AssociatedType {
+                    origin,
+                    arguments,
+                    subject,
+                } => Some((origin.as_ref(), arguments, subject.as_ref(), None)),
+                Term::AssociatedTypeCall(call) => Some((
+                    &call.origin,
+                    &call.arguments,
+                    &call.subject,
+                    Some(&call.call_arguments),
+                )),
+                _ => None,
+            } && node.check_scope(&[]).is_ok()
             {
                 if self.world.assumptions().is_empty() {
                     crate::associated::charge_projection_copy(node, &mut self.fuel)?;
@@ -3865,10 +3873,23 @@ impl Builder<'_, '_> {
                 for argument in arguments {
                     normalized_arguments.push(self.staging_type_view(argument)?);
                 }
-                let key = Term::AssociatedType {
-                    origin: origin.clone(),
-                    arguments: normalized_arguments,
-                    subject: Box::new(normalized_subject),
+                let key = if let Some(call_arguments) = call_arguments {
+                    let mut normalized_call_arguments = Vec::with_capacity(call_arguments.len());
+                    for argument in call_arguments {
+                        normalized_call_arguments.push(self.staging_type_view(argument)?);
+                    }
+                    Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+                        origin: origin.clone(),
+                        arguments: normalized_arguments,
+                        subject: normalized_subject,
+                        call_arguments: normalized_call_arguments,
+                    }))
+                } else {
+                    Term::AssociatedType {
+                        origin: Box::new(origin.clone()),
+                        arguments: normalized_arguments,
+                        subject: Box::new(normalized_subject),
+                    }
                 };
                 if self
                     .staging_views
@@ -4301,6 +4322,24 @@ impl Builder<'_, '_> {
                 }
                 children.extend(arguments.iter().cloned());
                 children.push((**subject).clone());
+            }
+            Term::AssociatedTypeCall(call) => {
+                if self.instances.is_some() {
+                    return Err("IIR requires associated type call resolution".into());
+                }
+                let normalized = self.dispatch_type_view(&ty)?;
+                let interface = n::InterfaceInstance {
+                    declaration: call.origin.interface,
+                    arguments: call.arguments.clone(),
+                };
+                let slot = self.interface(interface, call.subject.clone())?;
+                self.retain_associated_supply(slot, call.origin.member, 0, true)?;
+                if normalized != ty {
+                    children.push(normalized);
+                }
+                children.extend(call.arguments.iter().cloned());
+                children.extend(call.call_arguments.iter().cloned());
+                children.push(call.subject.clone());
             }
             Term::ErrorResult { errors, result } => {
                 children.extend(errors.iter().cloned());

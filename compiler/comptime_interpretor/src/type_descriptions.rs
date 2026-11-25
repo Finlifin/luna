@@ -608,7 +608,9 @@ pub(super) fn inspect<'signature>(
                 pending.push(Work::Visit(root, depth + fields.len()));
             }
             Term::Runtime(id) if runtime_domains.contains_key(id) => {}
-            Term::AssociatedType { .. } => return Err(ErrorKind::UnmaterializedDispatch),
+            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_) => {
+                return Err(ErrorKind::UnmaterializedDispatch);
+            }
             Term::Rigid { .. } | Term::Runtime(_) | Term::Value { .. } | Term::Hole { .. } => {
                 return Err(ErrorKind::Type);
             }

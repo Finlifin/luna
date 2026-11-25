@@ -337,6 +337,10 @@ pub struct Protocols {
     pub stable_range_pattern: Option<DeclarationId>,
     pub concat_pattern: Option<DeclarationId>,
     pub stable_concat_pattern: Option<DeclarationId>,
+    pub map_pattern: Option<DeclarationId>,
+    pub stable_map_pattern: Option<DeclarationId>,
+    pub struct_pattern: Option<DeclarationId>,
+    pub stable_struct_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
@@ -1545,6 +1549,30 @@ fn elaborate_candidate<'a, 'h>(
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
+    if let Some(id) = checker.protocols.map_pattern {
+        crate::record_patterns::map_protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.stable_map_pattern {
+        crate::record_patterns::stable_map_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.map_pattern,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.struct_pattern {
+        crate::record_patterns::struct_protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.stable_struct_pattern {
+        crate::record_patterns::stable_struct_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.struct_pattern,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
@@ -2099,9 +2127,29 @@ fn elaborate_candidate<'a, 'h>(
     // invocation inputs even though only concrete residual bodies are emitted.
     // Identity metadata admits their phase; it never authorizes execution.
     for owner in checker.open_functions.keys().copied() {
-        if !matches!(&package.item(owner).unwrap().kind, ItemKind::Fn(sig, _)
-            if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
-        {
+        let ItemKind::Fn(sig, _) = &package.item(owner).unwrap().kind else {
+            continue;
+        };
+        if sig.modifiers.is_normal_form_head {
+            continue;
+        }
+        if sig.modifiers.is_comptime {
+            let params = checker
+                .type_parameters
+                .get(&owner)
+                .map_or(&[][..], Vec::as_slice);
+            let type_parameters = checker
+                .input_binders(params)
+                .into_iter()
+                .map(|parameter| parameter.declaration)
+                .collect();
+            output.open_function_identities.push(n::MethodLink {
+                source: source(package.item(owner).unwrap().span),
+                declaration: declaration(package, package_identities, owner),
+                phase: n::FunctionPhase::Comptime,
+                is_quote: sig.modifiers.is_quote,
+                type_parameters,
+            });
             continue;
         }
         if let Some(signature) = checker
@@ -4947,19 +4995,58 @@ impl Checker<'_, '_> {
             // free functions also receive inputs through declaration clauses.
             // Comptime bodies already execute local constants per invocation;
             // receiver definitions retain their separate checking path.
-            if result_annotation.needs_instance()
-                || annotations
-                    .iter()
-                    .any(|(_, annotation)| annotation.needs_instance())
-                || (!sig.modifiers.is_normal_form_head
-                    && (parameters
+            let has_bound_type_call = |ty: &Term| {
+                ty.structural_terms().any(|term| {
+                    matches!(
+                        term,
+                        Term::AssociatedTypeCall(call)
+                            if call.call_arguments.iter().any(|arg| arg.check_scope(&[]).is_err())
+                    )
+                })
+            };
+            let is_method =
+                self.self_containers.contains_key(&owner) || self.self_types.contains_key(&owner);
+            let result_has_bound_type_call = matches!(
+                &result_annotation,
+                open_functions::Annotation::Known(ty) if has_bound_type_call(ty)
+            );
+            let staged_body = !sig.modifiers.is_normal_form_head
+                && (!is_method || matches!(item.kind, ItemKind::Fn(..)))
+                && (result_has_bound_type_call
+                    || ((parameters
                         .iter()
                         .any(|parameter| parameter.sort != Sort::Runtime)
                         || (!sig.modifiers.is_comptime
                             && !self.type_parameters[&owner].is_empty()))
-                    && self.has_staged_body_work(owner)?)
+                        && self.has_staged_body_work(owner)?));
+            if result_annotation.needs_instance()
+                || annotations
+                    .iter()
+                    .any(|(_, annotation)| annotation.needs_instance())
+                || staged_body
             {
-                self.register_open_function(owner, annotations, result_annotation, item.span)?;
+                let all_known = !result_annotation.needs_instance()
+                    && annotations
+                        .iter()
+                        .all(|(_, annotation)| !annotation.needs_instance());
+                self.register_open_function(
+                    owner,
+                    annotations,
+                    result_annotation.clone(),
+                    item.span,
+                )?;
+                if is_method && all_known {
+                    let open_functions::Annotation::Known(result) = result_annotation else {
+                        unreachable!()
+                    };
+                    self.signatures.insert(
+                        owner,
+                        Term::Function {
+                            parameters,
+                            result: Box::new(result),
+                        },
+                    );
+                }
                 return Ok(());
             }
             let open_functions::Annotation::Known(result) = result_annotation else {

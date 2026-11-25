@@ -2407,6 +2407,9 @@ pub struct Package {
     /// Body-free identities carried by required comptime evaluation. These do
     /// not authorize execution and must not substitute for runtime definitions.
     pub runtime_function_identities: Vec<RuntimeFunctionIdentity>,
+    /// Open function template declarations whose bodies are specialized at
+    /// call sites rather than emitted unspecialized into `functions`.
+    pub open_function_identities: Vec<MethodLink>,
     /// Checked implementation targets outside the executable closure of a required
     /// computation. A link preserves slot completeness without forming a value.
     pub method_links: Vec<MethodLink>,
@@ -4182,6 +4185,9 @@ impl fmt::Display for Package {
         }
         for identity in &self.runtime_function_identities {
             write!(f, "\n {identity}")?;
+        }
+        for identity in &self.open_function_identities {
+            write!(f, "\n (open-function-identity {identity})")?;
         }
         for declaration in &self.function_parameters {
             write!(f, "\n {declaration}")?;

@@ -415,6 +415,14 @@ impl Writer {
                 self.terms(arguments, d)?;
                 self.term(subject, d)?;
             }
+            T::AssociatedTypeCall(call) => {
+                self.byte(44)?;
+                self.id(call.origin.interface)?;
+                self.id(call.origin.member)?;
+                self.terms(&call.arguments, d)?;
+                self.term(&call.subject, d)?;
+                self.terms(&call.call_arguments, d)?;
+            }
             T::TraitObject {
                 interface,
                 arguments,
@@ -728,6 +736,15 @@ impl<'a> Reader<'a> {
                 arguments: self.terms(d)?,
                 subject: Box::new(self.term(d)?),
             },
+            44 => T::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+                origin: nir::AssociatedTypeOrigin {
+                    interface: self.id()?,
+                    member: self.id()?,
+                },
+                arguments: self.terms(d)?,
+                subject: self.term(d)?,
+                call_arguments: self.terms(d)?,
+            })),
             _ => return Err(failure("unknown descriptor tag")),
         })
     }

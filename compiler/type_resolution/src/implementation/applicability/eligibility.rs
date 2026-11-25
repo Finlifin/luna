@@ -28,7 +28,10 @@ pub(super) fn subject_view(
         || context.is_list_type(subject)
         || !matches!(
             subject,
-            Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. }
+            Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
         )
     {
         return Ok((subject.clone(), None));

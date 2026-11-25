@@ -522,7 +522,7 @@ impl Frame {
                     .parameters()
                     .get(slot)
                     .ok_or_else(|| error(source.span, "invalid dependent input slot"))?;
-                if parameter.sort == Sort::Runtime {
+                if parameter.sort == Sort::Runtime && !call.signature().is_comptime_callable() {
                     return Err(error(
                         source.span,
                         "dependent comptime input cannot read a runtime argument",
@@ -621,9 +621,10 @@ impl Frame {
                         .into_iter()
                         .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
                         .collect();
-                    if references
-                        .values()
-                        .any(|&i| call.parameters()[i].sort == Sort::Runtime)
+                    if !call.signature().is_comptime_callable()
+                        && references
+                            .values()
+                            .any(|&i| call.parameters()[i].sort == Sort::Runtime)
                     {
                         return Err(error(
                             source.span,

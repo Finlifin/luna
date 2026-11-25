@@ -66,11 +66,16 @@ impl Checker<'_, '_> {
                 _ => return Err(error(expr.span, "literal protocol is not implemented")),
             },
             H::Null => {
-                let ty = expected.ok_or_else(|| {
-                    context_error(expr.span, "null requires an optional target type")
-                })?;
-                self.optional_payload(ty, expr.span)?;
-                (ty.clone(), K::OptionalAbsent)
+                if expected.is_none() && (self.in_unselected_inline || self.checking_open_behavior)
+                {
+                    (Term::Optional(Box::new(p(P::Never))), K::OptionalAbsent)
+                } else {
+                    let ty = expected.ok_or_else(|| {
+                        context_error(expr.span, "null requires an optional target type")
+                    })?;
+                    self.optional_payload(ty, expr.span)?;
+                    (ty.clone(), K::OptionalAbsent)
+                }
             }
             H::Unit => {
                 let empty_tuple = expected

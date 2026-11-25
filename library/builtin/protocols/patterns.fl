@@ -250,3 +250,56 @@ comptime impl ConcatPatternView for str {
 }
 
 comptime impl StableConcatPatternView for str {}
+
+{-
+    Open/dynamic key-value map pattern view.
+    `FieldType(property)` maps a compile-time `Symbol` key to the expected
+    value type (`NoReturn` may be returned to statically reject unknown keys).
+    `map_pattern_view_get` returns `?FieldType(property)`: outer `null` means
+    the key is absent and the candidate arm fails; outer `v?` means present.
+-}
+pub trait MapPatternView {
+    assoc FieldType: pure comptime fn(Symbol) -> Type;
+
+    fn map_pattern_view_get(*self, comptime property: Symbol) -> ?FieldType(property);
+
+    ^attrs.comptime_phase
+    assoc FieldTypeComptime: pure comptime fn(Symbol) -> Type;
+
+    ^attrs.comptime_phase
+    comptime fn map_pattern_view_get_comptime(
+        self,
+        property: Symbol,
+    ) -> ?FieldTypeComptime(property);
+}
+
+{-
+    Marker protocol guaranteeing that map key lookups are referentially stable
+    across match arms without side effects.
+-}
+pub trait StableMapPatternView :- MapPatternView {}
+
+{-
+    Fixed-schema structure pattern view where every valid field is guaranteed
+    to exist (no outer `?` wrapper). Unknown fields should map to `NoReturn`.
+-}
+pub trait StructPatternView {
+    assoc FieldType: pure comptime fn(Symbol) -> Type;
+
+    fn struct_pattern_view_get(*self, comptime field: Symbol) -> FieldType(field);
+
+    ^attrs.comptime_phase
+    assoc FieldTypeComptime: pure comptime fn(Symbol) -> Type;
+
+    ^attrs.comptime_phase
+    comptime fn struct_pattern_view_get_comptime(
+        self,
+        field: Symbol,
+    ) -> FieldTypeComptime(field);
+}
+
+{-
+    Marker protocol guaranteeing that struct view field reads are referentially
+    stable across match arms without side effects.
+-}
+pub trait StableStructPatternView :- StructPatternView {}

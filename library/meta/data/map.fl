@@ -233,3 +233,20 @@ comptime impl ComptimeHash for Map<K, V> where K :- ComptimeHash, V :- ComptimeH
         mix_digest(with_count, combined)
     }
 }
+
+pure comptime fn meta_map_field_type(_property: Symbol) -> Type
+where
+    V: Type,
+{
+    V
+}
+
+comptime impl MapPatternView for Map<Symbol, V> where V {
+    assoc FieldTypeComptime: pure comptime fn(Symbol) -> Type = meta_map_field_type<V>;
+
+    comptime fn map_pattern_view_get_comptime(self, property: Symbol) -> ?FieldTypeComptime(property) {
+        self.get(property)
+    }
+}
+
+comptime impl StableMapPatternView for Map<Symbol, V> where V {}

@@ -219,6 +219,14 @@ fn walk<'p, L: Lookup<'p>>(
             charge_copy(ty, fuel)?;
             walk(ty, values, fuel, depth + 1)?
         }
+        Term::AssociatedTypeCall(call) => {
+            Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+                origin: call.origin.clone(),
+                arguments: walk_many(&call.arguments, values, fuel, depth + 1)?,
+                subject: walk(&call.subject, values, fuel, depth + 1)?,
+                call_arguments: walk_many(&call.call_arguments, values, fuel, depth + 1)?,
+            }))
+        }
         Term::Nominal {
             declaration,
             arguments,

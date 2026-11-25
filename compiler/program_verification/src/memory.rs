@@ -1438,6 +1438,7 @@ struct Environment {
     field_pointers: BTreeMap<CallablePlace, Targets>,
     local_candidates: BTreeMap<CallablePlace, BTreeSet<usize>>,
     callees: BTreeMap<CallablePlace, CallableResult>,
+    upper_bounds: BTreeMap<LocalId, u128>,
 }
 
 // Invocation-local evidence; unlike a named Summary it has no declaration identity.
@@ -2767,6 +2768,7 @@ impl<'a> Infer<'a, '_> {
             Term::Bound { .. }
                 | Term::Rigid { .. }
                 | Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
                 | Term::NormalForm { .. }
                 | Term::Hole { .. }
         ) {
@@ -2879,6 +2881,41 @@ impl<'a> Infer<'a, '_> {
         Ok(())
     }
 
+    fn unsigned_bitconvert_upper_bound(&mut self, expr: &Expr) -> Result<Option<u128>, String> {
+        let K::BitConvert(inner) = &expr.kind else {
+            return Ok(None);
+        };
+        let Term::Primitive(Primitive::BitVec(width)) = self.ty(&inner.ty)? else {
+            return Ok(None);
+        };
+        let target_bits = match self.ty(&expr.ty)? {
+            Term::Primitive(Primitive::U8) => 8,
+            Term::Primitive(Primitive::U16) => 16,
+            Term::Primitive(Primitive::U32) => 32,
+            Term::Primitive(Primitive::U64) => 64,
+            Term::Primitive(Primitive::U128) => 128,
+            Term::Primitive(Primitive::Usize) => 16,
+            _ => return Ok(None),
+        };
+        if width <= target_bits && width < 128 {
+            Ok(Some(if width == 0 { 0 } else { (1u128 << width) - 1 }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn known_upper_bound(&mut self, expr: &Expr, depth: usize) -> Result<Option<u128>, String> {
+        self.step(depth)?;
+        match &expr.kind {
+            K::Local(id) if self.private_storage_roots.contains(id) => {
+                Ok(self.environment.upper_bounds.get(id).copied())
+            }
+            K::BitConvert(_) => self.unsigned_bitconvert_upper_bound(expr),
+            K::Literal(nir::program::Literal::UnsignedInteger(value)) => Ok(Some(*value)),
+            _ => Ok(None),
+        }
+    }
+
     fn known_bool(&mut self, expr: &Expr, depth: usize) -> Result<Option<bool>, String> {
         self.step(depth)?;
         Ok(match &expr.kind {
@@ -2886,6 +2923,26 @@ impl<'a> Infer<'a, '_> {
                 match self.known_data(expr, depth + 1)? {
                     Some(Term::Bool(value)) => Some(value),
                     _ => None,
+                }
+            }
+            K::ScalarLessEqual(left, right) | K::ScalarGreaterEqual(right, left) => {
+                match (self.known_upper_bound(left, depth + 1)?, &right.kind) {
+                    (Some(bound), K::Literal(nir::program::Literal::UnsignedInteger(limit)))
+                        if bound <= *limit =>
+                    {
+                        Some(true)
+                    }
+                    _ => constant_bool(expr, depth),
+                }
+            }
+            K::ScalarLess(left, right) | K::ScalarGreater(right, left) => {
+                match (self.known_upper_bound(left, depth + 1)?, &right.kind) {
+                    (Some(bound), K::Literal(nir::program::Literal::UnsignedInteger(limit)))
+                        if bound < *limit =>
+                    {
+                        Some(true)
+                    }
+                    _ => constant_bool(expr, depth),
                 }
             }
             K::Not(value) => self.known_bool(value, depth + 1)?.map(|v| !v),
@@ -2997,11 +3054,16 @@ impl<'a> Infer<'a, '_> {
             self.step(0)?;
             key.charge(self.fuel)?;
         }
+        *self.fuel = self
+            .fuel
+            .checked_sub(environment.upper_bounds.len())
+            .ok_or("memory upper bound budget exhausted")?;
         Ok(Environment {
             pointers,
             field_pointers: environment.field_pointers.clone(),
             local_candidates: environment.local_candidates.clone(),
             callees: environment.callees.clone(),
+            upper_bounds: environment.upper_bounds.clone(),
         })
     }
 
@@ -3078,6 +3140,14 @@ impl<'a> Infer<'a, '_> {
                 .entry(binding)
                 .or_insert(CallableResult::Unknown);
         }
+        left.upper_bounds.retain(|binding, bound| {
+            if let Some(other) = right.upper_bounds.get(binding) {
+                *bound = (*bound).max(*other);
+                true
+            } else {
+                false
+            }
+        });
         Ok(left)
     }
 
@@ -7176,6 +7246,7 @@ impl<'a> Infer<'a, '_> {
                             field_pointers: prepared_fields.clone(),
                             local_candidates: BTreeMap::new(),
                             callees: prepared_callees.clone(),
+                            upper_bounds: BTreeMap::new(),
                         };
                         for ty in prepared_types.values() {
                             bound_type(ty, self.fuel)?;
@@ -7651,6 +7722,13 @@ impl<'a> Infer<'a, '_> {
                 let local_fields = self.local_fields_for(value)?;
                 self.replace_callees(CallablePlace::root(*binding), values)?;
                 self.locals.insert(*binding, ty);
+                if self.private_storage_roots.contains(binding)
+                    && let Some(bound) = self.unsigned_bitconvert_upper_bound(value)?
+                {
+                    self.environment.upper_bounds.insert(*binding, bound);
+                } else {
+                    self.environment.upper_bounds.remove(binding);
+                }
                 self.replace_local_fields(CallablePlace::root(*binding), local_fields)?;
                 if self.local_pointer_value(&value.ty)? {
                     let targets = self.optional_target(value, depth + 1)?;
@@ -7723,6 +7801,7 @@ impl<'a> Infer<'a, '_> {
                 value,
                 ..
             } => {
+                self.environment.upper_bounds.remove(&place.root);
                 let storage = self.ty(storage_type)?;
                 let value_ty = self.ty(&value.ty)?;
                 let result_ty = self.ty(&expr.ty)?;
@@ -7792,6 +7871,7 @@ impl<'a> Infer<'a, '_> {
                 self.walk(value, depth + 1)?;
             }
             K::Assign { place, value } => {
+                self.environment.upper_bounds.remove(&place.root);
                 self.walk(value, depth + 1)?;
                 let path: Vec<_> = place.fields.iter().map(|(_, index)| *index).collect();
                 let root_ty = self
@@ -8380,6 +8460,7 @@ fn term_rank(term: &Term) -> u8 {
         Term::Integer(_) => 49,
         Term::Float(_) => 50,
         Term::Value { .. } => 51,
+        Term::AssociatedTypeCall(_) => 53,
     }
 }
 
@@ -8431,6 +8512,14 @@ pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
             .then_with(|| ao.member.cmp(&bo.member))
             .then_with(|| cmp_term_slice(aa, ba))
             .then_with(|| cmp_term(asub, bsub)),
+        (Term::AssociatedTypeCall(a), Term::AssociatedTypeCall(b)) => a
+            .origin
+            .interface
+            .cmp(&b.origin.interface)
+            .then_with(|| a.origin.member.cmp(&b.origin.member))
+            .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
+            .then_with(|| cmp_term(&a.subject, &b.subject))
+            .then_with(|| cmp_term_slice(&a.call_arguments, &b.call_arguments)),
         (
             Term::Nominal {
                 declaration: ad,

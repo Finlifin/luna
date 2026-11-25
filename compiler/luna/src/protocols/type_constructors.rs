@@ -28,6 +28,10 @@ pub struct Selectors<'a> {
     pub stable_range_pattern: Option<&'a str>,
     pub concat_pattern: Option<&'a str>,
     pub stable_concat_pattern: Option<&'a str>,
+    pub map_pattern: Option<&'a str>,
+    pub stable_map_pattern: Option<&'a str>,
+    pub struct_pattern: Option<&'a str>,
+    pub stable_struct_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -72,6 +76,10 @@ impl Selectors<'_> {
                 self.stable_range_pattern,
                 self.concat_pattern,
                 self.stable_concat_pattern,
+                self.map_pattern,
+                self.stable_map_pattern,
+                self.struct_pattern,
+                self.stable_struct_pattern,
                 self.literal_into,
                 self.handle_error,
                 self.splice,
@@ -297,6 +305,26 @@ pub(crate) fn resolve_source(
                 "StableConcatPatternView".into(),
                 selectors.stable_concat_pattern,
                 &mut result.stable_concat_pattern,
+            ),
+            (
+                "MapPatternView".into(),
+                selectors.map_pattern,
+                &mut result.map_pattern,
+            ),
+            (
+                "StableMapPatternView".into(),
+                selectors.stable_map_pattern,
+                &mut result.stable_map_pattern,
+            ),
+            (
+                "StructPatternView".into(),
+                selectors.struct_pattern,
+                &mut result.struct_pattern,
+            ),
+            (
+                "StableStructPatternView".into(),
+                selectors.stable_struct_pattern,
+                &mut result.stable_struct_pattern,
             ),
             (
                 "LiteralInto".into(),
@@ -587,6 +615,10 @@ pub(crate) struct SysrootBindings {
     stable_range_pattern: Option<String>,
     concat_pattern: Option<String>,
     stable_concat_pattern: Option<String>,
+    map_pattern: Option<String>,
+    stable_map_pattern: Option<String>,
+    struct_pattern: Option<String>,
+    stable_struct_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     variadic_collector: Option<String>,
@@ -688,6 +720,10 @@ impl SysrootBindings {
                 "stable-range-pattern-protocol" => &mut result.stable_range_pattern,
                 "concat-pattern-protocol" => &mut result.concat_pattern,
                 "stable-concat-pattern-protocol" => &mut result.stable_concat_pattern,
+                "map-pattern-protocol" => &mut result.map_pattern,
+                "stable-map-pattern-protocol" => &mut result.stable_map_pattern,
+                "struct-pattern-protocol" => &mut result.struct_pattern,
+                "stable-struct-pattern-protocol" => &mut result.stable_struct_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "variadic-collector-protocol" => &mut result.variadic_collector,
@@ -898,6 +934,34 @@ impl SysrootBindings {
                     .stable_concat_pattern
                     .is_none()
                     .then_some(self.stable_concat_pattern.as_deref())
+                    .flatten()
+            }),
+            map_pattern: explicit.map_pattern.or_else(|| {
+                identities
+                    .map_pattern
+                    .is_none()
+                    .then_some(self.map_pattern.as_deref())
+                    .flatten()
+            }),
+            stable_map_pattern: explicit.stable_map_pattern.or_else(|| {
+                identities
+                    .stable_map_pattern
+                    .is_none()
+                    .then_some(self.stable_map_pattern.as_deref())
+                    .flatten()
+            }),
+            struct_pattern: explicit.struct_pattern.or_else(|| {
+                identities
+                    .struct_pattern
+                    .is_none()
+                    .then_some(self.struct_pattern.as_deref())
+                    .flatten()
+            }),
+            stable_struct_pattern: explicit.stable_struct_pattern.or_else(|| {
+                identities
+                    .stable_struct_pattern
+                    .is_none()
+                    .then_some(self.stable_struct_pattern.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1310,6 +1374,10 @@ mod stage_tests {
             stable_range_pattern_protocol: None,
             concat_pattern_protocol: None,
             stable_concat_pattern_protocol: None,
+            map_pattern_protocol: None,
+            stable_map_pattern_protocol: None,
+            struct_pattern_protocol: None,
+            stable_struct_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             variadic_collector_protocol: None,

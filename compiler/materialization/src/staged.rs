@@ -23,6 +23,7 @@ impl Snapshot {
             from_published_scope: false,
         })
     }
+
     fn for_scope<'s>(
         slot: &'s mut Option<Self>,
         scope: &type_resolution::dispatch::DeclarationScope<'_>,
@@ -139,26 +140,32 @@ pub(super) fn type_initializer_host<'a>(
 ) -> Result<crate::associated::TypeInitializerResult, nir::NominalAdmissionError>
 + 'a {
     move |scope, key, implementation, site, budget| {
-        let Term::AssociatedType {
-            origin,
-            arguments,
-            subject,
-        } = key
-        else {
-            return Err("expected an associated Type projection".into());
-        };
         crate::associated::charge_projection_copy(key, &mut budget.steps)?;
-        let read = n::Expr {
-            source: site,
-            ty: Term::Primitive(nir::Primitive::Type),
-            kind: K::AssociatedValue {
-                interface: n::InterfaceInstance {
-                    declaration: origin.interface,
-                    arguments: arguments.clone(),
+        let read = match key {
+            Term::AssociatedType {
+                origin,
+                arguments,
+                subject,
+            } => n::Expr {
+                source: site,
+                ty: Term::Primitive(nir::Primitive::Type),
+                kind: K::AssociatedValue {
+                    interface: n::InterfaceInstance {
+                        declaration: origin.interface,
+                        arguments: arguments.clone(),
+                    },
+                    subject: subject.as_ref().clone(),
+                    member: origin.member,
                 },
-                subject: subject.as_ref().clone(),
-                member: origin.member,
             },
+            Term::AssociatedTypeCall(call) => crate::associated::associated_call_expression(
+                scope.capabilities().traits,
+                call,
+                site,
+                scope.capabilities().context.scope(),
+                &mut budget.steps,
+            )?,
+            _ => return Err("expected an associated Type projection".into()),
         };
         let snapshot = Snapshot::for_scope(retained, scope, &mut budget.steps)
             .map_err(|_| nir::NominalAdmissionError::Budget)?;

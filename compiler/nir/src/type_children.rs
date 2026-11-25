@@ -27,6 +27,15 @@ macro_rules! visit_children {
                     $visit(argument)?;
                 }
             }
+            Self::AssociatedTypeCall(call) => {
+                $visit(& $($borrow)? call.subject)?;
+                for argument in & $($borrow)? call.arguments {
+                    $visit(argument)?;
+                }
+                for argument in & $($borrow)? call.call_arguments {
+                    $visit(argument)?;
+                }
+            }
             Self::MethodValue(method) => {
                 for argument in method.$method_terms() {
                     $visit(argument)?;
@@ -132,7 +141,7 @@ macro_rules! visit_children {
 impl Term {
     /// Borrow stored terms for unordered dependency queries. Declaration heads
     /// are identities; their supplied arguments are structural children.
-    pub(crate) fn structural_terms(&self) -> impl Iterator<Item = &Term> {
+    pub fn structural_terms(&self) -> impl Iterator<Item = &Term> {
         let mut root = Some(self);
         let mut pending = Vec::new();
         std::iter::from_fn(move || {

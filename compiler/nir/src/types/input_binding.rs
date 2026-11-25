@@ -431,6 +431,7 @@ fn check_input_count(signature: &Term, count: usize) -> Result<(), TypeError> {
 pub struct FunctionCallBinding {
     arguments: Vec<Option<Term>>,
     type_slots: BTreeSet<usize>,
+    comptime_slots: BTreeSet<usize>,
     // The last frame belongs to the callee. Earlier frames belong to the caller.
     frames: Vec<Vec<Sort>>,
 }
@@ -459,8 +460,13 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
                 frames: caller_frames,
                 arguments: vec![None; count],
                 type_slots: BTreeSet::new(),
+                comptime_slots: BTreeSet::new(),
             },
         })
+    }
+
+    pub fn signature(&self) -> &Term {
+        self.signature.borrow()
     }
 
     pub fn parameters(&self) -> &[Parameter] {
@@ -555,11 +561,18 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
             .get(&index)
             .ok_or(TypeError::UnpreparedCallInput(index))?;
         input.check_scope(self.binding.caller_frames())?;
-        require_sort(&input, sort)?;
-        self.pending.remove(&index);
-        if sort != self.parameters()[index].sort {
-            self.binding.type_slots.insert(index);
+        if self.signature.borrow().is_comptime_callable()
+            && sort == Sort::Runtime
+            && matches!(input.sort(), Sort::ComptimeValue | Sort::Type)
+        {
+            self.binding.comptime_slots.insert(index);
+        } else {
+            require_sort(&input, sort)?;
+            if sort != self.parameters()[index].sort {
+                self.binding.type_slots.insert(index);
+            }
         }
+        self.pending.remove(&index);
         self.binding.arguments[index] = Some(input);
         Ok(())
     }
@@ -680,6 +693,12 @@ impl FunctionCallBinding {
                     .ok_or(TypeError::MissingArgument(*index))?;
                 let expected = if *sort == Sort::ComptimeValue && self.type_slots.contains(index) {
                     Sort::Type
+                } else if *sort == Sort::Runtime && self.comptime_slots.contains(index) {
+                    match argument.sort() {
+                        Sort::ComptimeValue => Sort::ComptimeValue,
+                        Sort::Type => Sort::Type,
+                        _ => *sort,
+                    }
                 } else {
                     *sort
                 };

@@ -239,27 +239,126 @@ impl<'w> World<'w> {
     ) -> Result<values::SelectedAssociatedMember<'a, 'w>, QueryError> {
         charge_projection_copy(projection, &mut budget.steps)?;
         projection.check_scope(&[]).map_err(|e| e.to_string())?;
-        let Term::AssociatedType {
-            origin,
-            subject,
-            arguments,
-        } = projection
-        else {
-            return Err("associated Type query requires a projection".into());
+        let (origin, subject, arguments, access) = match projection {
+            Term::AssociatedType {
+                origin,
+                subject,
+                arguments,
+            } => (
+                origin.as_ref(),
+                subject.as_ref(),
+                arguments,
+                values::Access::TypeProjection,
+            ),
+            Term::AssociatedTypeCall(call) => (
+                &call.origin,
+                &call.subject,
+                &call.arguments,
+                values::Access::TypeCallProjection(call.call_arguments.len()),
+            ),
+            _ => return Err("associated Type query requires a projection".into()),
         };
         let interface = InterfaceInstance {
             declaration: origin.interface,
             arguments: arguments.clone(),
         };
-        self.select_scoped_member(
-            &interface,
-            origin.member,
-            subject,
-            values::Access::TypeProjection,
-            budget,
-            resolve,
-        )
+        self.select_scoped_member(&interface, origin.member, subject, access, budget, resolve)
     }
+}
+
+pub fn is_type_call_contract(member_ty: &Term, arg_count: usize) -> bool {
+    member_ty.is_comptime_callable()
+        && matches!(
+            member_ty.callable_signature(),
+            Term::Function { parameters, result }
+                if parameters.len() == arg_count
+                    && parameters.iter().all(|p| p.sort == nir::Sort::Runtime)
+                    && **result == Term::Primitive(Primitive::Type)
+        )
+}
+
+/// Construct the IIR call expression for a closed `Term::AssociatedTypeCall`.
+pub fn associated_call_expression(
+    traits: &[nir::program::Trait],
+    call: &nir::AssociatedTypeCall,
+    source: nir::program::SourceRange,
+    frames: &[Vec<nir::Sort>],
+    fuel: &mut usize,
+) -> Result<nir::program::Expr, QueryError> {
+    let contract = traits
+        .iter()
+        .find(|t| t.declaration == call.origin.interface)
+        .ok_or("associated Type call query has no originating interface")?;
+    if call.arguments.len() != contract.type_parameters.len() {
+        return Err("associated Type call interface argument count mismatch".into());
+    }
+    let member = contract
+        .associated
+        .iter()
+        .find(|m| m.declaration == call.origin.member)
+        .ok_or("associated Type call member does not belong to its interface")?;
+    charge_projection_copy(&member.ty, fuel)?;
+    let inputs: Vec<_> = std::iter::once(call.subject.clone())
+        .chain(call.arguments.iter().cloned())
+        .collect();
+    let binders = contract.binders_with_self_checked(fuel)?;
+    charge_projection_substitution(&member.ty, &binders, &inputs, fuel)?;
+    let member_ty = contract
+        .input_substitution(&inputs, frames, fuel)
+        .and_then(|substitution| substitution.instantiate_bounded(&member.ty, fuel))?;
+    if !is_type_call_contract(&member_ty, call.call_arguments.len()) {
+        return Err(
+            "associated type-call member must be a comptime callable returning Type".into(),
+        );
+    }
+    let Term::Function { parameters, .. } = member_ty.callable_signature() else {
+        unreachable!()
+    };
+    let callee = nir::program::Expr {
+        source,
+        ty: member_ty.clone(),
+        kind: ExprKind::AssociatedValue {
+            interface: InterfaceInstance {
+                declaration: call.origin.interface,
+                arguments: call.arguments.clone(),
+            },
+            subject: call.subject.clone(),
+            member: call.origin.member,
+        },
+    };
+    let arguments = call
+        .call_arguments
+        .iter()
+        .zip(parameters)
+        .enumerate()
+        .map(|(parameter, (arg, param))| {
+            let kind = if param.ty == Term::Primitive(Primitive::Type) {
+                ExprKind::TypeValue(arg.clone())
+            } else {
+                ExprKind::ComptimeValue(arg.clone())
+            };
+            nir::program::CallArgument {
+                passing: nir::program::ArgumentPassing::Value,
+                parameter,
+                is_default: false,
+                value: nir::program::Expr {
+                    source,
+                    ty: param.ty.clone(),
+                    kind,
+                },
+            }
+        })
+        .collect();
+    Ok(nir::program::Expr {
+        source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: ExprKind::Call {
+            callee: Box::new(callee),
+            arguments,
+            env_arguments: Vec::new(),
+            parameter_bindings: Vec::new(),
+        },
+    })
 }
 
 impl fmt::Display for AssociatedTypeResolution {
@@ -827,40 +926,65 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                     .collect::<Result<Vec<_>, QueryError>>()?;
                 Term::computation(operations, self.normalize(result, depth + 1)?)
             }
-            Term::AssociatedType {
-                origin,
-                arguments,
-                subject,
-            } => {
-                let subject = self.normalize(subject, depth + 1)?;
-                let arguments = self.many(arguments, depth + 1)?;
-                let key = Term::AssociatedType {
-                    origin: origin.clone(),
-                    arguments,
-                    subject: Box::new(subject),
-                };
-                if self.preserve_given && key.check_scope(&[]).is_err() {
-                    // A projection can capture any enclosing callable frame,
-                    // not just its immediate depth-zero frame. Validate it in
-                    // the complete telescope before retaining it uncached.
-                    key.check_scope(&self.frames).map_err(|e| e.to_string())?;
-                    // A callable's ordinary inputs have not been supplied yet.
-                    // Retain the projection without choosing an implementation
-                    // or manufacturing an equality. Formation evidence is
-                    // checked by elaboration; strict IIR normalization still
-                    // requires a selected concrete projection.
-                    let Term::AssociatedType {
+            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_) => {
+                let (origin, subject, arguments, call_arguments) = match term {
+                    Term::AssociatedType {
                         origin,
-                        subject,
                         arguments,
-                    } = &key
-                    else {
-                        unreachable!()
+                        subject,
+                    } => (
+                        origin.as_ref().clone(),
+                        self.normalize(subject, depth + 1)?,
+                        self.many(arguments, depth + 1)?,
+                        None,
+                    ),
+                    Term::AssociatedTypeCall(call) => (
+                        call.origin.clone(),
+                        self.normalize(&call.subject, depth + 1)?,
+                        self.many(&call.arguments, depth + 1)?,
+                        Some(self.many(&call.call_arguments, depth + 1)?),
+                    ),
+                    _ => unreachable!(),
+                };
+                let key = if let Some(call_arguments) = call_arguments {
+                    Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+                        origin,
+                        arguments,
+                        subject,
+                        call_arguments,
+                    }))
+                } else {
+                    Term::AssociatedType {
+                        origin: Box::new(origin),
+                        arguments,
+                        subject: Box::new(subject),
+                    }
+                };
+                let check_contract = |traits: &[nir::program::Trait],
+                                      frames: &[Vec<nir::Sort>],
+                                      key: &Term,
+                                      remaining: &mut usize|
+                 -> Result<(), QueryError> {
+                    let (origin, subject, arguments, call_arg_len) = match key {
+                        Term::AssociatedType {
+                            origin,
+                            subject,
+                            arguments,
+                        } => (
+                            origin.as_ref(),
+                            subject.as_ref(),
+                            arguments.as_slice(),
+                            None,
+                        ),
+                        Term::AssociatedTypeCall(call) => (
+                            &call.origin,
+                            &call.subject,
+                            call.arguments.as_slice(),
+                            Some(call.call_arguments.len()),
+                        ),
+                        _ => unreachable!(),
                     };
-                    let contract = self
-                        .environment
-                        .world()
-                        .traits
+                    let contract = traits
                         .iter()
                         .find(|t| t.declaration == origin.interface)
                         .ok_or("associated Type query has no originating interface")?;
@@ -874,25 +998,40 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                         .iter()
                         .find(|m| m.declaration == origin.member)
                         .ok_or("associated Type query member does not belong to its interface")?;
-                    charge_projection_copy(&member.ty, &mut self.remaining)?;
-                    let inputs = std::iter::once(subject.as_ref().clone())
+                    charge_projection_copy(&member.ty, remaining)?;
+                    let inputs = std::iter::once(subject.clone())
                         .chain(arguments.iter().cloned())
                         .collect::<Vec<_>>();
-                    let binders = contract.binders_with_self_checked(&mut self.remaining)?;
-                    charge_projection_substitution(
-                        &member.ty,
-                        &binders,
-                        &inputs,
-                        &mut self.remaining,
-                    )?;
+                    let binders = contract.binders_with_self_checked(remaining)?;
+                    charge_projection_substitution(&member.ty, &binders, &inputs, remaining)?;
                     let ty = contract
-                        .input_substitution(&inputs, &self.frames, &mut self.remaining)
+                        .input_substitution(&inputs, frames, remaining)
                         .and_then(|substitution| {
-                            substitution.instantiate_bounded(&member.ty, &mut self.remaining)
+                            substitution.instantiate_bounded(&member.ty, remaining)
                         })?;
-                    if ty != Term::Primitive(Primitive::Type) {
+                    if let Some(arg_len) = call_arg_len {
+                        if !is_type_call_contract(&ty, arg_len) {
+                            return Err(
+                                "associated type-call member must be a comptime callable returning Type"
+                                    .into(),
+                            );
+                        }
+                    } else if ty != Term::Primitive(Primitive::Type) {
                         return Err("associated projection member is not Type-valued".into());
                     }
+                    Ok(())
+                };
+                if self.preserve_given && key.check_scope(&[]).is_err() {
+                    // A projection can capture any enclosing callable frame,
+                    // not just its immediate depth-zero frame. Validate it in
+                    // the complete telescope before retaining it uncached.
+                    key.check_scope(&self.frames).map_err(|e| e.to_string())?;
+                    check_contract(
+                        self.environment.world().traits,
+                        &self.frames,
+                        &key,
+                        &mut self.remaining,
+                    )?;
                     return Ok(key);
                 }
                 if let Some(value) = self
@@ -908,13 +1047,24 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                 self.charge_copy(&key)?;
                 let mut incomplete_given: Option<String> = None;
                 if self.preserve_given && !self.environment.world().assumptions.is_empty() {
-                    let Term::AssociatedType {
-                        origin,
-                        subject,
-                        arguments,
-                    } = &key
-                    else {
-                        unreachable!()
+                    let (origin, subject, arguments, extra) = match &key {
+                        Term::AssociatedType {
+                            origin,
+                            subject,
+                            arguments,
+                        } => (
+                            origin.as_ref(),
+                            subject.as_ref(),
+                            arguments.as_slice(),
+                            &[][..],
+                        ),
+                        Term::AssociatedTypeCall(call) => (
+                            &call.origin,
+                            &call.subject,
+                            call.arguments.as_slice(),
+                            call.call_arguments.as_slice(),
+                        ),
+                        _ => unreachable!(),
                     };
                     let mut closure_budget = Budget {
                         steps: self.remaining,
@@ -924,7 +1074,7 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                         return Err(QueryError::Budget);
                     }
                     let closed = self.environment.world().closed_inputs_metered(
-                        std::iter::once(subject.as_ref()).chain(arguments),
+                        std::iter::once(subject).chain(arguments).chain(extra),
                         &mut closure_budget,
                     );
                     self.remaining = closure_budget.steps;
@@ -941,9 +1091,9 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                             return Err(QueryError::Budget);
                         }
                         let given = nir::program::TraitRequirement {
-                            subject: subject.as_ref().clone(),
+                            subject: subject.clone(),
                             interface: origin.interface,
-                            interface_arguments: arguments.clone(),
+                            interface_arguments: arguments.to_vec(),
                         };
                         let mut given_budget = Budget {
                             steps: query_steps,
@@ -978,44 +1128,12 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                         false
                     };
                     if preserve {
-                        let contract = self
-                            .environment
-                            .world()
-                            .traits
-                            .iter()
-                            .find(|t| t.declaration == origin.interface)
-                            .ok_or("associated Type query has no originating interface")?;
-                        if arguments.len() != contract.type_parameters.len() {
-                            return Err(
-                                "associated Type query interface argument count mismatch".into()
-                            );
-                        }
-                        let member = contract
-                            .associated
-                            .iter()
-                            .find(|m| m.declaration == origin.member)
-                            .ok_or(
-                                "associated Type query member does not belong to its interface",
-                            )?;
-                        charge_projection_copy(&member.ty, &mut self.remaining)?;
-                        let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
-                            .chain(arguments.iter().cloned())
-                            .collect();
-                        let binders = contract.binders_with_self_checked(&mut self.remaining)?;
-                        charge_projection_substitution(
-                            &member.ty,
-                            &binders,
-                            &inputs,
+                        check_contract(
+                            self.environment.world().traits,
+                            &self.frames,
+                            &key,
                             &mut self.remaining,
                         )?;
-                        let ty = contract
-                            .input_substitution(&inputs, &self.frames, &mut self.remaining)
-                            .and_then(|substitution| {
-                                substitution.instantiate_bounded(&member.ty, &mut self.remaining)
-                            })?;
-                        if ty != Term::Primitive(Primitive::Type) {
-                            return Err("associated projection member is not Type-valued".into());
-                        }
                         self.charge_copy(&key)?;
                         self.charge_copy(&key)?;
                         self.completed.insert(key.clone(), key.clone());

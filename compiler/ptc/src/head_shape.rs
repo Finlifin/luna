@@ -27,6 +27,7 @@ pub(crate) fn evaluate_term(ty: &Term, head: DeclarationId) -> Option<bool> {
         | Term::Bound { .. }
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
+        | Term::AssociatedTypeCall(_)
         | Term::ClosureContextType
         | Term::ClosureContextValue(_)
         | Term::ContextualClosure { .. }

@@ -13,6 +13,7 @@ pub struct AssociatedValueResolution {
     pub evidence: TypeEvidence,
     pub qualification: Qualification,
 }
+
 impl fmt::Display for AssociatedValueResolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -26,6 +27,7 @@ impl fmt::Display for AssociatedValueResolution {
         write!(f, ") {})", self.qualification)
     }
 }
+
 /// A member selected in one declaration world, before reading its implementation
 /// payload. The same world owns the assumptions, substitution and layout facts.
 pub struct SelectedAssociatedMember<'a, 'world> {
@@ -44,6 +46,7 @@ struct SelectionFacts {
 #[derive(Clone, Copy)]
 pub(super) enum Access {
     TypeProjection,
+    TypeCallProjection(usize),
     Value,
 }
 
@@ -168,16 +171,27 @@ impl<'world> World<'world> {
         let substitution =
             contract.input_substitution(&inputs, self.context.scope(), &mut budget.steps)?;
         let member_type = substitution.instantiate_bounded(&member.ty, &mut budget.steps)?;
-        if matches!(access, Access::TypeProjection)
-            && member_type != Term::Primitive(Primitive::Type)
-        {
-            return Err("associated projection member is not Type-valued".into());
+        match access {
+            Access::TypeProjection => {
+                if member_type != Term::Primitive(Primitive::Type) {
+                    return Err("associated projection member is not Type-valued".into());
+                }
+            }
+            Access::TypeCallProjection(arg_count) => {
+                if !is_type_call_contract(&member_type, arg_count) {
+                    return Err(
+                        "associated type-call member must be a comptime callable returning Type"
+                            .into(),
+                    );
+                }
+            }
+            Access::Value => {}
         }
         self.check_associated_formation(contract, &substitution, budget, resolve)?;
         let mut resolution = resolve(interface, subject, budget)?;
         let Selection::Selected(selected) = resolution.types.selection else {
             let kind = match access {
-                Access::TypeProjection => "Type",
+                Access::TypeProjection | Access::TypeCallProjection(_) => "Type",
                 Access::Value => "value",
             };
             let pending = resolution
@@ -560,11 +574,26 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
                 return Err("selected implementation has no associated Type value".into());
             }
         };
+        let is_type_call = matches!(projection, Term::AssociatedTypeCall(_));
         let source = match source {
+            MemberSource::Value(value) if is_type_call => {
+                let completed = self.instantiate(value, &mut budget.steps)?;
+                let program = AssociatedInitializer::new(completed, &mut budget.steps)?;
+                return Ok(TypeProjection::Initializer(SelectedTypeInitializer {
+                    source: program.expression().source,
+                    program: program.identity(),
+                    open_inputs: nir::type_computations::has_rigid_parameters_bounded(
+                        projection,
+                        &mut budget.steps,
+                    )?,
+                    evidence: self.facts.evidence,
+                    qualification: self.facts.qualification,
+                }));
+            }
             MemberSource::Value(value) => value,
             MemberSource::Initializer(program) => {
                 // A dependent result domain is compared after the selected substitution.
-                if program.expression().ty != Term::Primitive(Primitive::Type) {
+                if program.expression().ty != Term::Primitive(Primitive::Type) && !is_type_call {
                     self.member_result(program.expression(), budget)?;
                 }
                 return Ok(TypeProjection::Initializer(SelectedTypeInitializer {

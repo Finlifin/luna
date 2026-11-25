@@ -906,6 +906,10 @@ fn all_resolved_protocols_in(
         protocols.stable_range_pattern,
         protocols.concat_pattern,
         protocols.stable_concat_pattern,
+        protocols.map_pattern,
+        protocols.stable_map_pattern,
+        protocols.struct_pattern,
+        protocols.stable_struct_pattern,
         protocols.literal_into,
         protocols.handle_error,
         protocols.splice,
@@ -1987,6 +1991,8 @@ fn reorder_nir_by_package_rank(nir: &mut nir::program::Package, caller_packages:
     nir.quote_templates
         .sort_by_key(|item| pkg_rank(item.declaration.package));
     nir.runtime_function_identities
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.open_function_identities
         .sort_by_key(|item| pkg_rank(item.declaration.package));
     nir.function_parameters
         .sort_by_key(|item| pkg_rank(item.declaration.package));

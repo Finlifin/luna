@@ -256,6 +256,11 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             charge(subject, fuel, depth - 1)?;
             terms(arguments, fuel, depth - 1)
         }
+        Term::AssociatedTypeCall(call) => {
+            charge(&call.subject, fuel, depth - 1)?;
+            terms(&call.arguments, fuel, depth - 1)?;
+            terms(&call.call_arguments, fuel, depth - 1)
+        }
         Term::ContextualClosure { context, signature } => {
             charge(context, fuel, depth - 1)?;
             charge(signature, fuel, depth - 1)

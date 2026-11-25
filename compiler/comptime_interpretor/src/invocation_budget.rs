@@ -72,6 +72,7 @@ pub(super) fn charge_world_tables(
         effects,
         method_links,
         runtime_function_identities,
+        open_function_identities: _,
         normal_forms,
         dispatch_instances: _,
         traits,

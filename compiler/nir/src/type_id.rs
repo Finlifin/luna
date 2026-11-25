@@ -764,7 +764,10 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
 
         match ty {
             Term::Rigid { .. } => return Err(TypeIdError::OpenGeneric(ty.clone())),
-            Term::Hole { .. } | Term::AssociatedType { .. } | Term::ListConcat { .. } => {
+            Term::Hole { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
+            | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(ty.clone()));
             }
             Term::Bound { depth, .. } => {
@@ -959,7 +962,10 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                 digest.digest32(&res_d);
             }
             Term::Rigid { .. } => return Err(TypeIdError::OpenGeneric(ty.clone())),
-            Term::Hole { .. } | Term::AssociatedType { .. } | Term::ListConcat { .. } => {
+            Term::Hole { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
+            | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(ty.clone()));
             }
             Term::Bound { depth, .. } => {
@@ -1544,7 +1550,10 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                 self.hash_sort(digest, sort);
             }
             Term::Rigid { .. } => return Err(TypeIdError::OpenGeneric(term.clone())),
-            Term::Hole { .. } | Term::ListConcat { .. } | Term::AssociatedType { .. } => {
+            Term::Hole { .. }
+            | Term::ListConcat { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_) => {
                 return Err(TypeIdError::Unresolved(term.clone()));
             }
             _ => return Err(TypeIdError::Unsupported(term.clone())),
@@ -1617,7 +1626,10 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
                 self.hash_sort(digest, sort);
             }
             Term::Rigid { .. } => return Err(TypeIdError::OpenGeneric(domain.clone())),
-            Term::Hole { .. } | Term::AssociatedType { .. } | Term::ListConcat { .. } => {
+            Term::Hole { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
+            | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(domain.clone()));
             }
             other => {

@@ -237,8 +237,38 @@ impl Checker<'_, '_> {
                     )),
                 }
             }
-            H::Application(..)
-            | H::ExtendedApplication(..)
+            H::Application(callee, args) => {
+                if let Some(result) = self.associated_type_call_data(expr, callee, args)? {
+                    return Ok(result);
+                }
+                if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {
+                    return self.generator_type_data(expr);
+                }
+                if describe_input {
+                    let checked = self.with_staged_input(true, |this| {
+                        let checked = this.expr(expr, Some(&p(P::Type)))?;
+                        this.check_open_fragment(&checked, expr.span, false)?;
+                        Ok(checked)
+                    })?;
+                    if let Some(identity) =
+                        self.preserved_input_identity(&checked, |_, _| Ok(None), expr.span)?
+                    {
+                        return Ok(CompletedType::Identity(identity));
+                    }
+                    if let Some(identity) =
+                        self.deferred_definition_input(expr.hir_id.owner, &checked, expr.span)?
+                    {
+                        return Ok(CompletedType::Identity(identity));
+                    }
+                    return self.complete_checked_type(expr, checked);
+                }
+                if self.collecting_named_types() && self.data_consumer_call(expr)?.is_none() {
+                    return self.computed_annotation_type(expr);
+                }
+                let value = self.required_value(expr, P::Type)?;
+                CompletedType::from_value(value, expr.span)
+            }
+            H::ExtendedApplication(..)
             | H::Projection(..)
             | H::Index(..)
             | H::If(..)
@@ -530,5 +560,118 @@ impl Checker<'_, '_> {
             declaration: declaration(self.package, &self.package_identities, owner),
             arguments,
         }))
+    }
+
+    fn associated_type_call_data<'h>(
+        &mut self,
+        expr: &Expr<'h>,
+        callee: &Expr<'h>,
+        args: &[Arg<'h>],
+    ) -> Result<Option<CompletedType>, Error> {
+        let assoc_expr = match &callee.kind {
+            H::ResolvedDef { def_id, .. } => {
+                let Some(owner) = self.package.definition_owner(*def_id) else {
+                    return Ok(None);
+                };
+                if !matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Associated(_))
+                ) {
+                    return Ok(None);
+                }
+                self.lexical_associated_value(owner, callee.span)?
+            }
+            H::Projection(view, field) => {
+                let Some(assoc) = self.associated_projection(
+                    view,
+                    field.name.as_str(),
+                    callee.span,
+                    callee.hir_id,
+                )?
+                else {
+                    return Ok(None);
+                };
+                assoc
+            }
+            _ => return Ok(None),
+        };
+        let K::AssociatedValue {
+            interface,
+            subject,
+            member,
+        } = assoc_expr.kind
+        else {
+            return Ok(None);
+        };
+        if !crate::associated::is_type_call_contract(&assoc_expr.ty, args.len()) {
+            return Ok(None);
+        }
+        let Term::Function { parameters, .. } = assoc_expr.ty.callable_signature().clone() else {
+            unreachable!()
+        };
+        let mut call_arguments = Vec::with_capacity(args.len());
+        for (arg, param) in args.iter().zip(&parameters) {
+            let Arg::Positional(value) = arg else {
+                return Err(error(
+                    expr.span,
+                    "associated Type call arguments must be positional",
+                ));
+            };
+            if let H::ResolvedFnParam(_, id) = value.kind
+                && self.signature_owner == Some(id.owner)
+                && (self.active_signatures.contains(&id.owner) || self.checking_contract)
+                && let Some(item) = self.package.item(id.owner)
+                && let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig), Some(domains)) =
+                    (&item.kind, self.signature_domains.get(&id.owner))
+                && sig.modifiers.is_comptime
+                && let Some((slot, (_, (_, Some(domain))))) = sig
+                    .params
+                    .iter()
+                    .zip(domains)
+                    .enumerate()
+                    .find(|(_, (p, _))| p.hir_id == id)
+                && domains[slot].0 == nir::Sort::Runtime
+            {
+                let domain = domain.clone();
+                self.require(&domain, &param.ty, value.span)?;
+                call_arguments.push(nir::Term::Bound {
+                    depth: 0,
+                    index: slot,
+                    sort: nir::Sort::Runtime,
+                });
+                continue;
+            }
+            call_arguments.push(self.normal_value_argument(value, &param.ty)?);
+        }
+        let term = Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+            origin: nir::AssociatedTypeOrigin {
+                interface: interface.declaration,
+                member,
+            },
+            arguments: interface.arguments.clone(),
+            subject: subject.clone(),
+            call_arguments: call_arguments.clone(),
+        }));
+        let open = !self.interfaces_ready
+            || nominal_fields::metered(&mut self.required_steps, |fuel| {
+                for input in std::iter::once(&subject)
+                    .chain(&interface.arguments)
+                    .chain(&call_arguments)
+                {
+                    if input.check_scope(&[]).is_err()
+                        || nir::type_computations::has_rigid_parameters_bounded(input, fuel)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .map_err(|failure| error(expr.span, failure.to_string()))?;
+        if open {
+            return Ok(Some(CompletedType::Identity(term)));
+        }
+        self.observe_call_type(&term, expr)
+            .map(CompletedType::Identity)
+            .map(Some)
     }
 }

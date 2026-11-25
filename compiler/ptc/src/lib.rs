@@ -444,6 +444,10 @@ impl Context {
     /// Never grants disjointness to opaque normal-form heads, unclosed
     /// computations, or empty error-result wrappers.
     pub fn distinct_outer_types(&self, left: &Term, right: &Term) -> bool {
+        self.distinct_outer_types_at(left, right, 0)
+    }
+
+    fn distinct_outer_types_at(&self, left: &Term, right: &Term, depth: usize) -> bool {
         if distinct_outer_type_heads(left, right) {
             return true;
         }
@@ -478,9 +482,40 @@ impl Context {
                 || self.is_list_type(term)
                 || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
         };
-        (matches!(left, Term::ErrorResult { errors, .. } if !errors.is_empty()) && non_error(right))
+        if (matches!(left, Term::ErrorResult { errors, .. } if !errors.is_empty())
+            && non_error(right))
             || (matches!(right, Term::ErrorResult { errors, .. } if !errors.is_empty())
                 && non_error(left))
+        {
+            return true;
+        }
+        if depth >= 16 {
+            return false;
+        }
+        match (left, right) {
+            (
+                Term::Nominal {
+                    declaration: d1,
+                    arguments: a1,
+                },
+                Term::Nominal {
+                    declaration: d2,
+                    arguments: a2,
+                },
+            ) if d1 == d2 && a1.len() == a2.len() => a1.iter().zip(a2).any(|(l, r)| {
+                l.sort() == Sort::Type
+                    && r.sort() == Sort::Type
+                    && self.distinct_outer_types_at(l, r, depth + 1)
+            }),
+            (Term::Optional(a), Term::Optional(b)) | (Term::Pointer(a), Term::Pointer(b)) => {
+                self.distinct_outer_types_at(a, b, depth + 1)
+            }
+            (Term::Tuple(a), Term::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(b)
+                .any(|(l, r)| self.distinct_outer_types_at(l, r, depth + 1)),
+            _ => false,
+        }
     }
 
     /// Validate that `ty` lies in the runtime-representable domain of A11 `NotSized`.
@@ -1246,6 +1281,12 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .iter()
             .chain(std::iter::once(subject.as_ref()))
             .collect(),
+        Term::AssociatedTypeCall(call) => call
+            .arguments
+            .iter()
+            .chain(call.call_arguments.iter())
+            .chain(std::iter::once(&call.subject))
+            .collect(),
         Term::OptionalValue { ty, value } => std::iter::once(ty.as_ref())
             .chain(value.as_deref())
             .collect(),
@@ -1318,6 +1359,11 @@ fn has_bound(term: &Term) -> bool {
         Term::AssociatedType {
             arguments, subject, ..
         } => arguments.iter().any(has_bound) || has_bound(subject),
+        Term::AssociatedTypeCall(call) => {
+            call.arguments.iter().any(has_bound)
+                || call.call_arguments.iter().any(has_bound)
+                || has_bound(&call.subject)
+        }
         Term::OptionalValue { ty, value } => {
             has_bound(ty) || value.as_ref().is_some_and(|value| has_bound(value))
         }
@@ -1980,6 +2026,11 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     {
         // A projection is a query with fixed origin, not an injective constructor.
         return a == b && aa.len() == ba.len();
+    }
+    if let (Term::AssociatedTypeCall(a), Term::AssociatedTypeCall(b)) = (a, b) {
+        return a.origin == b.origin
+            && a.arguments.len() == b.arguments.len()
+            && a.call_arguments.len() == b.call_arguments.len();
     }
     // Type identity changes inside immutable tuple inputs lift forward through
     // the tuple. This does not admit a standalone value proposition, or make

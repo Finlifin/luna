@@ -1212,16 +1212,16 @@ impl Checker<'_, '_> {
                         }
                         if !self.associated_has_initializer(contract.declaration) {
                             let own = declaration(self.package, &self.package_identities, owner);
-                            let has_comptime_associated = trait_definition
-                                .associated
-                                .iter()
-                                .any(|member| member.phase == n::TraitPhase::Comptime);
+                            let paired_runtime = relationships.iter().any(|(other, canonical)| {
+                                *other != own && Some(canonical) == relationships.get(&own)
+                            });
                             if phase == n::TraitPhase::Comptime
                                 && contract.phase == n::TraitPhase::Runtime
-                                && (has_comptime_associated
-                                    || relationships.iter().any(|(other, canonical)| {
-                                        *other != own && Some(canonical) == relationships.get(&own)
-                                    }))
+                                && (paired_runtime
+                                    || !comptime_phase_uses_associated(
+                                        trait_definition,
+                                        contract.declaration,
+                                    ))
                             {
                                 continue;
                             }
@@ -3502,4 +3502,24 @@ impl Checker<'_, '_> {
             Some(target),
         )
     }
+}
+
+fn comptime_phase_uses_associated(trait_definition: &n::Trait, member: DeclarationId) -> bool {
+    let references = |term: &Term| {
+        term.structural_terms().any(|node| match node {
+            Term::AssociatedType { origin, .. } => origin.member == member,
+            Term::AssociatedTypeCall(call) => call.origin.member == member,
+            _ => false,
+        })
+    };
+    trait_definition
+        .methods
+        .iter()
+        .filter(|method| method.phase == n::TraitPhase::Comptime)
+        .any(|method| method.signature.type_terms().any(references))
+        || trait_definition
+            .associated
+            .iter()
+            .filter(|assoc| assoc.phase == n::TraitPhase::Comptime)
+            .any(|assoc| references(&assoc.ty))
 }

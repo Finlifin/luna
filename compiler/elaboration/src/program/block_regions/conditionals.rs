@@ -156,6 +156,7 @@ impl<'h> Frame<'h> {
                         .inline_selection
                         .filter(|(id, _)| *id == source.hir_id)
                         .map(|(_, choice)| choice)
+                        .or_else(|| checker.in_unselected_inline.then_some(usize::MAX))
                 })
                 .flatten(),
             preserve_effect: own_effect_delivery
@@ -222,6 +223,15 @@ impl<'h> Frame<'h> {
                         })
                     }
                     _ if no.is_none() => Destination::statement(),
+                    _ if self.selection == Some(usize::from(true)) => Destination::ordinary(
+                        checker,
+                        OrdinaryTail {
+                            expected: None,
+                            partial: None,
+                            input: None,
+                        },
+                        yes.span,
+                    )?,
                     _ => self.destination.clone(),
                 };
                 self.state = State::Then(condition);
@@ -241,14 +251,34 @@ impl<'h> Frame<'h> {
                         &Destination::statement(),
                     );
                 };
-                let destination = match &value {
-                    CheckedBlock::Ordinary(yes) if self.partial_input && !is_never(&yes.ty) => self
-                        .destination
-                        .with_expected(checker, Some(&yes.ty), self.source.span)?,
-                    CheckedBlock::Ordinary(yes) | CheckedBlock::SelectedExit(yes) => self
-                        .destination
-                        .following_branch(checker, &yes.ty, self.source.span)?,
-                    CheckedBlock::Contextual(_) => self.destination.clone(),
+                let destination = if self.selection == Some(usize::from(false)) {
+                    Destination::ordinary(
+                        checker,
+                        OrdinaryTail {
+                            expected: None,
+                            partial: None,
+                            input: None,
+                        },
+                        no.span,
+                    )?
+                } else if self.selection == Some(usize::from(true))
+                    || self.selection == Some(usize::MAX)
+                {
+                    self.destination.clone()
+                } else {
+                    match &value {
+                        CheckedBlock::Ordinary(yes) if self.partial_input && !is_never(&yes.ty) => {
+                            self.destination.with_expected(
+                                checker,
+                                Some(&yes.ty),
+                                self.source.span,
+                            )?
+                        }
+                        CheckedBlock::Ordinary(yes) | CheckedBlock::SelectedExit(yes) => self
+                            .destination
+                            .following_branch(checker, &yes.ty, self.source.span)?,
+                        CheckedBlock::Contextual(_) => self.destination.clone(),
+                    }
                 };
                 self.enter_branch(checker, &condition, false, Some(no.hir_id))?;
                 self.state = State::Else(condition, value, destination.clone());
@@ -471,7 +501,13 @@ impl<'h> Frame<'h> {
             .map(|value| value.ty.clone())
             .unwrap_or(p(P::Void));
         let context = branch_destination.expected();
-        let ty = if control::conditional_never(&condition, &yes.ty, &other) {
+        let ty = if self.selection == Some(0) {
+            yes.ty.clone()
+        } else if self.selection == Some(1) {
+            other
+        } else if self.selection == Some(usize::MAX) && context.is_none() {
+            p(P::Void)
+        } else if control::conditional_never(&condition, &yes.ty, &other) {
             p(P::Never)
         } else if no.is_some() && context.is_some() {
             // Completing branches already justified this destination under

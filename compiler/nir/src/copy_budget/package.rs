@@ -93,6 +93,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         effects,
         method_links,
         runtime_function_identities,
+        open_function_identities,
         normal_forms,
         dispatch_instances: _,
         observed_associated_types,
@@ -131,6 +132,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         effects.len(),
         method_links.len(),
         runtime_function_identities.len(),
+        open_function_identities.len(),
         normal_forms.len(),
         traits.len(),
         implementations.len(),
@@ -189,6 +191,9 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     }
     for link in method_links {
         meter.width(link.type_parameters.len())?;
+    }
+    for open in open_function_identities {
+        meter.width(open.type_parameters.len())?;
     }
     for identity in runtime_function_identities {
         meter.node(Node::Formation(identity.into()))?;
@@ -276,6 +281,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         effects: effects.clone(),
         method_links: method_links.clone(),
         runtime_function_identities: runtime_function_identities.clone(),
+        open_function_identities: open_function_identities.clone(),
         normal_forms: normal_forms.clone(),
         dispatch_instances: vec![],
         observed_associated_types: observed_associated_types.clone(),

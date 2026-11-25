@@ -1319,6 +1319,7 @@ fn layout_with_niche_at(
         | Term::Bound { .. }
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
+        | Term::AssociatedTypeCall(_)
         | Term::ContextualClosure { .. }
         | Term::ClosureContextValue(_) => Err(LayoutError::Unresolved(ty.clone())),
         Term::ClosureContextType => Err(LayoutError::ComptimeOnly(ty.clone())),
@@ -1523,6 +1524,7 @@ fn bit_packed_field_info_at(
         | Term::Bound { .. }
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
+        | Term::AssociatedTypeCall(_)
         | Term::ContextualClosure { .. }
         | Term::ClosureContextValue(_) => {
             Err(BitPackedError::Layout(LayoutError::Unresolved(ty.clone())))

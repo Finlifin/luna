@@ -440,6 +440,16 @@ pub struct AssociatedTypeOrigin {
     pub member: DeclarationId,
 }
 
+/// An applied Type-returning associated comptime callable of an interface instance,
+/// e.g. `Self.as(MapPatternView).FieldType(property)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AssociatedTypeCall {
+    pub origin: AssociatedTypeOrigin,
+    pub arguments: Vec<Term>,
+    pub subject: Term,
+    pub call_arguments: Vec<Term>,
+}
+
 /// A stable symbolic term. Eq/Hash compare representation only. In particular,
 /// two unequal terms can still require a semantic equality query.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -466,6 +476,8 @@ pub enum Term {
         arguments: Vec<Term>,
         subject: Box<Term>,
     },
+    /// Application of a Type-returning associated comptime callable to value arguments.
+    AssociatedTypeCall(Box<AssociatedTypeCall>),
     Nominal {
         declaration: DeclarationId,
         arguments: Vec<Term>,
@@ -775,6 +787,7 @@ impl Term {
                     | Self::Bound { .. }
                     | Self::Hole { .. }
                     | Self::AssociatedType { .. }
+                    | Self::AssociatedTypeCall(_)
                     | Self::NormalForm { .. }
             ) && matches!(
                 value.as_ref(),
@@ -820,6 +833,11 @@ impl Term {
                 } => {
                     pending.push(*subject);
                     pending.extend(arguments);
+                }
+                Self::AssociatedTypeCall(call) => {
+                    pending.push(call.subject);
+                    pending.extend(call.arguments);
+                    pending.extend(call.call_arguments);
                 }
                 Self::MethodValue(method) => {
                     pending.push(method.subject);
@@ -1459,13 +1477,36 @@ impl Term {
     /// Substitute only demanded slots of a frame. Missing slots are allowed
     /// when the term does not refer to them; no arbitrary placeholder is used.
     pub fn substitute_partial(&self, arguments: &[Option<Term>]) -> Result<Term, TypeError> {
+        self.substitute_partial_with(arguments, false)
+    }
+
+    /// Substitute only demanded slots of a comptime-callable frame, allowing
+    /// comptime values or types in ordinary (`Sort::Runtime`) parameter slots.
+    pub fn substitute_partial_comptime(
+        &self,
+        arguments: &[Option<Term>],
+    ) -> Result<Term, TypeError> {
+        self.substitute_partial_with(arguments, true)
+    }
+
+    fn substitute_partial_with(
+        &self,
+        arguments: &[Option<Term>],
+        allow_comptime_for_runtime: bool,
+    ) -> Result<Term, TypeError> {
         self.rewrite(0, &mut |term, nesting| match term {
             Self::Bound { depth, index, sort } if *depth == nesting => {
                 let value = arguments
                     .get(*index)
                     .and_then(Option::as_ref)
                     .ok_or(TypeError::MissingArgument(*index))?;
-                require_sort(value, *sort)?;
+                if allow_comptime_for_runtime
+                    && *sort == Sort::Runtime
+                    && matches!(value.sort(), Sort::ComptimeValue | Sort::Type)
+                {
+                } else {
+                    require_sort(value, *sort)?;
+                }
                 value.shift(nesting, 0)
             }
             Self::Bound { depth, index, sort } if *depth > nesting => Ok(Self::Bound {
@@ -1741,6 +1782,14 @@ impl Term {
                 arguments: many(arguments, leaf)?,
                 subject: Box::new(subject.rewrite(nesting, leaf)?),
             },
+            Self::AssociatedTypeCall(call) => {
+                Self::AssociatedTypeCall(Box::new(AssociatedTypeCall {
+                    origin: call.origin.clone(),
+                    arguments: many(&call.arguments, leaf)?,
+                    subject: call.subject.rewrite(nesting, leaf)?,
+                    call_arguments: many(&call.call_arguments, leaf)?,
+                }))
+            }
             Self::Nominal {
                 declaration,
                 arguments,
@@ -2732,6 +2781,16 @@ fn validate<'term>(
                 validate(argument, holes, frames, allow_free, core)?;
             }
         }
+        Term::AssociatedTypeCall(call) => {
+            require_sort(&call.subject, Sort::Type)?;
+            validate(&call.subject, holes, frames, allow_free, core)?;
+            for argument in &call.arguments {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+            for argument in &call.call_arguments {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+        }
         Term::MethodValue(method) => {
             require_sort(&method.subject, Sort::Type)?;
             for argument in method.terms() {
@@ -2882,6 +2941,21 @@ impl fmt::Display for Term {
                 )?;
                 list(f, arguments)?;
                 write!(f, ") (subject {subject}) (member {}))", origin.member)
+            }
+            Self::AssociatedTypeCall(call) => {
+                write!(
+                    f,
+                    "(associated-type-call (interface {}) (arguments ",
+                    call.origin.interface
+                )?;
+                list(f, &call.arguments)?;
+                write!(
+                    f,
+                    ") (subject {}) (member {}) (call-arguments ",
+                    call.subject, call.origin.member
+                )?;
+                list(f, &call.call_arguments)?;
+                f.write_str("))")
             }
             Self::Nominal {
                 declaration,

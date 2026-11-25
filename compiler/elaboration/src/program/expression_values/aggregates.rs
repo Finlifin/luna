@@ -53,7 +53,10 @@ impl Checker<'_, '_> {
                         .inline_selection
                         .is_some_and(|(id, _)| id.owner == expr.hir_id.owner)
                 {
-                    let checked = self.expr(value, expected)?;
+                    let previous = self.inline_selection.replace((value.hir_id, usize::MAX));
+                    let checked = self.expr(value, expected);
+                    self.inline_selection = previous;
+                    let checked = checked?;
                     self.check_inactive_inline_selectors(value, &checked)?;
                     return Ok(checked);
                 }
@@ -106,7 +109,10 @@ impl Checker<'_, '_> {
                         .inline_selection
                         .is_some_and(|(id, _)| id.owner == expr.hir_id.owner)
                 {
-                    let checked = self.expr(value, expected)?;
+                    let previous = self.inline_selection.replace((value.hir_id, usize::MAX));
+                    let checked = self.expr(value, expected);
+                    self.inline_selection = previous;
+                    let checked = checked?;
                     self.check_inactive_inline_selectors(value, &checked)?;
                     return Ok(checked);
                 }

@@ -39,12 +39,16 @@ pub use patterns.{
     ConcatPatternView,
     ListPatternView,
     ListPatternViewEndless,
+    MapPatternView,
     RangeEnd,
     RangePatternView,
     StableConcatPatternView,
     StableListPatternView,
     StableListPatternViewEndless,
+    StableMapPatternView,
     StableRangePatternView,
+    StableStructPatternView,
+    StructPatternView,
 }
 pub use primitives.*;
 pub use protocols.staging.{Splice, splice_auto};
@@ -100,12 +104,16 @@ pub mod prelude {
         ConcatPatternView,
         ListPatternView,
         ListPatternViewEndless,
+        MapPatternView,
         RangeEnd,
         RangePatternView,
         StableConcatPatternView,
         StableListPatternView,
         StableListPatternViewEndless,
+        StableMapPatternView,
         StableRangePatternView,
+        StableStructPatternView,
+        StructPatternView,
     }
     pub use primitives.*;
     pub use protocols.staging.{Splice, splice_auto};

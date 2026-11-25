@@ -241,7 +241,10 @@ impl<'h> Frame<'h> {
                         value.selected_exit(),
                     );
                     let mut body = value.ordinary(arm.body.span)?;
-                    if ordinary.branch_type.is_none() && !is_never(&body.ty) {
+                    if ordinary.selection.is_none()
+                        && ordinary.branch_type.is_none()
+                        && !is_never(&body.ty)
+                    {
                         ordinary.branch_type = Some(body.ty.clone());
                     }
                     if !ordinary.fallback {
@@ -384,7 +387,10 @@ impl<'h> Frame<'h> {
             if ordinary.callee == Some(self.source.hir_id) {
                 checker.comptime_callee_result = Some(arm.body.hir_id);
             }
-            if ordinary.fallback {
+            let is_unselected_branch = ordinary.selection.is_some_and(|selected| {
+                selected < self.arms.len() && selected != self.branches.len()
+            });
+            if ordinary.fallback && !is_unselected_branch {
                 self.destination.with_expected(
                     checker,
                     ordinary.branch_type.as_ref(),
@@ -394,7 +400,11 @@ impl<'h> Frame<'h> {
                 Destination::ordinary(
                     checker,
                     OrdinaryTail {
-                        expected: ordinary.branch_type.as_ref(),
+                        expected: if is_unselected_branch {
+                            None
+                        } else {
+                            ordinary.branch_type.as_ref()
+                        },
                         partial: None,
                         input: None,
                     },
@@ -451,38 +461,52 @@ impl<'h> Frame<'h> {
         } else {
             None
         };
-        let mut tail = unit();
-        for (condition, body) in branches.into_iter().rev() {
-            let Some(condition) = condition else {
-                tail = body;
-                continue;
-            };
-            let ty = if control::conditional_never(&condition, &body.ty, &tail.ty) {
-                p(P::Never)
-            } else if ordinary.fallback && ordinary.branch_type.is_some() {
-                ordinary.branch_type.clone().unwrap()
-            } else if is_never(&body.ty) {
-                tail.ty.clone()
-            } else if is_never(&tail.ty) {
-                body.ty.clone()
-            } else {
-                checker.require(&tail.ty, &body.ty, self.source.span)?;
-                body.ty.clone()
-            };
-            tail = n::Expr {
-                ty,
-                source: source(self.source.span),
-                kind: K::If {
-                    condition: Box::new(condition),
-                    then_branch: Box::new(body),
-                    else_branch: Some(Box::new(tail)),
-                },
-            };
-        }
-        if let Some(expected) = self.destination.expected() {
-            checker.require(&tail.ty, expected, self.source.span)?;
-        }
-        let value = selected_body.unwrap_or(tail);
+        let value = match selected_body {
+            Some(value) if ordinary.selection != Some(usize::MAX) => {
+                if let Some(expected) = self.destination.expected() {
+                    checker.require(&value.ty, expected, self.source.span)?;
+                }
+                value
+            }
+            selected_body => {
+                let mut tail = unit();
+                for (condition, body) in branches.into_iter().rev() {
+                    let Some(condition) = condition else {
+                        tail = body;
+                        continue;
+                    };
+                    let ty = if control::conditional_never(&condition, &body.ty, &tail.ty) {
+                        p(P::Never)
+                    } else if ordinary.fallback && ordinary.branch_type.is_some() {
+                        ordinary.branch_type.clone().unwrap()
+                    } else if is_never(&body.ty) {
+                        tail.ty.clone()
+                    } else if is_never(&tail.ty) {
+                        body.ty.clone()
+                    } else if ordinary.selection == Some(usize::MAX)
+                        && self.destination.expected().is_none()
+                    {
+                        p(P::Void)
+                    } else {
+                        checker.require(&tail.ty, &body.ty, self.source.span)?;
+                        body.ty.clone()
+                    };
+                    tail = n::Expr {
+                        ty,
+                        source: source(self.source.span),
+                        kind: K::If {
+                            condition: Box::new(condition),
+                            then_branch: Box::new(body),
+                            else_branch: Some(Box::new(tail)),
+                        },
+                    };
+                }
+                if let Some(expected) = self.destination.expected() {
+                    checker.require(&tail.ty, expected, self.source.span)?;
+                }
+                selected_body.unwrap_or(tail)
+            }
+        };
         let value = if ordinary.preserve_effect == Some(false) {
             checker.run_computation(value, self.destination.expected(), self.source.span)?
         } else {

@@ -229,7 +229,10 @@ impl Interpreter<'_> {
         let observed;
         let ty = if self.comptime_only
             && self.graph.is_none()
-            && matches!(ty, Term::AssociatedType { .. })
+            && matches!(
+                ty,
+                Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+            )
             && !matches!(value, Value::AbstractValue { .. })
         {
             observed = self.selected_type_view(ty, source)?;
@@ -469,7 +472,10 @@ impl Interpreter<'_> {
             });
         }
 
-        if matches!(ty, Term::AssociatedType { .. }) {
+        if matches!(
+            ty,
+            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+        ) {
             return checks
                 .observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
                 .is_some_and(|ty| self.has_type_at(value, &ty, depth + 1, checks));

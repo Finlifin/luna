@@ -262,7 +262,7 @@ impl Checker<'_, '_> {
                     symbols,
                     parameters,
                     live,
-                    call.span,
+                    call,
                 )?;
                 let ty =
                     self.admit_supplied_annotation(data, route, call, &mut values[slot], true)?;
@@ -470,7 +470,7 @@ impl Checker<'_, '_> {
                     sig,
                     symbols,
                     parameters,
-                    call.span,
+                    call,
                 )?
                 .identity(call.span)?
             };

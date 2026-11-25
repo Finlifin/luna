@@ -169,6 +169,7 @@ fn local_identity(
             | Term::Computation { .. }
             | Term::NormalForm { .. }
             | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
             | Term::Rigid { .. }
             | Term::Bound { .. }
             | Term::Hole { .. }

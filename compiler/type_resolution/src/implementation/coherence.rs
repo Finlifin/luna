@@ -341,6 +341,11 @@ fn separation_goal(
                     terms.extend(arguments);
                     terms.push(subject);
                 }
+                Term::AssociatedTypeCall(call) => {
+                    terms.extend(&call.arguments);
+                    terms.extend(&call.call_arguments);
+                    terms.push(&call.subject);
+                }
                 Term::Rigid { declaration, .. } => {
                     used.insert(*declaration);
                 }

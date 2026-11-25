@@ -1,6 +1,7 @@
 use builtin.fmt.{ByteWriter, Debug}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
+use string_impl.string.{String, raw_slot_equals_str}
 
 {-
     Open-addressed linear-probing HashMap<K, V, .A, .allocator> and its
@@ -1226,3 +1227,161 @@ where
         output.write_byte(125)
     }
 }
+
+pure comptime fn hash_map_field_type(_property: Symbol) -> Type
+where
+    V: Type,
+{
+    V
+}
+
+impl MapPatternView for HashMap<Symbol, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc FieldType: pure comptime fn(Symbol) -> Type = hash_map_field_type<V>;
+
+    fn map_pattern_view_get(*self, comptime property: Symbol) -> ?FieldType(property) {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        let len = self.raw_len.*;
+        if addr == 0 or cap == 0 or len == 0 {
+            return null;
+        }
+        let tl = table_layout<Symbol, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        let target_hash = mix_hash(property.as(Hash).hash());
+        var idx = bucket_index(target_hash, cap);
+        var steps: usize = 0;
+        while steps < cap {
+            let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, idx)) }
+            if st == STATE_EMPTY {
+                return null;
+            }
+            if st == STATE_FULL {
+                let stored_hash = unsafe {
+                    builtin
+                        .mem
+                        .raw_read<u64>(hash_addr(addr, tl.hashes_offset, idx))
+                }
+                if stored_hash == target_hash {
+                    let existing = unsafe {
+                        builtin
+                            .mem
+                            .raw_read<Symbol>(key_addr<Symbol>(addr, tl, idx))
+                    }
+                    if existing == property {
+                        return unsafe {
+                            builtin
+                                .mem
+                                .raw_read<V>(val_addr<V>(addr, tl, idx))
+                        };
+                    }
+                }
+            }
+            idx = next_ring_index(idx, cap);
+            steps = steps + 1;
+        }
+        null
+    }
+}
+
+impl StableMapPatternView for HashMap<Symbol, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{}
+
+impl MapPatternView for HashMap<str, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc FieldType: pure comptime fn(Symbol) -> Type = hash_map_field_type<V>;
+
+    fn map_pattern_view_get(*self, comptime property: Symbol) -> ?FieldType(property) {
+        self.get(property'tag_name)
+    }
+}
+
+impl StableMapPatternView for HashMap<str, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{}
+
+impl MapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    SA: Type,
+    requires SA :- Allocator,
+    quote sa: lift *SA,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc FieldType: pure comptime fn(Symbol) -> Type = hash_map_field_type<V>;
+
+    fn map_pattern_view_get(*self, comptime property: Symbol) -> ?FieldType(property) {
+        let name = property'tag_name;
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        let len = self.raw_len.*;
+        if addr == 0 or cap == 0 or len == 0 {
+            return null;
+        }
+        let tl = table_layout<String<.A = SA, .allocator = sa>, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        let target_hash = mix_hash(name.as(Hash).hash());
+        var idx = bucket_index(target_hash, cap);
+        var steps: usize = 0;
+        while steps < cap {
+            let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, idx)) }
+            if st == STATE_EMPTY {
+                return null;
+            }
+            if st == STATE_FULL {
+                let stored_hash = unsafe {
+                    builtin
+                        .mem
+                        .raw_read<u64>(hash_addr(addr, tl.hashes_offset, idx))
+                }
+                if stored_hash == target_hash {
+                    let k_slot = key_addr<String<.A = SA, .allocator = sa>>(addr, tl, idx);
+                    if raw_slot_equals_str(k_slot, name) {
+                        return unsafe {
+                            builtin.mem.raw_read<V>(val_addr<V>(addr, tl, idx))
+                        };
+                    }
+                }
+            }
+            idx = next_ring_index(idx, cap);
+            steps = steps + 1;
+        }
+        null
+    }
+}
+
+impl StableMapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .A = A, .allocator = alloc>
+where
+    V :- Copy,
+    SA: Type,
+    requires SA :- Allocator,
+    quote sa: lift *SA,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{}
