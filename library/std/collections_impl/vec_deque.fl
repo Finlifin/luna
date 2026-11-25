@@ -953,3 +953,37 @@ where
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
+
+impl Index<usize> for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Output: Type = T;
+
+    fn index(*self, idx: usize) -> *T {
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        assumes idx < len and cap > 0;
+        let slot = ring_index(self.raw_head.*, idx, cap);
+        unsafe { builtin.mem.raw_ptr<T>(slot_address<T>(self.raw_addr.*, slot)) }
+    }
+}
+
+impl IndexMut<usize> for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn index_mut(*self, idx: usize) -> *T {
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        assumes idx < len and cap > 0;
+        let slot = ring_index(self.raw_head.*, idx, cap);
+        unsafe { builtin.mem.raw_ptr<T>(slot_address<T>(self.raw_addr.*, slot)) }
+    }
+}

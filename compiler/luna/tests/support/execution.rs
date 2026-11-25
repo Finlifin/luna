@@ -97,6 +97,8 @@ pub(crate) fn compile_explicit_source_with_bindings(
             meta_list_type: selectors.meta_list.map(str::to_owned),
             tuple_type: selectors.tuple.map(str::to_owned),
             index_protocol: selectors.index.map(str::to_owned),
+            index_mut_protocol: selectors.index_mut.map(str::to_owned),
+            space_apply_protocol: selectors.space_apply.map(str::to_owned),
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
             comptime_ord_protocol: selectors.comptime_ordering.map(str::to_owned),
@@ -134,6 +136,12 @@ pub(crate) fn compile_explicit_source_with_bindings(
             call_context_type: selectors.call_context.map(str::to_owned),
             call_description_type: selectors.call_description.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
+            compound_arithmetic_protocols: selectors
+                .compound_arithmetic
+                .map(|value| value.map(str::to_owned)),
+            comptime_compound_arithmetic_protocols: selectors
+                .comptime_compound_arithmetic
+                .map(|value| value.map(str::to_owned)),
             incremental: Default::default(),
         },
         0,

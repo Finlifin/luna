@@ -1493,34 +1493,21 @@ impl Parser<'_> {
     }
 
     /// 索引调用表达式
+    /// index_application -> expr[argument*]
     fn try_index_call_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LBracket], |p| {
-            let open_span = p.next_token_span();
-            p.eat_tokens(1); // consume the opening bracket, not a list literal
-            // 解析索引调用参数
-            let expr = p.try_expr()?;
-            if expr == 0 {
-                return Err(ParseError::invalid_syntax(
-                    "expected an index expression after `[`".to_string(),
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                )
-                .with_secondary_label(open_span, "this `[` was opened here"));
-            }
-
-            if !p.eat_token(TokenKind::RBracket) {
-                return Err(ParseError::unexpected_token(
-                    TokenKind::RBracket,
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                )
-                .with_secondary_label(open_span, "this `[` was opened here"));
-            }
-            // 创建索引调用节点
+            let args = p.try_multi_with_bracket(
+                &[
+                    Rule::comma("optional argument", |p| p.try_optional_arg()),
+                    Rule::comma("extend argument", |p| p.try_extend_arg()),
+                    Rule::comma("function argument", |p| p.try_expr()),
+                ],
+                (TokenKind::LBracket, TokenKind::RBracket),
+            )?;
             Ok(
                 NodeBuilder::new(NodeKind::IndexApplication, p.current_span())
                     .add_single_child(left)
-                    .add_single_child(expr)
+                    .add_multiple_children(args)
                     .build(&mut p.ast),
             )
         })

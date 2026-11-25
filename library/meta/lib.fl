@@ -55,7 +55,10 @@ pub use integer.*;
 pub use map.{Map, MapEntry}
 pub use newtypes.*;
 pub use object.*;
-pub use ops_impl.ComptimeImplies;
+pub use ops_impl.{
+    ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
+    ComptimeSubAssign,
+};
 pub use optional.ComptimeOptionalOps;
 pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
 pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
@@ -126,7 +129,10 @@ pub mod prelude {
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
     pub use hashing.ComptimeHash;
-    pub use ops_impl.ComptimeImplies;
+    pub use ops_impl.{
+    ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
+    ComptimeSubAssign,
+};
     pub use optional.ComptimeOptionalOps;
     pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}

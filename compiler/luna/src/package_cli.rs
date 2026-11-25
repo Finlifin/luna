@@ -238,6 +238,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--concat-pattern-protocol"
                 | "--stable-concat-pattern-protocol"
                 | "--index-protocol"
+                | "--index-mut-protocol"
+                | "--space-apply-protocol"
                 | "--ord-protocol"
                 | "--eq-protocol"
                 | "--literal-into-protocol"
@@ -255,7 +257,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--div-protocol"
                 | "--rem-protocol"
                 | "--neg-protocol"
-                | "--not-protocol",
+                | "--not-protocol"
+                | "--add-assign-protocol"
+                | "--sub-assign-protocol"
+                | "--mul-assign-protocol"
+                | "--div-assign-protocol"
+                | "--rem-assign-protocol"
+                | "--comptime-add-assign-protocol"
+                | "--comptime-sub-assign-protocol"
+                | "--comptime-mul-assign-protocol"
+                | "--comptime-div-assign-protocol"
+                | "--comptime-rem-assign-protocol",
             ) => {
                 let value = take(&mut args, "option value")?;
                 forwarded.extend([argument, value]);
@@ -783,6 +795,8 @@ impl Request {
                     .extended_variadic_collector_protocol
                     .as_deref(),
                 index: options.index_protocol.as_deref(),
+                index_mut: options.index_mut_protocol.as_deref(),
+                space_apply: options.space_apply_protocol.as_deref(),
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),
                 comptime_ordering: options.comptime_ord_protocol.as_deref(),
@@ -797,6 +811,12 @@ impl Request {
                 call_context: options.call_context_type.as_deref(),
                 call_description: options.call_description_type.as_deref(),
                 arithmetic: std::array::from_fn(|i| options.arithmetic_protocols[i].as_deref()),
+                compound_arithmetic: std::array::from_fn(|i| {
+                    options.compound_arithmetic_protocols[i].as_deref()
+                }),
+                comptime_compound_arithmetic: std::array::from_fn(|i| {
+                    options.comptime_compound_arithmetic_protocols[i].as_deref()
+                }),
                 ..Default::default()
             },
             inputs,

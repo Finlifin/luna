@@ -817,7 +817,7 @@ impl Display for ExprKind<'_> {
             } => {
                 form!(f, "range-expr", "start" => Maybe(*start), "end" => Maybe(*end), "inclusive" => inclusive)
             }
-            Self::Index(base, index) => form!(f, "index", "base" => base, "index" => index),
+            Self::Index(base, args) => form!(f, "index", "base" => base, "args" => List(args)),
             Self::Application(callee, args) => {
                 form!(f, "application", "callee" => callee, "args" => List(args))
             }

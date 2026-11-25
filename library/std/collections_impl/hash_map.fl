@@ -1383,3 +1383,75 @@ where
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn value_address(*self, key: *K, target_hash: u64) -> ?usize {
+        let cap = self.raw_cap.*;
+        let slot = self.find_slot(key, target_hash) match {
+            v? => v,
+            null => return null,
+        };
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        };
+        val_addr<V>(self.raw_addr.*, tl, slot)
+    }
+}
+
+impl Index<K> for HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Output: Type = V;
+
+    fn index(*self, idx: K) -> *V {
+        var needle = idx;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let found = self.value_address(needle.ref, target_hash);
+        retire_value<K>(needle);
+        let addr = found match {
+            v? => v,
+            null => {
+                assumes false;
+                0
+            }
+        };
+        unsafe { builtin.mem.raw_ptr<V>(addr) }
+    }
+}
+
+impl IndexMut<K> for HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn index_mut(*self, idx: K) -> *V {
+        var needle = idx;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let found = self.value_address(needle.ref, target_hash);
+        retire_value<K>(needle);
+        let addr = found match {
+            v? => v,
+            null => {
+                assumes false;
+                0
+            }
+        };
+        unsafe { builtin.mem.raw_ptr<V>(addr) }
+    }
+}

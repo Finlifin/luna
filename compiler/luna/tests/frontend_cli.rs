@@ -1034,6 +1034,8 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         splice_protocol: Some("Splice".into()),
         meta_list_type: None,
         index_protocol: None,
+        index_mut_protocol: None,
+        space_apply_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
         comptime_ord_protocol: None,
@@ -1067,6 +1069,8 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         call_context_type: None,
         call_description_type: None,
         arithmetic_protocols: Default::default(),
+        compound_arithmetic_protocols: Default::default(),
+        comptime_compound_arithmetic_protocols: Default::default(),
         tuple_type: None,
         incremental: Default::default(),
     };
@@ -4798,9 +4802,9 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
 #[test]
 fn index_protocol_cli_checks_binding_and_declaration_shape() {
     let sandbox = Sandbox::new();
-    let source = "trait Access where K {fn index(self,idx:K)->bool;}
+    let source = "trait Access where K {fn index(*self,idx:K)->bool;}
         struct Flag {value:bool}
-        impl Access<bool> for Flag {fn index(self,idx:bool)->bool {self.value and idx}}
+        impl Access<bool> for Flag {fn index(*self,idx:bool)->bool {self.*.value and idx}}
         fn run()->bool {Flag {value:true}[true]}";
     sandbox.write("input.fl", source);
     assert_eq!(
@@ -4849,10 +4853,10 @@ fn index_protocol_cli_checks_binding_and_declaration_shape() {
         failure(&sandbox.run(&args), 2);
     }
     for declaration in [
-        "trait Access {fn index(self,idx:bool)->bool;}",
-        "trait Access where K {fn other(self,idx:K)->bool;}",
-        "trait Access where K {fn index(*self,idx:K)->bool;}",
-        "trait Access where K {fn index(self,idx:bool)->bool;}",
+        "trait Access {fn index(*self,idx:bool)->bool;}",
+        "trait Access where K {fn other(*self,idx:K)->bool;}",
+        "trait Access where K {fn index(self,idx:K)->bool;}",
+        "trait Access where K {fn index(*self,idx:bool)->bool;}",
     ] {
         sandbox.write("input.fl", format!("{declaration}fn run()->bool {{true}}"));
         let output = sandbox.run(&[
@@ -4890,7 +4894,7 @@ fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
         "input.fl",
         "use builtin.Index;typealias Type=.Type'builtin;typealias Word=.u16'builtin;
         struct Slot {p:*Word}
-        impl Index<bool> for Slot {assoc Output:Type=Word;fn index(self,idx:bool)->*Word {self.p}}
+        impl Index<bool> for Slot {assoc Output:Type=Word;fn index(*self,idx:bool)->*Word {self.*.p}}
         fn run()->Word {var word:Word=0;Slot {p:word.ref}[true].* = 17;word}",
     );
     assert_eq!(

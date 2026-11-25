@@ -1456,6 +1456,8 @@ fn hash_scoped_protocols(
         protocols.copy,
         protocols.drop,
         protocols.index,
+        protocols.index_mut,
+        protocols.space_apply,
         protocols.iterator,
         protocols.into_iterator,
         protocols.variadic_collector,
@@ -1496,6 +1498,12 @@ fn hash_scoped_protocols(
         hash_decl(hasher, decl);
     }
     for decl in protocols.arithmetic {
+        hash_decl(hasher, decl);
+    }
+    for decl in protocols.compound_arithmetic {
+        hash_decl(hasher, decl);
+    }
+    for decl in protocols.comptime_compound_arithmetic {
         hash_decl(hasher, decl);
     }
 }
@@ -1854,6 +1862,8 @@ pub fn encode_selectors_tag(
         copy,
         drop,
         index,
+        index_mut,
+        space_apply,
         iterator,
         into_iterator,
         variadic_collector,
@@ -1888,6 +1898,8 @@ pub fn encode_selectors_tag(
         call_context,
         call_description,
         arithmetic,
+        compound_arithmetic,
+        comptime_compound_arithmetic,
         splice,
         meta_list,
         tuple,
@@ -1931,6 +1943,8 @@ pub fn encode_selectors_tag(
         *copy,
         *drop,
         *index,
+        *index_mut,
+        *space_apply,
         *iterator,
         *into_iterator,
         *variadic_collector,
@@ -1971,6 +1985,12 @@ pub fn encode_selectors_tag(
         write_opt_str(&mut writer, opt);
     }
     for opt in arithmetic {
+        write_opt_str(&mut writer, *opt);
+    }
+    for opt in compound_arithmetic {
+        write_opt_str(&mut writer, *opt);
+    }
+    for opt in comptime_compound_arithmetic {
         write_opt_str(&mut writer, *opt);
     }
     writer.into_vec()

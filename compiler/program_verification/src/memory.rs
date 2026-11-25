@@ -55,6 +55,22 @@ pub struct ParameterPlace {
 }
 
 impl ParameterPlace {
+    pub const EXTERNAL_RAW_PARAMETER: usize = usize::MAX;
+
+    pub fn external_raw() -> Self {
+        Self {
+            parameter: Self::EXTERNAL_RAW_PARAMETER,
+            input_fields: vec![],
+            through: vec![],
+            conditions: BTreeMap::new(),
+            fields: vec![],
+        }
+    }
+
+    pub fn is_external_raw(&self) -> bool {
+        self.parameter == Self::EXTERNAL_RAW_PARAMETER
+    }
+
     pub(super) fn path_cost(&self) -> usize {
         self.through.iter().fold(
             condition_cost(&self.conditions).saturating_add(
@@ -102,6 +118,7 @@ enum PointerRoot {
     Local { binding: LocalId, storage: usize },
     ConstGlobal(DeclarationId),
     StaticGlobal(DeclarationId),
+    ExternalRaw,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,16 +218,23 @@ impl PointerPlace {
     }
 
     fn external(self) -> Result<ParameterPlace, String> {
-        let PointerRoot::Parameter(parameter) = self.root else {
-            return Err("local memory target cannot escape in a result".into());
-        };
-        Ok(ParameterPlace {
-            parameter,
-            input_fields: self.input_fields,
-            through: self.through,
-            conditions: self.conditions,
-            fields: self.fields,
-        })
+        match self.root {
+            PointerRoot::Parameter(parameter) => Ok(ParameterPlace {
+                parameter,
+                input_fields: self.input_fields,
+                through: self.through,
+                conditions: self.conditions,
+                fields: self.fields,
+            }),
+            PointerRoot::ExternalRaw => Ok(ParameterPlace {
+                parameter: ParameterPlace::EXTERNAL_RAW_PARAMETER,
+                input_fields: vec![],
+                through: self.through,
+                conditions: self.conditions,
+                fields: self.fields,
+            }),
+            _ => Err("local memory target cannot escape in a result".into()),
+        }
     }
 }
 
@@ -224,6 +248,7 @@ impl fmt::Display for PointerPlace {
             }
             PointerRoot::ConstGlobal(declaration) => write!(f, "(const-global {declaration})")?,
             PointerRoot::StaticGlobal(declaration) => write!(f, "(static-global {declaration})")?,
+            PointerRoot::ExternalRaw => f.write_str("(external-raw)")?,
         }
         f.write_str(")")?;
         if !self.input_fields.is_empty() {
@@ -473,7 +498,11 @@ pub struct Summary {
 
 impl fmt::Display for ParameterPlace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(parameter-place (parameter {})", self.parameter)?;
+        if self.is_external_raw() {
+            f.write_str("(parameter-place (external-raw)")?;
+        } else {
+            write!(f, "(parameter-place (parameter {})", self.parameter)?;
+        }
         if !self.input_fields.is_empty() {
             f.write_str(" (input-fields")?;
             for index in &self.input_fields {
@@ -4779,24 +4808,12 @@ impl<'a> Infer<'a, '_> {
         self.expression_results
             .insert(expr as *const Expr as usize, result);
         for access in summary.accesses {
-            let actual = targets
-                .get(&access.target.parameter)
-                .and_then(|fields| fields.get(&access.target.input_fields))
-                .ok_or("borrowed closure target is missing")?;
-            self.target_work(actual)?;
-            for base in actual {
-                self.step(depth)?;
-                let mut target = base.clone();
-                self.step(access.target.path_cost())?;
-                target.append_resolved_path(&access.target)?;
-                bound_type(&access.ty, self.fuel)?;
-                self.record_access(
-                    BTreeSet::from([target]),
-                    access.write,
-                    access.read_value,
-                    access.ty.clone(),
-                )?;
-            }
+            self.record_rebased_access(
+                &access,
+                &targets,
+                depth,
+                "borrowed closure target is missing",
+            )?;
         }
         Ok(true)
     }
@@ -5018,6 +5035,7 @@ impl<'a> Infer<'a, '_> {
             | K::Call { .. }
             | K::Match { .. }
             | K::If { .. }
+            | K::Intrinsic { .. }
             | K::NewtypeConvert(_) => {
                 let targets = self
                     .expression_results
@@ -5199,7 +5217,10 @@ impl<'a> Infer<'a, '_> {
                 }
                 continue;
             }
-            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
+            if matches!(
+                target.root,
+                PointerRoot::StaticGlobal(_) | PointerRoot::ExternalRaw
+            ) {
                 continue;
             }
             if let PointerRoot::Local { binding, storage } = target.root {
@@ -5235,6 +5256,63 @@ impl<'a> Infer<'a, '_> {
         Ok(())
     }
 
+    fn external_raw_place() -> PointerPlace {
+        PointerPlace {
+            root: PointerRoot::ExternalRaw,
+            input_fields: vec![],
+            through: vec![],
+            conditions: BTreeMap::new(),
+            fields: vec![],
+        }
+    }
+
+    fn record_rebased_access(
+        &mut self,
+        access: &Access,
+        arguments: &BTreeMap<usize, BTreeMap<Vec<usize>, BTreeSet<PointerPlace>>>,
+        depth: usize,
+        missing_message: &str,
+    ) -> Result<(), String> {
+        if access.target.is_external_raw() {
+            self.step(depth)?;
+            *self.fuel = self
+                .fuel
+                .checked_sub(access.target.path_cost())
+                .ok_or("memory target set budget exhausted")?;
+            let mut target = Self::external_raw_place();
+            target.append_resolved_path(&access.target)?;
+            bound_type(&access.ty, self.fuel)?;
+            return self.record_access(
+                BTreeSet::from([target]),
+                access.write,
+                access.read_value,
+                access.ty.clone(),
+            );
+        }
+        let actual = arguments
+            .get(&access.target.parameter)
+            .and_then(|fields| fields.get(&access.target.input_fields))
+            .ok_or_else(|| missing_message.to_string())?;
+        self.target_work(actual)?;
+        for base in actual {
+            self.step(depth)?;
+            let mut target = base.clone();
+            *self.fuel = self
+                .fuel
+                .checked_sub(access.target.path_cost())
+                .ok_or("memory target set budget exhausted")?;
+            target.append_resolved_path(&access.target)?;
+            bound_type(&access.ty, self.fuel)?;
+            self.record_access(
+                BTreeSet::from([target]),
+                access.write,
+                access.read_value,
+                access.ty.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn rebase_result(
         &mut self,
         result: Option<&BTreeSet<ParameterPlace>>,
@@ -5245,6 +5323,16 @@ impl<'a> Infer<'a, '_> {
         };
         let mut targets = BTreeSet::new();
         for target in result {
+            if target.is_external_raw() {
+                *self.fuel = self
+                    .fuel
+                    .checked_sub(target.path_cost())
+                    .ok_or("memory result budget exhausted")?;
+                let mut place = Self::external_raw_place();
+                place.append_resolved_path(target)?;
+                targets.insert(place);
+                continue;
+            }
             let Some(actual) = arguments
                 .get(&target.parameter)
                 .and_then(|fields| fields.get(&target.input_fields))
@@ -6626,6 +6714,20 @@ impl<'a> Infer<'a, '_> {
                 for input in inputs {
                     self.walk(input, depth + 1)?;
                 }
+                if binding.operation() == nir::intrinsics::Operation::MemRawPtr
+                    && matches!(&output, Term::Pointer(_))
+                {
+                    self.expression_results.insert(
+                        expr as *const Expr as usize,
+                        Some(BTreeSet::from([PointerPlace {
+                            root: PointerRoot::ExternalRaw,
+                            input_fields: vec![],
+                            through: vec![],
+                            fields: vec![],
+                            conditions: BTreeMap::new(),
+                        }])),
+                    );
+                }
             }
             K::EffectRequest { .. }
             | K::EffectComputation { .. }
@@ -7688,29 +7790,12 @@ impl<'a> Infer<'a, '_> {
                 self.expression_results
                     .insert(expr as *const Expr as usize, result_targets);
                 for access in summary.accesses {
-                    self.step(depth)?;
-                    let actual = targets
-                        .get(&access.target.parameter)
-                        .and_then(|fields| fields.get(&access.target.input_fields))
-                        .ok_or("memory call target is not established")?;
-                    self.target_work(actual)?;
-                    for base in actual {
-                        self.step(depth)?;
-                        let mut target = base.clone();
-                        let cost = access.target.path_cost();
-                        *self.fuel = self
-                            .fuel
-                            .checked_sub(cost)
-                            .ok_or("memory target set budget exhausted")?;
-                        target.append_resolved_path(&access.target)?;
-                        bound_type(&access.ty, self.fuel)?;
-                        self.record_access(
-                            BTreeSet::from([target]),
-                            access.write,
-                            access.read_value,
-                            access.ty.clone(),
-                        )?;
-                    }
+                    self.record_rebased_access(
+                        &access,
+                        &targets,
+                        depth,
+                        "memory call target is not established",
+                    )?;
                 }
             }
             K::Let { binding, value } => {

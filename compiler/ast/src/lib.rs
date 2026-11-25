@@ -323,7 +323,7 @@ pub enum NodeKind {
     OptionPropagation, // a
 
     Application,               // application -> expr(argument*), a, N
-    IndexApplication,          // index_application -> expr[expr], a, b
+    IndexApplication,          // index_application -> expr[argument*], a, N
     ExtendedApplication,       // extended_application -> expr{(property|expr)*}, a, N
     NormalFormHeadApplication, // normal_form_head_application -> expr<argument*>, a, N
 
@@ -1090,7 +1090,6 @@ impl NodeKind {
             | MulAssign
             | DivAssign
             | RemAssign
-            | IndexApplication
             | CaseArm
             | ConditionArm
             | CatchArm
@@ -1164,6 +1163,7 @@ impl NodeKind {
             | EffectElimination
             | ErrorElimination
             | Application
+            | IndexApplication
             | ExtendedApplication
             | NormalFormHeadApplication
             | PostMatch

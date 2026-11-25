@@ -586,11 +586,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![],
         ),
         (ExprKind::SelfValue, "self-value", vec![]),
-        (
-            ExprKind::Index(&a, &b),
-            "index",
-            vec![("base", &a_tree), ("index", &b_tree)],
-        ),
+        (ExprKind::Index(&a, &args), "index", vec![("base", &a_tree)]),
         (
             ExprKind::Application(&a, &args),
             "application",

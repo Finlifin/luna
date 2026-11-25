@@ -192,6 +192,12 @@ impl Checker<'_, '_> {
             }
             H::Assign(target, value) => {
                 if let Some(mut pointer) = self.dereferenced_place_for_write(target)? {
+                    if is_never(&pointer.ty) {
+                        if let Some(expected) = expected {
+                            self.require_expression(&pointer.ty, expected, expr.span)?;
+                        }
+                        return Ok(pointer);
+                    }
                     let Term::Pointer(ty) = &pointer.ty else {
                         return Err(error(target.span, "pointer assignment requires a pointer"));
                     };
@@ -226,9 +232,20 @@ impl Checker<'_, '_> {
 
                 let mut storage = *target;
                 let mut selections = Vec::new();
-                while let H::Index(base, index) = &storage.kind {
+                let mut bit_base_pointer = None;
+                while let H::Index(base, args) = &storage.kind {
+                    let [hir::common::Arg::Positional(index)] = args else {
+                        return Err(error(target.span, "assignment requires a writable place"));
+                    };
                     selections.push(*index);
                     storage = base;
+                    if matches!(storage.kind, H::TakeBitVec(_)) {
+                        break;
+                    }
+                    if let Some(ptr) = self.dereferenced_place_for_write(storage)? {
+                        bit_base_pointer = Some(ptr);
+                        break;
+                    }
                 }
                 selections.reverse();
                 let take_bits = if let H::TakeBitVec(base) = &storage.kind {
@@ -239,7 +256,18 @@ impl Checker<'_, '_> {
                 };
                 let bit_assignment = take_bits || !selections.is_empty();
                 if bit_assignment {
-                    if let Some(mut pointer) = self.dereferenced_place_for_write(storage)? {
+                    let resolved_ptr = if let Some(ptr) = bit_base_pointer {
+                        Some(ptr)
+                    } else {
+                        self.dereferenced_place_for_write(storage)?
+                    };
+                    if let Some(mut pointer) = resolved_ptr {
+                        if is_never(&pointer.ty) {
+                            if let Some(expected) = expected {
+                                self.require_expression(&pointer.ty, expected, expr.span)?;
+                            }
+                            return Ok(pointer);
+                        }
                         let Term::Pointer(ty) = &pointer.ty else {
                             unreachable!()
                         };

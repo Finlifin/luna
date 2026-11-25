@@ -1382,12 +1382,23 @@ impl Checker<'_, '_> {
                 }
                 H::Binary(_, left, right)
                 | H::AssignOp(_, left, right)
-                | H::Index(left, right)
                 | H::Assign(left, right)
                 | H::Cast(left, right)
                 | H::DynCast(left, right) => {
                     pending.push(left);
                     pending.push(right);
+                }
+                H::Index(base, args) => {
+                    pending.push(base);
+                    for arg in *args {
+                        match arg {
+                            Arg::Positional(value)
+                            | Arg::Named(_, value)
+                            | Arg::Expand(value)
+                            | Arg::Implicit(value)
+                            | Arg::PostLambda(value) => pending.push(value),
+                        }
+                    }
                 }
                 H::TyFnArrow(parameters, result) => {
                     pending.push(parameters);

@@ -238,3 +238,148 @@ pub fn binary_operator_protocol<'a>(
     }
     Ok(method)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompoundOperator {
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    RemAssign,
+}
+
+impl CompoundOperator {
+    pub const ALL: [Self; 5] = [
+        Self::AddAssign,
+        Self::SubAssign,
+        Self::MulAssign,
+        Self::DivAssign,
+        Self::RemAssign,
+    ];
+
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::AddAssign => "add_assign",
+            Self::SubAssign => "sub_assign",
+            Self::MulAssign => "mul_assign",
+            Self::DivAssign => "div_assign",
+            Self::RemAssign => "rem_assign",
+        }
+    }
+
+    pub fn binary_operator(self) -> Operator {
+        match self {
+            Self::AddAssign => Operator::Add,
+            Self::SubAssign => Operator::Subtract,
+            Self::MulAssign => Operator::Multiply,
+            Self::DivAssign => Operator::Divide,
+            Self::RemAssign => Operator::Remainder,
+        }
+    }
+
+    pub fn from_bin_op(op: hir::BinOp) -> Option<Self> {
+        match op {
+            hir::BinOp::Add => Some(Self::AddAssign),
+            hir::BinOp::Sub => Some(Self::SubAssign),
+            hir::BinOp::Mul => Some(Self::MulAssign),
+            hir::BinOp::Div => Some(Self::DivAssign),
+            hir::BinOp::Rem => Some(Self::RemAssign),
+            _ => None,
+        }
+    }
+}
+
+pub fn compound_protocol<'a>(
+    traits: &'a [Trait],
+    id: DeclarationId,
+    operator: CompoundOperator,
+    comptime: bool,
+) -> Result<&'a MethodContract, String> {
+    let mut candidates = traits.iter().filter(|item| item.declaration == id);
+    let interface = candidates
+        .next()
+        .ok_or_else(|| format!("{operator:?} binding is not a trait"))?;
+    if candidates.next().is_some() {
+        return Err(format!(
+            "{operator:?} binding matches multiple trait declarations"
+        ));
+    }
+    if interface.comptime_only != comptime {
+        return Err(if comptime {
+            format!("Comptime{operator:?} protocol must be declared as a pure comptime trait")
+        } else {
+            format!("{operator:?} protocol cannot be declared as a pure comptime trait")
+        });
+    }
+    let [rhs] = interface.type_parameters.as_slice() else {
+        return Err(format!(
+            "{operator:?} protocol requires one Rhs trait parameter"
+        ));
+    };
+    let name = operator.method();
+    let mut methods = interface.methods.iter().filter(|m| m.name == name);
+    let method = methods
+        .next()
+        .ok_or_else(|| format!("{operator:?} protocol requires a {name} method"))?;
+    if methods.next().is_some() {
+        return Err(format!(
+            "{operator:?} protocol allows only one {name} method"
+        ));
+    }
+    if method.is_quote {
+        return Err(format!("{operator:?} {name} cannot be a quote function"));
+    }
+    if method.signature.is_comptime_callable() != comptime {
+        return Err(if comptime {
+            format!("Comptime{operator:?} {name} must be a comptime function")
+        } else {
+            format!("{operator:?} {name} must be a runtime function")
+        });
+    }
+    let self_ty = Term::Rigid {
+        declaration: interface.self_parameter,
+        sort: Sort::Type,
+    };
+    let rhs_ty = Term::Rigid {
+        declaration: *rhs,
+        sort: Sort::Type,
+    };
+    let receiver_ty = if comptime {
+        self_ty
+    } else {
+        Term::Pointer(Box::new(self_ty))
+    };
+    let expected = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Runtime,
+                ty: receiver_ty,
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: rhs_ty,
+            },
+        ],
+        result: Box::new(Term::Primitive(Primitive::Void)),
+    };
+    let valid_receiver = if comptime {
+        method.by_value_receiver && !method.by_reference_receiver
+    } else {
+        !method.by_value_receiver && method.by_reference_receiver
+    };
+    if method.signature.callable_signature() != Ok(&expected)
+        || !valid_receiver
+        || method.parameter_bindings.len() != 2
+        || !method.type_parameters.is_empty()
+        || !method.type_arguments.is_empty()
+    {
+        return Err(if comptime {
+            format!(
+                "Comptime{operator:?} protocol requires comptime fn {name}(self, rhs: Rhs) -> void"
+            )
+        } else {
+            format!("{operator:?} protocol requires fn {name}(*self, rhs: Rhs) -> void")
+        });
+    }
+    Ok(method)
+}

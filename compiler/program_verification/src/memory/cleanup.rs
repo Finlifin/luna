@@ -215,7 +215,10 @@ impl Infer<'_, '_> {
             if matches!(target.root, PointerRoot::ConstGlobal(_)) {
                 return Err("cannot write through a pointer to a global constant".into());
             }
-            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
+            if matches!(
+                target.root,
+                PointerRoot::StaticGlobal(_) | PointerRoot::ExternalRaw
+            ) {
                 continue;
             }
             let PointerRoot::Local { binding, storage } = target.root else {
@@ -301,7 +304,10 @@ impl Infer<'_, '_> {
             if matches!(target.root, PointerRoot::ConstGlobal(_)) {
                 return Err("cannot write through a pointer to a global constant".into());
             }
-            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
+            if matches!(
+                target.root,
+                PointerRoot::StaticGlobal(_) | PointerRoot::ExternalRaw
+            ) {
                 continue;
             }
             let PointerRoot::Local { binding, storage } = target.root else {

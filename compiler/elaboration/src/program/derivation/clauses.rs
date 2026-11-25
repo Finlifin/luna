@@ -195,7 +195,8 @@ fn expr_mentions_clause<'h>(
         E::ResolvedClauseParam(_, id) => Ok(*id == target),
         E::Application(head, args)
         | E::ExtendedApplication(head, args)
-        | E::NFApplication(head, args) => {
+        | E::NFApplication(head, args)
+        | E::Index(head, args) => {
             if expr_mentions_clause(head, target, fuel, d)? {
                 return Ok(true);
             }
@@ -230,7 +231,6 @@ fn expr_mentions_clause<'h>(
         | E::TraitBound(a, b)
         | E::Cast(a, b)
         | E::DynCast(a, b)
-        | E::Index(a, b)
         | E::TyClosure(a, b) => {
             Ok(expr_mentions_clause(a, target, fuel, d)?
                 || expr_mentions_clause(b, target, fuel, d)?)
@@ -406,7 +406,8 @@ fn match_hir_expr<'h>(
     let d = depth + 1;
     match (&pattern.kind, &actual.kind) {
         (E::NFApplication(p_head, p_args), E::NFApplication(a_head, a_args))
-        | (E::Application(p_head, p_args), E::Application(a_head, a_args)) => {
+        | (E::Application(p_head, p_args), E::Application(a_head, a_args))
+        | (E::Index(p_head, p_args), E::Index(a_head, a_args)) => {
             match_hir_expr(p_head, a_head, strategy_defs, bound, fuel, d)?;
             let mut a_pos = a_args.iter().filter_map(|arg| match arg {
                 Arg::Positional(expr) => Some(*expr),
@@ -517,8 +518,7 @@ fn match_hir_expr<'h>(
         | (E::TyFnArrow(a1, a2), E::TyFnArrow(b1, b2))
         | (E::TyClosure(a1, a2), E::TyClosure(b1, b2))
         | (E::Cast(a1, a2), E::Cast(b1, b2))
-        | (E::DynCast(a1, a2), E::DynCast(b1, b2))
-        | (E::Index(a1, a2), E::Index(b1, b2)) => {
+        | (E::DynCast(a1, a2), E::DynCast(b1, b2)) => {
             match_hir_expr(a1, b1, strategy_defs, bound, fuel, d)?;
             match_hir_expr(a2, b2, strategy_defs, bound, fuel, d)?;
         }
@@ -664,7 +664,8 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             ),
             E::Application(head, args)
             | E::ExtendedApplication(head, args)
-            | E::NFApplication(head, args) => {
+            | E::NFApplication(head, args)
+            | E::Index(head, args) => {
                 let head = self.subst_source_expr(head, d)?;
                 let mut new_args = Vec::with_capacity(args.len());
                 for arg in *args {
@@ -680,7 +681,8 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
                 match expr.kind {
                     E::Application(..) => E::Application(head, new_args),
                     E::ExtendedApplication(..) => E::ExtendedApplication(head, new_args),
-                    _ => E::NFApplication(head, new_args),
+                    E::NFApplication(..) => E::NFApplication(head, new_args),
+                    _ => E::Index(head, new_args),
                 }
             }
             E::Binary(op, a, b) => E::Binary(
@@ -713,9 +715,6 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             E::Cast(a, b) => E::Cast(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?),
             E::DynCast(a, b) => {
                 E::DynCast(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
-            }
-            E::Index(a, b) => {
-                E::Index(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
             }
             E::TyClosure(a, b) => {
                 E::TyClosure(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
@@ -781,7 +780,8 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             ),
             E::Application(head, args)
             | E::ExtendedApplication(head, args)
-            | E::NFApplication(head, args) => {
+            | E::NFApplication(head, args)
+            | E::Index(head, args) => {
                 let head = self.rewrite_expr(head, d)?;
                 let mut new_args = Vec::with_capacity(args.len());
                 for arg in *args {
@@ -797,7 +797,8 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
                 match expr.kind {
                     E::Application(..) => E::Application(head, new_args),
                     E::ExtendedApplication(..) => E::ExtendedApplication(head, new_args),
-                    _ => E::NFApplication(head, new_args),
+                    E::NFApplication(..) => E::NFApplication(head, new_args),
+                    _ => E::Index(head, new_args),
                 }
             }
             E::Binary(op, a, b) => {
@@ -977,7 +978,6 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             E::HandlerApplication(a, b) => {
                 E::HandlerApplication(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?)
             }
-            E::Index(a, b) => E::Index(self.rewrite_expr(a, d)?, self.rewrite_expr(b, d)?),
             E::Range {
                 start,
                 end,

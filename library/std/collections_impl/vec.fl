@@ -1,5 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
-use collections_impl.slice.Slice;
+use collections_impl.slice.{Slice, SliceBounds};
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock, ReallocErr}
 use mem_impl.layout.Layout;
 
@@ -893,3 +893,47 @@ where
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
+
+impl Index<usize> for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Output: Type = T;
+
+    fn index(*self, idx: usize) -> *T {
+        assumes idx < self.raw_len.*;
+        unsafe { builtin.mem.raw_ptr<T>(slot_address<T>(self.raw_addr.*, idx)) }
+    }
+}
+
+impl IndexMut<usize> for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn index_mut(*self, idx: usize) -> *T {
+        assumes idx < self.raw_len.*;
+        unsafe { builtin.mem.raw_ptr<T>(slot_address<T>(self.raw_addr.*, idx)) }
+    }
+}
+
+impl SpaceApply for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc CollectTo: Type = SliceBounds;
+    assoc Target: Type = Slice<T>;
+
+    fn space_apply(*self, index: SliceBounds) -> Slice<T> {
+        var slice = self.as_slice();
+        slice.space_apply(index)
+    }
+}

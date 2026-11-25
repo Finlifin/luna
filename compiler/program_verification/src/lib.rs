@@ -63,6 +63,17 @@ pub(crate) fn is_static_global_place(id: PlaceId) -> bool {
     (id.owner & (0b11u64 << 62)) == STATIC_GLOBAL_OWNER_TAG
 }
 
+pub(crate) fn external_raw_place(local: u32) -> PlaceId {
+    PlaceId {
+        owner: u64::MAX - 7,
+        local,
+    }
+}
+
+pub(crate) fn is_external_raw_place(id: PlaceId) -> bool {
+    id.owner == u64::MAX - 7
+}
+
 use type_resolution::{associated, capabilities, implementation, ptc};
 
 /// Reusable package-scoped verification caches retained across fixpoint rounds

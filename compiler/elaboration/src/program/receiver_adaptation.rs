@@ -152,7 +152,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn query_single_trait_candidate(
+    pub(super) fn query_single_trait_candidate(
         &self,
         subject: &Term,
         interface: &n::InterfaceInstance,

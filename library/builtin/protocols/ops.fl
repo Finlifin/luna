@@ -54,15 +54,43 @@ pub trait Implies where .Rhs: Type = Self {
     fn implies(self, rhs: Rhs) -> Output;
 }
 
--- ── Index ──────────────────────────────────────────────────────────────────
+-- ── Index & SpaceApply ──────────────────────────────────────────────────────
 pub trait Index where Idx {
     assoc Output: Type;
 
-    fn index(self, idx: Idx) -> *Output;
+    fn index(*self, idx: Idx) -> *Output;
 }
 
 pub trait IndexMut :- Index<Idx> where Idx {
     fn index_mut(*self, idx: Idx) -> *Self.as(Index<Idx>).Output;
+}
+
+pub trait SpaceApply {
+    assoc CollectTo: Type;
+    assoc Target: Type;
+
+    fn space_apply(*self, index: CollectTo) -> Target;
+}
+
+-- ── Compound Assignment ────────────────────────────────────────────────────
+pub trait AddAssign where .Rhs: Type = Self {
+    fn add_assign(*self, rhs: Rhs) -> void;
+}
+
+pub trait SubAssign where .Rhs: Type = Self {
+    fn sub_assign(*self, rhs: Rhs) -> void;
+}
+
+pub trait MulAssign where .Rhs: Type = Self {
+    fn mul_assign(*self, rhs: Rhs) -> void;
+}
+
+pub trait DivAssign where .Rhs: Type = Self {
+    fn div_assign(*self, rhs: Rhs) -> void;
+}
+
+pub trait RemAssign where .Rhs: Type = Self {
+    fn rem_assign(*self, rhs: Rhs) -> void;
 }
 
 -- ── Variadic Collectors ────────────────────────────────────────────────────

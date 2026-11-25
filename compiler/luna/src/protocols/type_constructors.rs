@@ -12,6 +12,8 @@ pub struct Selectors<'a> {
     pub copy: Option<&'a str>,
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
+    pub index_mut: Option<&'a str>,
+    pub space_apply: Option<&'a str>,
     pub iterator: Option<&'a str>,
     pub into_iterator: Option<&'a str>,
     pub variadic_collector: Option<&'a str>,
@@ -46,6 +48,8 @@ pub struct Selectors<'a> {
     pub call_context: Option<&'a str>,
     pub call_description: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
+    pub compound_arithmetic: [Option<&'a str>; 5],
+    pub comptime_compound_arithmetic: [Option<&'a str>; 5],
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
     pub tuple: Option<&'a str>,
@@ -71,6 +75,8 @@ impl Selectors<'_> {
                 self.copy,
                 self.drop,
                 self.index,
+                self.index_mut,
+                self.space_apply,
                 self.iterator,
                 self.into_iterator,
                 self.variadic_collector,
@@ -110,6 +116,8 @@ impl Selectors<'_> {
             ]
             .into_iter()
             .chain(self.arithmetic)
+            .chain(self.compound_arithmetic)
+            .chain(self.comptime_compound_arithmetic)
             .any(|selector| selector.is_some())
         {
             return Err("source protocol/type binding requires NIR elaboration (--emit nir or an execution/analysis command)".into());
@@ -263,8 +271,42 @@ pub(crate) fn resolve_source(
                 target,
             )
         })
+        .chain(
+            elaboration::arithmetic::CompoundOperator::ALL
+                .iter()
+                .zip(result.compound_arithmetic.iter_mut())
+                .map(|(&operator, target)| {
+                    (
+                        format!("{operator:?}"),
+                        selectors.compound_arithmetic[operator as usize],
+                        target,
+                    )
+                }),
+        )
+        .chain(
+            elaboration::arithmetic::CompoundOperator::ALL
+                .iter()
+                .zip(result.comptime_compound_arithmetic.iter_mut())
+                .map(|(&operator, target)| {
+                    (
+                        format!("Comptime{operator:?}"),
+                        selectors.comptime_compound_arithmetic[operator as usize],
+                        target,
+                    )
+                }),
+        )
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
+            (
+                "IndexMut".into(),
+                selectors.index_mut,
+                &mut result.index_mut,
+            ),
+            (
+                "SpaceApply".into(),
+                selectors.space_apply,
+                &mut result.space_apply,
+            ),
             ("Iterator".into(), selectors.iterator, &mut result.iterator),
             (
                 "IntoIterator".into(),
@@ -582,6 +624,9 @@ pub(crate) fn resolve_source(
     if result.deref_mut.is_some() && result.deref.is_none() {
         return Err("DerefMut binding requires a Deref binding".into());
     }
+    if result.index_mut.is_some() && result.index.is_none() {
+        return Err("IndexMut binding requires an Index binding".into());
+    }
     for (label, selector, target) in [
         ("Context", selectors.call_context, &mut result.call_context),
         (
@@ -712,6 +757,8 @@ pub(crate) struct SysrootBindings {
     copy: Option<String>,
     drop: Option<String>,
     index: Option<String>,
+    index_mut: Option<String>,
+    space_apply: Option<String>,
     ordering: Option<String>,
     equality: Option<String>,
     comptime_ordering: Option<String>,
@@ -746,6 +793,8 @@ pub(crate) struct SysrootBindings {
     call_context: Option<String>,
     call_description: Option<String>,
     arithmetic: [Option<String>; 7],
+    compound_arithmetic: [Option<String>; 5],
+    comptime_compound_arithmetic: [Option<String>; 5],
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
@@ -828,6 +877,8 @@ impl SysrootBindings {
             }
             let target = match key {
                 "index-protocol" => &mut result.index,
+                "index-mut-protocol" => &mut result.index_mut,
+                "space-apply-protocol" => &mut result.space_apply,
                 "ord-protocol" => &mut result.ordering,
                 "eq-protocol" => &mut result.equality,
                 "comptime-ord-protocol" => &mut result.comptime_ordering,
@@ -870,6 +921,16 @@ impl SysrootBindings {
                 "rem-protocol" => &mut result.arithmetic[4],
                 "neg-protocol" => &mut result.arithmetic[5],
                 "not-protocol" => &mut result.arithmetic[6],
+                "add-assign-protocol" => &mut result.compound_arithmetic[0],
+                "sub-assign-protocol" => &mut result.compound_arithmetic[1],
+                "mul-assign-protocol" => &mut result.compound_arithmetic[2],
+                "div-assign-protocol" => &mut result.compound_arithmetic[3],
+                "rem-assign-protocol" => &mut result.compound_arithmetic[4],
+                "comptime-add-assign-protocol" => &mut result.comptime_compound_arithmetic[0],
+                "comptime-sub-assign-protocol" => &mut result.comptime_compound_arithmetic[1],
+                "comptime-mul-assign-protocol" => &mut result.comptime_compound_arithmetic[2],
+                "comptime-div-assign-protocol" => &mut result.comptime_compound_arithmetic[3],
+                "comptime-rem-assign-protocol" => &mut result.comptime_compound_arithmetic[4],
                 "splice-protocol" => &mut result.splice,
                 "meta-list-type" => &mut result.meta_list,
                 "tuple-type" => &mut result.tuple,
@@ -981,6 +1042,20 @@ impl SysrootBindings {
                     .index
                     .is_none()
                     .then_some(self.index.as_deref())
+                    .flatten()
+            }),
+            index_mut: explicit.index_mut.or_else(|| {
+                identities
+                    .index_mut
+                    .is_none()
+                    .then_some(self.index_mut.as_deref())
+                    .flatten()
+            }),
+            space_apply: explicit.space_apply.or_else(|| {
+                identities
+                    .space_apply
+                    .is_none()
+                    .then_some(self.space_apply.as_deref())
                     .flatten()
             }),
             ordering: explicit.ordering.or_else(|| {
@@ -1219,6 +1294,22 @@ impl SysrootBindings {
                     identities.arithmetic[index]
                         .is_none()
                         .then_some(self.arithmetic[index].as_deref())
+                        .flatten()
+                })
+            }),
+            compound_arithmetic: std::array::from_fn(|index| {
+                explicit.compound_arithmetic[index].or_else(|| {
+                    identities.compound_arithmetic[index]
+                        .is_none()
+                        .then_some(self.compound_arithmetic[index].as_deref())
+                        .flatten()
+                })
+            }),
+            comptime_compound_arithmetic: std::array::from_fn(|index| {
+                explicit.comptime_compound_arithmetic[index].or_else(|| {
+                    identities.comptime_compound_arithmetic[index]
+                        .is_none()
+                        .then_some(self.comptime_compound_arithmetic[index].as_deref())
                         .flatten()
                 })
             }),
@@ -1570,6 +1661,8 @@ mod stage_tests {
             build_targets: Default::default(),
             sysroot: None,
             index_protocol: None,
+            index_mut_protocol: None,
+            space_apply_protocol: None,
             ord_protocol: None,
             eq_protocol: None,
             comptime_ord_protocol: None,
@@ -1603,6 +1696,8 @@ mod stage_tests {
             call_context_type: None,
             call_description_type: None,
             arithmetic_protocols: Default::default(),
+            compound_arithmetic_protocols: Default::default(),
+            comptime_compound_arithmetic_protocols: Default::default(),
             splice_protocol: None,
             meta_list_type: None,
             tuple_type: None,

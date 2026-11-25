@@ -684,7 +684,9 @@ fn validate_captured_pointer_targets(
                     "Drop runtime environment constant target type disagrees with pointee".into(),
                 );
             }
-        } else if crate::is_static_global_place(target.root) {
+        } else if crate::is_static_global_place(target.root)
+            || crate::is_external_raw_place(target.root)
+        {
             if pointers.types.contains_key(&target.root)
                 && place_type(package, pointers.types, target, variant_layouts, fuel)? != *pointee
             {

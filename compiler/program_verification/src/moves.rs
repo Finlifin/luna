@@ -2600,6 +2600,7 @@ struct Analyzer<'a, F, G> {
     next_borrowed_pointer: u32,
     next_borrowed_scope: u64,
     borrowed_pointees: BTreeMap<(u64, Place, Vec<(Vec<usize>, usize)>), (PlaceId, Term)>,
+    external_raw_places: Vec<(Term, PlaceId)>,
     temporary_scope: TemporaryScope,
     temporary_scope_id: u64,
     next_sequence: u64,
@@ -2973,6 +2974,42 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .map_err(|e| error(source, format!("cannot establish global constant: {e:?}")))?;
         flow.types.insert(id, ty.clone());
         Ok(())
+    }
+
+    fn ensure_external_raw_place(
+        &mut self,
+        flow: &mut Flow,
+        pointee: &Term,
+        source: SourceRange,
+    ) -> Result<PlaceId, Error> {
+        let id = if let Some((_, id)) = self
+            .external_raw_places
+            .iter()
+            .find(|(ty, _)| ty == pointee)
+        {
+            *id
+        } else {
+            let next_local = u32::try_from(self.external_raw_places.len())
+                .map_err(|_| error(source, "external raw pointer storage slots exhausted"))?;
+            let id = crate::external_raw_place(next_local);
+            self.external_raw_places.push((pointee.clone(), id));
+            id
+        };
+        if flow.types.contains_key(&id) {
+            return Ok(id);
+        }
+        super::memory::bound_type(pointee, &mut self.fuel).map_err(|e| error(source, e))?;
+        let shape = (self.shape)(pointee).map_err(|e| error(source, e))?;
+        flow.state
+            .declare(id, &shape, true, &mut self.fuel)
+            .map_err(|e| {
+                error(
+                    source,
+                    format!("cannot establish external raw storage: {e:?}"),
+                )
+            })?;
+        flow.types.insert(id, pointee.clone());
+        Ok(id)
     }
 
     fn ensure_static_global(
@@ -14060,7 +14097,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         };
         let mut all = BTreeSet::new();
         for target in results {
-            if let Some(actual) = self.map_memory_target(target, &targets, flow, source)? {
+            if target.is_external_raw()
+                && let Term::Pointer(pointee) = completion_type(result)
+            {
+                let root = self.ensure_external_raw_place(flow, pointee, source)?;
+                all.insert(Place {
+                    root,
+                    fields: vec![],
+                });
+            } else if let Some(actual) = self.map_memory_target(target, &targets, flow, source)? {
                 all.extend(actual);
             } else {
                 all.insert(unknown_pointer_target());
@@ -15433,8 +15478,40 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                     return Ok(Some(targets));
                 }
+                K::Intrinsic { .. } => {
+                    return self.external_raw_intrinsic_pointer_targets(expr, flow, depth);
+                }
                 _ => (),
             }
+        }
+        let pointer = self.pointer_initializer(expr, flow);
+        self.expr(expr, flow, depth + 1)?;
+        Ok(pointer)
+    }
+
+    #[inline(never)]
+    fn external_raw_intrinsic_pointer_targets(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if matches!(
+            nir::intrinsics::checked(expr).map(|checked| checked.operation()),
+            Ok(nir::intrinsics::Operation::MemRawPtr)
+        ) {
+            self.expr(expr, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(None);
+            }
+            let Term::Pointer(pointee) = &expr.ty else {
+                return Ok(None);
+            };
+            let root = self.ensure_external_raw_place(flow, pointee, expr.source)?;
+            return Ok(Some(BTreeSet::from([Place {
+                root,
+                fields: vec![],
+            }])));
         }
         let pointer = self.pointer_initializer(expr, flow);
         self.expr(expr, flow, depth + 1)?;
@@ -16081,6 +16158,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         next_borrowed_pointer: 0,
         next_borrowed_scope: 1,
         borrowed_pointees: BTreeMap::new(),
+        external_raw_places: Vec::new(),
         next_sequence: 1,
         temporary_scope_id: 0,
         temporary_scope: TemporaryScope {
@@ -20899,6 +20977,7 @@ mod env_parameter_frame_tests {
             next_borrowed_pointer: 0,
             next_borrowed_scope: 1,
             borrowed_pointees: BTreeMap::new(),
+            external_raw_places: Vec::new(),
             temporary_scope: TemporaryScope {
                 source: SourceRange { start: 0, end: 1 },
                 boundary: TemporaryBoundary::FunctionResult,

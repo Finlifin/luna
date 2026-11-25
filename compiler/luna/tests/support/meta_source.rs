@@ -43,5 +43,6 @@ concat!(
     "mod macros_impl {\n",
     "mod attributes {\n", include_str!("../../../../library/meta/macros_impl/attributes.fl"), "\n}\n",
     include_str!("../../../../library/meta/macros_impl/mod.fl"), "\n}\n",
+    "mod ops_impl {\n", include_str!("../../../../library/meta/ops_impl.fl"), "\n}\n",
     include_str!("../../../../library/meta/lib.fl"),
 ).replace("use numeric.{conversions, equality, ordering, scalar_math}\n", "use numeric.{conversions, equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")

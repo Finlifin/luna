@@ -890,6 +890,8 @@ fn all_resolved_protocols_in(
         protocols.copy,
         protocols.drop,
         protocols.index,
+        protocols.index_mut,
+        protocols.space_apply,
         protocols.iterator,
         protocols.into_iterator,
         protocols.variadic_collector,
@@ -930,6 +932,12 @@ fn all_resolved_protocols_in(
     .into_iter()
     .all(decl_ok)
         && protocols.arithmetic.iter().copied().all(decl_ok)
+        && protocols.compound_arithmetic.iter().copied().all(decl_ok)
+        && protocols
+            .comptime_compound_arithmetic
+            .iter()
+            .copied()
+            .all(decl_ok)
         && host_pair_ok(&protocols.host_fma)
         && host_pair_ok(&protocols.host_sqrt)
         && host_pair_ok(&protocols.host_copysign)

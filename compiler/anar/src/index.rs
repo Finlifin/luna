@@ -1922,7 +1922,6 @@ impl<'a> IndexBuilder<'a> {
                 }
             }
             ExprKind::Binary(_, a, b)
-            | ExprKind::Index(a, b)
             | ExprKind::Cast(a, b)
             | ExprKind::DynCast(a, b)
             | ExprKind::TyClosure(a, b)
@@ -1932,6 +1931,12 @@ impl<'a> IndexBuilder<'a> {
             | ExprKind::TraitBound(a, b) => {
                 self.walk_expr(ctx, a, false);
                 self.walk_expr(ctx, b, false);
+            }
+            ExprKind::Index(base, args) => {
+                self.walk_expr(ctx, base, false);
+                for arg in *args {
+                    self.walk_arg(ctx, arg);
+                }
             }
             ExprKind::RefinedType { requirement, base } => {
                 self.walk_expr(ctx, requirement, false);

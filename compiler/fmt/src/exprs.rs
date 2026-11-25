@@ -1058,7 +1058,7 @@ impl<'a> Formatter<'a> {
                 NodeKind::IndexApplication => {
                     let recv_slot = inner.child_slot_from(self.parsed, inner.first, c[0]);
                     steps.push(ChainStep::Index {
-                        idx_expr: c[1],
+                        node: cur_node,
                         open_tok: recv_slot.last + 1,
                         close_tok: inner.last,
                     });
@@ -1216,22 +1216,21 @@ impl<'a> Formatter<'a> {
                 )
             }
             ChainStep::Index {
-                idx_expr,
+                node,
                 open_tok,
                 close_tok,
             } => {
-                let idx_slot = TokenSlot::new(
-                    (open_tok + 1).min(close_tok),
-                    close_tok.saturating_sub(1).max(open_tok),
-                );
-                let idx_doc = self.format_expr(idx_expr, idx_slot);
-                let tab = self.tab_spaces();
-                Doc::group(Doc::concat([
-                    Doc::str("["),
-                    Doc::indent(tab, Doc::concat([Doc::SoftLine, idx_doc])),
-                    Doc::SoftLine,
-                    Doc::str("]"),
-                ]))
+                let ch = self.parsed.ast.get_children(node);
+                let args = self.parsed.ast.get_multi_child_slice(ch[1]).unwrap_or(&[]);
+                let budget = Some(self.cfg().width_heuristics().fn_call_width);
+                self.format_delimited_seq(
+                    args,
+                    open_tok,
+                    close_tok,
+                    DelimStyle::Brackets,
+                    budget,
+                    |fmt, arg, arg_slot| fmt.format_call_arg(arg, arg_slot),
+                )
             }
             ChainStep::DotField(name) => Doc::text(format!(".{name}")),
             ChainStep::DotStatic(s) => Doc::str(s),
@@ -2573,7 +2572,7 @@ enum ChainStep {
         close_tok: usize,
     },
     Index {
-        idx_expr: NodeIndex,
+        node: NodeIndex,
         open_tok: usize,
         close_tok: usize,
     },

@@ -941,8 +941,19 @@ impl<'a, 'h> Reads<'a, 'h> {
             | H::TypeOf(value)
             | H::MultiDeref(value) => self.expression(value)?,
             H::PostLambdaBody(body) => self.push(Node::Body(*body))?,
-            H::Index(a, b)
-            | H::Binary(_, a, b)
+            H::Index(a, args) => {
+                self.expression(a)?;
+                for arg in *args {
+                    match arg {
+                        hir::common::Arg::Positional(v)
+                        | hir::common::Arg::Named(_, v)
+                        | hir::common::Arg::Expand(v)
+                        | hir::common::Arg::Implicit(v)
+                        | hir::common::Arg::PostLambda(v) => self.expression(v)?,
+                    }
+                }
+            }
+            H::Binary(_, a, b)
             | H::Assign(a, b)
             | H::AssignOp(_, a, b)
             | H::Cast(a, b)

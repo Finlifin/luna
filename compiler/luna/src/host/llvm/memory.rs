@@ -17,6 +17,19 @@ impl Emitter<'_> {
     ) -> Result<Value, String> {
         use nir::intrinsics::Operation;
         match operation {
+            Operation::MemRawPtr => {
+                let [addr] = values else {
+                    return Err("host mem_raw_ptr requires 1 argument".into());
+                };
+                let _ = usize_bits(addr)?;
+                if result_ty != Ty::Pointer {
+                    return Err("host mem_raw_ptr requires pointer result".into());
+                }
+                Ok(self.instruction(
+                    Ty::Pointer,
+                    format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
+                ))
+            }
             Operation::MemRawRead => {
                 let [addr] = values else {
                     return Err("host mem_raw_read requires 1 argument".into());

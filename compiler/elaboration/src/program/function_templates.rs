@@ -921,7 +921,6 @@ impl<'h> Rebind<'_, 'h> {
                 E::HandlerApplication(self.expr(a, depth)?, self.expr(b, depth)?)
             }
             E::DynCast(a, b) => E::DynCast(self.expr(a, depth)?, self.expr(b, depth)?),
-            E::Index(a, b) => E::Index(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Range {
                 start,
                 end,
@@ -974,7 +973,8 @@ impl<'h> Rebind<'_, 'h> {
             },
             E::Application(callee, args)
             | E::NFApplication(callee, args)
-            | E::ExtendedApplication(callee, args) => {
+            | E::ExtendedApplication(callee, args)
+            | E::Index(callee, args) => {
                 let callee = self.expr(callee, depth)?;
                 let args = args
                     .iter()
@@ -992,7 +992,8 @@ impl<'h> Rebind<'_, 'h> {
                 match expr.kind {
                     E::Application(..) => E::Application(callee, args),
                     E::NFApplication(..) => E::NFApplication(callee, args),
-                    _ => E::ExtendedApplication(callee, args),
+                    E::ExtendedApplication(..) => E::ExtendedApplication(callee, args),
+                    _ => E::Index(callee, args),
                 }
             }
             E::TyFn(params)

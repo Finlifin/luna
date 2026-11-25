@@ -48,6 +48,8 @@ pub struct Options {
     pub variadic_collector_protocol: Option<String>,
     pub extended_variadic_collector_protocol: Option<String>,
     pub index_protocol: Option<String>,
+    pub index_mut_protocol: Option<String>,
+    pub space_apply_protocol: Option<String>,
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
     pub comptime_ord_protocol: Option<String>,
@@ -62,6 +64,8 @@ pub struct Options {
     pub call_context_type: Option<String>,
     pub call_description_type: Option<String>,
     pub arithmetic_protocols: [Option<String>; 7],
+    pub compound_arithmetic_protocols: [Option<String>; 5],
+    pub comptime_compound_arithmetic_protocols: [Option<String>; 5],
     pub input: PathBuf,
     pub emit: Emit,
     pub output: Option<PathBuf>,
@@ -229,6 +233,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut variadic_collector_protocol = None;
     let mut extended_variadic_collector_protocol = None;
     let mut index_protocol = None;
+    let mut index_mut_protocol = None;
+    let mut space_apply_protocol = None;
     let mut ord_protocol = None;
     let mut eq_protocol = None;
     let mut comptime_ord_protocol = None;
@@ -244,6 +250,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut call_description_type = None;
     let mut tuple_type = None;
     let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
+    let mut compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
+    let mut comptime_compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
     let mut positional = false;
     let mut entry = None;
     let mut instantiate = None;
@@ -889,6 +897,28 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--index-mut-protocol") => {
+                    if index_mut_protocol.is_some() {
+                        return Err("--index-mut-protocol may only be specified once".into());
+                    }
+                    index_mut_protocol = Some(
+                        option_value(&mut args, "--index-mut-protocol")?
+                            .into_string()
+                            .map_err(|_| "IndexMut protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--space-apply-protocol") => {
+                    if space_apply_protocol.is_some() {
+                        return Err("--space-apply-protocol may only be specified once".into());
+                    }
+                    space_apply_protocol = Some(
+                        option_value(&mut args, "--space-apply-protocol")?
+                            .into_string()
+                            .map_err(|_| "SpaceApply protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--ord-protocol") => {
                     if ord_protocol.is_some() {
                         return Err("--ord-protocol may only be specified once".into());
@@ -1041,6 +1071,49 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                             .into_string()
                             .map_err(|_| "Splice protocol name must be valid UTF-8")?,
                     );
+                    continue;
+                }
+                Some(
+                    option @ ("--add-assign-protocol"
+                    | "--sub-assign-protocol"
+                    | "--mul-assign-protocol"
+                    | "--div-assign-protocol"
+                    | "--rem-assign-protocol"
+                    | "--comptime-add-assign-protocol"
+                    | "--comptime-sub-assign-protocol"
+                    | "--comptime-mul-assign-protocol"
+                    | "--comptime-div-assign-protocol"
+                    | "--comptime-rem-assign-protocol"),
+                ) => {
+                    let (comptime, index) = match option {
+                        "--add-assign-protocol" => (false, 0),
+                        "--sub-assign-protocol" => (false, 1),
+                        "--mul-assign-protocol" => (false, 2),
+                        "--div-assign-protocol" => (false, 3),
+                        "--rem-assign-protocol" => (false, 4),
+                        "--comptime-add-assign-protocol" => (true, 0),
+                        "--comptime-sub-assign-protocol" => (true, 1),
+                        "--comptime-mul-assign-protocol" => (true, 2),
+                        "--comptime-div-assign-protocol" => (true, 3),
+                        _ => (true, 4),
+                    };
+                    let slot = if comptime {
+                        &mut comptime_compound_arithmetic_protocols[index]
+                    } else {
+                        &mut compound_arithmetic_protocols[index]
+                    };
+                    if slot.is_some() {
+                        return Err(format!("{option} may only be specified once"));
+                    }
+                    let value = args
+                        .next()
+                        .ok_or_else(|| format!("{option} requires a source trait selector"))?
+                        .into_string()
+                        .map_err(|_| format!("{option} requires UTF-8"))?;
+                    if value.starts_with('-') || value.is_empty() {
+                        return Err(format!("{option} requires a source trait selector"));
+                    }
+                    *slot = Some(value);
                     continue;
                 }
                 Some(
@@ -1295,6 +1368,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         meta_list_type,
         tuple_type,
         arithmetic_protocols,
+        compound_arithmetic_protocols,
+        comptime_compound_arithmetic_protocols,
         list_pattern_protocol,
         comptime_list_pattern_protocol,
         stable_list_pattern_protocol,
@@ -1315,6 +1390,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         variadic_collector_protocol,
         extended_variadic_collector_protocol,
         index_protocol,
+        index_mut_protocol,
+        space_apply_protocol,
         ord_protocol,
         eq_protocol,
         comptime_ord_protocol,
@@ -1483,6 +1560,8 @@ mod tests {
                 splice_protocol: None,
                 meta_list_type: None,
                 index_protocol: None,
+                index_mut_protocol: None,
+                space_apply_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
                 comptime_ord_protocol: None,
@@ -1516,6 +1595,8 @@ mod tests {
                 call_context_type: None,
                 call_description_type: None,
                 arithmetic_protocols: Default::default(),
+                compound_arithmetic_protocols: Default::default(),
+                comptime_compound_arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),
             })
@@ -1547,6 +1628,8 @@ mod tests {
                 splice_protocol: None,
                 meta_list_type: None,
                 index_protocol: None,
+                index_mut_protocol: None,
+                space_apply_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
                 comptime_ord_protocol: None,
@@ -1580,6 +1663,8 @@ mod tests {
                 call_context_type: None,
                 call_description_type: None,
                 arithmetic_protocols: Default::default(),
+                compound_arithmetic_protocols: Default::default(),
+                comptime_compound_arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),
             })

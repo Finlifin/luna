@@ -10,7 +10,137 @@ impl Checker<'_, '_> {
         _partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
         let (ty, kind) = match &expr.kind {
-            H::Index(value, index) => {
+            H::Index(value, args) => {
+                let [hir::common::Arg::Positional(index)] = args else {
+                    if matches!(value.kind, H::TakeBitVec(_)) {
+                        return Err(error(
+                            expr.span,
+                            "multi-argument indexing is not supported on BitVec views",
+                        ));
+                    }
+                    let (temp_stmt, receiver_ptr) =
+                        if let Some(ptr) = self.index_base_place_pointer(value, false)? {
+                            (None, ptr)
+                        } else {
+                            let base_val = self.expr(value, None)?;
+                            if is_never(&base_val.ty) {
+                                if let Some(expected) = expected {
+                                    self.require_expression(&base_val.ty, expected, expr.span)?;
+                                }
+                                return Ok(base_val);
+                            }
+                            self.spill_receiver_for_address(base_val, value.span)?
+                        };
+                    let result =
+                        self.space_apply_with_args(expr, receiver_ptr, args, None, expected)?;
+                    return Ok(self.wrap_temp_stmt(temp_stmt, result));
+                };
+                if !matches!(value.kind, H::TakeBitVec(_))
+                    && let Some(place_ptr) = self.index_base_place_pointer(value, false)?
+                {
+                    let Term::Pointer(inner) = &place_ptr.ty else {
+                        unreachable!()
+                    };
+                    let shape = self.structural_type(inner, expr.span)?;
+                    if self.list_element_type(&shape).is_some() {
+                        let value = n::Expr {
+                            source: source(value.span),
+                            ty: (**inner).clone(),
+                            kind: K::ReadPointer(Box::new(place_ptr)),
+                        };
+                        let element = self.list_element_type(&value.ty).cloned().unwrap();
+                        let index = self.expr(index, Some(&p(P::Integer)))?;
+                        let ty = if index.ty == p(P::Never) {
+                            p(P::Never)
+                        } else {
+                            element
+                        };
+                        let result = n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind: K::TypeListIndex(Box::new(value), Box::new(index)),
+                        };
+                        if let Some(expected) = expected {
+                            self.require_expression(&result.ty, expected, expr.span)?;
+                        }
+                        return Ok(result);
+                    }
+                    if let Term::Primitive(P::BitVec(width)) = shape {
+                        let value = n::Expr {
+                            source: source(value.span),
+                            ty: p(P::BitVec(width)),
+                            kind: K::ReadPointer(Box::new(place_ptr)),
+                        };
+                        if let H::Range {
+                            start: Some(start),
+                            end: Some(end),
+                            inclusive: false,
+                        } = &index.kind
+                        {
+                            return self.bit_window(expr, value, start, end, expected);
+                        }
+                        if matches!(index.kind, H::Range { .. }) {
+                            return Err(error(
+                                index.span,
+                                "BitVec slicing currently requires an explicit half-open range",
+                            ));
+                        }
+                        let (index_expr, static_index) = self.bit_read_index(index)?;
+                        if let Some(bit_index) = static_index
+                            && bit_index >= width as usize
+                        {
+                            return Err(error(expr.span, "BitVec index is out of bounds"));
+                        }
+                        let kind = K::BitIndex(Box::new(value), Box::new(index_expr));
+                        let ty = p(P::BitVec(1));
+                        if let Some(expected) = expected {
+                            self.require_expression(&ty, expected, expr.span)?;
+                        }
+                        return Ok(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind,
+                        });
+                    }
+                    let arg_ctx = if let Some(index_proto) = self.protocols.index {
+                        self.adapt_receiver_index_context(&place_ptr.ty, index_proto, expr.span)?
+                    } else {
+                        None
+                    };
+                    let argument = match self.argument_attempt(index, None, None)? {
+                        Some(argument) => argument,
+                        None => self.expr(index, arg_ctx.as_ref())?,
+                    };
+                    return match self.resolve_index_call_on_receiver(
+                        expr, place_ptr, argument, false, expected,
+                    )? {
+                        crate::program::places::IndexResolution::Selected(call) => Ok(call),
+                        crate::program::places::IndexResolution::NoCandidate {
+                            receiver_ptr,
+                            arg_expr,
+                        } => {
+                            if self.protocols.space_apply.is_some() {
+                                self.space_apply_with_args(
+                                    expr,
+                                    receiver_ptr,
+                                    args,
+                                    Some(arg_expr),
+                                    expected,
+                                )
+                            } else {
+                                let Term::Pointer(inner) = &receiver_ptr.ty else {
+                                    unreachable!()
+                                };
+                                Err(error(
+                                    expr.span,
+                                    format!(
+                                        "no `Index` or `SpaceApply` implementation applies for `{inner}`"
+                                    ),
+                                ))
+                            }
+                        }
+                    };
+                }
                 let value = self.expr(value, None)?;
                 if let Some(element) = self.list_element_type(&value.ty).cloned() {
                     let index = self.expr(index, Some(&p(P::Integer)))?;
@@ -32,19 +162,57 @@ impl Checker<'_, '_> {
                 let Term::Primitive(P::BitVec(width)) =
                     self.structural_type(&value.ty, expr.span)?
                 else {
-                    let protocol = self.protocols.index.ok_or_else(|| error(expr.span,
-                        "indexing requires a bound Index protocol, BitVec or comptime List<Type>"))?;
+                    if is_never(&value.ty) {
+                        if let Some(expected) = expected {
+                            self.require_expression(&value.ty, expected, expr.span)?;
+                        }
+                        return Ok(value);
+                    }
+                    let (temp_stmt, receiver_ptr) =
+                        self.spill_receiver_for_address(value, expr.span)?;
+                    let arg_ctx = if let Some(index_proto) = self.protocols.index {
+                        self.adapt_receiver_index_context(&receiver_ptr.ty, index_proto, expr.span)?
+                    } else {
+                        None
+                    };
                     let argument = match self.argument_attempt(index, None, None)? {
                         Some(argument) => argument,
-                        None => {
-                            let context =
-                                self.protocol_argument_context(&value.ty, protocol, expr.span)?;
-                            self.expr(index, context.as_ref())?
+                        None => self.expr(index, arg_ctx.as_ref())?,
+                    };
+                    let result = match self.resolve_index_call_on_receiver(
+                        expr,
+                        receiver_ptr,
+                        argument,
+                        false,
+                        expected,
+                    )? {
+                        crate::program::places::IndexResolution::Selected(call) => call,
+                        crate::program::places::IndexResolution::NoCandidate {
+                            receiver_ptr,
+                            arg_expr,
+                        } => {
+                            if self.protocols.space_apply.is_some() {
+                                self.space_apply_with_args(
+                                    expr,
+                                    receiver_ptr,
+                                    args,
+                                    Some(arg_expr),
+                                    expected,
+                                )?
+                            } else {
+                                let Term::Pointer(inner) = &receiver_ptr.ty else {
+                                    unreachable!()
+                                };
+                                return Err(error(
+                                    expr.span,
+                                    format!(
+                                        "no `Index` or `SpaceApply` implementation applies for `{inner}`"
+                                    ),
+                                ));
+                            }
                         }
                     };
-                    return self.finish_binary_protocol_call(
-                        expr, protocol, "index", value, argument, expected,
-                    );
+                    return Ok(self.wrap_temp_stmt(temp_stmt, result));
                 };
                 let (start, end) = match &index.kind {
                     H::Range {

@@ -2372,7 +2372,11 @@ fn memory_bindings_check_payloads_defer_templates_and_refuse_comptime_evidence()
         Term::Tuple(vec![Term::Primitive(P::U8), Term::Primitive(P::I32)]),
         Term::Tuple(vec![]),
     ];
-    for operation in [Operation::MemRawRead, Operation::MemRawWrite] {
+    for operation in [
+        Operation::MemRawRead,
+        Operation::MemRawWrite,
+        Operation::MemRawPtr,
+    ] {
         let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
         for payload in &payloads {
             let input_types: Vec<_> = (0..operation.operand_count())

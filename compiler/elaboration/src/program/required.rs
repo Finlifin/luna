@@ -2149,9 +2149,24 @@ pub(super) fn mentions_value_parameter(
             mentions_value_parameter(requirement, depth + 1, is_type)?
                 || mentions_value_parameter(base, depth + 1, is_type)?
         }
-        H::Binary(_, a, b) | H::Index(a, b) | H::Cast(a, b) | H::TraitBound(a, b) => {
+        H::Binary(_, a, b) | H::Cast(a, b) | H::TraitBound(a, b) => {
             mentions_value_parameter(a, depth + 1, is_type)?
                 || mentions_value_parameter(b, depth + 1, is_type)?
+        }
+        H::Index(a, args) => {
+            let mut found = mentions_value_parameter(a, depth + 1, is_type)?;
+            for arg in *args {
+                match arg {
+                    hir::common::Arg::Positional(v)
+                    | hir::common::Arg::Named(_, v)
+                    | hir::common::Arg::Expand(v)
+                    | hir::common::Arg::Implicit(v)
+                    | hir::common::Arg::PostLambda(v) => {
+                        found |= mentions_value_parameter(v, depth + 1, is_type)?;
+                    }
+                }
+            }
+            found
         }
         H::TakeOld(value)
         | H::Deref(value)
@@ -3031,6 +3046,8 @@ fn scope_for_required(
         protocols_cfg.copy,
         protocols_cfg.drop,
         protocols_cfg.index,
+        protocols_cfg.index_mut,
+        protocols_cfg.space_apply,
         protocols_cfg.iterator,
         protocols_cfg.into_iterator,
         protocols_cfg.variadic_collector,
@@ -3069,6 +3086,20 @@ fn scope_for_required(
         protocols_cfg.tuple,
     ] {
         match slot {
+            None => protos.byte(0),
+            Some(id) => {
+                protos.byte(1);
+                protos.u64(id.package);
+                protos.u64(u64::from(id.local));
+            }
+        }
+    }
+    for operator_slot in protocols_cfg
+        .compound_arithmetic
+        .into_iter()
+        .chain(protocols_cfg.comptime_compound_arithmetic)
+    {
+        match operator_slot {
             None => protos.byte(0),
             Some(id) => {
                 protos.byte(1);

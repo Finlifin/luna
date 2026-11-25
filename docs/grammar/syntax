@@ -158,7 +158,7 @@ post_lambda -> expr do (lambda | block | expr)
 application -> expr (argument*)
 normal_form_head_application -> expr<argument*>
 extended_application -> expr { (property | extend_arg | expr)* }
-index_application -> expr [expr]
+index_application -> expr [argument*]
 -- BitVec 下标可为索引或半开范围；结果位宽必须在 comptime 确定，位置可以来自 runtime。
 -- 直接作用于合法可写位置的 bitvec 位段可赋值；读出的 BitVec 值不持续关联源存储。
 type_cast -> expr.as(expr)

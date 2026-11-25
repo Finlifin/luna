@@ -79,7 +79,7 @@ pub enum ExprKind<'hir> {
 
     SelfValue,
 
-    Index(&'hir Expr<'hir>, &'hir Expr<'hir>),
+    Index(&'hir Expr<'hir>, &'hir [Arg<'hir>]),
     Range {
         start: Option<&'hir Expr<'hir>>,
         end: Option<&'hir Expr<'hir>>,

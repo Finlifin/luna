@@ -1042,7 +1042,7 @@ impl Checker<'_, '_> {
             .map_err(|e| error(span, e.to_string()))?;
             let scheme = crate::calls::Scheme {
                 parameter_sorts: binders.iter().map(|p| p.sort).collect(),
-                type_parameters: implementation.type_parameters.len(),
+                type_parameters: binders.len(),
                 signature,
             };
             // Fresh candidate inference cannot leak substitutions into another

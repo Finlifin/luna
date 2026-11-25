@@ -1982,6 +1982,9 @@ impl Walker<'_> {
                 return Ok(None);
             }
 
+            if target.is_external_raw() {
+                return Ok(None);
+            }
             self.limits
                 .step(target.input_fields.len().saturating_add(1))?;
             let Some(inputs) = arguments.get(&(target.parameter, target.input_fields.clone()))

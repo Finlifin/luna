@@ -1766,12 +1766,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         span: Span,
     ) -> Expr<'hir> {
         let base = self.lower_expr(ctx, base_node);
-        let index = self.lower_expr(ctx, index_node);
         let base_ref = self.arena.alloc_expr(base);
-        let index_ref = self.arena.alloc_expr(index);
+        let args: &'hir [Arg<'hir>] = self.lower_args(ctx, index_node);
         Expr {
             hir_id: self.next_hir_id(),
-            kind: ExprKind::Index(base_ref, index_ref),
+            kind: ExprKind::Index(base_ref, args),
             span,
         }
     }

@@ -12,6 +12,7 @@ pub mod target {
     pub enum Memory {
         raw_read,
         raw_write,
+        raw_ptr,
         copy,
         copy_nonoverlapping,
         set_bytes,
@@ -22,6 +23,10 @@ pub mod target {
 
 pub unsafe fn raw_read(addr: usize) -> T where T {
     target.Memory.raw_read'intrinsic(addr).as(T)
+}
+
+pub unsafe fn raw_ptr(addr: usize) -> *T where T {
+    target.Memory.raw_ptr'intrinsic(addr).as(*T)
 }
 
 pub unsafe fn raw_write(addr: usize, value: T) where T {

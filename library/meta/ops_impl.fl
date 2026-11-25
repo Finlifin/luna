@@ -1,4 +1,4 @@
-use builtin.Type;
+use builtin.{Type, void};
 
 {- Comptime operator protocol companions for meta.ops. -}
 pub pure comptime trait ComptimeImplies
@@ -8,4 +8,39 @@ where
     assoc Output: Type;
 
     pure comptime fn implies(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeAddAssign
+where
+    .Rhs: Type = Self,
+{
+    comptime fn add_assign(self, rhs: Rhs) -> void;
+}
+
+pub pure comptime trait ComptimeSubAssign
+where
+    .Rhs: Type = Self,
+{
+    comptime fn sub_assign(self, rhs: Rhs) -> void;
+}
+
+pub pure comptime trait ComptimeMulAssign
+where
+    .Rhs: Type = Self,
+{
+    comptime fn mul_assign(self, rhs: Rhs) -> void;
+}
+
+pub pure comptime trait ComptimeDivAssign
+where
+    .Rhs: Type = Self,
+{
+    comptime fn div_assign(self, rhs: Rhs) -> void;
+}
+
+pub pure comptime trait ComptimeRemAssign
+where
+    .Rhs: Type = Self,
+{
+    comptime fn rem_assign(self, rhs: Rhs) -> void;
 }

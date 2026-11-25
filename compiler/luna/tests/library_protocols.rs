@@ -1151,7 +1151,7 @@ fn repository_index_protocol_preserves_pointer_output_and_evaluation_order() {
         struct Slot {{pointer:*u16}}
         impl Index<bool> for Slot {{
             assoc Output:Type=u16;
-            fn index(self,idx:bool)->*u16 {{self.pointer}}
+            fn index(*self,idx:bool)->*u16 {{self.*.pointer}}
         }}
         impl IndexMut<bool> for Slot {{
             fn index_mut(*self,idx:bool)->*u16 {{self.*.pointer}}
@@ -1200,7 +1200,7 @@ fn repository_index_protocol_preserves_pointer_output_and_evaluation_order() {
 fn repository_parent_associated_signatures_are_generic_and_order_independent() {
     let parent = "impl Index<bool> for Slot<T> where T {
         assoc Output:Type=T;
-        fn index(self,idx:bool)->*T {self.pointer}
+        fn index(*self,idx:bool)->*T {self.*.pointer}
     }";
     let child = "impl IndexMut<bool> for Slot<T> where T {
         fn index_mut(*self,idx:bool)->*T {self.*.pointer}
@@ -1232,7 +1232,7 @@ fn repository_parent_associated_signatures_are_generic_and_order_independent() {
             "",
             "impl Index<bool> for Slot<T> where T {
                 assoc Output:Type=T;
-                fn index(self,idx:bool)->bool {true}
+                fn index(*self,idx:bool)->bool {true}
             }",
         ] {
             let invalid = source.replace(parent, invalid_parent);

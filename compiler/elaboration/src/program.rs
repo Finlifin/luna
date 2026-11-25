@@ -411,6 +411,8 @@ pub struct Protocols {
     pub copy: Option<DeclarationId>,
     pub drop: Option<DeclarationId>,
     pub index: Option<DeclarationId>,
+    pub index_mut: Option<DeclarationId>,
+    pub space_apply: Option<DeclarationId>,
     pub iterator: Option<DeclarationId>,
     pub into_iterator: Option<DeclarationId>,
     pub variadic_collector: Option<DeclarationId>,
@@ -445,6 +447,8 @@ pub struct Protocols {
     pub call_context: Option<DeclarationId>,
     pub call_description: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
+    pub compound_arithmetic: [Option<DeclarationId>; 5],
+    pub comptime_compound_arithmetic: [Option<DeclarationId>; 5],
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
     pub tuple: Option<DeclarationId>,
@@ -1575,8 +1579,26 @@ fn elaborate_candidate<'a, 'h>(
                 .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
         }
     }
+    for operator in crate::arithmetic::CompoundOperator::ALL {
+        if let Some(id) = checker.protocols.compound_arithmetic[operator as usize] {
+            crate::arithmetic::compound_protocol(&checker.checked_traits, id, operator, false)
+                .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+        }
+        if let Some(id) = checker.protocols.comptime_compound_arithmetic[operator as usize] {
+            crate::arithmetic::compound_protocol(&checker.checked_traits, id, operator, true)
+                .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+        }
+    }
     if let Some(id) = checker.protocols.index {
         crate::indexing::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.index_mut {
+        crate::indexing::index_mut_protocol(&checker.checked_traits, id, checker.protocols.index)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.space_apply {
+        crate::indexing::space_apply_protocol(&checker.checked_traits, id)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     if let Some(id) = checker.protocols.list_pattern {

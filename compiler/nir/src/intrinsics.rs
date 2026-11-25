@@ -111,6 +111,7 @@ pub enum Operation {
     LinuxReadRaw,
     MemRawRead,
     MemRawWrite,
+    MemRawPtr,
     MemCopy,
     MemCopyNonOverlapping,
     MemSetBytes,
@@ -178,6 +179,7 @@ impl Operation {
         Self::LinuxReadRaw,
         Self::MemRawRead,
         Self::MemRawWrite,
+        Self::MemRawPtr,
         Self::MemCopy,
         Self::MemCopyNonOverlapping,
         Self::MemSetBytes,
@@ -244,6 +246,7 @@ impl Operation {
             Self::LinuxReadRaw => "linux_read_raw",
             Self::MemRawRead => "mem_raw_read",
             Self::MemRawWrite => "mem_raw_write",
+            Self::MemRawPtr => "mem_raw_ptr",
             Self::MemCopy => "mem_copy",
             Self::MemCopyNonOverlapping => "mem_copy_nonoverlapping",
             Self::MemSetBytes => "mem_set_bytes",
@@ -277,6 +280,7 @@ impl Operation {
             self,
             Self::MemRawRead
                 | Self::MemRawWrite
+                | Self::MemRawPtr
                 | Self::MemCopy
                 | Self::MemCopyNonOverlapping
                 | Self::MemSetBytes
@@ -289,7 +293,7 @@ impl Operation {
     pub fn is_polymorphic_memory(self) -> bool {
         matches!(
             self,
-            Self::MemRawRead | Self::MemRawWrite | Self::MemBorrowStr
+            Self::MemRawRead | Self::MemRawWrite | Self::MemRawPtr | Self::MemBorrowStr
         )
     }
 
@@ -334,6 +338,11 @@ impl Operation {
                 Some(Term::Pointer(inner)) => inner.as_ref(),
                 _ => output,
             }
+        } else if matches!(self, Self::MemRawPtr) {
+            match output {
+                Term::Pointer(inner) => inner.as_ref(),
+                _ => output,
+            }
         } else if matches!(self, Self::MemRawWrite) {
             inputs.get(1).unwrap_or(output)
         } else {
@@ -376,6 +385,7 @@ impl Operation {
                 (Self::MemBorrowStr, 0) => Term::Pointer(Box::new(scalar.clone())),
                 (Self::MemRawRead, 0)
                 | (Self::MemRawWrite, 0)
+                | (Self::MemRawPtr, 0)
                 | (Self::MemCopy, 0 | 1 | 2)
                 | (Self::MemCopyNonOverlapping, 0 | 1 | 2)
                 | (Self::MemSetBytes, 0 | 2)
@@ -400,6 +410,7 @@ impl Operation {
             | Self::MemCopyNonOverlapping
             | Self::MemSetBytes => Term::Primitive(Primitive::Void),
             Self::MemRawRead => scalar.clone(),
+            Self::MemRawPtr => Term::Pointer(Box::new(scalar.clone())),
             Self::MemCompareBytes => Term::Primitive(Primitive::I32),
             Self::MemBorrowStr => Term::Primitive(Primitive::Str),
             _ if self.is_platform() => Term::Primitive(Primitive::I64),
@@ -425,7 +436,7 @@ impl Operation {
             | Self::LinuxGetPid
             | Self::LinuxWriteRaw
             | Self::LinuxReadRaw => &[I64],
-            Self::LinuxAlloc | Self::MemRawRead => &[Usize],
+            Self::LinuxAlloc | Self::MemRawRead | Self::MemRawPtr => &[Usize],
             Self::MemCompareBytes => &[I32],
             Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
@@ -495,7 +506,11 @@ impl Operation {
             | Self::MemCompareBytes
             | Self::MemBorrowStr => 3,
             Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite => 2,
-            Self::LinuxReadByte | Self::LinuxClose | Self::LinuxUnlink | Self::MemRawRead => 1,
+            Self::LinuxReadByte
+            | Self::LinuxClose
+            | Self::LinuxUnlink
+            | Self::MemRawRead
+            | Self::MemRawPtr => 1,
             Self::LinuxGetPid => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot

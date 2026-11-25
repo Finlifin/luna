@@ -1516,7 +1516,8 @@ fn generic_effect_requests_propagate_record_context_into_packet_producers() {
 
 #[test]
 fn partial_structural_results_flow_through_effectful_generic_producers() {
-    let source = effect_fixture!("typealias Byte=.u8'builtin;
+    let source = effect_fixture!(
+        "typealias Byte=.u8'builtin;
         typealias Pair=Tuple<bool,Byte>;
         ^attrs.effects.direct_passing effect tick()->bool;
         fn keep(value:T)->T where T {value}
@@ -1534,7 +1535,8 @@ fn partial_structural_results_flow_through_effectful_generic_producers() {
             var seen=false;
             let result=subject()# {tick()=>mark(seen.ref),};
             (result,seen)
-        }");
+        }"
+    );
     let package = execution_support::compile_with_tuple(source);
     let expected = Value::Tuple(vec![
         Value::Tuple(vec![Value::Bool(true), Value::UnsignedInteger(7)]),
@@ -5593,9 +5595,9 @@ fn direct_passing_installs_once_even_without_requests() {
 
 #[test]
 fn direct_passing_overrides_use_outer_values_and_restore_each_instance() {
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn subject()->#setting bool {let before=setting()#;let inside=setting()# {setting()=>not (setting()#),};let after=setting()#;before and not inside and after} fn run()->bool {subject()# {setting()=>true,}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool; fn subject()->#setting bool {let before=setting()#;let inside=setting()# {setting()=>not (setting()#),};let after=setting()#;before and not inside and after} fn run()->bool {subject()# {setting()=>true,}}"
+    ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -5604,9 +5606,9 @@ fn direct_passing_overrides_use_outer_values_and_restore_each_instance() {
 
 #[test]
 fn direct_passing_group_installation_is_ordered_before_subject() {
-    let package = compile(
-        effect_fixture!("effect enum Settings {^attrs.effects.direct_passing first()->bool,^attrs.effects.direct_passing second()->bool,} fn mark(p:*bool)->bool {p.* = not p.*;p.*} fn subject(p:*bool)->#Settings bool {not (p.*) and (Settings.first()#) and not (Settings.second()#)} fn run()->bool {let flag=false;subject(flag.ref)# {Settings.first()=>mark(flag.ref),Settings.second()=>mark(flag.ref),}}"),
-    );
+    let package = compile(effect_fixture!(
+        "effect enum Settings {^attrs.effects.direct_passing first()->bool,^attrs.effects.direct_passing second()->bool,} fn mark(p:*bool)->bool {p.* = not p.*;p.*} fn subject(p:*bool)->#Settings bool {not (p.*) and (Settings.first()#) and not (Settings.second()#)} fn run()->bool {let flag=false;subject(flag.ref)# {Settings.first()=>mark(flag.ref),Settings.second()=>mark(flag.ref),}}"
+    ));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "run"), vec![]).unwrap(),
@@ -5621,9 +5623,9 @@ fn direct_passing_group_installation_is_ordered_before_subject() {
 
 #[test]
 fn direct_passing_partial_provider_forwards_at_installation_once() {
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn twice()->#setting bool {(setting()#) and (setting()#)} fn nested()->#setting bool {var flag=false;let result=twice()# {setting() if do {flag=not flag;false}=>false,};result and flag} fn run()->bool {nested()# {setting()=>true,}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool; fn twice()->#setting bool {(setting()#) and (setting()#)} fn nested()->#setting bool {var flag=false;let result=twice()# {setting() if do {flag=not flag;false}=>false,};result and flag} fn run()->bool {nested()# {setting()=>true,}}"
+    ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -5632,9 +5634,9 @@ fn direct_passing_partial_provider_forwards_at_installation_once() {
 
 #[test]
 fn direct_passing_installation_exit_does_not_enter_subject() {
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn subject()->#setting bool {setting()#} fn run()->bool {subject()# {setting()=>{return false;},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool; fn subject()->#setting bool {setting()#} fn run()->bool {subject()# {setting()=>{return false;},}}"
+    ));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "run"), vec![]).unwrap(),
@@ -5649,7 +5651,9 @@ fn direct_passing_installation_exit_does_not_enter_subject() {
 
 #[test]
 fn direct_passing_usage_match_preserves_branch_returns_and_guard_fallthrough() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;"
+    );
     for flag in [false, true] {
         for body in [
             "flag match {true=>{return token()#;},false=>{},};token()#",
@@ -5683,7 +5687,9 @@ fn direct_passing_usage_match_preserves_branch_returns_and_guard_fallthrough() {
 
 #[test]
 fn direct_passing_usage_match_retains_consumption_from_failed_guards() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;"
+    );
     for body in [
         "flag match {_ if do {let ignored=token()#;false}=>{},_=>{},};token()#",
         "flag match {true=>{let first=token()#;},false=>{},};token()#",
@@ -5706,7 +5712,9 @@ fn direct_passing_usage_match_retains_consumption_from_failed_guards() {
 
 #[test]
 fn direct_passing_usage_tracks_selected_factory_values() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token; typealias Factory=fn()->Callback; fn good()->Callback {one} fn bad()->Callback {twice} struct Makers {make:Factory,} fn maker()->Factory {good} fn make_record()->Makers {Makers {make:good}}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token; typealias Factory=fn()->Callback; fn good()->Callback {one} fn bad()->Callback {twice} struct Makers {make:Factory,} fn maker()->Factory {good} fn make_record()->Makers {Makers {make:good}}"
+    );
     for (body, accepted) in [
         ("let make=good;make()()", true),
         ("let make=bad;make()()", false),
@@ -5762,7 +5770,9 @@ fn direct_passing_usage_tracks_selected_factory_values() {
 
 #[test]
 fn direct_passing_usage_tracks_factory_returned_aggregate_callables() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token; struct Action {call:Callback,} struct Nested {action:Action,} enum Choice {none,some(Action),}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token; struct Action {call:Callback,} struct Nested {action:Action,} enum Choice {none,some(Action),}"
+    );
     for (factory, body, accepted) in [
         (
             "fn make(flag:bool)->Action {Action {call:one}}",
@@ -5864,7 +5874,9 @@ fn direct_passing_usage_tracks_factory_returned_aggregate_callables() {
 
 #[test]
 fn direct_passing_usage_tracks_factory_returned_callables() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} typealias Callback=fn()->#token Token;"
+    );
     for (factory, body, accepted) in [
         ("fn make(flag:bool)->Callback {one}", "make(flag)()", true),
         (
@@ -5995,7 +6007,9 @@ fn direct_passing_usage_factory_dependencies_converge_in_both_orders() {
 
 #[test]
 fn direct_passing_usage_callable_selection_respects_embedded_pattern_guards() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         ("let f=flag match {_ if false=>twice,_=>one,};f()", true),
         ("let f=flag match {_ if do {true}=>one,_=>twice,};f()", true),
@@ -6032,7 +6046,9 @@ fn direct_passing_usage_callable_selection_respects_embedded_pattern_guards() {
 
 #[test]
 fn direct_passing_usage_tracks_match_arm_callable_bindings() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,} enum Choice {none,some(fn()->#token Token),}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,} enum Choice {none,some(fn()->#token Token),}"
+    );
     for (body, accepted) in [
         ("(one,twice) match {(f,_)=>f(),}", true),
         ("(flag,one) match {(true,f)=>f(),(false,f)=>f(),}", true),
@@ -6090,7 +6106,9 @@ fn direct_passing_usage_tracks_match_arm_callable_bindings() {
 
 #[test]
 fn direct_passing_usage_normal_boolean_results_preserve_prefix_effects() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token bool {let value=token()#;true} fn twice()->#token bool {one() and one()}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token bool {let value=token()#;true} fn twice()->#token bool {one() and one()}"
+    );
     for (body, accepted) in [
         ("if do {true} {one()} else {twice()}", true),
         ("if not do {false} {one()} else {twice()}", true),
@@ -6137,7 +6155,9 @@ fn direct_passing_usage_normal_boolean_results_preserve_prefix_effects() {
 
 #[test]
 fn direct_passing_usage_upper_bounds_reference_execution_across_compositions() {
-    let prefix = effect_fixture!("^attrs.effects.direct_passing effect token()->bool; fn hit()->#token bool {token()#} fn one()->#token bool {hit()} fn twice()->#token bool {let first=hit();hit()} struct Action {call:fn()->#token bool,} enum Choice {none,some(fn()->#token bool),}");
+    let prefix = effect_fixture!(
+        "^attrs.effects.direct_passing effect token()->bool; fn hit()->#token bool {token()#} fn one()->#token bool {hit()} fn twice()->#token bool {let first=hit();hit()} struct Action {call:fn()->#token bool,} enum Choice {none,some(fn()->#token bool),}"
+    );
     let mut observed = std::collections::BTreeSet::new();
     for selector in [
         "one",
@@ -6241,7 +6261,9 @@ fn direct_passing_usage_upper_bounds_reference_execution_across_compositions() {
 
 #[test]
 fn direct_passing_usage_tracks_match_selected_aggregate_callables() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         (
             "let action=flag match {true=>Action {call:one},false=>Action {call:one},};action.call()",
@@ -6294,7 +6316,9 @@ fn direct_passing_usage_tracks_match_selected_aggregate_callables() {
 
 #[test]
 fn direct_passing_usage_joins_or_pattern_callable_sources() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}"
+    );
     for (body, accepted) in [
         (
             "let ((true,f,_) or (false,_,f))=(flag,one,one) else {return Token {};};f()",
@@ -6351,7 +6375,9 @@ fn direct_passing_usage_joins_or_pattern_callable_sources() {
 
 #[test]
 fn direct_passing_usage_tracks_variant_payloads_and_as_bindings() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} enum Choice {none,some(fn()->#token Token),other(fn()->#token Token),} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} enum Choice {none,some(fn()->#token Token),other(fn()->#token Token),} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         (
             "let .some(f)=Choice.some(one) else {return Token {};};f()",
@@ -6421,7 +6447,9 @@ fn direct_passing_usage_tracks_variant_payloads_and_as_bindings() {
 
 #[test]
 fn direct_passing_usage_tracks_transformed_pattern_binding_sources() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}"
+    );
     for (body, accepted) in [
         (
             "let (unused and one is f)=true else {return Token {};};f()",
@@ -6485,7 +6513,9 @@ fn direct_passing_usage_tracks_transformed_pattern_binding_sources() {
 
 #[test]
 fn direct_passing_usage_tracks_guarded_structural_bindings() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         ("let {call:f}=Action {call:one};f()", true),
         ("let ({call:f},)=(Action {call:one},);f()", true),
@@ -6542,7 +6572,9 @@ fn direct_passing_usage_tracks_guarded_structural_bindings() {
 
 #[test]
 fn direct_passing_usage_tracks_tuple_destructured_callable_values() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         ("let (f,unused)=(one,twice);f()", true),
         ("let (unused,f)=(twice,one);f()", true),
@@ -6582,7 +6614,8 @@ fn direct_passing_usage_tracks_tuple_destructured_callable_values() {
 
 #[test]
 fn direct_passing_usage_worklist_revisits_recursive_and_late_handler_dependencies() {
-    let prefix = effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix =
+        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
     for declarations in [
         "effect ask()->bool; fn subject()->#token bool {request()# {ask()=>provider(),}} fn request()->#ask bool {ask()#} fn provider()->#token bool {leaf() and leaf()} fn leaf()->#token bool {let value=token()#;true}",
         "fn subject()->#token bool {first(true)} fn first(flag:bool)->#token bool {let value=token()#;if flag {second(false)} else {true}} fn second(flag:bool)->#token bool {first(flag)}",
@@ -6622,7 +6655,8 @@ fn direct_passing_usage_worklist_scales_with_reverse_ordered_call_chain() {
     let mut costs = vec![];
     for count in [8, 32] {
         let mut source =
-            effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;").to_string();
+            effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;")
+                .to_string();
         for index in 0..count {
             let body = if index + 1 == count {
                 "token()#".to_string()
@@ -6684,9 +6718,9 @@ fn direct_passing_usage_worklist_scales_with_reverse_ordered_call_chain() {
 #[test]
 fn direct_passing_usage_instance_index_keeps_generic_summaries_distinct() {
     use nir::program::ExprKind as K;
-    let package = compile(
-        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn generic(value:T)->#token Token where T {token()#} fn entry()->bool {let a=generic(true)# {token()=>Token {},};let b=generic('x')# {token()=>Token {},};true}"),
-    );
+    let package = compile(effect_fixture!(
+        "struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn generic(value:T)->#token Token where T {token()#} fn entry()->bool {let a=generic(true)# {token()=>Token {},};let b=generic('x')# {token()=>Token {},};true}"
+    ));
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
         arguments: vec![].into(),
@@ -6750,7 +6784,8 @@ fn direct_passing_usage_instance_lookup_scales_with_call_graph() {
     let mut costs = vec![];
     for count in [16, 64] {
         let mut source =
-            effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;").to_string();
+            effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token;")
+                .to_string();
         for index in 0..count {
             source.push_str(&format!("fn f{index}()->bool {{true}}"));
         }
@@ -6790,7 +6825,9 @@ fn direct_passing_usage_instance_lookup_scales_with_call_graph() {
 
 #[test]
 fn direct_passing_usage_tracks_nested_callable_fields_without_forgetting_mutation() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,} struct Pipeline {stage:Action,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,} struct Pipeline {stage:Action,}"
+    );
     for (body, accepted) in [
         (
             "let pipeline=Pipeline {stage:Action {call:one}};pipeline.stage.call()",
@@ -6845,7 +6882,9 @@ fn direct_passing_usage_tracks_nested_callable_fields_without_forgetting_mutatio
 
 #[test]
 fn direct_passing_usage_tracks_unexposed_record_function_fields() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,}"
+    );
     for (body, accepted) in [
         ("let action=Action {call:one};action.call()", true),
         (
@@ -7003,7 +7042,9 @@ fn direct_passing_usage_tracks_constructed_anonymous_callable_fields() {
 
 #[test]
 fn direct_passing_usage_tracks_constructed_callable_fields() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,ready:bool,}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} struct Action {call:fn()->#token Token,ready:bool,}"
+    );
     for (value, accepted) in [
         ("Action {call:one,ready:true}", true),
         ("Action {call:twice,ready:true}", false),
@@ -7033,9 +7074,9 @@ fn direct_passing_usage_tracks_constructed_callable_fields() {
 #[test]
 fn direct_passing_usage_alias_does_not_cross_pattern_rebinding() {
     use nir::program::{ExprKind as K, Pattern};
-    let package = compile(
-        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} fn subject()->#token Token {let original=one;let (selected,)=(twice,);selected()} fn entry()->Token {subject()# {token()=>Token {},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#} fn subject()->#token Token {let original=one;let (selected,)=(twice,);selected()} fn entry()->Token {subject()# {token()=>Token {},}}"
+    ));
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
         arguments: vec![].into(),
@@ -7108,7 +7149,9 @@ fn direct_passing_usage_alias_does_not_cross_pattern_rebinding() {
 
 #[test]
 fn direct_passing_usage_tracks_unexposed_function_aliases() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}"
+    );
     for (body, accepted) in [
         ("let f=one;f()", true),
         ("let f=one;let g=f;g()", true),
@@ -7138,7 +7181,9 @@ fn direct_passing_usage_tracks_unexposed_function_aliases() {
 
 #[test]
 fn direct_passing_usage_tracks_selected_function_values() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn another()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn one()->#token Token {token()#} fn another()->#token Token {token()#} fn twice()->#token Token {let lost=token()#;token()#}"
+    );
     for flag in [false, true] {
         for (callee, accepted) in [
             ("if flag {one} else {another}", true),
@@ -7175,7 +7220,9 @@ fn direct_passing_usage_tracks_selected_function_values() {
 
 #[test]
 fn direct_passing_usage_mixed_installation_separates_providers_from_requests() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; ^attrs.effects.direct_passing effect setting()->bool; effect ask()->bool;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; ^attrs.effects.direct_passing effect setting()->bool; effect ask()->bool;"
+    );
     for source in [
         "fn inner()->#[ask,setting] bool {(ask()#) and (setting()#)} fn subject()->#token bool {inner()# {ask()=>{let a=token()#;let b=token()#;true},setting()=>{return true;},}} fn run()->bool {subject()# {token()=>Token {},}}",
         "fn inner()->#[setting,ask] bool {(setting()#) and (ask()#)} fn subject()->#token bool {inner()# {setting()=>{let lost=token()#;return true;},ask()=>{let a=token()#;let b=token()#;true},};let lost=token()#;true} fn run()->bool {subject()# {token()=>Token {},}}",
@@ -7225,7 +7272,9 @@ fn direct_passing_usage_mixed_installation_separates_providers_from_requests() {
 
 #[test]
 fn direct_passing_usage_installation_exits_skip_subject_and_later_providers() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; ^attrs.effects.direct_passing effect setting()->bool; ^attrs.effects.direct_passing effect later()->bool;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; ^attrs.effects.direct_passing effect setting()->bool; ^attrs.effects.direct_passing effect later()->bool;"
+    );
     for source in [
         "fn subject()->#token Token {let first=token()#;token()#} fn run()->Token {subject()# {token()=>{return Token {};},}}",
         "fn inner()->#setting bool {setting()#} fn subject()->#token bool {inner()# {setting()=>{let lost=token()#;return true;},};let lost=token()#;true} fn run()->bool {subject()# {token()=>Token {},}}",
@@ -7286,7 +7335,9 @@ fn direct_passing_usage_installation_exits_skip_subject_and_later_providers() {
 
 #[test]
 fn direct_passing_usage_handler_candidates_preserve_probe_order() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; effect ask()->bool;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; effect ask()->bool;"
+    );
     for (arms, accepted) in [
         (
             "ask()=>true,ask() if do {let lost=token()#;true}=>{let lost=token()#;false},",
@@ -7347,9 +7398,9 @@ fn direct_passing_usage_provider_fallback_only_follows_failed_candidates() {
 #[test]
 fn direct_passing_usage_product_mismatch_keeps_earlier_guard_consumption() {
     use nir::program::{ExprKind as K, Literal, Pattern};
-    let package = compile(
-        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn subject()->#token Token {(true,true) match {(a,b) if do {let lost=token()#;true}=>{},_=>{},};token()#} fn entry()->Token {subject()# {token()=>Token {},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn subject()->#token Token {(true,true) match {(a,b) if do {let lost=token()#;true}=>{},_=>{},};token()#} fn entry()->Token {subject()# {token()=>Token {},}}"
+    ));
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
         arguments: vec![].into(),
@@ -7414,7 +7465,9 @@ fn direct_passing_usage_product_mismatch_keeps_earlier_guard_consumption() {
 
 #[test]
 fn direct_passing_usage_control_keeps_returns_separate_from_successors() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn consume(value:Token)->bool {true}");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn consume(value:Token)->bool {true}"
+    );
     for flag in [false, true] {
         for body in [
             "if flag {return token()#;}token()#",
@@ -7445,7 +7498,9 @@ fn direct_passing_usage_control_keeps_returns_separate_from_successors() {
 
 #[test]
 fn direct_passing_usage_control_distinguishes_loop_exits_from_backedges() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; effect stop()->bool;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; effect stop()->bool;"
+    );
     for (body, accepted) in [
         ("while true {let value=token()#;break;}true", true),
         (
@@ -7490,9 +7545,9 @@ fn direct_passing_usage_control_distinguishes_loop_exits_from_backedges() {
 
 #[test]
 fn direct_passing_usage_control_preserves_runtime_predicate_abort() {
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn subject()->#token bool {assumes false;let first=token()#;let second=token()#;true} fn run()->bool {subject()# {token()=>Token {},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn subject()->#token bool {assumes false;let first=token()#;let second=token()#;true} fn run()->bool {subject()# {token()=>Token {},}}"
+    ));
     assert!(
         luna::execution::interpret_effects_with_protocols(
             &package,
@@ -7509,9 +7564,9 @@ fn direct_passing_usage_control_preserves_runtime_predicate_abort() {
 #[test]
 fn direct_passing_usage_checks_installations_in_contract_roots() {
     use nir::program::{ExprKind as K, Literal};
-    let package = compile(
-        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn twice()->#token bool {let first=token()#;let second=token()#;true} fn entry()->bool {twice()# {token()=>Token {},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn twice()->#token bool {let first=token()#;let second=token()#;true} fn entry()->bool {twice()# {token()=>Token {},}}"
+    ));
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
         arguments: vec![].into(),
@@ -7552,7 +7607,9 @@ fn direct_passing_usage_checks_installations_in_contract_roots() {
 
 #[test]
 fn direct_passing_usage_joins_alternatives_and_maps_caller_arguments() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;"
+    );
     for body in [
         "fn pick(flag:bool)->#token Token {if flag {token()#} else {token()#}} fn run()->Token {pick(true)# {token()=>Token {},}}",
         "fn read(value:Token)->bool {true} fn subject()->#token Token {let first=token()#;let unused=false and read(token()#);first} fn run()->Token {subject()# {token()=>Token {},}}",
@@ -7573,7 +7630,9 @@ fn direct_passing_usage_joins_alternatives_and_maps_caller_arguments() {
 
 #[test]
 fn direct_passing_usage_rejects_sequential_recursive_and_forwarded_consumption() {
-    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;");
+    let prefix = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {} ^attrs.effects.direct_passing effect token()->Token;"
+    );
     for body in [
         "fn once()->#token Token {token()#} fn subject()->#token Token {let first=once();once()}",
         "fn subject()->#token Token {let first=token()#;subject()}",
@@ -7601,9 +7660,9 @@ fn direct_passing_usage_rejects_sequential_recursive_and_forwarded_consumption()
 
 #[test]
 fn direct_passing_copy_plan_repeats_nominal_results_without_aliasing_inline_fields() {
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Config {flag:bool} impl Duplicate for Config {} ^attrs.effects.direct_passing effect config()->Config; fn subject()->#config bool {var first=config()#;first.flag=false;let second=config()#;not first.flag and second.flag} fn run()->bool {subject()# {config()=>Config {flag:true},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct Config {flag:bool} impl Duplicate for Config {} ^attrs.effects.direct_passing effect config()->Config; fn subject()->#config bool {var first=config()#;first.flag=false;let second=config()#;not first.flag and second.flag} fn run()->bool {subject()# {config()=>Config {flag:true},}}"
+    ));
     assert_eq!(
         luna::execution::interpret_effects_with_protocols(
             &package,
@@ -7691,9 +7750,9 @@ fn direct_passing_copy_plan_preserves_generic_and_enum_results() {
 
 #[test]
 fn direct_passing_copy_plan_preserves_pointer_targets_inside_copied_views() {
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct View {ptr:*bool} impl Duplicate for View {} ^attrs.effects.direct_passing effect view()->View; fn subject()->#view bool {let first=view()#;first.ptr.* = false;let second=view()#;not (second.ptr.*)} fn run()->bool {let value=true;subject()# {view()=>View {ptr:value.ref},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} struct View {ptr:*bool} impl Duplicate for View {} ^attrs.effects.direct_passing effect view()->View; fn subject()->#view bool {let first=view()#;first.ptr.* = false;let second=view()#;not (second.ptr.*)} fn run()->bool {let value=true;subject()# {view()=>View {ptr:value.ref},}}"
+    ));
     assert_eq!(
         luna::execution::interpret_effects_with_protocols(
             &package,
@@ -7736,9 +7795,9 @@ fn direct_passing_copy_plan_rejects_invalid_copy_and_keeps_affine_delivery() {
 #[test]
 fn direct_passing_copy_plan_is_bound_to_one_immutable_graph() {
     use iir::effect_values::{Delivery, Plan};
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->#setting bool {(setting()#) and (setting()#)} fn entry()->bool {run()# {setting()=>true,}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool; fn run()->#setting bool {(setting()#) and (setting()#)} fn entry()->bool {run()# {setting()=>true,}}"
+    ));
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
         arguments: vec![].into(),
@@ -7793,9 +7852,9 @@ fn direct_passing_copy_plan_is_bound_to_one_immutable_graph() {
 
 #[test]
 fn direct_passing_pointer_values_preserve_shared_storage() {
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect pointer()->*bool; fn subject()->#pointer bool {let first=pointer()#;first.* = false;let second=pointer()#;not (second.*)} fn run()->bool {let value=true;subject()# {pointer()=>value.ref,}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect pointer()->*bool; fn subject()->#pointer bool {let first=pointer()#;first.* = false;let second=pointer()#;not (second.*)} fn run()->bool {let value=true;subject()# {pointer()=>value.ref,}}"
+    ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -7804,9 +7863,9 @@ fn direct_passing_pointer_values_preserve_shared_storage() {
 
 #[test]
 fn direct_passing_generic_instances_keep_distinct_values_and_resume_providers() {
-    let package = compile(
-        effect_fixture!("typealias Char='x''type; ^attrs.effects.direct_passing effect supplied()->T where T; fn subject()->#[supplied<bool>,supplied<Char>] bool {(supplied<bool>()#) and (supplied<Char>()#)=='x'} fn run()->bool {subject()# {supplied<bool>()=>{resume true;},supplied<Char>()=>'x',}}"),
-    );
+    let package = compile(effect_fixture!(
+        "typealias Char='x''type; ^attrs.effects.direct_passing effect supplied()->T where T; fn subject()->#[supplied<bool>,supplied<Char>] bool {(supplied<bool>()#) and (supplied<Char>()#)=='x'} fn run()->bool {subject()# {supplied<bool>()=>{resume true;},supplied<Char>()=>'x',}}"
+    ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -7815,9 +7874,9 @@ fn direct_passing_generic_instances_keep_distinct_values_and_resume_providers() 
 
 #[test]
 fn direct_passing_provider_failure_skips_subject_and_restores_environment() {
-    let package = compile(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn checked(flag:bool)->bool {assumes flag;true} fn subject()->#setting bool {setting()#} fn bad()->bool {subject()# {setting()=>checked(false),}} fn good()->bool {subject()# {setting()=>true,}}"),
-    );
+    let package = compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect setting()->bool; fn checked(flag:bool)->bool {assumes flag;true} fn subject()->#setting bool {setting()#} fn bad()->bool {subject()# {setting()=>checked(false),}} fn good()->bool {subject()# {setting()=>true,}}"
+    ));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "bad"), vec![]).unwrap_err().kind,
@@ -7837,9 +7896,9 @@ fn direct_passing_provider_failure_skips_subject_and_restores_environment() {
 
 #[test]
 fn direct_passing_noncopy_results_transfer_only_once() {
-    let package = compile(
-        effect_fixture!("struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn once()->#token Token {token()#} fn twice()->#token Token {let first=token()#;token()#} fn good()->Token {once()# {token()=>Token {},}} fn bad()->Token {twice()# {token()=>Token {},}}"),
-    );
+    let package = compile(effect_fixture!(
+        "struct Token {} ^attrs.effects.direct_passing effect token()->Token; fn once()->#token Token {token()#} fn twice()->#token Token {let first=token()#;token()#} fn good()->Token {once()# {token()=>Token {},}} fn bad()->Token {twice()# {token()=>Token {},}}"
+    ));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert!(matches!(
         vm.invoke(id(&package, "good"), vec![]).unwrap(),
@@ -35365,7 +35424,8 @@ fn bound_tuple_memory_layout_preserves_callable_and_pointer_fields() {
 
 #[test]
 fn bound_tuple_stores_effectful_code_without_storing_a_computation() {
-    let source = effect_fixture!("typealias Type=.Type'builtin;
+    let source = effect_fixture!(
+        "typealias Type=.Type'builtin;
         pure comptime fn List<T> -> Type {T}
         pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}
         ^attrs.effects.direct_passing effect tick()->bool;
@@ -35377,7 +35437,8 @@ fn bound_tuple_stores_effectful_code_without_storing_a_computation() {
             var seen=false;
             let result=subject()# {tick()=>mark(seen.ref),};
             (result,seen)
-        }");
+        }"
+    );
     let package = compile_with_source_bindings(
         source,
         &Default::default(),
@@ -43045,9 +43106,9 @@ fn bitvec_pointer_writeback_validates_ranges_and_budgets_in_malformed_ir() {
 #[test]
 fn index_protocol_selects_source_identity_generic_results_and_order() {
     let source="typealias Type=.Type'builtin;
-        trait Access where Key {assoc Output:Type;fn index(self,idx:Key)->Output;}
+        trait Access where Key {assoc Output:Type;fn index(*self,idx:Key)->Output;}
         struct Flags {value:bool}
-        impl Access<bool> for Flags {assoc Output:Type=bool;fn index(self,idx:bool)->bool {self.value and idx}}
+        impl Access<bool> for Flags {assoc Output:Type=bool;fn index(*self,idx:bool)->bool {self.*.value and idx}}
         fn receiver()->Flags {Flags {value:true}}
         fn key()->bool {true}
         fn lookup(value:T,idx:bool)->T.as(Access<bool>).Output where T :- Access<bool> {value[idx]}
@@ -43070,16 +43131,6 @@ fn index_protocol_selects_source_identity_generic_results_and_order() {
         ]
     );
     assert!(compile_with_protocols(source, &Default::default()).is_err());
-    let comptime = compile_with_source_bindings(
-        &source.replace("fn ", "comptime fn "),
-        &Default::default(),
-        selectors,
-    )
-    .unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&comptime, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
     for body in [
         "fn bad()->bool {receiver()[receiver()]}",
         "fn bad()->.u8'builtin {receiver()[true]}",
@@ -43100,9 +43151,9 @@ fn index_protocol_selects_source_identity_generic_results_and_order() {
 #[test]
 fn index_protocol_preserves_pointer_results_and_explicit_writeback() {
     let source = "typealias Type=.Type'builtin;typealias Word=.u16'builtin;
-        trait Access where Key {assoc Output:Type;fn index(self,idx:Key)->*Output;}
+        trait Access where Key {assoc Output:Type;fn index(*self,idx:Key)->*Output;}
         struct Slot {p:*Word}
-        impl Access<bool> for Slot {assoc Output:Type=Word;fn index(self,idx:bool)->*Word {self.p}}
+        impl Access<bool> for Slot {assoc Output:Type=Word;fn index(*self,idx:bool)->*Word {self.*.p}}
         fn target(p:*Word)->Slot {Slot {p:p}}
         fn key()->bool {true}
         fn rhs()->Word {9}
@@ -43135,9 +43186,9 @@ fn index_protocol_preserves_pointer_results_and_explicit_writeback() {
 fn index_protocol_infers_keys_and_retains_effect_boundaries() {
     let source="typealias Type=.Type'builtin;
         enum Key {one,two}
-        trait Access where K {assoc Output:Type;fn index(self,idx:K)->Output;}
+        trait Access where K {assoc Output:Type;fn index(*self,idx:K)->Output;}
         struct Flags {value:bool}
-        impl Access<Key> for Flags {assoc Output:Type=bool;fn index(self,idx:Key)->bool {idx match {.one=>self.value,.two=>false}}}
+        impl Access<Key> for Flags {assoc Output:Type=bool;fn index(*self,idx:Key)->bool {idx match {.one=>self.*.value,.two=>false}}}
         fn run()->bool {Flags {value:true}[.one]}";
     let selectors = luna::protocols::type_constructors::Selectors {
         index: Some("input.Access"),
@@ -43149,9 +43200,9 @@ fn index_protocol_infers_keys_and_retains_effect_boundaries() {
         Value::Bool(true)
     );
     let effect="typealias Type=.Type'builtin;effect read()->bool;
-        trait Access where K {assoc Output:Type;fn index(self,idx:K)->Output;}
+        trait Access where K {assoc Output:Type;fn index(*self,idx:K)->Output;}
         struct Flags {value:bool}
-        impl Access<bool> for Flags {assoc Output:Type=#read bool;fn index(self,idx:bool)->#read bool {let x=read()#;self.value and idx and x}}
+        impl Access<bool> for Flags {assoc Output:Type=#read bool;fn index(*self,idx:bool)->#read bool {let x=read()#;self.*.value and idx and x}}
         fn subject()->#read bool {Flags {value:true}[true]}
         fn run()->bool {subject()# {read()=>true,}}";
     let package = compile_with_source_bindings(effect, &Default::default(), selectors).unwrap();
@@ -43172,10 +43223,10 @@ fn index_protocol_infers_keys_and_retains_effect_boundaries() {
 #[test]
 fn index_protocol_context_rejects_ambiguity_and_checks_instance_requirements() {
     let prefix = "typealias Type=.Type'builtin;enum Key {First,Second}
-        trait Access where K {assoc Output:Type;fn index(self,idx:K)->Output;}
+        trait Access where K {assoc Output:Type;fn index(*self,idx:K)->Output;}
         struct Container where T {value:T}
         impl Access<Key> for Container<T> where T, requires T == bool {
-            assoc Output:Type=bool;fn index(self,idx:Key)->bool {self.value}}
+            assoc Output:Type=bool;fn index(*self,idx:Key)->bool {self.*.value}}
         fn generic(value:T)->T.as(Access<Key>).Output where T :- Access<Key> {value[.First]}
         fn identity(value:T)->T where T {value}";
     let source = format!(
@@ -43193,7 +43244,7 @@ fn index_protocol_context_rejects_ambiguity_and_checks_instance_requirements() {
     let invalid = format!("{prefix}fn bad()->bool {{Container<.u8'builtin> {{value:7}}[.First]}}");
     assert!(compile_with_source_bindings(&invalid, &Default::default(), selectors).is_err());
     let ambiguous=format!("{prefix}enum Other {{First}}
-        impl Access<Other> for Container<bool> {{assoc Output:Type=bool;fn index(self,idx:Other)->bool {{false}}}}
+        impl Access<Other> for Container<bool> {{assoc Output:Type=bool;fn index(*self,idx:Other)->bool {{false}}}}
         fn bad()->bool {{Container<bool> {{value:true}}[.First]}}");
     assert!(compile_with_source_bindings(&ambiguous, &Default::default(), selectors).is_err());
     let explicit = ambiguous.replace("[.First]}", "[Key.First]}");
@@ -43222,17 +43273,18 @@ fn index_protocol_context_rejects_ambiguity_and_checks_instance_requirements() {
 #[test]
 fn index_protocol_consumes_affine_receivers_through_ordinary_calls() {
     use elaboration::verification::moves::{Delivery, analyze_in_package};
-    let prefix = "trait Access where K {fn index(self,idx:K)->bool;}
+    let prefix = "trait Access where K {fn index(*self,idx:K)->bool;}
         struct Flags {value:bool}
-        impl Access<bool> for Flags {fn index(self,idx:bool)->bool {self.value and idx}}";
+        impl Access<bool> for Flags {fn index(*self,idx:bool)->bool {self.*.value and idx}}";
     let selectors = luna::protocols::type_constructors::Selectors {
         index: Some("input.Access"),
         ..Default::default()
     };
     for (body, valid) in [
         ("let f=Flags {value:true};f[true]", true),
-        ("let f=Flags {value:true};let a=f[true];f[true]", false),
-        ("let f=Flags {value:true};let a=f[true];f.value", false),
+        ("let f=Flags {value:true};let a=f[true];f[true]", true),
+        ("let f=Flags {value:true};let a=f[true];f.value", true),
+        ("let f=Flags {value:true};let g=f;f[true]", false),
     ] {
         let source = format!("{prefix}fn run()->bool {{{body}}}");
         let package =
@@ -43260,10 +43312,10 @@ fn index_protocol_consumes_affine_receivers_through_ordinary_calls() {
 fn index_protocol_preserves_program_contracts_and_diverging_keys() {
     let source="typealias Byte=.u8'builtin;
         trait Access where K, requires K == Byte {
-            fn index(self,idx:K)->result:Byte where requires idx < 255, ensures result == idx'old + 1;
+            fn index(*self,idx:K)->result:Byte where requires idx < 255, ensures result == idx'old + 1;
         }
         struct Counter {}
-        impl Access<Byte> for Counter {fn index(self,idx:Byte)->Byte {idx + 1}}
+        impl Access<Byte> for Counter {fn index(*self,idx:Byte)->Byte {idx + 1}}
         fn receiver()->Counter {Counter {}}
         fn lookup(value:T,key:Byte)->result:Byte where T :- Access<Byte>, requires key < 255, ensures result == key'old + 1 {value[key]}
         fn run()->Byte {lookup(receiver(),41)}
@@ -43371,12 +43423,12 @@ fn trait_program_contracts_use_enclosing_type_constraints_before_publication() {
 #[test]
 fn index_protocol_diverging_key_cleans_receiver_before_caller_without_dispatch() {
     let source = "trait Retire {fn drop(*self);} trait Duplicate {}
-        trait Access where K {fn index(self,key:K)->bool;}
+        trait Access where K {fn index(*self,key:K)->bool;}
         struct Held {} struct Caller {}
         fn held_clean() {} fn caller_clean() {}
         impl Retire for Held {fn drop(*self) {held_clean();}}
         impl Retire for Caller {fn drop(*self) {caller_clean();}}
-        impl Access<bool> for Held {fn index(self,key:bool)->bool {key}}
+        impl Access<bool> for Held {fn index(*self,key:bool)->bool {key}}
         fn receiver()->Held {Held {}}
         fn run()->bool {let caller=Caller {};receiver()[do {return true;}]}";
     let selectors = luna::protocols::type_constructors::Selectors {

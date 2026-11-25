@@ -23,16 +23,41 @@ fn index_delimiters_are_not_synthesized_list_literals() {
         assert_eq!(parser.peek_next_token().kind, TokenKind::Eof, "{source}");
         let ast = parser.finalize();
         assert_eq!(ast.get_node_kind(node), Some(NodeKind::IndexApplication));
-        assert_eq!(
-            ast.get_node_kind(ast.get_children(node)[1]),
-            Some(kind),
-            "{source}"
-        );
+        let args = ast
+            .get_multi_child_slice(ast.get_children(node)[1])
+            .unwrap();
+        assert_eq!(args.len(), 1, "{source}");
+        assert_eq!(ast.get_node_kind(args[0]), Some(kind), "{source}");
     }
 }
+
 #[test]
-fn indexing_requires_one_expression_and_a_closing_bracket() {
-    for source in ["value[]", "value[1,2]", "value[1", "value[1)"] {
+fn indexing_supports_multi_named_spread_and_empty_arguments() {
+    for (source, expected_len) in [
+        ("value[]", 0),
+        ("value[1, 2]", 2),
+        ("value[1, ]", 1),
+        ("value[0..2, .axis = 1, ...rest]", 3),
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(FileName::Custom("index.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty(), "{source}");
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let node = parser.try_expr().unwrap();
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof, "{source}");
+        let ast = parser.finalize();
+        assert_eq!(ast.get_node_kind(node), Some(NodeKind::IndexApplication));
+        let args = ast
+            .get_multi_child_slice(ast.get_children(node)[1])
+            .unwrap();
+        assert_eq!(args.len(), expected_len, "{source}");
+    }
+}
+
+#[test]
+fn indexing_requires_a_closing_bracket() {
+    for source in ["value[1", "value[1)", "value[, 1]"] {
         let map = SourceMap::new(FilePathMapping::empty());
         let file = map.new_source_file(FileName::Custom("index.fl".into()), source.into());
         let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
