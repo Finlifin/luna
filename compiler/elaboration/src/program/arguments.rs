@@ -789,36 +789,43 @@ impl Checker<'_, '_> {
         if let Some(bounds) = offsets {
             bounds.push(ordered.len());
         }
-        for route in routes {
-            if !route.is_collected() {
-                continue;
-            }
-            let target_param = offset + route.parameter;
-            let Some(slot) = arguments
-                .iter()
-                .position(|argument| argument.parameter == target_param)
-            else {
-                continue;
-            };
-            let (target_ty, staged) =
-                self.call_parameter_collection_target(callee, arguments, target_param, span)?;
-            if !self.is_default_collection_shape(&target_ty, false, span)? {
-                let raw_packet = std::mem::replace(
-                    &mut arguments[slot].value,
-                    n::Expr {
-                        ty: p(P::Void),
-                        source: preparation_anchor(span),
-                        kind: K::Tuple(Vec::new()),
-                    },
-                );
-                arguments[slot].value = self.lower_variadic_collector_packet(
-                    &mut ordered,
-                    raw_packet,
-                    &target_ty,
-                    false,
-                    staged,
+        if self.protocols.variadic_collector.is_some() {
+            for route in routes {
+                if !route.is_collected() {
+                    continue;
+                }
+                let target_param = offset + route.parameter;
+                let Some(slot) = arguments
+                    .iter()
+                    .position(|argument| argument.parameter == target_param)
+                else {
+                    continue;
+                };
+                let (target_ty, staged) = self.call_parameter_collection_target(
+                    callee,
+                    arguments,
+                    &ordered,
+                    target_param,
                     span,
                 )?;
+                if !self.is_default_collection_shape(&target_ty, false, span)? {
+                    let raw_packet = std::mem::replace(
+                        &mut arguments[slot].value,
+                        n::Expr {
+                            ty: p(P::Void),
+                            source: preparation_anchor(span),
+                            kind: K::Tuple(Vec::new()),
+                        },
+                    );
+                    arguments[slot].value = self.lower_variadic_collector_packet(
+                        &mut ordered,
+                        raw_packet,
+                        &target_ty,
+                        false,
+                        staged,
+                        span,
+                    )?;
+                }
             }
         }
         ordered.extend(after_explicit);

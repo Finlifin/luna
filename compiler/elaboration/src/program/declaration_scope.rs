@@ -83,6 +83,8 @@ impl Checker<'_, '_> {
         let saved_match_input = self.inline_match_input.take();
         let saved_operand_scope = self.operand_scope.take();
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
+        let saved_dependent_result =
+            std::mem::replace(&mut self.dependent_result_instantiation, false);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_local_type_views = std::mem::take(&mut self.local_type_views);
         let saved_code = std::mem::take(&mut self.in_code_body);
@@ -142,6 +144,7 @@ impl Checker<'_, '_> {
         self.inline_match_input = saved_match_input;
         self.operand_scope = saved_operand_scope;
         self.in_unselected_inline = saved_unselected;
+        self.dependent_result_instantiation = saved_dependent_result;
         self.locals = saved_locals;
         self.local_type_views = saved_local_type_views;
         self.pattern_codes = saved_patterns;

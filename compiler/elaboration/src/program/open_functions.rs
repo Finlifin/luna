@@ -9221,6 +9221,10 @@ impl Checker<'_, '_> {
                 .package
                 .body(*body)
                 .ok_or_else(|| error(span, "missing open function body"))?;
+            this.dependent_result_instantiation =
+                this.open_functions.get(&owner).is_some_and(|definition| {
+                    !matches!(&definition.result, Annotation::Known(ty) if ty.check_scope(&[]).is_ok())
+                });
             let body = this.function_body(owner, body.value, result)?;
             let decreases = this.program_decreases(owner)?;
             if sig.modifiers.is_verified {

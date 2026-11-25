@@ -1010,6 +1010,7 @@ fn elaborate_in_mode(
         inline_selection: None,
         inline_match_input: None,
         in_unselected_inline: false,
+        dependent_result_instantiation: false,
         quote_holes: BTreeSet::new(),
         code_construction_depth: 0,
         expansion_sources: Vec::new(),
@@ -4016,6 +4017,7 @@ struct Checker<'a, 'h> {
     inline_selection: Option<(hir::HirId, usize)>,
     inline_match_input: Option<(hir::HirId, n::Expr, Term)>,
     in_unselected_inline: bool,
+    dependent_result_instantiation: bool,
     quote_holes: BTreeSet<n::LocalId>,
     code_construction_depth: usize,
     expansion_sources: Vec<n::ExpansionSource>,
@@ -4744,6 +4746,18 @@ impl Checker<'_, '_> {
                                     return Err(error(
                                         parameter.span,
                                         "normal-form parameter type is not yet supported",
+                                    ));
+                                }
+                                if self.protocols.variadic_collector.is_none()
+                                    && !self.is_default_collection_shape(
+                                        &domain,
+                                        false,
+                                        parameter.span,
+                                    )?
+                                {
+                                    return Err(error(
+                                        parameter.span,
+                                        "variadic clause input requires a bound meta.List<T> or VariadicCollector",
                                     ));
                                 }
                                 if local_sorts.keys().any(|id| domain.mentions_rigid(*id)) {

@@ -223,15 +223,19 @@ impl<'h> Frame<'h> {
                         })
                     }
                     _ if no.is_none() => Destination::statement(),
-                    _ if self.selection == Some(usize::from(true)) => Destination::ordinary(
-                        checker,
-                        OrdinaryTail {
-                            expected: None,
-                            partial: None,
-                            input: None,
-                        },
-                        yes.span,
-                    )?,
+                    _ if self.selection == Some(usize::from(true))
+                        && checker.dependent_result_instantiation =>
+                    {
+                        Destination::ordinary(
+                            checker,
+                            OrdinaryTail {
+                                expected: None,
+                                partial: None,
+                                input: None,
+                            },
+                            yes.span,
+                        )?
+                    }
                     _ => self.destination.clone(),
                 };
                 self.state = State::Then(condition);
@@ -251,7 +255,9 @@ impl<'h> Frame<'h> {
                         &Destination::statement(),
                     );
                 };
-                let destination = if self.selection == Some(usize::from(false)) {
+                let destination = if self.selection == Some(usize::from(false))
+                    && checker.dependent_result_instantiation
+                {
                     Destination::ordinary(
                         checker,
                         OrdinaryTail {
@@ -261,7 +267,8 @@ impl<'h> Frame<'h> {
                         },
                         no.span,
                     )?
-                } else if self.selection == Some(usize::from(true))
+                } else if self.selection == Some(usize::from(false))
+                    || self.selection == Some(usize::from(true))
                     || self.selection == Some(usize::MAX)
                 {
                     self.destination.clone()
@@ -506,7 +513,14 @@ impl<'h> Frame<'h> {
         } else if self.selection == Some(1) {
             other
         } else if self.selection == Some(usize::MAX) && context.is_none() {
-            p(P::Void)
+            if is_never(&yes.ty) {
+                other
+            } else if is_never(&other) || checker.require(&other, &yes.ty, self.source.span).is_ok()
+            {
+                yes.ty.clone()
+            } else {
+                p(P::Void)
+            }
         } else if control::conditional_never(&condition, &yes.ty, &other) {
             p(P::Never)
         } else if no.is_some() && context.is_some() {

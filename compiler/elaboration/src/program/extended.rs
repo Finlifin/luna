@@ -505,25 +505,32 @@ impl Checker<'_, '_> {
                 value: Box::new(packet),
             },
         });
-        let (target_ty, staged) =
-            self.call_parameter_collection_target(callee, arguments, parameter_index, expr.span)?;
-        if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
-            let raw_packet = std::mem::replace(
-                &mut arguments[slot].value,
-                n::Expr {
-                    ty: p(P::Void),
-                    source: anchor,
-                    kind: K::Tuple(Vec::new()),
-                },
-            );
-            arguments[slot].value = self.lower_variadic_collector_packet(
-                &mut statements,
-                raw_packet,
-                &target_ty,
-                true,
-                staged,
+        if self.protocols.extended_variadic_collector.is_some() {
+            let (target_ty, staged) = self.call_parameter_collection_target(
+                callee,
+                arguments,
+                &statements,
+                parameter_index,
                 expr.span,
             )?;
+            if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
+                let raw_packet = std::mem::replace(
+                    &mut arguments[slot].value,
+                    n::Expr {
+                        ty: p(P::Void),
+                        source: anchor,
+                        kind: K::Tuple(Vec::new()),
+                    },
+                );
+                arguments[slot].value = self.lower_variadic_collector_packet(
+                    &mut statements,
+                    raw_packet,
+                    &target_ty,
+                    true,
+                    staged,
+                    expr.span,
+                )?;
+            }
         }
         let diverges = statements.iter().any(|statement| is_never(&statement.ty));
         Ok(n::Expr {
@@ -773,25 +780,28 @@ impl Checker<'_, '_> {
         }
         new_offsets.push(prepared.len());
         prepared.push(packet);
-        let (target_ty, staged) =
-            self.call_parameter_collection_target(callee, arguments, parameter, expr.span)?;
-        if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
-            let raw_packet = std::mem::replace(
-                &mut arguments[slot].value,
-                n::Expr {
-                    ty: p(P::Void),
-                    source: arguments::preparation_anchor(expr.span),
-                    kind: K::Tuple(Vec::new()),
-                },
-            );
-            arguments[slot].value = self.lower_variadic_collector_packet(
-                &mut prepared,
-                raw_packet,
-                &target_ty,
-                true,
-                staged,
-                expr.span,
+        if self.protocols.extended_variadic_collector.is_some() {
+            let (target_ty, staged) = self.call_parameter_collection_target(
+                callee, arguments, &prepared, parameter, expr.span,
             )?;
+            if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
+                let raw_packet = std::mem::replace(
+                    &mut arguments[slot].value,
+                    n::Expr {
+                        ty: p(P::Void),
+                        source: arguments::preparation_anchor(expr.span),
+                        kind: K::Tuple(Vec::new()),
+                    },
+                );
+                arguments[slot].value = self.lower_variadic_collector_packet(
+                    &mut prepared,
+                    raw_packet,
+                    &target_ty,
+                    true,
+                    staged,
+                    expr.span,
+                )?;
+            }
         }
         self.preparing_inputs.as_mut().unwrap().offsets = new_offsets;
         prepared.extend(remaining);

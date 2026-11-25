@@ -439,6 +439,7 @@ impl Checker<'_, '_> {
         &mut self,
         callee: &n::Expr,
         arguments: &[n::CallArgument],
+        statements: &[n::Expr],
         parameter: usize,
         span: Span,
     ) -> Result<(Term, bool), Error> {
@@ -456,27 +457,63 @@ impl Checker<'_, '_> {
             ));
         };
         let staged = callee.ty.is_comptime_callable() || param.sort != Sort::Runtime;
+        if param.ty.check_scope(&[]).is_ok() {
+            let target_ty = self.copy_alias_type(&param.ty, span)?;
+            return Ok((target_ty, staged));
+        }
         let mut inputs = vec![None; signature.parameters.len()];
         for argument in arguments {
             if argument.parameter < inputs.len() {
-                inputs[argument.parameter] = match &argument.value.kind {
-                    K::TypeValue(term) | K::ComptimeValue(term) => Some(term.clone()),
-                    _ => None,
-                };
+                inputs[argument.parameter] =
+                    resolve_prepared_comptime_term(&argument.value, statements);
             }
         }
-        let target_ty = self.with_call_type_fuel(|checker, fuel| {
-            let binding = checker.prepare_call_binding(callable, &inputs, span, fuel)?;
-            binding
-                .substitute_bounded(&param.ty, fuel)
-                .map_err(|failure| {
-                    error(
-                        span,
-                        format!("dependent collector parameter is not available: {failure}"),
-                    )
-                })
-        })?;
+        let target_ty = if callee.ty.is_comptime_callable() {
+            self.with_call_type_fuel(|_, fuel| {
+                param
+                    .ty
+                    .substitute_partial_comptime_bounded(&inputs, fuel)
+                    .map_err(|failure| {
+                        error(
+                            span,
+                            format!("dependent collector parameter is not available: {failure}"),
+                        )
+                    })
+            })?
+        } else {
+            self.with_call_type_fuel(|checker, fuel| {
+                let binding = checker.prepare_call_binding(callable, &inputs, span, fuel)?;
+                binding
+                    .substitute_bounded(&param.ty, fuel)
+                    .map_err(|failure| {
+                        error(
+                            span,
+                            format!("dependent collector parameter is not available: {failure}"),
+                        )
+                    })
+            })?
+        };
         let target_ty = self.copy_alias_type(&target_ty, span)?;
         Ok((target_ty, staged))
     }
+}
+
+fn resolve_prepared_comptime_term<'a>(
+    mut expr: &'a n::Expr,
+    statements: &'a [n::Expr],
+) -> Option<Term> {
+    for _ in 0..32 {
+        match &expr.kind {
+            K::TypeValue(term) | K::ComptimeValue(term) => return Some(term.clone()),
+            K::Local(binding) => {
+                let bound = statements.iter().rev().find_map(|stmt| match &stmt.kind {
+                    K::Let { binding: b, value } if b == binding => Some(value.as_ref()),
+                    _ => None,
+                })?;
+                expr = bound;
+            }
+            _ => return None,
+        }
+    }
+    None
 }

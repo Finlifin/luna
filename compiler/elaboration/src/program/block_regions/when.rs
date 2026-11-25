@@ -387,10 +387,11 @@ impl<'h> Frame<'h> {
             if ordinary.callee == Some(self.source.hir_id) {
                 checker.comptime_callee_result = Some(arm.body.hir_id);
             }
-            let is_unselected_branch = ordinary.selection.is_some_and(|selected| {
-                selected < self.arms.len() && selected != self.branches.len()
-            });
-            if ordinary.fallback && !is_unselected_branch {
+            let drop_unselected_expected = checker.dependent_result_instantiation
+                && ordinary.selection.is_some_and(|selected| {
+                    selected < self.arms.len() && selected != self.branches.len()
+                });
+            if ordinary.fallback && !drop_unselected_expected {
                 self.destination.with_expected(
                     checker,
                     ordinary.branch_type.as_ref(),
@@ -400,7 +401,7 @@ impl<'h> Frame<'h> {
                 Destination::ordinary(
                     checker,
                     OrdinaryTail {
-                        expected: if is_unselected_branch {
+                        expected: if drop_unselected_expected {
                             None
                         } else {
                             ordinary.branch_type.as_ref()
@@ -451,7 +452,9 @@ impl<'h> Frame<'h> {
             source: source(self.source.span),
             kind: K::Unit,
         };
-        let selected_body = if let Some(index) = ordinary.selection {
+        let selected_body = if let Some(index) = ordinary.selection
+            && index != usize::MAX
+        {
             Some(if let Some((_, body)) = branches.get(index) {
                 constants::charge_copy(body, &mut checker.required_steps, self.source.span)?;
                 body.clone()
@@ -462,13 +465,13 @@ impl<'h> Frame<'h> {
             None
         };
         let value = match selected_body {
-            Some(value) if ordinary.selection != Some(usize::MAX) => {
+            Some(value) => {
                 if let Some(expected) = self.destination.expected() {
                     checker.require(&value.ty, expected, self.source.span)?;
                 }
                 value
             }
-            selected_body => {
+            None => {
                 let mut tail = unit();
                 for (condition, body) in branches.into_iter().rev() {
                     let Some(condition) = condition else {
@@ -486,7 +489,14 @@ impl<'h> Frame<'h> {
                     } else if ordinary.selection == Some(usize::MAX)
                         && self.destination.expected().is_none()
                     {
-                        p(P::Void)
+                        if checker
+                            .require(&tail.ty, &body.ty, self.source.span)
+                            .is_ok()
+                        {
+                            body.ty.clone()
+                        } else {
+                            p(P::Void)
+                        }
                     } else {
                         checker.require(&tail.ty, &body.ty, self.source.span)?;
                         body.ty.clone()
@@ -504,7 +514,7 @@ impl<'h> Frame<'h> {
                 if let Some(expected) = self.destination.expected() {
                     checker.require(&tail.ty, expected, self.source.span)?;
                 }
-                selected_body.unwrap_or(tail)
+                tail
             }
         };
         let value = if ordinary.preserve_effect == Some(false) {
