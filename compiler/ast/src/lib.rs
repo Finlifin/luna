@@ -400,6 +400,7 @@ pub enum NodeKind {
     RangeFromToInclusivePattern,      // a, b
     PropertyPattern,                  // a, b (id: pattern)
     ListRestPattern,                  // a (...id)
+    StructRestPattern,                // ...
     StructPattern,                    // N
     ListPattern,                      // N
     TuplePattern,                     // N
@@ -867,6 +868,7 @@ impl NodeKind {
             RangeFromToInclusivePattern,
             PropertyPattern,
             ListRestPattern,
+            StructRestPattern,
             StructPattern,
             ListPattern,
             TuplePattern,
@@ -977,9 +979,8 @@ impl NodeKind {
             // No children
             Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | Wildcard
             | SelfLower | SelfCap | Null | Undefined | SelfParam | SelfRefParam | ItselfParam
-            | ItselfRefParam | RangeFull | TokenBufferToken | TokenBufferDollar => {
-                NodeType::NoChild
-            }
+            | ItselfRefParam | RangeFull | StructRestPattern | TokenBufferToken
+            | TokenBufferDollar => NodeType::NoChild,
 
             // Single child (a)
             TypeDeclClause

@@ -243,8 +243,11 @@ impl Checker<'_, '_> {
                 let binding = match base.kind {
                     H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => local(id),
                     H::SelfValue => {
-                        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
-                            self.package.item(base.hir_id.owner).map(|item| &item.kind)
+                        let Some(
+                            ItemKind::Fn(sig, _)
+                            | ItemKind::Case(sig, _)
+                            | ItemKind::FnDeclaration(sig),
+                        ) = self.package.item(base.hir_id.owner).map(|item| &item.kind)
                         else {
                             return Err(error(base.span, "self requires a method receiver"));
                         };

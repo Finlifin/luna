@@ -600,6 +600,7 @@ impl<'a> Formatter<'a> {
                     Doc::concat([Doc::str("..."), sub_doc])
                 }
             }
+            NodeKind::StructRestPattern => Doc::str("..."),
             NodeKind::TuplePattern => {
                 let elems = self.parsed.ast.get_multi_child_slice(ch[0]).unwrap_or(&[]);
                 let style = if elems.len() == 1 {

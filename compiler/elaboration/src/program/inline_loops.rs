@@ -4,7 +4,7 @@ use super::*;
 mod comptime_ranges;
 
 /// Validate and split a `'tuple_indexed` pattern into `(index_pat, element_pat)`.
-pub(super) fn tuple_indexed_parts<'hir>(
+pub(in crate::program) fn tuple_indexed_parts<'hir>(
     pat: &'hir hir::pattern::Pattern<'hir>,
 ) -> Result<
     (

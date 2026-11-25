@@ -482,15 +482,7 @@ impl Parser<'_> {
                         return Err(ParseError::MeetPostExtendedCallStart);
                     }
 
-                    let nodes = p.try_multi_with_bracket(
-                        &[
-                            Rule::comma("property pattern", move |p| {
-                                p.try_property_pattern(option)
-                            }),
-                            Rule::comma("id", |p| p.try_id()),
-                        ],
-                        (TokenKind::LBrace, TokenKind::RBrace),
-                    )?;
+                    let nodes = p.try_struct_pattern_fields(option)?;
 
                     Ok(
                         NodeBuilder::new(NodeKind::ExtendedApplicationPattern, p.current_span())
@@ -846,16 +838,90 @@ impl Parser<'_> {
         })
     }
 
+    fn try_struct_pattern_fields(
+        &mut self,
+        option: PatternOption,
+    ) -> Result<Vec<NodeIndex>, ParseError> {
+        self.scoped_with_expected_prefix(&[TokenKind::LBrace], |p| {
+            let open_span = p.next_token_span();
+            p.eat_tokens(1);
+            let mut nodes = Vec::new();
+            let mut saw_rest = false;
+            loop {
+                if p.eat_token(TokenKind::RBrace) {
+                    break;
+                }
+                if p.peek(&[TokenKind::Dot, TokenKind::Dot, TokenKind::Dot]) {
+                    let rest_node = p.scoped(|p2| {
+                        let rest_span = p2.next_token_span();
+                        p2.eat_tokens(3);
+                        if saw_rest {
+                            return Err(ParseError::invalid_syntax(
+                                "duplicate `...` in struct or record pattern".to_string(),
+                                p2.peek_next_token().kind,
+                                rest_span,
+                            ));
+                        }
+                        Ok(
+                            NodeBuilder::new(NodeKind::StructRestPattern, p2.current_span())
+                                .build(&mut p2.ast),
+                        )
+                    })?;
+                    saw_rest = true;
+                    nodes.push(rest_node);
+                } else if p.peek(&[TokenKind::Dot, TokenKind::Dot]) {
+                    return Err(ParseError::invalid_syntax(
+                        "use `...` (three dots) instead of `..` to ignore remaining fields in struct or record patterns".to_string(),
+                        TokenKind::Dot,
+                        p.next_token_span(),
+                    ));
+                } else {
+                    if saw_rest {
+                        return Err(ParseError::invalid_syntax(
+                            "struct or record rest pattern `...` must be the last entry"
+                                .to_string(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    let entry = p.try_property_pattern(option)?;
+                    let entry = if entry != 0 { entry } else { p.try_id()? };
+                    if entry == 0 {
+                        let found = p.peek_next_token().kind;
+                        return Err(ParseError::invalid_syntax(
+                            format!(
+                                "expected struct field pattern, `...`, or `}}`, found {}",
+                                describe_token(found)
+                            ),
+                            found,
+                            p.next_token_span(),
+                        )
+                        .with_secondary_label(open_span, "this `{` was opened here"));
+                    }
+                    nodes.push(entry);
+                }
+                if p.eat_token(TokenKind::Comma) {
+                    continue;
+                }
+                if p.eat_token(TokenKind::RBrace) {
+                    break;
+                }
+                let found = p.peek_next_token().kind;
+                return Err(ParseError::unexpected_token(
+                    TokenKind::RBrace,
+                    found,
+                    p.next_token_span(),
+                )
+                .with_secondary_label(open_span, "this `{` was opened here"));
+            }
+            Ok(nodes)
+        })
+    }
+
     /// 尝试解析记录模式 {props}
     fn try_record_pattern(&mut self, option: PatternOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LBrace], |p| {
-            let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::comma("property pattern", move |p| p.try_property_pattern(option)),
-                    Rule::comma("id", |p| p.try_id()),
-                ],
-                (TokenKind::LBrace, TokenKind::RBrace),
-            )?;
+            let nodes = p.try_struct_pattern_fields(option)?;
 
             Ok(NodeBuilder::new(NodeKind::StructPattern, p.current_span())
                 .add_multiple_children(nodes)

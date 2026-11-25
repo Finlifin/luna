@@ -643,3 +643,50 @@ fn entire_builtin_library_corpus_parses_with_zero_errors() {
         "library `.fl` files failed to parse:\n{error_files:#?}"
     );
 }
+
+#[test]
+fn struct_rest_pattern_three_dots_accepted_and_invalid_forms_rejected() {
+    for clean_src in [
+        "fn f(p: Point) { let Point { x, ... } = p; }",
+        "fn f(p: Point) { let { x, ... } = p; }",
+        "fn f(p: Point) { let { ... } = p; }",
+        "fn f(m: Msg) { m match { .data { a, ... } => a, _ => false } }",
+    ] {
+        let (ok, diags) = parse_with_diagnostics(clean_src);
+        let errs: Vec<_> = diags
+            .into_iter()
+            .filter(|d| d.level == Level::Error)
+            .collect();
+        assert!(
+            ok && errs.is_empty(),
+            "expected clean parse for {clean_src}: {errs:#?}"
+        );
+    }
+
+    for (bad_src, needle) in [
+        (
+            "fn f(p: Point) { let Point { x, .. } = p; }",
+            "use `...` (three dots) instead of `..`",
+        ),
+        (
+            "fn f(p: Point) { let { x, .. } = p; }",
+            "use `...` (three dots) instead of `..`",
+        ),
+        (
+            "fn f(p: Point) { let Point { ..., x } = p; }",
+            "must be the last entry",
+        ),
+        (
+            "fn f(p: Point) { let { x, ..., ... } = p; }",
+            "duplicate `...`",
+        ),
+    ] {
+        let (_ok, diags) = parse_with_diagnostics(bad_src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.level == Level::Error && d.message.contains(needle)),
+            "expected diagnostic `{needle}` for `{bad_src}`, got: {diags:#?}"
+        );
+    }
+}

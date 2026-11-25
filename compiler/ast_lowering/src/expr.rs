@@ -3030,9 +3030,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             PatternKind::Guard(pattern, _)
             | PatternKind::OptionSome(pattern)
             | PatternKind::ErrorOk(pattern)
-            | PatternKind::ErrorErr(pattern) => {
-                self.bind_arm_pattern_inner(children[0], pattern, seen)
-            }
+            | PatternKind::ErrorErr(pattern)
+            | PatternKind::Ref(pattern) => self.bind_arm_pattern_inner(children[0], pattern, seen),
             PatternKind::Binding(_, name, inner) => {
                 if let Some(inner) = inner {
                     self.bind_arm_pattern_inner(children[0], inner, seen);
@@ -3054,7 +3053,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         }],
                     )
                     .unwrap_or(&[])
-                    .to_vec();
+                    .iter()
+                    .copied()
+                    .filter(|&node| {
+                        self.ast.get_node_kind(node) != Some(NodeKind::StructRestPattern)
+                    })
+                    .collect::<Vec<_>>();
                 for (node, field) in nodes.into_iter().zip(*fields) {
                     let node = if self.ast.get_node_kind(node) == Some(NodeKind::PropertyPattern) {
                         self.ast.get_children(node)[1]

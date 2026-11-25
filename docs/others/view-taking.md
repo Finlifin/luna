@@ -51,9 +51,20 @@ inline for arg in args'tuple_enumerate {
 
 用于 `BitVec<N>` 的位向量视图投影与位切片定位，服务于读/写位置语义及边界验证（参见 BitVec 与位域文档）。
 
+### `'attribute`
+
+仅可在 `comptime` 上下文调用，读取附着在类型、实例或目标声明上的合并后 `meta.Object` 元数据（包含官方 `__flurry_*` 条目与用户属性）；目标无任何属性时返回空 `{}`。
+
+- 操作数在类型/目标位置检查，不会消费运行时资源或执行运行时求值，仅允许在 `comptime` 阶段读取（在 runtime 值上下文或 quoted runtime body 中使用会被拒绝）。
+- 与命令行 `--emit merged-attributes` 输出使用同一合并属性视图。
+
 ### `'multi_deref`
 
-用于多级指针解引用位置访问；单层解引用统一使用 `ptr.*`。
+用于沿嵌套指针链执行多级解引用（`***...*T -> T`），单层解引用统一使用 `ptr.*`。
+
+- 要求操作数至少具备一层指针类型（`*T`、`*(*T)` 等），沿结构化类型逐层穿透至最终非指针目标 `T`。
+- 中间指针层自动按固有指针读取；最终值读取要求目标类型满足 `Copy` 或内建可读取原语约束，避免绕过 `Once` 所有权移动检查。
+- 支持位置写回与成员投影：作为左值或投影基址（如 `pp'multi_deref = v`、`pp'multi_deref.field`、`pp'multi_deref.ref`、`pp'multi_deref'bitvec[lo..hi] = rhs`）时，自动穿透外层指针并定位到最内层 `*T` 位置进行安全读/写或受控借用。
 
 ## 编译器内部专用 view kind
 

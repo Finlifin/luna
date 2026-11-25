@@ -3545,7 +3545,10 @@ impl Checker<'_, '_> {
                     _ => D::Known(p(P::Object)),
                 }
             }
-            H::TakeBitVec(value) | H::TakeTagName(value) | H::Deref(value) => {
+            H::TakeBitVec(value)
+            | H::TakeTagName(value)
+            | H::Deref(value)
+            | H::MultiDeref(value) => {
                 let description =
                     self.describe_open_expression(value, locals, returns, None, depth + 1)?;
                 let D::Known(ty) = description else {
@@ -3555,6 +3558,7 @@ impl Checker<'_, '_> {
                             H::TakeBitVec(_) => "bit view requires an established source type",
                             H::TakeTagName(_) => "tag_name requires an established source type",
                             H::Deref(_) => "dereference requires an established pointer type",
+                            H::MultiDeref(_) => "multi_deref requires an established pointer type",
                             _ => "unary projection requires an established source type",
                         },
                     ));
@@ -3572,11 +3576,32 @@ impl Checker<'_, '_> {
                     self.require_description(&result, expected, expr.span)?;
                     return Ok(result);
                 }
+                if matches!(expr.kind, H::MultiDeref(_)) {
+                    let mut current = ty.clone();
+                    let mut ptr_depth = 0usize;
+                    while let Term::Pointer(pointee) = current {
+                        ptr_depth += 1;
+                        if ptr_depth > 128 {
+                            return Err(error(expr.span, "multi_deref depth exhausted"));
+                        }
+                        current = (*pointee).clone();
+                    }
+                    if ptr_depth > 0
+                        && !self
+                            .term_substitution_inputs(&current, expr.span)?
+                            .is_empty()
+                    {
+                        let result = D::Known(current);
+                        self.require_description(&result, expected, expr.span)?;
+                        return Ok(result);
+                    }
+                }
                 self.with_open_operand(ty, value.span, |this, placeholder| {
                     let kind = match expr.kind {
                         H::TakeBitVec(_) => H::TakeBitVec(placeholder),
                         H::TakeTagName(_) => H::TakeTagName(placeholder),
                         H::Deref(_) => H::Deref(placeholder),
+                        H::MultiDeref(_) => H::MultiDeref(placeholder),
                         _ => {
                             return Err(error(
                                 expr.span,

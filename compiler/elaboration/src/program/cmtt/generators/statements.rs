@@ -560,13 +560,10 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         if let H::TakeTupleEnumerate(input) = iter.kind {
-            return self.generator_inline_tuple(value, input, interface, depth, loops);
+            return self.generator_inline_tuple(value, input, false, interface, depth, loops);
         }
-        if let H::TakeTupleIndexed(_) = iter.kind {
-            return Err(error(
-                iter.span,
-                "generator tuple_indexed is not yet implemented",
-            ));
+        if let H::TakeTupleIndexed(input) = iter.kind {
+            return self.generator_inline_tuple(value, input, true, interface, depth, loops);
         }
         let H::Range {
             start: Some(start),
@@ -859,10 +856,118 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn check_generator_tuple_index_pattern(
+        &mut self,
+        index_pat: &hir::pattern::Pattern<'_>,
+    ) -> Result<(bool, n::Pattern), Error> {
+        let existing: BTreeSet<_> = self.locals.keys().copied().collect();
+        self.immutable.extend(pattern_binding_ids(index_pat));
+        let index_pattern = self.pattern(index_pat, &p(P::Integer))?;
+        let irrefutable = self.pattern_exhaustive(&index_pattern, &p(P::Integer));
+        for id in self.locals.keys().copied().collect::<Vec<_>>() {
+            if !existing.contains(&id) {
+                self.generator_data.insert(id, None);
+                self.immutable.insert(id);
+            }
+        }
+        let probe_id = self.spread_binding(index_pat.span)?;
+        self.locals.insert(probe_id, p(P::Integer));
+        self.generator_data.insert(probe_id, None);
+        let probe = n::Expr {
+            ty: p(P::Bool),
+            source: source(index_pat.span),
+            kind: K::Match {
+                value: Box::new(n::Expr {
+                    ty: p(P::Integer),
+                    source: source(index_pat.span),
+                    kind: K::Local(probe_id),
+                }),
+                arms: vec![n::MatchArm {
+                    pattern: index_pattern.clone(),
+                    guard: None,
+                    body: n::Expr {
+                        ty: p(P::Bool),
+                        source: source(index_pat.span),
+                        kind: K::Literal(n::Literal::Bool(true)),
+                    },
+                }],
+            },
+        };
+        self.validate_generator_data(&probe, index_pat.span)?;
+        Ok((irrefutable, index_pattern))
+    }
+
+    fn match_generator_tuple_index(
+        &mut self,
+        site: &Expr<'_>,
+        index_pat: &hir::pattern::Pattern<'_>,
+        index: usize,
+        body: &hir::Block<'_>,
+        then: impl FnOnce(&mut Self) -> Result<Control, Error>,
+    ) -> Result<Control, Error> {
+        let input = self.materialize_generator_data(
+            comptime_interpretor::Value::Integer(comptime_runtime::Integer::from_u128(
+                index as u128,
+            )),
+            p(P::Integer),
+            index_pat.span,
+        )?;
+        let source_body = Expr {
+            hir_id: body.hir_id,
+            span: body.span,
+            kind: H::Block(body),
+        };
+        let arms = [
+            hir::pattern::PatternArm {
+                hir_id: index_pat.hir_id,
+                pat: index_pat.clone(),
+                guard: None,
+                body: &source_body,
+                span: index_pat.span,
+            },
+            hir::pattern::PatternArm {
+                hir_id: index_pat.hir_id,
+                pat: hir::pattern::Pattern {
+                    hir_id: index_pat.hir_id,
+                    kind: hir::pattern::PatternKind::Wild,
+                    span: index_pat.span,
+                },
+                guard: None,
+                body: &source_body,
+                span: index_pat.span,
+            },
+        ];
+        let mut then = Some(then);
+        let selected = self.generator_match_prepared(
+            site,
+            &source_body,
+            &arms,
+            input,
+            false,
+            &mut |this, arm, _| {
+                if arm == 1 {
+                    return Ok(Control::Next);
+                }
+                let callback = then.take().expect("index match arm invoked at most once");
+                callback(this)
+            },
+        )?;
+        selected.into_iter().next().ok_or_else(|| {
+            error(
+                index_pat.span,
+                "generator tuple index matching produced no selection",
+            )
+        })
+    }
+
     fn generator_inline_code_collection(
         &mut self,
         value: &Expr<'_>,
         pat: &hir::pattern::Pattern<'_>,
+        indexed_pats: Option<(
+            Option<&hir::pattern::Pattern<'_>>,
+            Option<&hir::pattern::Pattern<'_>>,
+        )>,
         guard: Option<&Expr<'_>>,
         body: &hir::Block<'_>,
         interface: ResultInterface<'_>,
@@ -894,7 +999,16 @@ impl Checker<'_, '_> {
                     }
                 };
                 return self.generator_scope(body.span, |this| {
-                    this.bind_variadic_code_element(pat, sample)?;
+                    if let Some((index_pat, elem_pat)) = indexed_pats {
+                        if let Some(index_pat) = index_pat {
+                            this.check_generator_tuple_index_pattern(index_pat)?;
+                        }
+                        if let Some(elem_pat) = elem_pat {
+                            this.bind_variadic_code_element(elem_pat, sample)?;
+                        }
+                    } else {
+                        this.bind_variadic_code_element(pat, sample)?;
+                    }
                     let selected = this.generator_when_condition(guard)?;
                     let body_ctrl =
                         this.generator_statement_block(body, interface, depth + 1, loops)?;
@@ -920,14 +1034,35 @@ impl Checker<'_, '_> {
                         "generator code collection enumeration budget exhausted",
                     )
                 })?;
-            for item in items {
+            for (index, item) in items.into_iter().enumerate() {
                 let next = self.generator_scope(body.span, |this| {
-                    this.bind_variadic_code_element(pat, item)?;
-                    let selected = this.generator_when_condition(guard)?;
-                    if selected == Some(false) {
-                        return Ok(Control::Next);
+                    let run = |this: &mut Self,
+                               elem_pat: Option<&hir::pattern::Pattern<'_>>|
+                     -> Result<Control, Error> {
+                        if let Some(elem_pat) = elem_pat {
+                            this.bind_variadic_code_element(elem_pat, item)?;
+                        }
+                        let selected = this.generator_when_condition(guard)?;
+                        if selected == Some(false) {
+                            return Ok(Control::Next);
+                        }
+                        this.generator_statement_block(body, interface, depth + 1, loops)
+                    };
+                    if let Some((index_pat, elem_pat)) = indexed_pats {
+                        if let Some(index_pat) = index_pat {
+                            this.match_generator_tuple_index(
+                                value,
+                                index_pat,
+                                index,
+                                body,
+                                |this| run(this, elem_pat),
+                            )
+                        } else {
+                            run(this, elem_pat)
+                        }
+                    } else {
+                        run(this, Some(pat))
                     }
-                    this.generator_statement_block(body, interface, depth + 1, loops)
                 })?;
                 match next {
                     Control::Next => {}
@@ -946,6 +1081,7 @@ impl Checker<'_, '_> {
         &mut self,
         value: &Expr<'_>,
         input: &Expr<'_>,
+        indexed: bool,
         interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
@@ -956,6 +1092,11 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
+        let indexed_pats = if indexed {
+            Some(crate::program::inline_loops::tuple_indexed_parts(pat)?)
+        } else {
+            None
+        };
         if let H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) = input.kind {
             let input_id = local(id);
             if self.checking_code_generator {
@@ -963,6 +1104,7 @@ impl Checker<'_, '_> {
                     return self.generator_inline_code_collection(
                         value,
                         pat,
+                        indexed_pats,
                         *guard,
                         body,
                         interface,
@@ -991,6 +1133,7 @@ impl Checker<'_, '_> {
                 return self.generator_inline_code_collection(
                     value,
                     pat,
+                    indexed_pats,
                     *guard,
                     body,
                     interface,
@@ -1036,41 +1179,51 @@ impl Checker<'_, '_> {
                 .push(binder.declaration);
             loops.push(identity);
             let checked = self.generator_scope(body.span, |this| {
-                let existing = this.locals.keys().copied().collect::<BTreeSet<_>>();
-                this.immutable.extend(pattern_binding_ids(pat));
-                let pattern = this.with_generator_pattern_inputs(pat.span, |this| {
-                    this.pattern(pat, &element_ty)
-                })?;
-                let probe_id = this.spread_binding(pat.span)?;
-                this.locals.insert(probe_id, element_ty.clone());
-                this.generator_data.insert(probe_id, None);
-                for id in this.locals.keys().copied().collect::<Vec<_>>() {
-                    if !existing.contains(&id) {
-                        this.generator_data.insert(id, None);
-                        this.immutable.insert(id);
+                let elem_pat = if let Some((index_pat, elem_pat)) = indexed_pats {
+                    if let Some(index_pat) = index_pat {
+                        this.check_generator_tuple_index_pattern(index_pat)?;
                     }
-                }
-                let probe = n::Expr {
-                    ty: p(P::Bool),
-                    source: source(pat.span),
-                    kind: K::Match {
-                        value: Box::new(n::Expr {
-                            ty: element_ty.clone(),
-                            source: source(input.span),
-                            kind: K::Local(probe_id),
-                        }),
-                        arms: vec![n::MatchArm {
-                            pattern,
-                            guard: None,
-                            body: n::Expr {
-                                ty: p(P::Bool),
-                                source: source(pat.span),
-                                kind: K::Literal(n::Literal::Bool(true)),
-                            },
-                        }],
-                    },
+                    elem_pat
+                } else {
+                    Some(*pat)
                 };
-                this.validate_generator_data(&probe, pat.span)?;
+                if let Some(elem_pat) = elem_pat {
+                    let existing = this.locals.keys().copied().collect::<BTreeSet<_>>();
+                    this.immutable.extend(pattern_binding_ids(elem_pat));
+                    let pattern = this.with_generator_pattern_inputs(elem_pat.span, |this| {
+                        this.pattern(elem_pat, &element_ty)
+                    })?;
+                    let probe_id = this.spread_binding(elem_pat.span)?;
+                    this.locals.insert(probe_id, element_ty.clone());
+                    this.generator_data.insert(probe_id, None);
+                    for id in this.locals.keys().copied().collect::<Vec<_>>() {
+                        if !existing.contains(&id) {
+                            this.generator_data.insert(id, None);
+                            this.immutable.insert(id);
+                        }
+                    }
+                    let probe = n::Expr {
+                        ty: p(P::Bool),
+                        source: source(elem_pat.span),
+                        kind: K::Match {
+                            value: Box::new(n::Expr {
+                                ty: element_ty.clone(),
+                                source: source(input.span),
+                                kind: K::Local(probe_id),
+                            }),
+                            arms: vec![n::MatchArm {
+                                pattern,
+                                guard: None,
+                                body: n::Expr {
+                                    ty: p(P::Bool),
+                                    source: source(elem_pat.span),
+                                    kind: K::Literal(n::Literal::Bool(true)),
+                                },
+                            }],
+                        },
+                    };
+                    this.validate_generator_data(&probe, elem_pat.span)?;
+                }
                 let _ = this.generator_when_condition(*guard)?;
                 let _ = this.generator_statement_block(body, interface, depth + 1, loops)?;
                 let mut flow = Flow::default();
@@ -1096,162 +1249,210 @@ impl Checker<'_, '_> {
         } else {
             (0..elements.len()).map(|_| None).collect::<Vec<_>>()
         };
-        let declaration = hir::decl::LetDecl {
-            hir_id: value.hir_id,
-            mutable: false,
-            comptime: true,
-            pattern: (**pat).clone(),
-            guard: None,
-            otherwise: None,
-            ty: None,
-            init: Some(input),
-            span: pat.span,
-        };
         loops.push(identity);
         let result = (|| {
             let mut control = Control::Next;
-            for (ty, field) in elements.into_iter().zip(values) {
+            for (index, (ty, field)) in elements.into_iter().zip(values).enumerate() {
                 let next = self.generator_scope(body.span, |this| {
-                    let irrefutable = this.generator_scope(pat.span, |this| {
-                        this.immutable.extend(pattern_binding_ids(pat));
-                        let pattern = this.with_generator_pattern_inputs(pat.span, |this| {
-                            this.pattern(pat, &ty)
-                        })?;
-                        Ok(this.pattern_exhaustive(&pattern, &ty))
-                    })?;
-                    if !irrefutable {
-                        let id = this.spread_binding(pat.span)?;
-                        this.locals.insert(id, ty.clone());
-                        let marker = n::Expr {
-                            ty: ty.clone(),
-                            source: source(pat.span),
-                            kind: K::Local(id),
+                    let (index_pat, elem_pat) = match indexed_pats {
+                        Some((index_pat, elem_pat)) => (index_pat, elem_pat),
+                        None => (None, Some(*pat)),
+                    };
+                    let mut index_irrefutable = true;
+                    if let Some(index_pat) = index_pat
+                        && this.checking_code_generator
+                    {
+                        let (irrefutable, index_pattern) =
+                            this.check_generator_tuple_index_pattern(index_pat)?;
+                        index_irrefutable = irrefutable;
+                        let index_term =
+                            Term::Integer(comptime_runtime::Integer::from_u128(index as u128));
+                        let source_body = Expr {
+                            hir_id: body.hir_id,
+                            span: body.span,
+                            kind: H::Block(body),
                         };
-                        let element = if let Some(field) = field {
-                            // Keep the evaluated packet in a live cell. In
-                            // particular, pointer fields must retain aliases.
-                            this.generator_data.insert(id, Some(marker.clone()));
-                            this.generator_cells
-                                .insert(id, (marker.clone(), GeneratorCell::owned(field)));
-                            marker
-                        } else {
-                            this.generator_data.insert(id, None);
-                            marker
-                        };
-                        let arms = [
-                            hir::pattern::PatternArm {
-                                hir_id: pat.hir_id,
-                                pat: (**pat).clone(),
-                                guard: None,
-                                body: input,
-                                span: pat.span,
-                            },
-                            hir::pattern::PatternArm {
-                                hir_id: pat.hir_id,
-                                pat: hir::pattern::Pattern {
-                                    hir_id: pat.hir_id,
-                                    kind: hir::pattern::PatternKind::Wild,
-                                    span: pat.span,
-                                },
-                                guard: None,
-                                body: input,
-                                span: pat.span,
-                            },
-                        ];
-                        let outputs = this.generator_match_prepared(
-                            value,
-                            input,
-                            &arms,
-                            element,
-                            false,
-                            &mut |this, selected_arm, _| {
-                                if selected_arm == 1 {
-                                    return Ok(Control::Next);
-                                }
-                                let selected = this.generator_when_condition(*guard)?;
-                                if this.checking_code_generator {
-                                    let mut flow = this
-                                        .generator_statement_block(
-                                            body,
-                                            interface,
-                                            depth + 1,
-                                            loops,
-                                        )?
-                                        .flow();
-                                    if selected == Some(false) {
-                                        return Ok(Control::Next);
-                                    }
-                                    let continues_here = flow.continues.remove(&identity);
-                                    if selected.is_none() || continues_here {
-                                        flow.next = true;
-                                    }
-                                    Ok(Control::Abstract(flow))
-                                } else if selected == Some(false) {
-                                    Ok(Control::Next)
-                                } else {
-                                    this.generator_statement_block(
-                                        body,
-                                        interface,
-                                        depth + 1,
-                                        loops,
-                                    )
-                                }
-                            },
-                        )?;
-                        if this.checking_code_generator {
-                            let mut flow = Flow::default();
-                            for output in outputs {
-                                flow = this.join_generator_flows(flow, output.flow(), pat.span)?;
-                            }
-                            return Ok(Control::Abstract(flow));
-                        }
-                        return outputs.into_iter().next().ok_or_else(|| {
-                            error(pat.span, "generator tuple matching produced no selection")
-                        });
-                    }
-                    if let Some(field) = field {
-                        this.bind_live_generator_pattern(&declaration, field, ty)?;
-                    } else {
-                        let field = {
-                            // Each element has its own established type, but no
-                            // invented data value during definition checking.
-                            let id = n::LocalId {
-                                owner: u32::MAX,
-                                index: this.next_temporary_binding,
-                            };
-                            this.next_temporary_binding =
-                                this.next_temporary_binding.checked_add(1).ok_or_else(|| {
-                                    error(input.span, "generator tuple identity space exhausted")
-                                })?;
-                            this.locals.insert(id, ty.clone());
-                            this.generator_data.insert(id, None);
-                            n::Expr {
-                                ty: ty.clone(),
-                                source: source(input.span),
-                                kind: K::Local(id),
-                            }
-                        };
-                        this.bind_generator_pattern(&declaration, field, ty, false)?;
-                    }
-                    let selected = this.generator_when_condition(*guard)?;
-                    if this.checking_code_generator {
-                        let body =
-                            this.generator_statement_block(body, interface, depth + 1, loops)?;
-                        if selected == Some(false) {
+                        if let Ok(None) =
+                            this.select_inline_pattern(&index_pattern, &index_term, &source_body)
+                        {
                             return Ok(Control::Next);
                         }
-                        let mut flow = body.flow();
-                        if selected.is_none() {
-                            flow.next = true;
+                    }
+                    let run_element = |this: &mut Self| -> Result<Control, Error> {
+                        if let Some(elem_pat) = elem_pat {
+                            let declaration = hir::decl::LetDecl {
+                                hir_id: value.hir_id,
+                                mutable: false,
+                                comptime: true,
+                                pattern: elem_pat.clone(),
+                                guard: None,
+                                otherwise: None,
+                                ty: None,
+                                init: Some(input),
+                                span: elem_pat.span,
+                            };
+                            let irrefutable = this.generator_scope(elem_pat.span, |this| {
+                                this.immutable.extend(pattern_binding_ids(elem_pat));
+                                let pattern = this
+                                    .with_generator_pattern_inputs(elem_pat.span, |this| {
+                                        this.pattern(elem_pat, &ty)
+                                    })?;
+                                Ok(this.pattern_exhaustive(&pattern, &ty))
+                            })?;
+                            if !irrefutable {
+                                let id = this.spread_binding(elem_pat.span)?;
+                                this.locals.insert(id, ty.clone());
+                                let marker = n::Expr {
+                                    ty: ty.clone(),
+                                    source: source(elem_pat.span),
+                                    kind: K::Local(id),
+                                };
+                                let element = if let Some(field) = field {
+                                    // Keep the evaluated packet in a live cell. In
+                                    // particular, pointer fields must retain aliases.
+                                    this.generator_data.insert(id, Some(marker.clone()));
+                                    this.generator_cells
+                                        .insert(id, (marker.clone(), GeneratorCell::owned(field)));
+                                    marker
+                                } else {
+                                    this.generator_data.insert(id, None);
+                                    marker
+                                };
+                                let arms = [
+                                    hir::pattern::PatternArm {
+                                        hir_id: elem_pat.hir_id,
+                                        pat: elem_pat.clone(),
+                                        guard: None,
+                                        body: input,
+                                        span: elem_pat.span,
+                                    },
+                                    hir::pattern::PatternArm {
+                                        hir_id: elem_pat.hir_id,
+                                        pat: hir::pattern::Pattern {
+                                            hir_id: elem_pat.hir_id,
+                                            kind: hir::pattern::PatternKind::Wild,
+                                            span: elem_pat.span,
+                                        },
+                                        guard: None,
+                                        body: input,
+                                        span: elem_pat.span,
+                                    },
+                                ];
+                                let outputs = this.generator_match_prepared(
+                                    value,
+                                    input,
+                                    &arms,
+                                    element,
+                                    false,
+                                    &mut |this, selected_arm, _| {
+                                        if selected_arm == 1 {
+                                            return Ok(Control::Next);
+                                        }
+                                        let selected = this.generator_when_condition(*guard)?;
+                                        if this.checking_code_generator {
+                                            let mut flow = this
+                                                .generator_statement_block(
+                                                    body,
+                                                    interface,
+                                                    depth + 1,
+                                                    loops,
+                                                )?
+                                                .flow();
+                                            if selected == Some(false) || !index_irrefutable {
+                                                flow.next = true;
+                                            }
+                                            let continues_here = flow.continues.remove(&identity);
+                                            if selected.is_none() || continues_here {
+                                                flow.next = true;
+                                            }
+                                            Ok(Control::Abstract(flow))
+                                        } else if selected == Some(false) {
+                                            Ok(Control::Next)
+                                        } else {
+                                            this.generator_statement_block(
+                                                body,
+                                                interface,
+                                                depth + 1,
+                                                loops,
+                                            )
+                                        }
+                                    },
+                                )?;
+                                if this.checking_code_generator {
+                                    let mut flow = Flow::default();
+                                    for output in outputs {
+                                        flow = this.join_generator_flows(
+                                            flow,
+                                            output.flow(),
+                                            elem_pat.span,
+                                        )?;
+                                    }
+                                    return Ok(Control::Abstract(flow));
+                                }
+                                return outputs.into_iter().next().ok_or_else(|| {
+                                    error(
+                                        elem_pat.span,
+                                        "generator tuple matching produced no selection",
+                                    )
+                                });
+                            }
+                            if let Some(field) = field {
+                                this.bind_live_generator_pattern(&declaration, field, ty)?;
+                            } else {
+                                let field = {
+                                    // Each element has its own established type, but no
+                                    // invented data value during definition checking.
+                                    let id = n::LocalId {
+                                        owner: u32::MAX,
+                                        index: this.next_temporary_binding,
+                                    };
+                                    this.next_temporary_binding = this
+                                        .next_temporary_binding
+                                        .checked_add(1)
+                                        .ok_or_else(|| {
+                                            error(
+                                                input.span,
+                                                "generator tuple identity space exhausted",
+                                            )
+                                        })?;
+                                    this.locals.insert(id, ty.clone());
+                                    this.generator_data.insert(id, None);
+                                    n::Expr {
+                                        ty: ty.clone(),
+                                        source: source(input.span),
+                                        kind: K::Local(id),
+                                    }
+                                };
+                                this.bind_generator_pattern(&declaration, field, ty, false)?;
+                            }
                         }
-                        if flow.continues.remove(&identity) {
-                            flow.next = true;
+                        let selected = this.generator_when_condition(*guard)?;
+                        if this.checking_code_generator {
+                            let body =
+                                this.generator_statement_block(body, interface, depth + 1, loops)?;
+                            if selected == Some(false) {
+                                return Ok(Control::Next);
+                            }
+                            let mut flow = body.flow();
+                            if selected.is_none() || !index_irrefutable {
+                                flow.next = true;
+                            }
+                            if flow.continues.remove(&identity) {
+                                flow.next = true;
+                            }
+                            Ok(Control::Abstract(flow))
+                        } else if selected == Some(false) {
+                            Ok(Control::Next)
+                        } else {
+                            this.generator_statement_block(body, interface, depth + 1, loops)
                         }
-                        Ok(Control::Abstract(flow))
-                    } else if selected == Some(false) {
-                        Ok(Control::Next)
+                    };
+                    if let Some(index_pat) = index_pat
+                        && !this.checking_code_generator
+                    {
+                        this.match_generator_tuple_index(value, index_pat, index, body, run_element)
                     } else {
-                        this.generator_statement_block(body, interface, depth + 1, loops)
+                        run_element(this)
                     }
                 })?;
                 if self.checking_code_generator {

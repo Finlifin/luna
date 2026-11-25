@@ -185,8 +185,11 @@ fn newtype_observe_inner(pat: &Pattern) -> Option<(&Pattern, &nir::program::Expr
     let Pattern::Then { first, value, next } = inner.as_ref() else {
         return None;
     };
-    let nir::program::ExprKind::NewtypeConvert(arg) = &value.kind else {
-        return None;
+    let arg = match &value.kind {
+        nir::program::ExprKind::NewtypeConvert(arg) | nir::program::ExprKind::ReadPointer(arg) => {
+            arg
+        }
+        _ => return None,
     };
     let nir::program::ExprKind::Local(source) = arg.kind else {
         return None;

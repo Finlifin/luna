@@ -210,15 +210,44 @@ impl Checker<'_, '_> {
         let mut pointer = if let Some(owner) = static_owner {
             self.static_pointer(owner, base.span)?
         } else {
-            let H::Deref(pointer) = &base.kind else {
-                return Ok(None);
+            let (inner, multi) = match &base.kind {
+                H::Deref(pointer) => (*pointer, false),
+                H::MultiDeref(pointer) => (*pointer, true),
+                _ => return Ok(None),
             };
             let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
-            let pointer = self.expr(pointer, None);
+            let pointer = self.expr(inner, None);
             self.allow_packed_pointer_projection = prev_allow;
-            let pointer = pointer?;
-            if !matches!(pointer.ty, Term::Pointer(_)) {
-                return Err(error(base.span, "dereference requires a pointer"));
+            let mut pointer = pointer?;
+            let shape = self.structural_type(&pointer.ty, base.span)?;
+            let Term::Pointer(mut pointee) = shape else {
+                return Err(error(
+                    base.span,
+                    if multi {
+                        "multi_deref requires a pointer"
+                    } else {
+                        "dereference requires a pointer"
+                    },
+                ));
+            };
+            if multi {
+                let mut depth = 0usize;
+                loop {
+                    let inner_shape = self.structural_type(&pointee, base.span)?;
+                    let Term::Pointer(next_pointee) = inner_shape else {
+                        break;
+                    };
+                    depth += 1;
+                    if depth >= 128 {
+                        return Err(error(base.span, "multi_deref depth exhausted"));
+                    }
+                    pointer = n::Expr {
+                        source: source(base.span),
+                        ty: (*pointee).clone(),
+                        kind: K::ReadPointer(Box::new(pointer)),
+                    };
+                    pointee = next_pointee;
+                }
             }
             pointer
         };

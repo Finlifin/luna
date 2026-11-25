@@ -559,12 +559,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
                 let fields_node = children[1];
                 let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
-                let field_pats = self.lower_candidate_fields(field_nodes);
+                let (field_pats, rest) = self.lower_candidate_fields(field_nodes, span);
                 let field_pats_slice = self.arena.alloc_field_pat_slice(field_pats);
 
                 Pattern {
                     hir_id: self.next_hir_id(),
-                    kind: PatternKind::Struct(callee_ref, field_pats_slice, false),
+                    kind: PatternKind::Struct(callee_ref, field_pats_slice, rest),
                     span,
                 }
             }
@@ -573,7 +573,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::StructPattern => {
                 let fields_node = children[0];
                 let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
-                let field_pats = self.lower_candidate_fields(field_nodes);
+                let (field_pats, rest) = self.lower_candidate_fields(field_nodes, span);
                 let field_pats_slice = self.arena.alloc_field_pat_slice(field_pats);
 
                 // Use an empty path for anonymous struct patterns
@@ -585,7 +585,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
                 Pattern {
                     hir_id: self.next_hir_id(),
-                    kind: PatternKind::Struct(wild, field_pats_slice, false),
+                    kind: PatternKind::Struct(wild, field_pats_slice, rest),
                     span,
                 }
             }
@@ -743,6 +743,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
             }
 
+            NodeKind::AsyncPattern => {
+                self.emit_invalid_pattern("async patterns are not supported", span);
+                self.make_error_pattern(span)
+            }
+
             other => {
                 self.emit_invalid_pattern(&format!("{:?}", other), span);
                 self.make_error_pattern(span)
@@ -752,10 +757,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Publish preceding fields only inside this candidate. Elaboration still
     /// checks that references are available in the declaration's match order.
-    fn lower_candidate_fields(&mut self, nodes: &[NodeIndex]) -> Vec<FieldPat<'hir>> {
+    fn lower_candidate_fields(
+        &mut self,
+        nodes: &[NodeIndex],
+        span: Span,
+    ) -> (Vec<FieldPat<'hir>>, bool) {
         let scope = self.local_enter(resolve::RibKind::MatchBody);
         let mut fields = Vec::with_capacity(nodes.len());
-        for &node in nodes {
+        let mut rest = false;
+        for (index, &node) in nodes.iter().enumerate() {
+            if self.ast.get_node_kind(node) == Some(NodeKind::StructRestPattern) {
+                if rest || index + 1 != nodes.len() {
+                    self.emit_malformed(
+                        "struct rest pattern `...` must occur once at the end",
+                        span,
+                    );
+                }
+                rest = true;
+                continue;
+            }
             let field = self.lower_field_pattern(node);
             let pattern_node = if self.ast.get_node_kind(node) == Some(NodeKind::PropertyPattern) {
                 self.ast.get_children(node)[1]
@@ -766,7 +786,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             fields.push(field);
         }
         self.local_exit(scope);
-        fields
+        (fields, rest)
     }
 
     /// Lower a field pattern node (`id: pattern`).
@@ -819,7 +839,8 @@ fn pattern_output_names(pattern: &Pattern<'_>) -> Vec<hir::common::Ident> {
             PatternKind::Guard(inner, _)
             | PatternKind::OptionSome(inner)
             | PatternKind::ErrorOk(inner)
-            | PatternKind::ErrorErr(inner) => pending.push(inner),
+            | PatternKind::ErrorErr(inner)
+            | PatternKind::Ref(inner) => pending.push(inner),
             PatternKind::List(fields, rest) => {
                 pending.extend(*fields);
                 if let Some(rest) = rest {

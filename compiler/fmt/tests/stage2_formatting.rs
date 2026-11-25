@@ -765,3 +765,21 @@ fn make() -> Tuple<Tuple<Tuple<bool, bool>, bool>, Tuple<bool, Tuple<Tuple<bool,
     assert!(got.contains("select(v) if"), "{got}");
     assert!(got.contains("_ => false,"), "{got}");
 }
+
+#[test]
+fn formats_struct_record_and_enum_three_dot_rest_patterns() {
+    let src = "\
+fn inspect(p: Point, r: Rec, m: Msg) -> bool {
+    let Point { x, ... } = p;
+    let { a, ... } = r;
+    m match {
+        .data { flag, ... } => flag,
+        .empty => false,
+    }
+}
+";
+    let got = fmt_ok(src);
+    assert!(got.contains("let Point { x, ... } = p;"), "{got}");
+    assert!(got.contains("let { a, ... } = r;"), "{got}");
+    assert!(got.contains(".data { flag, ... } => flag,"), "{got}");
+}

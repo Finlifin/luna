@@ -174,6 +174,41 @@ impl Checker<'_, '_> {
                 }
                 (target, K::BitConvert(Box::new(value)))
             }
+            H::MultiDeref(inner) => {
+                let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
+                let current = self.expr(inner, None);
+                self.allow_packed_pointer_projection = prev_allow;
+                let mut current = current?;
+                let mut depth = 0usize;
+                loop {
+                    let shape = self.structural_type(&current.ty, expr.span)?;
+                    let Term::Pointer(pointee) = shape else {
+                        if depth == 0 {
+                            return Err(error(expr.span, "multi_deref requires a pointer"));
+                        }
+                        break;
+                    };
+                    depth += 1;
+                    if depth > 128 {
+                        return Err(error(expr.span, "multi_deref depth exhausted"));
+                    }
+                    if !self.intrinsic_pointer_input(&pointee) && !self.copy_read_input(&pointee) {
+                        return Err(error(
+                            expr.span,
+                            "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
+                        ));
+                    }
+                    current = n::Expr {
+                        source: source(expr.span),
+                        ty: (*pointee).clone(),
+                        kind: K::ReadPointer(Box::new(current)),
+                    };
+                }
+                if let Some(expected) = expected {
+                    self.require_expression(&current.ty, expected, expr.span)?;
+                }
+                return Ok(current);
+            }
             H::TakeOld(value) => {
                 let Some(scope) = self
                     .old_scope

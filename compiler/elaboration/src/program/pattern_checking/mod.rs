@@ -770,9 +770,6 @@ impl Checker<'_, '_> {
                         "enum variant does not have named fields",
                     ));
                 };
-                if *rest {
-                    return Err(error(pattern.span, "enum rest binding is not implemented"));
-                }
                 let mut routed = vec![None; names.len()];
                 let mut seen = BTreeSet::new();
                 for field in *fields {
@@ -785,14 +782,25 @@ impl Checker<'_, '_> {
                     }
                     routed[slot] = Some(field);
                 }
+                let has_omitted = routed.iter().any(Option::is_none);
                 // Runtime field traversal follows declaration order, so candidate
                 // locals must become available to guards in that same order.
+                // Unmentioned fields act as wildcards whether omitted silently or via `...`.
                 let mut checked = Vec::with_capacity(routed.len());
                 for (slot, field) in routed.into_iter().enumerate() {
                     checked.push(match field {
                         Some(field) => self.pattern(&field.pat, &variant.fields[slot])?,
                         None => n::Pattern::Wild,
                     });
+                }
+                if *rest {
+                    self.check_rest_drop_partial_move(
+                        &variant_type,
+                        &checked,
+                        &variant.fields,
+                        has_omitted,
+                        pattern.span,
+                    )?;
                 }
                 Ok(n::Pattern::Variant {
                     declaration,
@@ -943,6 +951,61 @@ impl Checker<'_, '_> {
                 self.locals = exported;
                 Ok(n::Pattern::Or(alternatives))
             }
+            HP::Ref(inner) => {
+                let shape = self.structural_type(ty, pattern.span)?;
+                let Term::Pointer(pointee) = shape else {
+                    return Err(error(
+                        pattern.span,
+                        "ref pattern requires a pointer subject",
+                    ));
+                };
+                let staged = !self.in_code_body
+                    && self.captures.last().map(|frame| frame.comptime).unwrap_or_else(|| {
+                        self.in_required_comptime
+                            || self.in_staged_input
+                            || self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(
+                                |item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head),
+                            )
+                    });
+                let allowed = staged
+                    || matches!(&*pointee, Term::Pointer(_))
+                    || if self.protocols.copy.is_some() {
+                        self.is_copy_type_for_pattern(&pointee)
+                    } else {
+                        self.intrinsic_pointer_input(&pointee) || self.copy_read_input(&pointee)
+                    };
+                if !allowed {
+                    return Err(error(
+                        pattern.span,
+                        "ref pattern dereference requires Copy evidence or a pointer target",
+                    ));
+                }
+                let next = self.pattern(inner, &pointee)?;
+                let binding = self.spread_binding(pattern.span)?;
+                let subject = n::Expr {
+                    ty: ty.clone(),
+                    source: source(pattern.span),
+                    kind: K::Local(binding),
+                };
+                let deref = n::Expr {
+                    ty: (*pointee).clone(),
+                    source: source(pattern.span),
+                    kind: K::ReadPointer(Box::new(subject)),
+                };
+                Ok(n::Pattern::Observe {
+                    binding,
+                    inner: Box::new(n::Pattern::Then {
+                        first: Box::new(n::Pattern::Wild),
+                        value: Box::new(deref),
+                        next: Box::new(next),
+                    }),
+                })
+            }
+            HP::Async => Err(error(pattern.span, "async patterns are not supported")),
+            HP::Comptime(_) => Err(error(
+                pattern.span,
+                "comptime patterns are not supported; use `<expr>` for computed pattern constants",
+            )),
             _ => Err(error(
                 pattern.span,
                 "pattern view/protocol elaboration is not implemented for this pattern",
