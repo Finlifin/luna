@@ -136,6 +136,13 @@ struct CaseEntry {
 enum CaseCalleeKey {
     Instance(DeclarationId, Vec<Term>),
     Function(DeclarationId),
+    TraitMethod {
+        interface: DeclarationId,
+        interface_arguments: Vec<Term>,
+        method_arguments: Vec<Term>,
+        member: DeclarationId,
+        subject: Term,
+    },
     Other(String),
 }
 
@@ -146,7 +153,20 @@ fn callee_key(expr: &n::Expr) -> CaseCalleeKey {
             arguments,
         } => CaseCalleeKey::Instance(*declaration, arguments.clone()),
         n::ExprKind::Function(declaration) => CaseCalleeKey::Function(*declaration),
-        _ => CaseCalleeKey::Other(expr.to_string()),
+        n::ExprKind::TraitMethod {
+            interface,
+            interface_arguments,
+            method_arguments,
+            member,
+            subject,
+        } => CaseCalleeKey::TraitMethod {
+            interface: *interface,
+            interface_arguments: interface_arguments.clone(),
+            method_arguments: method_arguments.clone(),
+            member: *member,
+            subject: subject.clone(),
+        },
+        _ => CaseCalleeKey::Other(expr.kind.to_string()),
     }
 }
 
@@ -203,6 +223,23 @@ fn expr_equiv_ignoring_source(a: &n::Expr, b: &n::Expr) -> bool {
                     .all(|(x, y)| expr_equiv_ignoring_source(x, y))
         }
         (n::ExprKind::TypeValue(t1), n::ExprKind::TypeValue(t2)) => t1 == t2,
+        (n::ExprKind::OptionalAbsent, n::ExprKind::OptionalAbsent) => true,
+        (n::ExprKind::OptionalPresent(a), n::ExprKind::OptionalPresent(b))
+        | (n::ExprKind::IntegerNegate(a), n::ExprKind::IntegerNegate(b))
+        | (n::ExprKind::FloatNegate(a), n::ExprKind::FloatNegate(b))
+        | (n::ExprKind::NewtypeConvert(a), n::ExprKind::NewtypeConvert(b)) => {
+            expr_equiv_ignoring_source(a, b)
+        }
+        (
+            n::ExprKind::AnonymousRecord { fields: f1 },
+            n::ExprKind::AnonymousRecord { fields: f2 },
+        ) => {
+            f1.len() == f2.len()
+                && f1
+                    .iter()
+                    .zip(f2.iter())
+                    .all(|(x, y)| expr_equiv_ignoring_source(x, y))
+        }
         (
             n::ExprKind::FunctionInstance {
                 declaration: d1,

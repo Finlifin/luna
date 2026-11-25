@@ -21,6 +21,9 @@ pub struct Selectors<'a> {
     pub stable_list_pattern: Option<&'a str>,
     pub list_pattern_endless: Option<&'a str>,
     pub stable_list_pattern_endless: Option<&'a str>,
+    pub range_end: Option<&'a str>,
+    pub range_pattern: Option<&'a str>,
+    pub stable_range_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -58,6 +61,9 @@ impl Selectors<'_> {
                 self.stable_list_pattern,
                 self.list_pattern_endless,
                 self.stable_list_pattern_endless,
+                self.range_end,
+                self.range_pattern,
+                self.stable_range_pattern,
                 self.literal_into,
                 self.handle_error,
                 self.splice,
@@ -255,6 +261,16 @@ pub(crate) fn resolve_source(
                 &mut result.stable_list_pattern_endless,
             ),
             (
+                "RangePatternView".into(),
+                selectors.range_pattern,
+                &mut result.range_pattern,
+            ),
+            (
+                "StableRangePatternView".into(),
+                selectors.stable_range_pattern,
+                &mut result.stable_range_pattern,
+            ),
+            (
                 "LiteralInto".into(),
                 selectors.literal_into,
                 &mut result.literal_into,
@@ -415,6 +431,42 @@ pub(crate) fn resolve_source(
         }
         *target = Some(*id);
     }
+    if let Some(selector) = selectors.range_end {
+        let parts = selector.split(".").collect::<Vec<_>>();
+        if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+            return Err("RangeEnd selector requires package.enum or package.module.enum".into());
+        }
+        let providers = packages
+            .iter()
+            .filter(|(_, _, name)| *name == parts[0])
+            .collect::<Vec<_>>();
+        let [provider] = providers.as_slice() else {
+            return Err("RangeEnd selector package is missing or ambiguous".into());
+        };
+        let owner = paths
+            .resolve(provider.0, &parts[1..])
+            .ok_or_else(|| "RangeEnd selector is missing or ambiguous".to_string())?;
+        if !hir
+            .item(owner)
+            .is_some_and(|item| matches!(item.kind, hir::ItemKind::Enum(_)))
+        {
+            return Err("RangeEnd selector requires an enum".into());
+        }
+        let definition = hir
+            .owner_definition(owner)
+            .ok_or("RangeEnd has no source identity")?;
+        let id = nir::DeclarationId {
+            package: provider.1,
+            local: definition.index,
+        };
+        if result.range_end.is_some_and(|previous| previous != id) {
+            return Err("RangeEnd selector conflicts with the driver's bound identity".into());
+        }
+        result.range_end = Some(id);
+    }
+    if result.range_pattern.is_some() && result.range_end.is_none() {
+        return Err("RangePatternView binding requires a RangeEnd binding".into());
+    }
     if result.tuple.is_some() && result.meta_list.is_none() {
         return Err("Tuple binding requires a meta.List binding".into());
     }
@@ -502,6 +554,9 @@ pub(crate) struct SysrootBindings {
     stable_list_pattern: Option<String>,
     list_pattern_endless: Option<String>,
     stable_list_pattern_endless: Option<String>,
+    range_end: Option<String>,
+    range_pattern: Option<String>,
+    stable_range_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
@@ -596,6 +651,9 @@ impl SysrootBindings {
                 "stable-list-pattern-protocol" => &mut result.stable_list_pattern,
                 "list-pattern-endless-protocol" => &mut result.list_pattern_endless,
                 "stable-list-pattern-endless-protocol" => &mut result.stable_list_pattern_endless,
+                "range-end-type" => &mut result.range_end,
+                "range-pattern-protocol" => &mut result.range_pattern,
+                "stable-range-pattern-protocol" => &mut result.stable_range_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
@@ -769,6 +827,27 @@ impl SysrootBindings {
                     .stable_list_pattern_endless
                     .is_none()
                     .then_some(self.stable_list_pattern_endless.as_deref())
+                    .flatten()
+            }),
+            range_end: explicit.range_end.or_else(|| {
+                identities
+                    .range_end
+                    .is_none()
+                    .then_some(self.range_end.as_deref())
+                    .flatten()
+            }),
+            range_pattern: explicit.range_pattern.or_else(|| {
+                identities
+                    .range_pattern
+                    .is_none()
+                    .then_some(self.range_pattern.as_deref())
+                    .flatten()
+            }),
+            stable_range_pattern: explicit.stable_range_pattern.or_else(|| {
+                identities
+                    .stable_range_pattern
+                    .is_none()
+                    .then_some(self.stable_range_pattern.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1089,6 +1168,18 @@ mod repository_bindings_tests {
             bindings.equality.as_deref(),
             Some("builtin.numeric.comparison.Eq")
         );
+        assert_eq!(
+            bindings.range_end.as_deref(),
+            Some("builtin.protocols.patterns.RangeEnd")
+        );
+        assert_eq!(
+            bindings.range_pattern.as_deref(),
+            Some("builtin.protocols.patterns.RangePatternView")
+        );
+        assert_eq!(
+            bindings.stable_range_pattern.as_deref(),
+            Some("builtin.protocols.patterns.StableRangePatternView")
+        );
         for (operator, declaration) in [
             (elaboration::arithmetic::Operator::Add, "Add"),
             (elaboration::arithmetic::Operator::Subtract, "Sub"),
@@ -1150,6 +1241,9 @@ mod stage_tests {
             stable_list_pattern_protocol: None,
             list_pattern_endless_protocol: None,
             stable_list_pattern_endless_protocol: None,
+            range_end_type: None,
+            range_pattern_protocol: None,
+            stable_range_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,

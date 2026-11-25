@@ -76,3 +76,49 @@ pub trait ListPatternViewEndless {
     single-observation decision DAGs and prefix exhaustiveness proofs.
 -}
 pub trait StableListPatternViewEndless :- ListPatternViewEndless {}
+
+{-
+    Unified range endpoint descriptor used by `RangePatternView` to cover all
+    five bounded and half-bounded range pattern forms (`..hi`, `..=hi`,
+    `lo..`, `lo..hi`, `lo..=hi`).
+-}
+pub enum RangeEnd where T {
+    unbounded,
+    inclusive(T),
+    exclusive(T),
+}
+
+{-
+    Range pattern view protocol (single-trait two-phase).
+    Runtime context invokes `range_pattern_view_contains` with `*self` and
+    `RangeEnd<Bound>`; comptime context invokes
+    `range_pattern_view_contains_comptime` with `self` and
+    `RangeEnd<BoundComptime>`.
+-}
+pub trait RangePatternView {
+    assoc Bound: Type = Self;
+
+    fn range_pattern_view_contains(
+        *self,
+        start: RangeEnd<Bound>,
+        end: RangeEnd<Bound>,
+    ) -> bool;
+
+    ^attrs.comptime_phase
+    assoc BoundComptime: Type = Self;
+
+    ^attrs.comptime_phase
+    comptime fn range_pattern_view_contains_comptime(
+        self,
+        start: RangeEnd<BoundComptime>,
+        end: RangeEnd<BoundComptime>,
+    ) -> bool;
+}
+
+{-
+    Marker protocol guaranteeing that range pattern containment is
+    referentially stable and monotonic across match arms without side effects,
+    authorizing decision-DAG deduplication when endpoints are static
+    constants.
+-}
+pub trait StableRangePatternView :- RangePatternView {}

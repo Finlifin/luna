@@ -33,6 +33,9 @@ pub struct Options {
     pub stable_list_pattern_protocol: Option<String>,
     pub list_pattern_endless_protocol: Option<String>,
     pub stable_list_pattern_endless_protocol: Option<String>,
+    pub range_end_type: Option<String>,
+    pub range_pattern_protocol: Option<String>,
+    pub stable_range_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub index_protocol: Option<String>,
@@ -192,6 +195,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut stable_list_pattern_protocol = None;
     let mut list_pattern_endless_protocol = None;
     let mut stable_list_pattern_endless_protocol = None;
+    let mut range_end_type = None;
+    let mut range_pattern_protocol = None;
+    let mut stable_range_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut index_protocol = None;
@@ -649,6 +655,45 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--range-end-type") => {
+                    if range_end_type.is_some() {
+                        return Err("--range-end-type may only be specified once".into());
+                    }
+                    range_end_type = Some(
+                        option_value(&mut args, "--range-end-type")?
+                            .into_string()
+                            .map_err(|_| "RangeEnd type selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--range-pattern-protocol") => {
+                    if range_pattern_protocol.is_some() {
+                        return Err("--range-pattern-protocol may only be specified once".into());
+                    }
+                    range_pattern_protocol = Some(
+                        option_value(&mut args, "--range-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "RangePatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--stable-range-pattern-protocol") => {
+                    if stable_range_pattern_protocol.is_some() {
+                        return Err(
+                            "--stable-range-pattern-protocol may only be specified once".into()
+                        );
+                    }
+                    stable_range_pattern_protocol = Some(
+                        option_value(&mut args, "--stable-range-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StableRangePatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -983,6 +1028,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         stable_list_pattern_protocol,
         list_pattern_endless_protocol,
         stable_list_pattern_endless_protocol,
+        range_end_type,
+        range_pattern_protocol,
+        stable_range_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         index_protocol,
@@ -1151,6 +1199,9 @@ mod tests {
                 stable_list_pattern_protocol: None,
                 list_pattern_endless_protocol: None,
                 stable_list_pattern_endless_protocol: None,
+                range_end_type: None,
+                range_pattern_protocol: None,
+                stable_range_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1193,6 +1244,9 @@ mod tests {
                 stable_list_pattern_protocol: None,
                 list_pattern_endless_protocol: None,
                 stable_list_pattern_endless_protocol: None,
+                range_end_type: None,
+                range_pattern_protocol: None,
+                stable_range_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,

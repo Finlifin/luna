@@ -34,6 +34,7 @@ pub mod arithmetic;
 
 pub mod indexing;
 pub mod list_patterns;
+pub mod range_patterns;
 
 pub mod literal_conversion;
 

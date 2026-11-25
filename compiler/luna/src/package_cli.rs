@@ -232,6 +232,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--stable-list-pattern-protocol"
                 | "--list-pattern-endless-protocol"
                 | "--stable-list-pattern-endless-protocol"
+                | "--range-end-type"
+                | "--range-pattern-protocol"
+                | "--stable-range-pattern-protocol"
                 | "--index-protocol"
                 | "--ord-protocol"
                 | "--eq-protocol"
@@ -753,6 +756,9 @@ impl Request {
                 stable_list_pattern_endless: options
                     .stable_list_pattern_endless_protocol
                     .as_deref(),
+                range_end: options.range_end_type.as_deref(),
+                range_pattern: options.range_pattern_protocol.as_deref(),
+                stable_range_pattern: options.stable_range_pattern_protocol.as_deref(),
                 iterator: options.iterator_protocol.as_deref(),
                 into_iterator: options.into_iterator_protocol.as_deref(),
                 index: options.index_protocol.as_deref(),

@@ -38,8 +38,11 @@ pub use option.OptionalOps;
 pub use patterns.{
     ListPatternView,
     ListPatternViewEndless,
+    RangeEnd,
+    RangePatternView,
     StableListPatternView,
     StableListPatternViewEndless,
+    StableRangePatternView,
 }
 pub use primitives.*;
 pub use protocols.staging.{Splice, splice_auto};
@@ -92,11 +95,14 @@ pub mod prelude {
     pub use ops.*;
     pub use option.OptionalOps;
     pub use patterns.{
-    ListPatternView,
-    ListPatternViewEndless,
-    StableListPatternView,
-    StableListPatternViewEndless,
-}
+        ListPatternView,
+        ListPatternViewEndless,
+        RangeEnd,
+        RangePatternView,
+        StableListPatternView,
+        StableListPatternViewEndless,
+        StableRangePatternView,
+    }
     pub use primitives.*;
     pub use protocols.staging.{Splice, splice_auto};
     pub use result.ErrorResultOps;

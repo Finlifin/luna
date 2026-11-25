@@ -329,6 +329,9 @@ pub struct Protocols {
     pub stable_list_pattern: Option<DeclarationId>,
     pub list_pattern_endless: Option<DeclarationId>,
     pub stable_list_pattern_endless: Option<DeclarationId>,
+    pub range_end: Option<DeclarationId>,
+    pub range_pattern: Option<DeclarationId>,
+    pub stable_range_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
@@ -1494,6 +1497,34 @@ fn elaborate_candidate<'a, 'h>(
             &checker.checked_traits,
             id,
             checker.protocols.list_pattern_endless,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.range_end {
+        let span = checker
+            .source_declarations
+            .item(id)
+            .map(|item| item.span)
+            .unwrap_or(rustc_span::DUMMY_SP);
+        checker.ensure_nominal_type(
+            &Term::Nominal {
+                declaration: id,
+                arguments: vec![],
+            },
+            span,
+        )?;
+        crate::range_patterns::validate_range_end(&checker.enums, id)
+            .map_err(|reason| error(span, reason))?;
+    }
+    if let Some(id) = checker.protocols.range_pattern {
+        crate::range_patterns::protocol(&checker.checked_traits, id, checker.protocols.range_end)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.stable_range_pattern {
+        crate::range_patterns::stable_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.range_pattern,
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }

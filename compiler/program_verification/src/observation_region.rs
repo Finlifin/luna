@@ -255,6 +255,7 @@ pub(super) fn check(
             | K::Local(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
+            | K::TraitMethod { .. }
             | K::Field { .. }
             | K::AnonymousField { .. }
             | K::AddressOf(_)
