@@ -264,6 +264,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--stable-struct-pattern-protocol"
                     | "--type-pattern-protocol"
                     | "--literal-into-protocol"
+                    | "--implies-protocol"
+                    | "--comptime-implies-protocol"
                     | "--deref-protocol"
                     | "--deref-mut-protocol"
                     | "--reference-protocol"

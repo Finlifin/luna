@@ -123,6 +123,8 @@ pub(crate) fn compile_explicit_source_with_bindings(
                 .extended_variadic_collector
                 .map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),
+            implies_protocol: selectors.implies.map(str::to_owned),
+            comptime_implies_protocol: selectors.comptime_implies.map(str::to_owned),
             deref_protocol: selectors.deref.map(str::to_owned),
             deref_mut_protocol: selectors.deref_mut.map(str::to_owned),
             reference_protocol: selectors.reference.map(str::to_owned),

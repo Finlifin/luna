@@ -123,7 +123,14 @@ impl<'h> Frame<'h> {
                 // Signed literal formation must not first fit the positive
                 // magnitude into the destination's signed range.
                 let signed_literal = self.operator == crate::arithmetic::Operator::Negate
-                    && is_numeric_literal(self.operand);
+                    && (is_numeric_literal(self.operand)
+                        || checker
+                            .atomic_negative_signed_literal(
+                                self.operand,
+                                self.destination.expected(),
+                                self.source.span,
+                            )?
+                            .is_some());
                 if !signed_literal && self.protocol.is_some() {
                     self.phase = Phase::Select;
                     return self.request(checker, true);
@@ -163,13 +170,19 @@ impl<'h> Frame<'h> {
                 // Nested negation still checks the inner operator normally.
                 // Only an immediate literal is formed together with its sign.
                 let immediate_literal = self.operator == crate::arithmetic::Operator::Negate
-                    && matches!(
+                    && (matches!(
                         self.operand.kind,
                         H::Lit(hir::Lit {
                             kind: hir::LitKind::Integer(_) | hir::LitKind::Float(_),
                             ..
                         })
-                    );
+                    ) || checker
+                        .atomic_negative_signed_literal(
+                            self.operand,
+                            self.destination.expected(),
+                            self.source.span,
+                        )?
+                        .is_some());
                 self.phase = Phase::Complete;
                 if self.checked.is_none() && !immediate_literal {
                     return self.request(checker, false);

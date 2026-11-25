@@ -307,8 +307,8 @@ fn cross_language_operator_and_syntax_habits_give_targeted_flurry_guidance() {
         "not",
     );
     assert_error_with_code("fn f() -> bool { a !== b }", PARSE_FOREIGN_HABIT, "!=");
-    // Note: `===` is Flurry's own `BoolImplies` operator (`TokenKind::EqEqEq`) and must stay valid!
-    assert_clean("fn f(p: bool, q: bool) -> bool { p === q }");
+    // Note: `==>` is Flurry's `BoolImplies` operator (`TokenKind::EqEqEq`).
+    assert_clean("fn f(p: bool, q: bool) -> bool { p ==> q }");
 
     // Pattern alternatives & conjunctions
     assert_error_with_code(

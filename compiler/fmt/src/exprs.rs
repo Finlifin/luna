@@ -1417,13 +1417,7 @@ impl<'a> Formatter<'a> {
             NodeKind::BoolGtEq => ">=",
             NodeKind::BoolLt => "<",
             NodeKind::BoolLtEq => "<=",
-            NodeKind::BoolImplies => {
-                if self.parsed.bridge.implies_offsets.contains(&op_byte) {
-                    "==>"
-                } else {
-                    "==="
-                }
-            }
+            NodeKind::BoolImplies => "==>",
             NodeKind::Arrow => "->",
             NodeKind::Subtype => "<:",
             NodeKind::TraitBound => {
@@ -2606,6 +2600,7 @@ fn binary_prec(kind: NodeKind) -> i32 {
         NodeKind::BoolImplies => 10,
         NodeKind::BoolOr => 20,
         NodeKind::BoolAnd => 30,
+        NodeKind::PipePrepend => 35,
         NodeKind::BoolEq
         | NodeKind::BoolNotEq
         | NodeKind::BoolGt
@@ -2619,7 +2614,7 @@ fn binary_prec(kind: NodeKind) -> i32 {
         NodeKind::Arrow => 50,
         NodeKind::Add | NodeKind::Sub => 60,
         NodeKind::Mul | NodeKind::Div | NodeKind::Mod | NodeKind::AddAdd => 70,
-        NodeKind::Pipe | NodeKind::PipePrepend => 80,
+        NodeKind::Pipe => 80,
         _ => -1,
     }
 }

@@ -105,7 +105,6 @@ fn is_keyword(kind: TokenKind) -> bool {
             | TokenKind::Const
             | TokenKind::Continue
             | TokenKind::Decreases
-            | TokenKind::Default
             | TokenKind::Define
             | TokenKind::Derive
             | TokenKind::Do

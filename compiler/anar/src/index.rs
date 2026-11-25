@@ -3781,7 +3781,6 @@ pub fn is_keyword_token(kind: TokenKind) -> bool {
             | TokenKind::Const
             | TokenKind::Continue
             | TokenKind::Decreases
-            | TokenKind::Default
             | TokenKind::Define
             | TokenKind::Derive
             | TokenKind::Do

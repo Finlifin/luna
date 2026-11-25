@@ -166,6 +166,7 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Implies,
 }
 
 impl fmt::Display for BinOp {
@@ -185,6 +186,7 @@ impl fmt::Display for BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "and",
             BinOp::Or => "or",
+            BinOp::Implies => "==>",
         })
     }
 }

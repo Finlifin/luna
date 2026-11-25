@@ -443,7 +443,7 @@ impl Parser<'_> {
             while p.eat_token(TokenKind::Dot) {
                 let next = p.peek_next_token();
                 match next.kind {
-                    TokenKind::Id | TokenKind::Default => {
+                    TokenKind::Id => {
                         let id = p.try_member_id()?;
                         left = NodeBuilder::new(NodeKind::ProjectionPath, p.current_span())
                             .add_single_child(left)

@@ -281,7 +281,7 @@ impl<'a> Lexer<'a> {
                 match self.current_char() {
                     Some('=') => {
                         self.advance();
-                        if let Some('=') = self.current_char() {
+                        if let Some('>') = self.current_char() {
                             self.advance();
                             Ok(Token::new(TokenKind::EqEqEq, start, self.cursor))
                         } else {

@@ -241,6 +241,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--ord-protocol"
                 | "--eq-protocol"
                 | "--literal-into-protocol"
+                | "--implies-protocol"
+                | "--comptime-implies-protocol"
                 | "--deref-protocol"
                 | "--deref-mut-protocol"
                 | "--reference-protocol"
@@ -784,6 +786,8 @@ impl Request {
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),
                 literal_into: options.literal_into_protocol.as_deref(),
+                implies: options.implies_protocol.as_deref(),
+                comptime_implies: options.comptime_implies_protocol.as_deref(),
                 deref: options.deref_protocol.as_deref(),
                 deref_mut: options.deref_mut_protocol.as_deref(),
                 reference: options.reference_protocol.as_deref(),

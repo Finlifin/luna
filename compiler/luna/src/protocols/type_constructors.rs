@@ -34,6 +34,8 @@ pub struct Selectors<'a> {
     pub stable_struct_pattern: Option<&'a str>,
     pub type_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
+    pub implies: Option<&'a str>,
+    pub comptime_implies: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub deref: Option<&'a str>,
     pub deref_mut: Option<&'a str>,
@@ -89,6 +91,8 @@ impl Selectors<'_> {
                 self.stable_struct_pattern,
                 self.type_pattern,
                 self.literal_into,
+                self.implies,
+                self.comptime_implies,
                 self.handle_error,
                 self.deref,
                 self.deref_mut,
@@ -349,6 +353,12 @@ pub(crate) fn resolve_source(
                 "LiteralInto".into(),
                 selectors.literal_into,
                 &mut result.literal_into,
+            ),
+            ("Implies".into(), selectors.implies, &mut result.implies),
+            (
+                "ComptimeImplies".into(),
+                selectors.comptime_implies,
+                &mut result.comptime_implies,
             ),
             (
                 "HandleError".into(),
@@ -710,6 +720,8 @@ pub(crate) struct SysrootBindings {
     variadic_collector: Option<String>,
     extended_variadic_collector: Option<String>,
     literal_into: Option<String>,
+    implies: Option<String>,
+    comptime_implies: Option<String>,
     handle_error: Option<String>,
     deref: Option<String>,
     deref_mut: Option<String>,
@@ -822,6 +834,8 @@ impl SysrootBindings {
                 "variadic-collector-protocol" => &mut result.variadic_collector,
                 "extended-variadic-collector-protocol" => &mut result.extended_variadic_collector,
                 "literal-into-protocol" => &mut result.literal_into,
+                "implies-protocol" => &mut result.implies,
+                "comptime-implies-protocol" => &mut result.comptime_implies,
                 "handle-error-protocol" => &mut result.handle_error,
                 "deref-protocol" => &mut result.deref,
                 "deref-mut-protocol" => &mut result.deref_mut,
@@ -1103,6 +1117,20 @@ impl SysrootBindings {
                     .literal_into
                     .is_none()
                     .then_some(self.literal_into.as_deref())
+                    .flatten()
+            }),
+            implies: explicit.implies.or_else(|| {
+                identities
+                    .implies
+                    .is_none()
+                    .then_some(self.implies.as_deref())
+                    .flatten()
+            }),
+            comptime_implies: explicit.comptime_implies.or_else(|| {
+                identities
+                    .comptime_implies
+                    .is_none()
+                    .then_some(self.comptime_implies.as_deref())
                     .flatten()
             }),
             handle_error: explicit.handle_error.or_else(|| {
@@ -1532,6 +1560,8 @@ mod stage_tests {
             variadic_collector_protocol: None,
             extended_variadic_collector_protocol: None,
             literal_into_protocol: None,
+            implies_protocol: None,
+            comptime_implies_protocol: None,
             deref_protocol: None,
             deref_mut_protocol: None,
             reference_protocol: None,

@@ -4,6 +4,18 @@ use super::*;
 
 pub(in crate::program) mod peers;
 
+pub(super) fn builtin_signed_integer_suffix(suffix: &str) -> Option<P> {
+    match suffix {
+        "i8" => Some(P::I8),
+        "i16" => Some(P::I16),
+        "i32" => Some(P::I32),
+        "i64" => Some(P::I64),
+        "i128" => Some(P::I128),
+        "isize" => Some(P::Isize),
+        _ => None,
+    }
+}
+
 pub(super) fn native_arithmetic_operand(
     op: &BinOp,
     shape: &Term,
@@ -96,6 +108,68 @@ impl Checker<'_, '_> {
 
     pub(super) fn proved_float_family(&self, ty: &Term) -> bool {
         self.proved_primitive_family(ty, &[P::F16, P::Bf16, P::F32, P::F64])
+    }
+
+    pub(super) fn atomic_negative_signed_literal<'h>(
+        &self,
+        operand: &'h Expr<'h>,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<Option<(&'h str, P)>, Error> {
+        let H::LiteralConversion { literal, suffix } = &operand.kind else {
+            return Ok(None);
+        };
+        let H::Lit(hir::Lit {
+            kind: hir::LitKind::Integer(spelling),
+            ..
+        }) = &literal.kind
+        else {
+            return Ok(None);
+        };
+        let Some(prim) = builtin_signed_integer_suffix(suffix.name.as_str()) else {
+            return Ok(None);
+        };
+        let Some(protocol) = self.protocols.literal_into else {
+            return Ok(None);
+        };
+        if let Some(exp) = expected
+            && *exp != p(prim)
+        {
+            let custom = self
+                .resolve_trait_capability(
+                    &n::InterfaceInstance {
+                        declaration: protocol,
+                        arguments: vec![Term::Symbol(suffix.name.as_str().into()), exp.clone()],
+                    },
+                    &p(P::Integer),
+                    crate::ptc::Budget::default(),
+                )
+                .map_err(|reason| error(span, reason))?;
+            if matches!(
+                custom.selection,
+                crate::implementation::Selection::Selected(_)
+            ) {
+                return Ok(None);
+            }
+        }
+        let standard = self
+            .resolve_trait_capability(
+                &n::InterfaceInstance {
+                    declaration: protocol,
+                    arguments: vec![Term::Symbol(suffix.name.as_str().into()), p(prim)],
+                },
+                &p(P::Integer),
+                crate::ptc::Budget::default(),
+            )
+            .map_err(|reason| error(span, reason))?;
+        if matches!(
+            standard.selection,
+            crate::implementation::Selection::Selected(_)
+        ) {
+            Ok(Some((spelling, prim)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn proved_signed_integer_family(&self, ty: &Term) -> bool {
@@ -203,6 +277,17 @@ impl Checker<'_, '_> {
                     unreachable!()
                 };
                 let value = self.integer_proxy(spelling, true, expected, expr.span)?;
+                (value.ty, value.kind)
+            }
+            H::Unary(UnOp::Neg, value)
+                if self
+                    .atomic_negative_signed_literal(value, expected, expr.span)?
+                    .is_some() =>
+            {
+                let (spelling, prim) = self
+                    .atomic_negative_signed_literal(value, expected, expr.span)?
+                    .expect("validated atomic negative signed integer literal");
+                let value = self.integer_proxy(spelling, true, Some(&p(prim)), expr.span)?;
                 (value.ty, value.kind)
             }
             H::Unary(UnOp::Neg, value)
@@ -370,7 +455,12 @@ impl Checker<'_, '_> {
         // Bool short-circuits; BitVec evaluates both operands. Checking a
         // child's domain does not authorize changing its execution position.
         let evaluates_right = if operand_ty == p(P::Bool) {
-            super::control::boolean(&left) == Some(op == BinOp::And)
+            match op {
+                BinOp::And => super::control::boolean(&left) == Some(true),
+                BinOp::Or => super::control::boolean(&left) == Some(false),
+                BinOp::Implies => super::control::boolean(&left) == Some(true),
+                _ => unreachable!(),
+            }
         } else {
             matches!(operand_ty, Term::Primitive(P::BitVec(_)))
         };
@@ -382,14 +472,90 @@ impl Checker<'_, '_> {
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;
         }
+        let kind = match op {
+            BinOp::And => K::And(Box::new(left), Box::new(right)),
+            BinOp::Or => K::Or(Box::new(left), Box::new(right)),
+            BinOp::Implies => {
+                let negated_left = n::Expr {
+                    ty: p(P::Bool),
+                    source: left.source,
+                    kind: K::Not(Box::new(left)),
+                };
+                K::Or(Box::new(negated_left), Box::new(right))
+            }
+            _ => unreachable!(),
+        };
         Ok(n::Expr {
             ty,
             source: source(expr.span),
-            kind: if op == BinOp::And {
-                K::And(Box::new(left), Box::new(right))
+            kind,
+        })
+    }
+
+    pub(super) fn selected_implies_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        use crate::ptc::{Budget, Formula, Outcome};
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        if comptime && let Some(ct_proto) = self.protocols.comptime_implies {
+            let scope = self.call_inference_domains();
+            let frames = if scope.is_empty() {
+                vec![]
             } else {
-                K::Or(Box::new(left), Box::new(right))
-            },
+                vec![scope.iter().map(|p| p.0).collect()]
+            };
+            let has_assumption = crate::capabilities::capability_sources_with_layouts(
+                &self.checked_traits,
+                &self.capability_assumptions(),
+                Budget::default(),
+                &frames,
+                self.implementation_index.parameter_domains(),
+                Some(self.implementation_index.nominal_layouts()),
+            )
+            .map_err(|reason| error(span, reason))?
+            .into_iter()
+            .any(|capability| {
+                capability.interface == ct_proto
+                    && (capability.subject == *subject
+                        || matches!(
+                            self.context.prove(
+                                Formula::equal(capability.subject, subject.clone()),
+                                Budget::default(),
+                            ),
+                            Outcome::Entailed(_)
+                        ))
+            });
+            let has_impl = if has_assumption {
+                true
+            } else if let Some(interface) = self.checked_traits.by_id(ct_proto)
+                && let [rhs] = interface.type_parameters.as_slice()
+            {
+                let wildcard = Term::Rigid {
+                    declaration: *rhs,
+                    sort: Sort::Type,
+                };
+                !self
+                    .implementation_index
+                    .candidates(Some(ct_proto), &[wildcard], subject, Budget::default())
+                    .map_err(|reason| {
+                        error(span, format!("Implies candidate query failed: {reason:?}"))
+                    })?
+                    .declarations()
+                    .is_empty()
+            } else {
+                false
+            };
+            if has_impl || self.protocols.implies.is_none() {
+                return Ok(ct_proto);
+            }
+        }
+        self.protocols.implies.ok_or_else(|| {
+            error(
+                span,
+                "`==>` on non-bool operands requires a bound Implies protocol",
+            )
         })
     }
 

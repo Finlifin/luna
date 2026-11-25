@@ -912,6 +912,8 @@ fn all_resolved_protocols_in(
         protocols.stable_struct_pattern,
         protocols.type_pattern,
         protocols.literal_into,
+        protocols.implies,
+        protocols.comptime_implies,
         protocols.handle_error,
         protocols.deref,
         protocols.deref_mut,

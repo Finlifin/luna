@@ -188,10 +188,9 @@ impl Parser<'_> {
                         // 消耗操作符标记
                         p.eat_tokens(1);
 
-                        // A function's result is itself a complete type:
-                        // fn() -> fn() -> T nests on the right. Other binary
-                        // operators retain their existing left association.
-                        let right_prec = if token.kind == TokenKind::Arrow {
+                        // A function's result is itself a complete type (`->`), and logical
+                        // implication (`==>`) associates to the right.
+                        let right_prec = if matches!(token.kind, TokenKind::Arrow | TokenKind::EqEqEq) {
                             op_info.prec
                         } else {
                             op_info.prec + 1

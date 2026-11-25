@@ -48,6 +48,8 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         variadic_collector_protocol: None,
         extended_variadic_collector_protocol: None,
         literal_into_protocol: None,
+        implies_protocol: None,
+        comptime_implies_protocol: None,
         deref_protocol: None,
         deref_mut_protocol: None,
         reference_protocol: None,

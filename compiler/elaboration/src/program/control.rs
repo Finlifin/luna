@@ -26,6 +26,7 @@ pub(super) enum ReturnObservations {
     Infer(Vec<Term>),
     Deferred,
 }
+
 impl ReturnObservations {
     pub(super) fn iter(&self) -> std::slice::Iter<'_, Term> {
         match self {
@@ -33,6 +34,7 @@ impl ReturnObservations {
             Self::Deferred => [].iter(),
         }
     }
+
     pub(super) fn push(&mut self, ty: Term) {
         if let Self::Infer(types) = self {
             types.push(ty);
@@ -58,6 +60,9 @@ pub(super) fn source_boolean(expr: &Expr<'_>, fuel: &mut u64, depth: usize) -> O
         }
         H::Binary(BinOp::Or, left, right) => {
             Some(source_boolean(left, fuel, depth + 1)? || source_boolean(right, fuel, depth + 1)?)
+        }
+        H::Binary(BinOp::Implies, left, right) => {
+            Some(!source_boolean(left, fuel, depth + 1)? || source_boolean(right, fuel, depth + 1)?)
         }
         _ => None,
     }

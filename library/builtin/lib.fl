@@ -3,7 +3,7 @@
   Public root re-exports also supply names to builtin's own child modules.
   The prelude supplies default imports to other packages.
 -}
-use numeric.{comparison, conversions, math_intrinsics}
+use numeric.{comparison, conversions, literals, math_intrinsics}
 use protocols.capabilities.{effects as capability_effects, errors as capability_errors}
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
 use protocols.{conversion, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}

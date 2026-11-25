@@ -1,6 +1,6 @@
 # 基础协议
 
-现有资源（Once/Clone/Copy/Drop）、转换、语法制导 pattern view、运算、迭代和 Hash/Default 协议归这里。协议跨 comptime/runtime 的适用范围由声明确定，不按调用阶段复制 trait。容器实现与分配策略属于 std。
+现有资源（Once/Clone/Copy/Drop）、转换、语法制导 pattern view、运算、迭代和 Hash/Default 协议归这里。两阶段分治遵循统一策略：用户会在 comptime 与 runtime 直接调用的同名协议（如 Eq/Ord/Hash/Add..Not/Implies/Default 等）由 runtime trait 与 meta 中的 `pure comptime trait Comptime*` 分别承担；仅由编译器分派的协议（如 pattern view、VariadicCollector 等）在单 trait 内以 `^attrs.comptime_phase` 提供 comptime phase 实现。容器实现与分配策略属于 std。
 
 ## 可失败的迭代消费
 

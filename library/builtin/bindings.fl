@@ -146,6 +146,18 @@ const try_isize_to_i32_operation: fn(isize) -> ?i32 = .try_integer_convert'built
 const try_isize_to_i64_operation: fn(isize) -> ?i64 = .try_integer_convert'builtin;
 const try_isize_to_i128_operation: fn(isize) -> ?i128 = .try_integer_convert'builtin;
 const try_u32_to_char_operation: fn(u32) -> ?char = .try_integer_convert'builtin;
+const integer_to_u8_operation: comptime fn(Integer) -> u8 = .comptime_integer_convert'builtin;
+const integer_to_u16_operation: comptime fn(Integer) -> u16 = .comptime_integer_convert'builtin;
+const integer_to_u32_operation: comptime fn(Integer) -> u32 = .comptime_integer_convert'builtin;
+const integer_to_u64_operation: comptime fn(Integer) -> u64 = .comptime_integer_convert'builtin;
+const integer_to_u128_operation: comptime fn(Integer) -> u128 = .comptime_integer_convert'builtin;
+const integer_to_usize_operation: comptime fn(Integer) -> usize = .comptime_integer_convert'builtin;
+const integer_to_i8_operation: comptime fn(Integer) -> i8 = .comptime_integer_convert'builtin;
+const integer_to_i16_operation: comptime fn(Integer) -> i16 = .comptime_integer_convert'builtin;
+const integer_to_i32_operation: comptime fn(Integer) -> i32 = .comptime_integer_convert'builtin;
+const integer_to_i64_operation: comptime fn(Integer) -> i64 = .comptime_integer_convert'builtin;
+const integer_to_i128_operation: comptime fn(Integer) -> i128 = .comptime_integer_convert'builtin;
+const integer_to_isize_operation: comptime fn(Integer) -> isize = .comptime_integer_convert'builtin;
 
 {-
     Select compiler operation identities as explicit comptime inputs. The public
@@ -706,4 +718,52 @@ pub fn try_isize_to_i128(value: isize) -> ?i128 {
 
 pub fn try_u32_to_char(value: u32) -> ?char {
     invoke_one(try_u32_to_char_operation, value)
+}
+
+pub pure comptime fn integer_to_u8(value: Integer) -> u8 {
+    integer_to_u8_operation(value)
+}
+
+pub pure comptime fn integer_to_u16(value: Integer) -> u16 {
+    integer_to_u16_operation(value)
+}
+
+pub pure comptime fn integer_to_u32(value: Integer) -> u32 {
+    integer_to_u32_operation(value)
+}
+
+pub pure comptime fn integer_to_u64(value: Integer) -> u64 {
+    integer_to_u64_operation(value)
+}
+
+pub pure comptime fn integer_to_u128(value: Integer) -> u128 {
+    integer_to_u128_operation(value)
+}
+
+pub pure comptime fn integer_to_usize(value: Integer) -> usize {
+    integer_to_usize_operation(value)
+}
+
+pub pure comptime fn integer_to_i8(value: Integer) -> i8 {
+    integer_to_i8_operation(value)
+}
+
+pub pure comptime fn integer_to_i16(value: Integer) -> i16 {
+    integer_to_i16_operation(value)
+}
+
+pub pure comptime fn integer_to_i32(value: Integer) -> i32 {
+    integer_to_i32_operation(value)
+}
+
+pub pure comptime fn integer_to_i64(value: Integer) -> i64 {
+    integer_to_i64_operation(value)
+}
+
+pub pure comptime fn integer_to_i128(value: Integer) -> i128 {
+    integer_to_i128_operation(value)
+}
+
+pub pure comptime fn integer_to_isize(value: Integer) -> isize {
+    integer_to_isize_operation(value)
 }

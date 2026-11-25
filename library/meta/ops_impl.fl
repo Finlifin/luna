@@ -1,0 +1,11 @@
+use builtin.Type;
+
+{- Comptime operator protocol companions for meta.ops. -}
+pub pure comptime trait ComptimeImplies
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn implies(self, rhs: Rhs) -> Output;
+}

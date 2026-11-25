@@ -51,6 +51,8 @@ pub struct Options {
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
     pub literal_into_protocol: Option<String>,
+    pub implies_protocol: Option<String>,
+    pub comptime_implies_protocol: Option<String>,
     pub deref_protocol: Option<String>,
     pub deref_mut_protocol: Option<String>,
     pub reference_protocol: Option<String>,
@@ -228,6 +230,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut ord_protocol = None;
     let mut eq_protocol = None;
     let mut literal_into_protocol = None;
+    let mut implies_protocol = None;
+    let mut comptime_implies_protocol = None;
     let mut deref_protocol = None;
     let mut deref_mut_protocol = None;
     let mut reference_protocol = None;
@@ -925,6 +929,28 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--implies-protocol") => {
+                    if implies_protocol.is_some() {
+                        return Err("--implies-protocol may only be specified once".into());
+                    }
+                    implies_protocol = Some(
+                        option_value(&mut args, "--implies-protocol")?
+                            .into_string()
+                            .map_err(|_| "Implies protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--comptime-implies-protocol") => {
+                    if comptime_implies_protocol.is_some() {
+                        return Err("--comptime-implies-protocol may only be specified once".into());
+                    }
+                    comptime_implies_protocol = Some(
+                        option_value(&mut args, "--comptime-implies-protocol")?
+                            .into_string()
+                            .map_err(|_| "ComptimeImplies protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--deref-mut-protocol") => {
                     if deref_mut_protocol.is_some() {
                         return Err("--deref-mut-protocol may only be specified once".into());
@@ -1266,6 +1292,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         ord_protocol,
         eq_protocol,
         literal_into_protocol,
+        implies_protocol,
+        comptime_implies_protocol,
         deref_protocol,
         deref_mut_protocol,
         reference_protocol,
@@ -1449,6 +1477,8 @@ mod tests {
                 variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
+                implies_protocol: None,
+                comptime_implies_protocol: None,
                 deref_protocol: None,
                 deref_mut_protocol: None,
                 reference_protocol: None,
@@ -1509,6 +1539,8 @@ mod tests {
                 variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
+                implies_protocol: None,
+                comptime_implies_protocol: None,
                 deref_protocol: None,
                 deref_mut_protocol: None,
                 reference_protocol: None,

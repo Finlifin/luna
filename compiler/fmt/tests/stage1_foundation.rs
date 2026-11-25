@@ -214,7 +214,7 @@ where
     );
     assert_eq!(parsed.bridge.predicate_kw_offsets.len(), 1);
     assert_eq!(parsed.bridge.outcomes_kw_offsets.len(), 1);
-    assert_eq!(parsed.bridge.implies_offsets.len(), 1);
+    assert_eq!(parsed.bridge.implies_offsets.len(), 0);
     assert_eq!(parsed.bridge.subtype_offsets.len(), 1);
 
     let mut has_raw_brace = false;

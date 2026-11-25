@@ -353,7 +353,7 @@ impl Checker<'_, '_> {
                     ..
                 }) => true,
                 H::Unary(UnOp::Not, inner) => type_shape(checker, inner, depth + 1)?,
-                H::Binary(BinOp::And | BinOp::Or, left, right) => {
+                H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, left, right) => {
                     type_shape(checker, left, depth + 1)? && type_shape(checker, right, depth + 1)?
                 }
                 _ if checker.type_predicate_not_sized_call(value)?.is_some() => true,
@@ -3053,6 +3053,8 @@ fn scope_for_required(
         protocols_cfg.stable_struct_pattern,
         protocols_cfg.type_pattern,
         protocols_cfg.literal_into,
+        protocols_cfg.implies,
+        protocols_cfg.comptime_implies,
         protocols_cfg.handle_error,
         protocols_cfg.deref,
         protocols_cfg.deref_mut,

@@ -1,0 +1,148 @@
+use bindings.*;
+use primitives.*;
+use protocols.conversion.LiteralInto;
+
+-- Built-in suffixed machine-integer literal conversions across runtime and comptime phases.
+impl LiteralInto<.u8, u8> for Integer {
+    fn literal_into(comptime value: Integer) -> u8 {
+        integer_to_u8(value)
+    }
+}
+
+comptime impl LiteralInto<.u8, u8> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> u8 {
+        integer_to_u8(value)
+    }
+}
+
+impl LiteralInto<.u16, u16> for Integer {
+    fn literal_into(comptime value: Integer) -> u16 {
+        integer_to_u16(value)
+    }
+}
+
+comptime impl LiteralInto<.u16, u16> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> u16 {
+        integer_to_u16(value)
+    }
+}
+
+impl LiteralInto<.u32, u32> for Integer {
+    fn literal_into(comptime value: Integer) -> u32 {
+        integer_to_u32(value)
+    }
+}
+
+comptime impl LiteralInto<.u32, u32> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> u32 {
+        integer_to_u32(value)
+    }
+}
+
+impl LiteralInto<.u64, u64> for Integer {
+    fn literal_into(comptime value: Integer) -> u64 {
+        integer_to_u64(value)
+    }
+}
+
+comptime impl LiteralInto<.u64, u64> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> u64 {
+        integer_to_u64(value)
+    }
+}
+
+impl LiteralInto<.u128, u128> for Integer {
+    fn literal_into(comptime value: Integer) -> u128 {
+        integer_to_u128(value)
+    }
+}
+
+comptime impl LiteralInto<.u128, u128> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> u128 {
+        integer_to_u128(value)
+    }
+}
+
+impl LiteralInto<.usize, usize> for Integer {
+    fn literal_into(comptime value: Integer) -> usize {
+        integer_to_usize(value)
+    }
+}
+
+comptime impl LiteralInto<.usize, usize> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> usize {
+        integer_to_usize(value)
+    }
+}
+
+impl LiteralInto<.i8, i8> for Integer {
+    fn literal_into(comptime value: Integer) -> i8 {
+        integer_to_i8(value)
+    }
+}
+
+comptime impl LiteralInto<.i8, i8> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> i8 {
+        integer_to_i8(value)
+    }
+}
+
+impl LiteralInto<.i16, i16> for Integer {
+    fn literal_into(comptime value: Integer) -> i16 {
+        integer_to_i16(value)
+    }
+}
+
+comptime impl LiteralInto<.i16, i16> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> i16 {
+        integer_to_i16(value)
+    }
+}
+
+impl LiteralInto<.i32, i32> for Integer {
+    fn literal_into(comptime value: Integer) -> i32 {
+        integer_to_i32(value)
+    }
+}
+
+comptime impl LiteralInto<.i32, i32> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> i32 {
+        integer_to_i32(value)
+    }
+}
+
+impl LiteralInto<.i64, i64> for Integer {
+    fn literal_into(comptime value: Integer) -> i64 {
+        integer_to_i64(value)
+    }
+}
+
+comptime impl LiteralInto<.i64, i64> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> i64 {
+        integer_to_i64(value)
+    }
+}
+
+impl LiteralInto<.i128, i128> for Integer {
+    fn literal_into(comptime value: Integer) -> i128 {
+        integer_to_i128(value)
+    }
+}
+
+comptime impl LiteralInto<.i128, i128> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> i128 {
+        integer_to_i128(value)
+    }
+}
+
+impl LiteralInto<.isize, isize> for Integer {
+    fn literal_into(comptime value: Integer) -> isize {
+        integer_to_isize(value)
+    }
+}
+
+comptime impl LiteralInto<.isize, isize> for Integer {
+    comptime fn comptime_literal_into(comptime value: Integer) -> isize {
+        integer_to_isize(value)
+    }
+}

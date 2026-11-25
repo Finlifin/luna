@@ -14,3 +14,10 @@ pub trait TryInto where Target {
 pub trait TryFrom where Source {
     fn try_from(source: Source) -> ?Self;
 }
+
+pub trait LiteralInto where suffix: Symbol, R: Type {
+    fn literal_into(comptime value: Self) -> R;
+
+    ^attrs.comptime_phase
+    comptime fn comptime_literal_into(comptime value: Self) -> R;
+}

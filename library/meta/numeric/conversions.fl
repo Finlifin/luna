@@ -10,6 +10,10 @@ pub pure comptime trait ComptimeTryFrom where Source {
     pure comptime fn try_from(source: Source) -> ?Self;
 }
 
+pub pure comptime trait ComptimeDefault {
+    pure comptime fn default() -> Self;
+}
+
 comptime impl ComptimeTryInto<Target> for Source where Source, Target :- ComptimeTryFrom<Source> {
     pure comptime fn try_into(self) -> ?Target {
         Target.as(ComptimeTryFrom<Source>).try_from(self)

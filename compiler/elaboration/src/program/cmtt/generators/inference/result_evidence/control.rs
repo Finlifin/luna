@@ -169,16 +169,17 @@ impl Observation<'_> {
             }
             // BitVec shares these tokens and evaluates both operands. Only
             // a Boolean destination establishes short-circuit control here.
-            H::Binary(op @ (BinOp::And | BinOp::Or), left, right)
+            H::Binary(op @ (BinOp::And | BinOp::Or | BinOp::Implies), left, right)
                 if expected == Some(&p(P::Bool)) =>
             {
-                let short = op == BinOp::Or;
+                let short = matches!(op, BinOp::Or | BinOp::Implies);
                 let left = self.expr(checker, left, Some(&p(P::Bool)), depth)?;
                 if matches!(left, Paths::Closed) {
                     return Ok(Paths::Closed);
                 }
-                if matches!(left, Paths::Known(Term::Bool(value)) if value == short) {
-                    return Ok(left);
+                let short_value = if op == BinOp::Implies { false } else { true };
+                if matches!(left, Paths::Known(Term::Bool(value)) if value == short_value) {
+                    return Ok(Paths::Known(Term::Bool(short)));
                 }
                 let right = self.expr(checker, right, Some(&p(P::Bool)), depth)?;
                 let value = if matches!(left, Paths::Known(Term::Bool(_))) {

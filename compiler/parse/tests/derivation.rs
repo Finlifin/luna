@@ -96,16 +96,25 @@ fn malformed_strategy_headers_and_bodies_are_rejected() {
 }
 
 #[test]
-fn default_is_contextual_only_in_member_projection() {
+fn default_is_an_ordinary_identifier_across_declarations_and_imports() {
     let (ast, root) = declaration("attrs.derivation.default").unwrap();
     assert_eq!(ast.get_node_kind(root), Some(NodeKind::ExprStatement));
     assert_eq!(
         ast.get_node_kind(ast.get_children(root)[0]),
         Some(NodeKind::Projection)
     );
-    assert!(declaration("fn default() {}").is_err());
-    assert!(declaration("derive fn default for Hash {}").is_err());
-    assert!(declaration("default").is_err());
+    for text in [
+        "fn default() {}",
+        "derive fn default for Hash {}",
+        "default",
+        "use default",
+        "use attrs.derivation.default as default",
+        "use attrs.derivation.{default as default}",
+        "const default = true;",
+        "let default = true;",
+    ] {
+        declaration(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+    }
 }
 
 #[test]
@@ -124,17 +133,10 @@ fn reserved_default_member_is_available_in_qualified_imports() {
 }
 
 #[test]
-fn member_import_support_does_not_unreserve_default_bindings() {
+fn invalid_import_alias_forms_remain_rejected() {
     for text in [
-        "use default",
-        "use attrs.derivation.default as default",
         "use attrs.derivation.{default as}",
-        "use attrs.derivation.{default as default}",
         "use attrs.derivation.default extra",
-        "const default = true;",
-        "fn default() {}",
-        "let default = true;",
-        "default",
     ] {
         assert!(declaration(text).is_err(), "accepted: {text}");
     }

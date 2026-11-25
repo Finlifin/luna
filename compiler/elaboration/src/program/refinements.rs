@@ -324,7 +324,7 @@ fn classify_refinement<'a>(
                 ..
             }) => {}
             H::Unary(UnOp::Not, value) => pending.push(value),
-            H::Binary(BinOp::And | BinOp::Or, left, right) => {
+            H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, left, right) => {
                 pending.push(right);
                 pending.push(left);
             }
@@ -1079,6 +1079,11 @@ impl Checker<'_, '_> {
                     right,
                 ))
             }
+            H::Binary(BinOp::Implies, left, right) => {
+                let left = self.staged_condition_fact(left, !positive, depth + 1)?;
+                let right = self.staged_condition_fact(right, positive, depth + 1)?;
+                Ok(combine_condition_facts(!positive, left, right))
+            }
             _ if self.is_type_assumption(expr) => {
                 let predicate = self.type_predicate(expr)?;
                 let fact = crate::ptc::Formula::from_predicate(&predicate);
@@ -1217,6 +1222,29 @@ impl Checker<'_, '_> {
                         span,
                     )?;
                     return Ok(combine_condition_facts(and == positive, left, right));
+                }
+                (H::Binary(BinOp::Implies, l, r), K::Or(cl, cr)) if checked.ty == p(P::Bool) => {
+                    let cl_inner = match &cl.kind {
+                        K::Not(inner) => inner.as_ref(),
+                        _ => cl.as_ref(),
+                    };
+                    let left = self.condition_source_type_fact(
+                        Some(l),
+                        cl_inner,
+                        !positive,
+                        fuel,
+                        depth + 1,
+                        span,
+                    )?;
+                    let right = self.condition_source_type_fact(
+                        Some(r),
+                        cr,
+                        positive,
+                        fuel,
+                        depth + 1,
+                        span,
+                    )?;
+                    return Ok(combine_condition_facts(!positive, left, right));
                 }
                 _ => {}
             }

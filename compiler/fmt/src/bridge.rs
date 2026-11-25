@@ -954,17 +954,6 @@ fn pre_scan_source(src: &str) -> PreScanResult {
         // wait: if valid bridged constructs appear inside `.off`, bridging them in `shadow`
         // still keeps `original_src` untouched and helps Attempt 1 succeed!
 
-        // 1. Implies operator `==>` -> `===` (3 bytes -> 3 bytes)
-        if b == b'=' && i + 2 < len && bytes[i + 1] == b'=' && bytes[i + 2] == b'>' {
-            shadow[i + 2] = b'=';
-            bridge.implies_offsets.insert(i);
-            i += 3;
-            can_end_expr = false;
-            prev_was_rbrace = false;
-            prev_sig_word = None;
-            continue;
-        }
-
         // 2. Subtype operator `<:` -> `:-` (2 bytes -> 2 bytes)
         if b == b'<' && i + 1 < len && bytes[i + 1] == b':' {
             shadow[i] = b':';

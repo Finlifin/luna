@@ -13,7 +13,16 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<D, Error> {
         let result = match &expr.kind {
-            H::Unary(UnOp::Not | UnOp::Neg, operand) if !is_numeric_literal(operand) => {
+            H::Unary(UnOp::Not | UnOp::Neg, operand)
+                if !is_numeric_literal(operand)
+                    && !matches!(
+                        expr.kind,
+                        H::Unary(UnOp::Neg, _)
+                            if self
+                                .atomic_negative_signed_literal(operand, None, expr.span)?
+                                .is_some()
+                    ) =>
+            {
                 self.describe_open_unary(expr, locals, returns, expected, depth)?
             }
             H::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, _, _) => {
@@ -107,80 +116,134 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            H::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
-                let left_description =
-                    self.describe_open_expression(left, locals, returns, expected, depth + 1)?;
+            H::Binary(op @ (BinOp::And | BinOp::Or | BinOp::Implies), left, right) => {
+                let left_description = if *op == BinOp::Implies {
+                    match self.describe_open_expression(left, locals, returns, None, depth + 1) {
+                        Ok(desc) => desc,
+                        Err(err) => {
+                            if expected == Some(&D::Known(p(P::Bool))) {
+                                self.describe_open_expression(
+                                    left,
+                                    locals,
+                                    returns,
+                                    expected,
+                                    depth + 1,
+                                )?
+                            } else {
+                                return Err(err);
+                            }
+                        }
+                    }
+                } else {
+                    self.describe_open_expression(left, locals, returns, expected, depth + 1)?
+                };
                 let D::Known(left_type) = left_description else {
-                    return Err(error(left.span, "and/or require established operand types"));
+                    return Err(error(
+                        left.span,
+                        "logical operator requires established operand types",
+                    ));
                 };
                 let shape = self.structural_type(&left_type, left.span)?;
-                if !matches!(shape, Term::Primitive(P::Bool | P::BitVec(_) | P::Never)) {
-                    return Err(error(
-                        expr.span,
-                        "and/or require bool or equal-width BitVec operands",
-                    ));
-                }
-                let choice = control::source_boolean(left, &mut self.required_steps, 0);
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(self.open_loop_transfers.len() as u64)
-                    .ok_or_else(|| {
-                        error(expr.span, "loop completion description budget exhausted")
+                if *op == BinOp::Implies && shape != p(P::Bool) && !is_never(&shape) {
+                    let protocol = self.selected_implies_protocol(&left_type, expr.span)?;
+                    let context = self
+                        .protocol_argument_context(&left_type, protocol, expr.span)?
+                        .map(D::Known);
+                    let description = self.with_open_reachability(true, right.span, |this| {
+                        this.describe_open_expression(
+                            right,
+                            locals,
+                            returns,
+                            context.as_ref(),
+                            depth + 1,
+                        )
                     })?;
-                let left_transfers = self.open_loop_transfers.clone();
-                let right_type = if is_never(&shape) {
-                    p(P::Bool)
-                } else {
-                    shape.clone()
-                };
-                let mut check = |this: &mut Self| {
-                    this.describe_open_expression(
-                        right,
-                        locals,
-                        returns,
-                        Some(&D::Known(right_type.clone())),
-                        depth + 1,
-                    )
-                };
-                let right_description =
-                    if shape == p(P::Bool) && self.open_condition_has_type_evidence(left, 0) {
-                        let positive = *op == BinOp::And;
-                        let scope = if self.in_staged_input {
-                            let fact = self.staged_condition_fact(left, positive, 0)?;
-                            self.enter_condition_fact(fact)
-                        } else {
-                            let predicate = self.expr(left, Some(&p(P::Bool)))?;
-                            self.enter_source_type_condition(
-                                Some(left),
-                                &predicate,
-                                positive,
-                                right.span,
-                            )?
-                        };
-                        let result = check(self);
-                        scope.leave(self);
-                        result?
-                    } else {
-                        check(self)?
+                    let D::Known(right_type) = description else {
+                        return Err(error(
+                            right.span,
+                            "implication requires established operand types",
+                        ));
                     };
-                let D::Known(right_description) = right_description else {
-                    return Err(error(
-                        right.span,
-                        "and/or require established operand types",
-                    ));
-                };
-                if is_never(&shape) || (shape == p(P::Bool) && choice == Some(*op != BinOp::And)) {
-                    self.open_loop_transfers = left_transfers;
-                }
-                let guaranteed_right = matches!(shape, Term::Primitive(P::BitVec(_)))
-                    || choice == Some(*op == BinOp::And);
-                D::Known(
-                    if is_never(&shape) || (guaranteed_right && is_never(&right_description)) {
-                        p(P::Never)
+                    self.with_open_operand(left_type, left.span, |this, left| {
+                        this.with_open_operand(right_type, right.span, |this, right| {
+                            let probe = Expr {
+                                hir_id: expr.hir_id,
+                                span: expr.span,
+                                kind: H::Binary(*op, left, right),
+                            };
+                            this.describe_known_region(&probe, expected)
+                        })
+                    })?
+                } else {
+                    if !matches!(shape, Term::Primitive(P::Bool | P::BitVec(_) | P::Never)) {
+                        return Err(error(
+                            expr.span,
+                            "and/or require bool or equal-width BitVec operands",
+                        ));
+                    }
+                    let choice = control::source_boolean(left, &mut self.required_steps, 0);
+                    self.required_steps = self
+                        .required_steps
+                        .checked_sub(self.open_loop_transfers.len() as u64)
+                        .ok_or_else(|| {
+                            error(expr.span, "loop completion description budget exhausted")
+                        })?;
+                    let left_transfers = self.open_loop_transfers.clone();
+                    let right_type = if is_never(&shape) {
+                        p(P::Bool)
                     } else {
-                        shape
-                    },
-                )
+                        shape.clone()
+                    };
+                    let mut check = |this: &mut Self| {
+                        this.describe_open_expression(
+                            right,
+                            locals,
+                            returns,
+                            Some(&D::Known(right_type.clone())),
+                            depth + 1,
+                        )
+                    };
+                    let right_description =
+                        if shape == p(P::Bool) && self.open_condition_has_type_evidence(left, 0) {
+                            let positive = matches!(op, BinOp::And | BinOp::Implies);
+                            let scope = if self.in_staged_input {
+                                let fact = self.staged_condition_fact(left, positive, 0)?;
+                                self.enter_condition_fact(fact)
+                            } else {
+                                let predicate = self.expr(left, Some(&p(P::Bool)))?;
+                                self.enter_source_type_condition(
+                                    Some(left),
+                                    &predicate,
+                                    positive,
+                                    right.span,
+                                )?
+                            };
+                            let result = check(self);
+                            scope.leave(self);
+                            result?
+                        } else {
+                            check(self)?
+                        };
+                    let D::Known(right_description) = right_description else {
+                        return Err(error(
+                            right.span,
+                            "logical operator requires established operand types",
+                        ));
+                    };
+                    let short_choice = !matches!(op, BinOp::And | BinOp::Implies);
+                    if is_never(&shape) || (shape == p(P::Bool) && choice == Some(short_choice)) {
+                        self.open_loop_transfers = left_transfers;
+                    }
+                    let guaranteed_right = matches!(shape, Term::Primitive(P::BitVec(_)))
+                        || choice == Some(matches!(op, BinOp::And | BinOp::Implies));
+                    D::Known(
+                        if is_never(&shape) || (guaranteed_right && is_never(&right_description)) {
+                            p(P::Never)
+                        } else {
+                            shape
+                        },
+                    )
+                }
             }
             _ => self.describe_known_region(expr, expected)?,
         };

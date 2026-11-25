@@ -24,6 +24,7 @@ use data.{
 use definitions.{enums, newtypes, structs}
 use macros_impl;
 use numeric.{conversions, equality, ordering, scalar_math}
+use ops_impl;
 use reflection.structure;
 use types.equality as type_equality;
 
@@ -45,7 +46,7 @@ pub use code_types.{
     ContextEntry,
     Substitution,
 }
-pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
+pub use conversions.{ComptimeDefault, ComptimeTryFrom, ComptimeTryInto}
 pub use enums.*;
 pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
@@ -54,6 +55,7 @@ pub use integer.*;
 pub use map.{Map, MapEntry}
 pub use newtypes.*;
 pub use object.*;
+pub use ops_impl.ComptimeImplies;
 pub use optional.ComptimeOptionalOps;
 pub use ordering.ComptimeOrd;
 pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
@@ -61,6 +63,10 @@ pub use set.Set;
 pub use structs.*;
 pub use structure.*;
 pub use text.{ComptimeTextBytes, str_from_char}
+
+pub mod ops {
+    pub use ops_impl.*;
+}
 
 pub mod ast {
     pub use ast_impl.*;
@@ -116,10 +122,11 @@ pub mod prelude {
     pub use .Object;
     pub use .Set;
     pub use ast_impl.{ComptimeSourceSpanOps, SourceSpanOps}
-    pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
+    pub use conversions.{ComptimeDefault, ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
     pub use hashing.ComptimeHash;
+    pub use ops_impl.ComptimeImplies;
     pub use optional.ComptimeOptionalOps;
     pub use ordering.ComptimeOrd;
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}

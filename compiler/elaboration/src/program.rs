@@ -433,6 +433,8 @@ pub struct Protocols {
     pub stable_struct_pattern: Option<DeclarationId>,
     pub type_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
+    pub implies: Option<DeclarationId>,
+    pub comptime_implies: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub deref: Option<DeclarationId>,
     pub deref_mut: Option<DeclarationId>,
@@ -1679,6 +1681,14 @@ fn elaborate_candidate<'a, 'h>(
     }
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.implies {
+        crate::arithmetic::binary_operator_protocol(&checker.checked_traits, id, "implies", false)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.comptime_implies {
+        crate::arithmetic::binary_operator_protocol(&checker.checked_traits, id, "implies", true)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     if let Some(id) = checker.protocols.iterator {
@@ -6676,6 +6686,12 @@ impl Checker<'_, '_> {
                             pending.push(Work::Expr(right, depth + 1));
                             pending.push(Work::Expr(left, depth + 1));
                         }
+                        H::Binary(BinOp::Implies, left, right) => {
+                            pending.push(Work::Binary(false));
+                            pending.push(Work::Expr(right, depth + 1));
+                            pending.push(Work::Not);
+                            pending.push(Work::Expr(left, depth + 1));
+                        }
                         _ => values.push(self.type_predicate_atom(expr)?),
                     }
                 }
@@ -9285,6 +9301,7 @@ impl Checker<'_, '_> {
                 | H::Binary(
                     BinOp::And
                         | BinOp::Or
+                        | BinOp::Implies
                         | BinOp::Eq
                         | BinOp::Ne
                         | BinOp::Lt
@@ -9306,7 +9323,9 @@ impl Checker<'_, '_> {
         let preserve = std::mem::take(&mut self.preserve_effect_value);
         let value = match &expr.kind {
             H::Unary(_, _) => self.unary_expression(expr, expected),
-            H::Binary(BinOp::And | BinOp::Or, _, _) => self.logical_expression(expr, expected),
+            H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, _, _) => {
+                self.logical_expression(expr, expected)
+            }
             H::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, _, _) => {
                 self.arithmetic_expression(expr, expected)
             }

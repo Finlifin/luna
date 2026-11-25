@@ -1,5 +1,7 @@
 use bindings;
-use builtin.{Integer, isize, u128, usize}
+use builtin.{
+    Integer, compiler, i128, i16, i32, i64, i8, isize, u128, u16, u32, u64, u8, usize,
+}
 
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
@@ -30,6 +32,50 @@ impl Integer {
 
     pub pure comptime fn from_usize(value: usize) -> Self {
         bindings.from_usize(value)
+    }
+
+    pub pure comptime fn to_u8(self) -> u8 {
+        compiler.integer_to_u8(self)
+    }
+
+    pub pure comptime fn to_u16(self) -> u16 {
+        compiler.integer_to_u16(self)
+    }
+
+    pub pure comptime fn to_u32(self) -> u32 {
+        compiler.integer_to_u32(self)
+    }
+
+    pub pure comptime fn to_u64(self) -> u64 {
+        compiler.integer_to_u64(self)
+    }
+
+    pub pure comptime fn to_u128(self) -> u128 {
+        compiler.integer_to_u128(self)
+    }
+
+    pub pure comptime fn to_i8(self) -> i8 {
+        compiler.integer_to_i8(self)
+    }
+
+    pub pure comptime fn to_i16(self) -> i16 {
+        compiler.integer_to_i16(self)
+    }
+
+    pub pure comptime fn to_i32(self) -> i32 {
+        compiler.integer_to_i32(self)
+    }
+
+    pub pure comptime fn to_i64(self) -> i64 {
+        compiler.integer_to_i64(self)
+    }
+
+    pub pure comptime fn to_i128(self) -> i128 {
+        compiler.integer_to_i128(self)
+    }
+
+    pub pure comptime fn to_isize(self) -> isize {
+        compiler.integer_to_isize(self)
     }
 
     pub pure comptime fn div_trunc(self, divisor: Integer) -> Integer {

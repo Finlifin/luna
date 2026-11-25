@@ -1213,7 +1213,12 @@ impl Checker<'_, '_> {
         let mut current = expression;
         let mut context = expected;
         while let H::Unary(op @ (UnOp::Not | UnOp::Neg), operand) = current.kind {
-            if is_numeric_literal(operand) {
+            if is_numeric_literal(operand)
+                || (op == UnOp::Neg
+                    && self
+                        .atomic_negative_signed_literal(operand, None, current.span)?
+                        .is_some())
+            {
                 break;
             }
             if depth + nodes.len() >= 128 {
@@ -2841,7 +2846,8 @@ impl Checker<'_, '_> {
                 | BinOp::Rem
                 | BinOp::Concat
                 | BinOp::And
-                | BinOp::Or,
+                | BinOp::Or
+                | BinOp::Implies,
                 _,
                 _,
             ) => self.describe_open_scalar(expr, locals, returns, expected, depth),
@@ -4362,7 +4368,7 @@ impl Checker<'_, '_> {
             return false;
         }
         match &condition.kind {
-            H::Binary(BinOp::And | BinOp::Or, left, right) => {
+            H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, left, right) => {
                 self.open_condition_has_type_evidence(left, depth + 1)
                     || self.open_condition_has_type_evidence(right, depth + 1)
             }

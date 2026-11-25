@@ -1622,6 +1622,7 @@ fn absent_optional_payloads_and_operator_spelling_are_explicit() {
         (BinOp::Ge, ">="),
         (BinOp::And, "and"),
         (BinOp::Or, "or"),
+        (BinOp::Implies, "==>"),
     ] {
         parsed(&ExprKind::Binary(op, &value, &value))
             .field("op")

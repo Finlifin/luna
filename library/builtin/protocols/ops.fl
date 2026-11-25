@@ -48,34 +48,10 @@ pub trait Not {
     fn invert(self) -> Output;
 }
 
-pub trait BitAnd where .Rhs: Type = Self {
+pub trait Implies where .Rhs: Type = Self {
     assoc Output: Type;
 
-    fn bit_and(self, rhs: Rhs) -> Output;
-}
-
-pub trait BitOr where .Rhs: Type = Self {
-    assoc Output: Type;
-
-    fn bit_or(self, rhs: Rhs) -> Output;
-}
-
-pub trait BitXor where .Rhs: Type = Self {
-    assoc Output: Type;
-
-    fn bit_xor(self, rhs: Rhs) -> Output;
-}
-
-pub trait Shl where .Rhs: Type = Self {
-    assoc Output: Type;
-
-    fn shl(self, rhs: Rhs) -> Output;
-}
-
-pub trait Shr where .Rhs: Type = Self {
-    assoc Output: Type;
-
-    fn shr(self, rhs: Rhs) -> Output;
+    fn implies(self, rhs: Rhs) -> Output;
 }
 
 -- ── Index ──────────────────────────────────────────────────────────────────

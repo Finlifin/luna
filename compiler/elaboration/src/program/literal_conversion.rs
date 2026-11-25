@@ -40,6 +40,18 @@ impl Checker<'_, '_> {
             }
         };
         let value = self.expr(literal, Some(&source_type))?;
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        let has_comptime_method = self.checked_traits.by_id(protocol).is_some_and(|contract| {
+            contract
+                .methods
+                .iter()
+                .any(|m| m.name == "comptime_literal_into")
+        });
+        let method_name = if comptime && has_comptime_method {
+            "comptime_literal_into"
+        } else {
+            "literal_into"
+        };
         let callee = self
             .selected_method(
                 source_type,
@@ -47,7 +59,7 @@ impl Checker<'_, '_> {
                     declaration: protocol,
                     arguments: vec![Term::Symbol(suffix.into()), result.clone()],
                 }),
-                "literal_into",
+                method_name,
                 expr.span,
             )?
             .ok_or_else(|| error(expr.span, "literal conversion has no selected method"))?;

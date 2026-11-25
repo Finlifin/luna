@@ -92,7 +92,6 @@ pub enum TokenKind {
     Const,     // const
     Continue,  // continue
     Decreases, // decreases
-    Default,   // default
     Define,    // define
     Derive,    // derive
     Do,        // do
@@ -263,7 +262,6 @@ impl TokenKind {
             TokenKind::Const => "const",
             TokenKind::Continue => "continue",
             TokenKind::Decreases => "decreases",
-            TokenKind::Default => "default",
             TokenKind::Define => "define",
             TokenKind::Derive => "derive",
             TokenKind::Do => "do",
@@ -445,7 +443,6 @@ impl TokenKind {
             TokenKind::Const => "kw_const",
             TokenKind::Continue => "kw_continue",
             TokenKind::Decreases => "kw_decreases",
-            TokenKind::Default => "kw_default",
             TokenKind::Define => "kw_define",
             TokenKind::Derive => "kw_derive",
             TokenKind::Do => "kw_do",
@@ -614,7 +611,6 @@ impl TokenKind {
             "kw_const" => TokenKind::Const,
             "kw_continue" => TokenKind::Continue,
             "kw_decreases" => TokenKind::Decreases,
-            "kw_default" => TokenKind::Default,
             "kw_define" => TokenKind::Define,
             "kw_derive" => TokenKind::Derive,
             "kw_do" => TokenKind::Do,
@@ -780,7 +776,6 @@ impl TokenKind {
         TokenKind::Const,
         TokenKind::Continue,
         TokenKind::Decreases,
-        TokenKind::Default,
         TokenKind::Define,
         TokenKind::Derive,
         TokenKind::Do,
@@ -884,7 +879,6 @@ impl Token {
         map.insert("const", TokenKind::Const);
         map.insert("continue", TokenKind::Continue);
         map.insert("decreases", TokenKind::Decreases);
-        map.insert("default", TokenKind::Default);
         map.insert("define", TokenKind::Define);
         map.insert("derive", TokenKind::Derive);
         map.insert("do", TokenKind::Do);

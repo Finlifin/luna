@@ -21,6 +21,9 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::Or => ExprOpInfo::new(20, NodeKind::BoolOr),          // or
         TokenKind::And => ExprOpInfo::new(30, NodeKind::BoolAnd),        // and
 
+        // 管道操作符
+        TokenKind::PipeGt => ExprOpInfo::new(35, NodeKind::PipePrepend), // |>
+
         // 比较操作符
         TokenKind::BangEq => ExprOpInfo::new(40, NodeKind::BoolNotEq), // !=
         TokenKind::EqEq => ExprOpInfo::new(40, NodeKind::BoolEq),      // ==
@@ -45,9 +48,8 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::SeparatedPercent => ExprOpInfo::new(70, NodeKind::Mod), // " % "
         TokenKind::PlusPlus => ExprOpInfo::new(70, NodeKind::AddAdd),   // ++
 
-        // 管道操作符
+        // 并集类型操作符
         TokenKind::Pipe => ExprOpInfo::new(80, NodeKind::Pipe), // |
-        TokenKind::PipeGt => ExprOpInfo::new(80, NodeKind::PipePrepend), // |>
 
         // 90级保留用于前缀表达式优先级
 

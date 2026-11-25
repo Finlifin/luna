@@ -153,6 +153,7 @@ fn binary_operator(kind: NodeKind) -> Option<BinOp> {
         NodeKind::BoolLtEq => Some(BinOp::Le),
         NodeKind::BoolAnd => Some(BinOp::And),
         NodeKind::BoolOr => Some(BinOp::Or),
+        NodeKind::BoolImplies => Some(BinOp::Implies),
         _ => None,
     }
 }
@@ -1234,6 +1235,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             // Preserve the iterable, pattern, guard and loop identity in HIR.
             // Protocol selection belongs to elaboration, not AST lowering.
             NodeKind::ForStatement => self.lower_for_stmt(ctx, node),
+            NodeKind::PipePrepend => {
+                self.emit_unsupported_node("pipeline operator `|>` (reserved)", span);
+                self.make_invalid_expr(span)
+            }
 
             other => {
                 self.emit_unsupported_node(&format!("{:?}", other), span);

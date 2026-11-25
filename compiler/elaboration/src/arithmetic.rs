@@ -13,6 +13,7 @@ pub enum Operator {
     Negate,
     Invert,
 }
+
 impl Operator {
     pub const ALL: [Self; 7] = [
         Self::Add,
@@ -23,9 +24,11 @@ impl Operator {
         Self::Negate,
         Self::Invert,
     ];
+
     pub fn is_unary(self) -> bool {
         matches!(self, Self::Negate | Self::Invert)
     }
+
     pub fn method(self) -> &'static str {
         match self {
             Self::Add => "add",
@@ -38,11 +41,13 @@ impl Operator {
         }
     }
 }
+
 impl std::fmt::Display for Operator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.method())
     }
 }
+
 /// Validate the bound declaration, never a same-spelled trait found by lookup.
 pub fn protocol(
     traits: &[Trait],
@@ -137,6 +142,99 @@ pub fn protocol(
                 operator.method()
             )
         });
+    }
+    Ok(method)
+}
+
+/// Validate a binary operator protocol (e.g. `Implies` or `ComptimeImplies`)
+/// that has one `.Rhs` type parameter, `assoc Output: Type`, and method
+/// `fn <method_name>(self, rhs: Rhs) -> Output`.
+pub fn binary_operator_protocol<'a>(
+    traits: &'a [Trait],
+    id: DeclarationId,
+    method_name: &str,
+    require_comptime_only: bool,
+) -> Result<&'a MethodContract, String> {
+    let mut candidates = traits
+        .iter()
+        .filter(|interface| interface.declaration == id);
+    let interface = candidates
+        .next()
+        .ok_or_else(|| format!("{method_name} protocol is not a declared trait"))?;
+    if candidates.next().is_some() {
+        return Err(format!("duplicate {method_name} protocol identity"));
+    }
+    if require_comptime_only && !interface.comptime_only {
+        return Err(format!(
+            "{method_name} comptime protocol must be declared as a comptime trait"
+        ));
+    }
+    let [rhs] = interface.type_parameters.as_slice() else {
+        return Err(format!(
+            "{method_name} protocol requires one RHS type parameter"
+        ));
+    };
+    let rhs = Term::Rigid {
+        declaration: *rhs,
+        sort: Sort::Type,
+    };
+    let outputs = interface
+        .associated
+        .iter()
+        .filter(|member| member.name == "Output")
+        .collect::<Vec<_>>();
+    let [output] = outputs.as_slice() else {
+        return Err(format!(
+            "{method_name} protocol requires one Output associated type"
+        ));
+    };
+    if output.ty != Term::Primitive(Primitive::Type) {
+        return Err(format!("{method_name} Output must have type Type"));
+    }
+    let methods = interface
+        .methods
+        .iter()
+        .filter(|method| method.name == method_name)
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        return Err(format!(
+            "{method_name} protocol requires one {method_name} method"
+        ));
+    };
+    let subject = Term::Rigid {
+        declaration: interface.self_parameter,
+        sort: Sort::Type,
+    };
+    let expected = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Runtime,
+                ty: subject.clone(),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: rhs.clone(),
+            },
+        ],
+        result: Box::new(Term::AssociatedType {
+            origin: Box::new(AssociatedTypeOrigin {
+                interface: id,
+                member: output.declaration,
+            }),
+            arguments: vec![rhs],
+            subject: Box::new(subject),
+        }),
+    };
+    if method.signature.callable_signature() != Ok(&expected)
+        || !method.by_value_receiver
+        || method.by_reference_receiver
+        || method.parameter_bindings.len() != 2
+        || !method.type_parameters.is_empty()
+        || !method.type_arguments.is_empty()
+    {
+        return Err(format!(
+            "{method_name} protocol requires fn {method_name}(self, rhs: Rhs) -> Output"
+        ));
     }
     Ok(method)
 }
