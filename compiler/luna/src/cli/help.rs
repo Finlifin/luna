@@ -45,6 +45,7 @@ const BINDINGS: &str = "Compiler binding overrides:
   --copy-protocol <trait>, --drop-protocol <trait>
   --splice-protocol, --meta-list-type, --tuple-type, --index-protocol,
   --index-mut-protocol, --space-apply-protocol,
+  --comptime-index-protocol,
   --ord-protocol, --eq-protocol, --comptime-ord-protocol,
   --comptime-eq-protocol, --list-pattern-protocol,
   --comptime-list-pattern-protocol, --stable-list-pattern-protocol,
@@ -68,7 +69,10 @@ const BINDINGS: &str = "Compiler binding overrides:
   --div-assign-protocol, --rem-assign-protocol,
   --comptime-add-assign-protocol, --comptime-sub-assign-protocol,
   --comptime-mul-assign-protocol, --comptime-div-assign-protocol,
-  --comptime-rem-assign-protocol <source-selector>
+  --comptime-rem-assign-protocol
+  --comptime-add-protocol, --comptime-sub-protocol, --comptime-mul-protocol,
+  --comptime-div-protocol, --comptime-rem-protocol, --comptime-neg-protocol,
+  --comptime-not-protocol <source-selector>
 Selectors use dotted source paths. Availability depends on the selected
 pipeline. Normal applications obtain bindings from --sysroot.
 ";

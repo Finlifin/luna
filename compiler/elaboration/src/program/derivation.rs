@@ -1485,26 +1485,46 @@ mod splice_auto {
                 Ok(())
             }
             E::ResolvedDef { def_id, .. } => {
-                if let Some(owner) = source.definition_owner(def_id)
-                    && matches!(
-                        source.item(owner).map(|item| &item.kind),
+                if let Some(owner) = source.definition_owner(def_id) {
+                    match source.item(owner).map(|item| &item.kind) {
                         Some(
                             ItemKind::Struct(_)
-                                | ItemKind::Enum(_)
-                                | ItemKind::TypeAlias(..)
-                                | ItemKind::Newtype(..)
-                        )
-                    )
-                {
-                    validate_finite_hir(
-                        source,
-                        owner,
-                        drop_nominals,
-                        visiting,
-                        visited,
-                        expr.span,
-                        fuel,
-                    )?;
+                            | ItemKind::Enum(_)
+                            | ItemKind::TypeAlias(..)
+                            | ItemKind::Newtype(..),
+                        ) => {
+                            validate_finite_hir(
+                                source,
+                                owner,
+                                drop_nominals,
+                                visiting,
+                                visited,
+                                expr.span,
+                                fuel,
+                            )?;
+                        }
+                        Some(ItemKind::Const(_, init))
+                            if matches!(
+                                &init.kind,
+                                E::Builtin(sym)
+                                    if matches!(
+                                        sym.as_str(),
+                                        "Type"
+                                            | "Object"
+                                            | "Continuation"
+                                            | "List"
+                                            | "Integer"
+                                            | "Float"
+                                    )
+                            ) =>
+                        {
+                            return Err(error(
+                                expr.span,
+                                "cannot auto-derive Splice across comptime-only type",
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
                 Ok(())
             }
@@ -1539,6 +1559,24 @@ mod splice_auto {
                     )?;
                 }
                 Ok(())
+            }
+            E::TyType => Err(error(
+                expr.span,
+                "cannot auto-derive Splice across comptime-only `Type`",
+            )),
+            E::Builtin(sym)
+                if matches!(
+                    sym.as_str(),
+                    "Type" | "Object" | "Continuation" | "List" | "Integer" | "Float"
+                ) =>
+            {
+                Err(error(
+                    expr.span,
+                    format!(
+                        "cannot auto-derive Splice across comptime-only `{}`",
+                        sym.as_str()
+                    ),
+                ))
             }
             E::DeliveredType(_)
             | E::ConstantObjectEntry(..)
@@ -1612,7 +1650,6 @@ mod splice_auto {
             | E::TyNoReturn
             | E::TyVoid
             | E::TyAny
-            | E::TyType
             | E::TermTypedWith
             | E::TraitBound(..)
             | E::LambdaBound

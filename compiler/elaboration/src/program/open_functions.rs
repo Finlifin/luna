@@ -1241,7 +1241,7 @@ impl Checker<'_, '_> {
             } else {
                 crate::arithmetic::Operator::Negate
             };
-            if self.protocols.arithmetic[operator as usize].is_some() {
+            if self.has_arithmetic_protocol(operator) {
                 context = None;
             }
             current = operand;
@@ -2798,7 +2798,7 @@ impl Checker<'_, '_> {
             return Ok(description);
         }
         if matches!(expected, Some(D::Unknown))
-            && self.protocols.arithmetic[crate::arithmetic::Operator::Invert as usize].is_none()
+            && !self.has_arithmetic_protocol(crate::arithmetic::Operator::Invert)
         {
             // An integer literal has no committed operand type yet. Preserve
             // contextual builtin inversion until the result domain is known;
@@ -3622,7 +3622,10 @@ impl Checker<'_, '_> {
                     BinOp::Rem => Some(crate::arithmetic::Operator::Remainder),
                     _ => None,
                 };
-                let protocol = arithmetic.and_then(|op| self.protocols.arithmetic[op as usize]);
+                let protocol = match arithmetic {
+                    Some(op) => self.selected_arithmetic_protocol(op, &target_type, expr.span)?,
+                    None => None,
+                };
                 let context =
                     (protocol.is_none() && *op != BinOp::Concat).then_some(D::Known(target_type));
                 let description = self.describe_open_expression(

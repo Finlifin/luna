@@ -673,6 +673,7 @@ pub(crate) fn source_protocols(
         index: options.index_protocol.as_deref(),
         index_mut: options.index_mut_protocol.as_deref(),
         space_apply: options.space_apply_protocol.as_deref(),
+        comptime_index: options.comptime_index_protocol.as_deref(),
         ordering: options.ord_protocol.as_deref(),
         equality: options.eq_protocol.as_deref(),
         comptime_ordering: options.comptime_ord_protocol.as_deref(),
@@ -693,6 +694,9 @@ pub(crate) fn source_protocols(
         }),
         comptime_compound_arithmetic: std::array::from_fn(|index| {
             options.comptime_compound_arithmetic_protocols[index].as_deref()
+        }),
+        comptime_arithmetic: std::array::from_fn(|index| {
+            options.comptime_arithmetic_protocols[index].as_deref()
         }),
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),

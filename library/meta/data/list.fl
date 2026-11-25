@@ -3,6 +3,15 @@ use builtin.{Integer, Type, void}
 
 use List;
 use integer.div_trunc;
+use ops_impl.ComptimeIndex;
+
+comptime impl ComptimeIndex<Integer> for List<T> where T {
+    assoc Output: Type = T;
+
+    comptime fn index(self, idx: Integer) -> T {
+        self[idx]
+    }
+}
 
 impl List<T> where T {
     {-

@@ -58,6 +58,7 @@ pub struct Options {
     pub index_protocol: Option<String>,
     pub index_mut_protocol: Option<String>,
     pub space_apply_protocol: Option<String>,
+    pub comptime_index_protocol: Option<String>,
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
     pub comptime_ord_protocol: Option<String>,
@@ -74,6 +75,7 @@ pub struct Options {
     pub arithmetic_protocols: [Option<String>; 7],
     pub compound_arithmetic_protocols: [Option<String>; 5],
     pub comptime_compound_arithmetic_protocols: [Option<String>; 5],
+    pub comptime_arithmetic_protocols: [Option<String>; 7],
     pub input: PathBuf,
     pub emit: Emit,
     pub output: Option<PathBuf>,
@@ -251,6 +253,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut index_protocol = None;
     let mut index_mut_protocol = None;
     let mut space_apply_protocol = None;
+    let mut comptime_index_protocol = None;
     let mut ord_protocol = None;
     let mut eq_protocol = None;
     let mut comptime_ord_protocol = None;
@@ -268,6 +271,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
     let mut comptime_compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
+    let mut comptime_arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut positional = false;
     let mut entry = None;
     let mut instantiate = None;
@@ -952,6 +956,17 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--comptime-index-protocol") => {
+                    if comptime_index_protocol.is_some() {
+                        return Err("--comptime-index-protocol may only be specified once".into());
+                    }
+                    comptime_index_protocol = Some(
+                        option_value(&mut args, "--comptime-index-protocol")?
+                            .into_string()
+                            .map_err(|_| "ComptimeIndex protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--ord-protocol") => {
                     if ord_protocol.is_some() {
                         return Err("--ord-protocol may only be specified once".into());
@@ -1199,6 +1214,38 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     arithmetic_protocols[index] = Some(value);
                     continue;
                 }
+                Some(
+                    option @ ("--comptime-add-protocol"
+                    | "--comptime-sub-protocol"
+                    | "--comptime-mul-protocol"
+                    | "--comptime-div-protocol"
+                    | "--comptime-rem-protocol"
+                    | "--comptime-neg-protocol"
+                    | "--comptime-not-protocol"),
+                ) => {
+                    let index = match option {
+                        "--comptime-add-protocol" => 0,
+                        "--comptime-sub-protocol" => 1,
+                        "--comptime-mul-protocol" => 2,
+                        "--comptime-div-protocol" => 3,
+                        "--comptime-rem-protocol" => 4,
+                        "--comptime-neg-protocol" => 5,
+                        _ => 6,
+                    };
+                    if comptime_arithmetic_protocols[index].is_some() {
+                        return Err(format!("{option} may only be specified once"));
+                    }
+                    let value = args
+                        .next()
+                        .ok_or_else(|| format!("{option} requires a source trait selector"))?
+                        .into_string()
+                        .map_err(|_| format!("{option} requires UTF-8"))?;
+                    if value.starts_with('-') || value.is_empty() {
+                        return Err(format!("{option} requires a source trait selector"));
+                    }
+                    comptime_arithmetic_protocols[index] = Some(value);
+                    continue;
+                }
                 Some(option @ ("--meta-list-type" | "--tuple-type")) => {
                     let target = if option == "--meta-list-type" {
                         &mut meta_list_type
@@ -1425,6 +1472,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         arithmetic_protocols,
         compound_arithmetic_protocols,
         comptime_compound_arithmetic_protocols,
+        comptime_arithmetic_protocols,
         list_pattern_protocol,
         comptime_list_pattern_protocol,
         stable_list_pattern_protocol,
@@ -1455,6 +1503,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         index_protocol,
         index_mut_protocol,
         space_apply_protocol,
+        comptime_index_protocol,
         ord_protocol,
         eq_protocol,
         comptime_ord_protocol,
@@ -1625,6 +1674,7 @@ mod tests {
                 index_protocol: None,
                 index_mut_protocol: None,
                 space_apply_protocol: None,
+                comptime_index_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
                 comptime_ord_protocol: None,
@@ -1668,6 +1718,7 @@ mod tests {
                 arithmetic_protocols: Default::default(),
                 compound_arithmetic_protocols: Default::default(),
                 comptime_compound_arithmetic_protocols: Default::default(),
+                comptime_arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),
             })
@@ -1701,6 +1752,7 @@ mod tests {
                 index_protocol: None,
                 index_mut_protocol: None,
                 space_apply_protocol: None,
+                comptime_index_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
                 comptime_ord_protocol: None,
@@ -1744,6 +1796,7 @@ mod tests {
                 arithmetic_protocols: Default::default(),
                 compound_arithmetic_protocols: Default::default(),
                 comptime_compound_arithmetic_protocols: Default::default(),
+                comptime_arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),
             })

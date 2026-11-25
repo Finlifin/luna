@@ -122,7 +122,8 @@ impl<'h> Frame<'h> {
             source: source.clone(),
             inputs: [left, right],
             destination,
-            protocol: checker.protocols.arithmetic[op as usize],
+            protocol: checker.protocols.arithmetic[op as usize]
+                .or(checker.protocols.comptime_arithmetic[op as usize]),
             phase: Phase::Start,
             pending: None,
             attempt: None,
@@ -266,11 +267,16 @@ impl<'h> Frame<'h> {
             Phase::ContextRight => {
                 self.phase = Phase::Select;
                 if self.values[1].is_none() {
-                    if let Some(rhs) = checker.protocol_argument_context(
-                        &self.values[0].as_ref().unwrap().ty,
-                        self.protocol.unwrap(),
-                        self.source.span,
-                    )? {
+                    let op = operator(&self.source).unwrap();
+                    let left_ty = &self.values[0].as_ref().unwrap().ty;
+                    if let Some(protocol) =
+                        checker.selected_arithmetic_protocol(op, left_ty, self.source.span)?
+                        && let Some(rhs) = checker.protocol_argument_context(
+                            left_ty,
+                            protocol,
+                            self.source.span,
+                        )?
+                    {
                         return self.request(checker, Child::Right, 1, Some(&rhs), false);
                     }
                     if let Some(mut failure) = self.native_failure.take() {
@@ -317,12 +323,23 @@ impl<'h> Frame<'h> {
                 }
             }
             Phase::Protocol => {
+                let op = operator(&self.source).unwrap();
+                let left = self.values[0].take().unwrap();
+                let right = self.values[1].take().unwrap();
+                let protocol = checker
+                    .selected_arithmetic_protocol(op, &left.ty, self.source.span)?
+                    .ok_or_else(|| {
+                        error(
+                            self.source.span,
+                            "arithmetic operator requires a bound protocol",
+                        )
+                    })?;
                 let value = checker.finish_binary_protocol_call(
                     &self.source,
-                    self.protocol.unwrap(),
-                    operator(&self.source).unwrap().method(),
-                    self.values[0].take().unwrap(),
-                    self.values[1].take().unwrap(),
+                    protocol,
+                    op.method(),
+                    left,
+                    right,
                     self.destination.expected(),
                 )?;
                 return self.finish(checker, value);

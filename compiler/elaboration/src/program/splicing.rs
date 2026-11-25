@@ -380,6 +380,32 @@ impl Checker<'_, '_> {
                         },
                     ))
                 }
+                Term::ErrorResult { errors, result } => {
+                    let mut target_errors = Vec::with_capacity(errors.len());
+                    let mut unchanged = true;
+                    for err_ty in errors {
+                        let target = require_child(self, err_ty, visiting, fuel)?;
+                        unchanged &= self.structural_type(&target, span)?
+                            == self.structural_type(err_ty, span)?;
+                        target_errors.push(target);
+                    }
+                    let target_result = if is_never(result) {
+                        result.as_ref().clone()
+                    } else {
+                        let target = require_child(self, result, visiting, fuel)?;
+                        unchanged &= self.structural_type(&target, span)?
+                            == self.structural_type(result, span)?;
+                        target
+                    };
+                    Ok(Some(if unchanged {
+                        ty.clone()
+                    } else {
+                        Term::ErrorResult {
+                            errors: target_errors,
+                            result: Box::new(target_result),
+                        }
+                    }))
+                }
                 Term::Nominal {
                     declaration,
                     arguments,
@@ -462,6 +488,7 @@ impl Checker<'_, '_> {
                     }
                     Ok(Some(ty.clone()))
                 }
+                Term::Primitive(P::BitVec(_)) => Ok(Some(ty.clone())),
                 _ => Ok(None),
             }
         })();
@@ -494,7 +521,7 @@ impl Checker<'_, '_> {
         *fuel = fuel
             .checked_sub(1)
             .ok_or_else(|| error(span, "auto-Splice Drop check budget exhausted"))?;
-        let assumptions = [];
+        let assumptions = self.capability_assumptions();
         let world = crate::capabilities::World {
             index: &self.implementation_index,
             implementations: &self.checked_implementations,
@@ -502,11 +529,14 @@ impl Checker<'_, '_> {
             assumptions: &assumptions,
             context,
         };
-        if let Ok(resolution) = world.resolve(drop_protocol, ty, crate::ptc::Budget::default())
-            && matches!(
-                resolution.types.selection,
-                crate::implementation::Selection::Selected(_)
-            )
+        if let Ok(decision) = world.decide_trait(
+            &crate::ptc::TraitQuery {
+                interface: drop_protocol,
+                arguments: vec![],
+                subject: ty.clone(),
+            },
+            crate::ptc::Budget::default(),
+        ) && decision.truth() == crate::capabilities::TraitTruth::Established
         {
             return Ok(true);
         }
@@ -640,6 +670,27 @@ impl Checker<'_, '_> {
                     source: loc,
                     ty: target_ty.clone(),
                     kind: K::OptionalPresent(Box::new(spliced)),
+                })
+            }
+            (
+                K::ErrorConvert {
+                    conversion: nir::error_results::Conversion::Success,
+                    value: inner,
+                },
+                Term::ErrorResult { .. },
+                Term::ErrorResult {
+                    result: target_result,
+                    ..
+                },
+            ) => {
+                let spliced = self.splice_value(expr, *inner, Some(&target_result))?;
+                Ok(n::Expr {
+                    source: loc,
+                    ty: target_ty.clone(),
+                    kind: K::ErrorConvert {
+                        conversion: nir::error_results::Conversion::Success,
+                        value: Box::new(spliced),
+                    },
                 })
             }
             (kind, _, _) => self.synthesize_auto_splice_call(
@@ -1085,6 +1136,95 @@ impl Checker<'_, '_> {
                                 },
                             },
                         ],
+                    },
+                })
+            }
+            (
+                Term::ErrorResult { errors, result },
+                Term::ErrorResult {
+                    errors: target_errors,
+                    result: target_result,
+                },
+            ) if errors.len() == target_errors.len() => {
+                let mut arms = Vec::with_capacity(errors.len() + usize::from(!is_never(result)));
+                if !is_never(result) {
+                    let id = n::LocalId {
+                        owner: owner_local,
+                        index: *next_local,
+                    };
+                    *next_local += 1;
+                    self.locals.insert(id, result.as_ref().clone());
+                    let ok_val = self.splice_auto_child(
+                        expr,
+                        splice_id,
+                        n::Expr {
+                            source: loc,
+                            ty: result.as_ref().clone(),
+                            kind: K::Local(id),
+                        },
+                        target_result,
+                    )?;
+                    arms.push(n::MatchArm {
+                        pattern: n::Pattern::ErrorResult {
+                            label: None,
+                            inner: Box::new(n::Pattern::Binding {
+                                binding: id,
+                                inner: Box::new(n::Pattern::Wild),
+                            }),
+                        },
+                        guard: None,
+                        body: n::Expr {
+                            source: loc,
+                            ty: target_ty.clone(),
+                            kind: K::ErrorConvert {
+                                conversion: nir::error_results::Conversion::Success,
+                                value: Box::new(ok_val),
+                            },
+                        },
+                    });
+                }
+                for (err_ty, target_err) in errors.iter().zip(target_errors) {
+                    let id = n::LocalId {
+                        owner: owner_local,
+                        index: *next_local,
+                    };
+                    *next_local += 1;
+                    self.locals.insert(id, err_ty.clone());
+                    let err_val = self.splice_auto_child(
+                        expr,
+                        splice_id,
+                        n::Expr {
+                            source: loc,
+                            ty: err_ty.clone(),
+                            kind: K::Local(id),
+                        },
+                        target_err,
+                    )?;
+                    arms.push(n::MatchArm {
+                        pattern: n::Pattern::ErrorResult {
+                            label: Some(err_ty.clone()),
+                            inner: Box::new(n::Pattern::Binding {
+                                binding: id,
+                                inner: Box::new(n::Pattern::Wild),
+                            }),
+                        },
+                        guard: None,
+                        body: n::Expr {
+                            source: loc,
+                            ty: target_ty.clone(),
+                            kind: K::ErrorConvert {
+                                conversion: nir::error_results::Conversion::Failure,
+                                value: Box::new(err_val),
+                            },
+                        },
+                    });
+                }
+                Ok(n::Expr {
+                    source: loc,
+                    ty: target_ty.clone(),
+                    kind: K::Match {
+                        value: Box::new(data),
+                        arms,
                     },
                 })
             }

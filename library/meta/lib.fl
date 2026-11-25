@@ -57,8 +57,21 @@ pub use map.{Map, MapEntry}
 pub use newtypes.*;
 pub use object.*;
 pub use ops_impl.{
-    ComptimeAddAssign, ComptimeConcat, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign,
-    ComptimeRemAssign, ComptimeSubAssign,
+    ComptimeAdd,
+    ComptimeAddAssign,
+    ComptimeConcat,
+    ComptimeDiv,
+    ComptimeDivAssign,
+    ComptimeImplies,
+    ComptimeIndex,
+    ComptimeMul,
+    ComptimeMulAssign,
+    ComptimeNeg,
+    ComptimeNot,
+    ComptimeRem,
+    ComptimeRemAssign,
+    ComptimeSub,
+    ComptimeSubAssign,
 };
 pub use optional.ComptimeOptionalOps;
 pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
@@ -146,8 +159,21 @@ pub mod prelude {
     pub use errors.ComptimeErrorResultOps;
     pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
     pub use ops_impl.{
-        ComptimeAddAssign, ComptimeConcat, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign,
-        ComptimeRemAssign, ComptimeSubAssign,
+        ComptimeAdd,
+        ComptimeAddAssign,
+        ComptimeConcat,
+        ComptimeDiv,
+        ComptimeDivAssign,
+        ComptimeImplies,
+        ComptimeIndex,
+        ComptimeMul,
+        ComptimeMulAssign,
+        ComptimeNeg,
+        ComptimeNot,
+        ComptimeRem,
+        ComptimeRemAssign,
+        ComptimeSub,
+        ComptimeSubAssign,
     };
     pub use optional.ComptimeOptionalOps;
     pub use ordering.{ComptimeOrd, ComptimeTotalOrd}

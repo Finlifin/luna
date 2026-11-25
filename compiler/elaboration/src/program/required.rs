@@ -3057,6 +3057,7 @@ fn scope_for_required(
         protocols_cfg.index,
         protocols_cfg.index_mut,
         protocols_cfg.space_apply,
+        protocols_cfg.comptime_index,
         protocols_cfg.iterator,
         protocols_cfg.into_iterator,
         protocols_cfg.variadic_collector,
@@ -3101,7 +3102,11 @@ fn scope_for_required(
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,
-    ] {
+    ]
+    .into_iter()
+    .chain(protocols_cfg.arithmetic)
+    .chain(protocols_cfg.comptime_arithmetic)
+    {
         match slot {
             None => protos.byte(0),
             Some(id) => {

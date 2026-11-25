@@ -111,6 +111,10 @@ pub mod math {
     pub use math_intrinsics.*;
 }
 
+pub mod staging {
+    pub use protocols.staging.*;
+}
+
 pub mod capabilities {
     pub use capability_effects.{HandleCapturingEffect, HandleEffect};
     pub use capability_errors.HandleError;

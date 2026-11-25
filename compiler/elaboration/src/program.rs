@@ -413,6 +413,7 @@ pub struct Protocols {
     pub index: Option<DeclarationId>,
     pub index_mut: Option<DeclarationId>,
     pub space_apply: Option<DeclarationId>,
+    pub comptime_index: Option<DeclarationId>,
     pub iterator: Option<DeclarationId>,
     pub into_iterator: Option<DeclarationId>,
     pub variadic_collector: Option<DeclarationId>,
@@ -457,6 +458,7 @@ pub struct Protocols {
     pub arithmetic: [Option<DeclarationId>; 7],
     pub compound_arithmetic: [Option<DeclarationId>; 5],
     pub comptime_compound_arithmetic: [Option<DeclarationId>; 5],
+    pub comptime_arithmetic: [Option<DeclarationId>; 7],
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
     pub tuple: Option<DeclarationId>,
@@ -1586,6 +1588,10 @@ fn elaborate_candidate<'a, 'h>(
             crate::arithmetic::protocol(&checker.checked_traits, id, operator)
                 .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
         }
+        if let Some(id) = checker.protocols.comptime_arithmetic[operator as usize] {
+            crate::arithmetic::comptime_protocol(&checker.checked_traits, id, operator)
+                .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+        }
     }
     for operator in crate::arithmetic::CompoundOperator::ALL {
         if let Some(id) = checker.protocols.compound_arithmetic[operator as usize] {
@@ -1607,6 +1613,10 @@ fn elaborate_candidate<'a, 'h>(
     }
     if let Some(id) = checker.protocols.space_apply {
         crate::indexing::space_apply_protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.comptime_index {
+        crate::indexing::comptime_protocol(&checker.checked_traits, id)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     if let Some(id) = checker.protocols.list_pattern {
@@ -9222,7 +9232,9 @@ impl Checker<'_, '_> {
         // re-elaborate producers or assume the associated Output is the input
         // type. In particular signed division/remainder have no native policy.
         if !is_never(&left.ty) && !self.native_arithmetic_type(op, &shape) {
-            if let Some(protocol) = self.protocols.arithmetic[operator as usize] {
+            if let Some(protocol) =
+                self.selected_arithmetic_protocol(operator, &left.ty, expr.span)?
+            {
                 return self.finish_binary_protocol_call(
                     expr,
                     protocol,

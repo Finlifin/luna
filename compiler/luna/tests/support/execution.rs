@@ -99,6 +99,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             index_protocol: selectors.index.map(str::to_owned),
             index_mut_protocol: selectors.index_mut.map(str::to_owned),
             space_apply_protocol: selectors.space_apply.map(str::to_owned),
+            comptime_index_protocol: selectors.comptime_index.map(str::to_owned),
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
             comptime_ord_protocol: selectors.comptime_ordering.map(str::to_owned),
@@ -149,6 +150,9 @@ pub(crate) fn compile_explicit_source_with_bindings(
                 .map(|value| value.map(str::to_owned)),
             comptime_compound_arithmetic_protocols: selectors
                 .comptime_compound_arithmetic
+                .map(|value| value.map(str::to_owned)),
+            comptime_arithmetic_protocols: selectors
+                .comptime_arithmetic
                 .map(|value| value.map(str::to_owned)),
             incremental: Default::default(),
         },

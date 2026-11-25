@@ -36,6 +36,7 @@ impl Checker<'_, '_> {
                     return Ok(self.wrap_temp_stmt(temp_stmt, result));
                 };
                 if !matches!(value.kind, H::TakeBitVec(_))
+                    && (self.runtime_value_context() || self.in_code_body)
                     && let Some(place_ptr) = self.index_base_place_pointer(value, false)?
                 {
                     let Term::Pointer(inner) = &place_ptr.ty else {
@@ -167,6 +168,23 @@ impl Checker<'_, '_> {
                             self.require_expression(&value.ty, expected, expr.span)?;
                         }
                         return Ok(value);
+                    }
+                    if !self.runtime_value_context() && !self.in_code_body {
+                        let protocol = self.selected_index_protocol(&value.ty, expr.span)?;
+                        if Some(protocol) == self.protocols.comptime_index {
+                            let argument = match self.argument_attempt(index, None, None)? {
+                                Some(argument) => argument,
+                                None => {
+                                    let context = self.protocol_argument_context(
+                                        &value.ty, protocol, expr.span,
+                                    )?;
+                                    self.expr(index, context.as_ref())?
+                                }
+                            };
+                            return self.finish_binary_protocol_call(
+                                expr, protocol, "index", value, argument, expected,
+                            );
+                        }
                     }
                     let (temp_stmt, receiver_ptr) =
                         self.spill_receiver_for_address(value, expr.span)?;

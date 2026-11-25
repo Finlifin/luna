@@ -279,6 +279,7 @@ struct OwnedSelectors {
     index: Option<String>,
     index_mut: Option<String>,
     space_apply: Option<String>,
+    comptime_index: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     variadic_collector: Option<String>,
@@ -323,6 +324,7 @@ struct OwnedSelectors {
     arithmetic: [Option<String>; 7],
     compound_arithmetic: [Option<String>; 5],
     comptime_compound_arithmetic: [Option<String>; 5],
+    comptime_arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
@@ -342,6 +344,7 @@ impl OwnedSelectors {
             index: s.index.map(str::to_owned),
             index_mut: s.index_mut.map(str::to_owned),
             space_apply: s.space_apply.map(str::to_owned),
+            comptime_index: s.comptime_index.map(str::to_owned),
             iterator: s.iterator.map(str::to_owned),
             into_iterator: s.into_iterator.map(str::to_owned),
             variadic_collector: s.variadic_collector.map(str::to_owned),
@@ -390,6 +393,9 @@ impl OwnedSelectors {
             comptime_compound_arithmetic: std::array::from_fn(|i| {
                 s.comptime_compound_arithmetic[i].map(str::to_owned)
             }),
+            comptime_arithmetic: std::array::from_fn(|i| {
+                s.comptime_arithmetic[i].map(str::to_owned)
+            }),
             splice: s.splice.map(str::to_owned),
             meta_list: s.meta_list.map(str::to_owned),
             tuple: s.tuple.map(str::to_owned),
@@ -409,6 +415,7 @@ impl OwnedSelectors {
             index: self.index.as_deref(),
             index_mut: self.index_mut.as_deref(),
             space_apply: self.space_apply.as_deref(),
+            comptime_index: self.comptime_index.as_deref(),
             iterator: self.iterator.as_deref(),
             into_iterator: self.into_iterator.as_deref(),
             variadic_collector: self.variadic_collector.as_deref(),
@@ -455,6 +462,7 @@ impl OwnedSelectors {
             comptime_compound_arithmetic: std::array::from_fn(|i| {
                 self.comptime_compound_arithmetic[i].as_deref()
             }),
+            comptime_arithmetic: std::array::from_fn(|i| self.comptime_arithmetic[i].as_deref()),
             splice: self.splice.as_deref(),
             meta_list: self.meta_list.as_deref(),
             tuple: self.tuple.as_deref(),

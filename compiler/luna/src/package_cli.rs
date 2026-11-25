@@ -248,6 +248,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--index-protocol"
                 | "--index-mut-protocol"
                 | "--space-apply-protocol"
+                | "--comptime-index-protocol"
                 | "--ord-protocol"
                 | "--eq-protocol"
                 | "--literal-into-protocol"
@@ -275,7 +276,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--comptime-sub-assign-protocol"
                 | "--comptime-mul-assign-protocol"
                 | "--comptime-div-assign-protocol"
-                | "--comptime-rem-assign-protocol",
+                | "--comptime-rem-assign-protocol"
+                | "--comptime-add-protocol"
+                | "--comptime-sub-protocol"
+                | "--comptime-mul-protocol"
+                | "--comptime-div-protocol"
+                | "--comptime-rem-protocol"
+                | "--comptime-neg-protocol"
+                | "--comptime-not-protocol",
             ) => {
                 let value = take(&mut args, "option value")?;
                 forwarded.extend([argument, value]);
@@ -813,6 +821,7 @@ impl Request {
                 index: options.index_protocol.as_deref(),
                 index_mut: options.index_mut_protocol.as_deref(),
                 space_apply: options.space_apply_protocol.as_deref(),
+                comptime_index: options.comptime_index_protocol.as_deref(),
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),
                 comptime_ordering: options.comptime_ord_protocol.as_deref(),
@@ -832,6 +841,9 @@ impl Request {
                 }),
                 comptime_compound_arithmetic: std::array::from_fn(|i| {
                     options.comptime_compound_arithmetic_protocols[i].as_deref()
+                }),
+                comptime_arithmetic: std::array::from_fn(|i| {
+                    options.comptime_arithmetic_protocols[i].as_deref()
                 }),
                 ..Default::default()
             },

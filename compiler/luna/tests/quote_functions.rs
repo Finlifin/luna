@@ -56,6 +56,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         index_protocol: None,
         index_mut_protocol: None,
         space_apply_protocol: None,
+        comptime_index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
         comptime_ord_protocol: None,
@@ -91,6 +92,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         arithmetic_protocols: Default::default(),
         compound_arithmetic_protocols: Default::default(),
         comptime_compound_arithmetic_protocols: Default::default(),
+        comptime_arithmetic_protocols: Default::default(),
         incremental: Default::default(),
     });
     std::fs::remove_file(path).unwrap();

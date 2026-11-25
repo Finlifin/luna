@@ -14,6 +14,7 @@ pub struct Selectors<'a> {
     pub index: Option<&'a str>,
     pub index_mut: Option<&'a str>,
     pub space_apply: Option<&'a str>,
+    pub comptime_index: Option<&'a str>,
     pub iterator: Option<&'a str>,
     pub into_iterator: Option<&'a str>,
     pub variadic_collector: Option<&'a str>,
@@ -58,6 +59,7 @@ pub struct Selectors<'a> {
     pub arithmetic: [Option<&'a str>; 7],
     pub compound_arithmetic: [Option<&'a str>; 5],
     pub comptime_compound_arithmetic: [Option<&'a str>; 5],
+    pub comptime_arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
     pub tuple: Option<&'a str>,
@@ -85,6 +87,7 @@ impl Selectors<'_> {
                 self.index,
                 self.index_mut,
                 self.space_apply,
+                self.comptime_index,
                 self.iterator,
                 self.into_iterator,
                 self.variadic_collector,
@@ -134,6 +137,7 @@ impl Selectors<'_> {
             .chain(self.arithmetic)
             .chain(self.compound_arithmetic)
             .chain(self.comptime_compound_arithmetic)
+            .chain(self.comptime_arithmetic)
             .any(|selector| selector.is_some())
         {
             return Err("source protocol/type binding requires NIR elaboration (--emit nir or an execution/analysis command)".into());
@@ -311,6 +315,18 @@ pub(crate) fn resolve_source(
                     )
                 }),
         )
+        .chain(
+            elaboration::arithmetic::Operator::ALL
+                .into_iter()
+                .zip(result.comptime_arithmetic.iter_mut())
+                .map(|(operator, target)| {
+                    (
+                        format!("Comptime {operator}"),
+                        selectors.comptime_arithmetic[operator as usize],
+                        target,
+                    )
+                }),
+        )
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
             (
@@ -322,6 +338,11 @@ pub(crate) fn resolve_source(
                 "SpaceApply".into(),
                 selectors.space_apply,
                 &mut result.space_apply,
+            ),
+            (
+                "ComptimeIndex".into(),
+                selectors.comptime_index,
+                &mut result.comptime_index,
             ),
             ("Iterator".into(), selectors.iterator, &mut result.iterator),
             (
@@ -795,6 +816,7 @@ pub(crate) struct SysrootBindings {
     index: Option<String>,
     index_mut: Option<String>,
     space_apply: Option<String>,
+    comptime_index: Option<String>,
     ordering: Option<String>,
     equality: Option<String>,
     comptime_ordering: Option<String>,
@@ -839,6 +861,7 @@ pub(crate) struct SysrootBindings {
     arithmetic: [Option<String>; 7],
     compound_arithmetic: [Option<String>; 5],
     comptime_compound_arithmetic: [Option<String>; 5],
+    comptime_arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
@@ -923,6 +946,7 @@ impl SysrootBindings {
                 "index-protocol" => &mut result.index,
                 "index-mut-protocol" => &mut result.index_mut,
                 "space-apply-protocol" => &mut result.space_apply,
+                "comptime-index-protocol" => &mut result.comptime_index,
                 "ord-protocol" => &mut result.ordering,
                 "eq-protocol" => &mut result.equality,
                 "comptime-ord-protocol" => &mut result.comptime_ordering,
@@ -983,6 +1007,13 @@ impl SysrootBindings {
                 "comptime-mul-assign-protocol" => &mut result.comptime_compound_arithmetic[2],
                 "comptime-div-assign-protocol" => &mut result.comptime_compound_arithmetic[3],
                 "comptime-rem-assign-protocol" => &mut result.comptime_compound_arithmetic[4],
+                "comptime-add-protocol" => &mut result.comptime_arithmetic[0],
+                "comptime-sub-protocol" => &mut result.comptime_arithmetic[1],
+                "comptime-mul-protocol" => &mut result.comptime_arithmetic[2],
+                "comptime-div-protocol" => &mut result.comptime_arithmetic[3],
+                "comptime-rem-protocol" => &mut result.comptime_arithmetic[4],
+                "comptime-neg-protocol" => &mut result.comptime_arithmetic[5],
+                "comptime-not-protocol" => &mut result.comptime_arithmetic[6],
                 "splice-protocol" => &mut result.splice,
                 "meta-list-type" => &mut result.meta_list,
                 "tuple-type" => &mut result.tuple,
@@ -1108,6 +1139,13 @@ impl SysrootBindings {
                     .space_apply
                     .is_none()
                     .then_some(self.space_apply.as_deref())
+                    .flatten()
+            }),
+            comptime_index: explicit.comptime_index.or_else(|| {
+                identities
+                    .comptime_index
+                    .is_none()
+                    .then_some(self.comptime_index.as_deref())
                     .flatten()
             }),
             ordering: explicit.ordering.or_else(|| {
@@ -1421,6 +1459,14 @@ impl SysrootBindings {
                         .flatten()
                 })
             }),
+            comptime_arithmetic: std::array::from_fn(|index| {
+                explicit.comptime_arithmetic[index].or_else(|| {
+                    identities.comptime_arithmetic[index]
+                        .is_none()
+                        .then_some(self.comptime_arithmetic[index].as_deref())
+                        .flatten()
+                })
+            }),
             splice: explicit.splice.or_else(|| {
                 identities
                     .splice
@@ -1726,7 +1772,25 @@ mod repository_bindings_tests {
                 bindings.arithmetic[operator as usize].as_deref(),
                 Some(format!("builtin.protocols.ops.{declaration}").as_str())
             );
+            assert_eq!(
+                bindings.comptime_arithmetic[operator as usize].as_deref(),
+                Some(format!("meta.ops_impl.Comptime{declaration}").as_str())
+            );
         }
+        assert_eq!(
+            bindings.comptime_arithmetic[elaboration::arithmetic::Operator::Negate as usize]
+                .as_deref(),
+            Some("meta.ops_impl.ComptimeNeg")
+        );
+        assert_eq!(
+            bindings.comptime_arithmetic[elaboration::arithmetic::Operator::Invert as usize]
+                .as_deref(),
+            Some("meta.ops_impl.ComptimeNot")
+        );
+        assert_eq!(
+            bindings.comptime_index.as_deref(),
+            Some("meta.ops_impl.ComptimeIndex")
+        );
     }
 }
 
@@ -1771,6 +1835,7 @@ mod stage_tests {
             index_protocol: None,
             index_mut_protocol: None,
             space_apply_protocol: None,
+            comptime_index_protocol: None,
             ord_protocol: None,
             eq_protocol: None,
             comptime_ord_protocol: None,
@@ -1814,6 +1879,7 @@ mod stage_tests {
             arithmetic_protocols: Default::default(),
             compound_arithmetic_protocols: Default::default(),
             comptime_compound_arithmetic_protocols: Default::default(),
+            comptime_arithmetic_protocols: Default::default(),
             splice_protocol: None,
             meta_list_type: None,
             tuple_type: None,

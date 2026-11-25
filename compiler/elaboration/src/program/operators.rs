@@ -371,7 +371,6 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         expected: Option<&Term>,
         operator: crate::arithmetic::Operator,
-        protocol: DeclarationId,
         checked: &mut Option<n::Expr>,
     ) -> Result<Option<n::Expr>, Error> {
         let value = checked.as_ref().expect("checked protocol operand");
@@ -417,6 +416,9 @@ impl Checker<'_, '_> {
             _ => unreachable!(),
         };
         if !native {
+            let protocol = self
+                .selected_arithmetic_protocol(operator, &value.ty, expr.span)?
+                .ok_or_else(|| error(expr.span, "unary operator has no bound protocol"))?;
             let callee = self
                 .selected_method(
                     value.ty.clone(),
@@ -506,123 +508,20 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn selected_phase_protocol(
+    /// Select the phase-appropriate operator protocol: in comptime evaluation
+    /// contexts, prefer a `pure comptime trait` twin whenever `subject` has a
+    /// matching capability assumption or candidate implementation (or when no
+    /// runtime twin is bound); otherwise fall back to the runtime protocol.
+    pub(super) fn selected_comptime_twin_protocol(
         &self,
+        ct_opt: Option<DeclarationId>,
+        rt_opt: Option<DeclarationId>,
         subject: &Term,
-        comptime_proto: Option<DeclarationId>,
-        runtime_proto: Option<DeclarationId>,
+        span: Span,
         label: &str,
-        missing_error: &str,
-        span: Span,
-    ) -> Result<DeclarationId, Error> {
+    ) -> Result<Option<DeclarationId>, Error> {
         use crate::ptc::{Budget, Formula, Outcome};
         let comptime = !self.runtime_value_context() && !self.in_code_body;
-        if comptime && let Some(ct_proto) = comptime_proto {
-            let scope = self.call_inference_domains();
-            let frames = if scope.is_empty() {
-                vec![]
-            } else {
-                vec![scope.iter().map(|p| p.0).collect()]
-            };
-            let has_assumption = crate::capabilities::capability_sources_with_layouts(
-                &self.checked_traits,
-                &self.capability_assumptions(),
-                Budget::default(),
-                &frames,
-                self.implementation_index.parameter_domains(),
-                Some(self.implementation_index.nominal_layouts()),
-            )
-            .map_err(|reason| error(span, reason))?
-            .into_iter()
-            .any(|capability| {
-                capability.interface == ct_proto
-                    && (capability.subject == *subject
-                        || matches!(
-                            self.context.prove(
-                                Formula::equal(capability.subject, subject.clone()),
-                                Budget::default(),
-                            ),
-                            Outcome::Entailed(_)
-                        ))
-            });
-            let has_impl = if has_assumption {
-                true
-            } else if let Some(interface) = self.checked_traits.by_id(ct_proto)
-                && let [rhs] = interface.type_parameters.as_slice()
-            {
-                let wildcard = Term::Rigid {
-                    declaration: *rhs,
-                    sort: Sort::Type,
-                };
-                !self
-                    .implementation_index
-                    .candidates(Some(ct_proto), &[wildcard], subject, Budget::default())
-                    .map_err(|reason| {
-                        error(span, format!("{label} candidate query failed: {reason:?}"))
-                    })?
-                    .declarations()
-                    .is_empty()
-            } else {
-                false
-            };
-            if has_impl || runtime_proto.is_none() {
-                return Ok(ct_proto);
-            }
-        }
-        runtime_proto.ok_or_else(|| error(span, missing_error))
-    }
-
-    pub(super) fn selected_implies_protocol(
-        &self,
-        subject: &Term,
-        span: Span,
-    ) -> Result<DeclarationId, Error> {
-        self.selected_phase_protocol(
-            subject,
-            self.protocols.comptime_implies,
-            self.protocols.implies,
-            "Implies",
-            "`==>` on non-bool operands requires a bound Implies protocol",
-            span,
-        )
-    }
-
-    pub(super) fn selected_concat_protocol(
-        &self,
-        subject: &Term,
-        span: Span,
-    ) -> Result<DeclarationId, Error> {
-        self.selected_phase_protocol(
-            subject,
-            self.protocols.comptime_concat,
-            self.protocols.concat,
-            "Concat",
-            "`++` on non-BitVec operands requires a bound Concat protocol",
-            span,
-        )
-    }
-
-    pub(super) fn selected_comparison_protocol(
-        &self,
-        ordering: bool,
-        subject: &Term,
-        span: Span,
-    ) -> Result<DeclarationId, Error> {
-        use crate::ptc::{Budget, Formula, Outcome};
-        let comptime = !self.runtime_value_context() && !self.in_code_body;
-        let (ct_opt, rt_opt, missing_msg) = if ordering {
-            (
-                self.protocols.comptime_ordering,
-                self.protocols.ordering,
-                "ordering protocol for this type is not implemented without an Ord binding",
-            )
-        } else {
-            (
-                self.protocols.comptime_equality,
-                self.protocols.equality,
-                "equality protocol for this type is not implemented without an Eq binding",
-            )
-        };
         if comptime && let Some(ct_proto) = ct_opt {
             let scope = self.call_inference_domains();
             let frames = if scope.is_empty() {
@@ -666,10 +565,7 @@ impl Checker<'_, '_> {
                     .implementation_index
                     .candidates(Some(ct_proto), &wildcards, subject, Budget::default())
                     .map_err(|reason| {
-                        error(
-                            span,
-                            format!("comparison candidate query failed: {reason:?}"),
-                        )
+                        error(span, format!("{label} candidate query failed: {reason:?}"))
                     })?
                     .declarations()
                     .is_empty()
@@ -677,10 +573,115 @@ impl Checker<'_, '_> {
                 false
             };
             if has_impl || rt_opt.is_none() {
-                return Ok(ct_proto);
+                return Ok(Some(ct_proto));
             }
         }
-        rt_opt.ok_or_else(|| error(span, missing_msg))
+        Ok(rt_opt)
+    }
+
+    pub(super) fn has_arithmetic_protocol(&self, operator: crate::arithmetic::Operator) -> bool {
+        self.protocols.arithmetic[operator as usize].is_some()
+            || self.protocols.comptime_arithmetic[operator as usize].is_some()
+    }
+
+    pub(super) fn selected_arithmetic_protocol(
+        &self,
+        operator: crate::arithmetic::Operator,
+        subject: &Term,
+        span: Span,
+    ) -> Result<Option<DeclarationId>, Error> {
+        self.selected_comptime_twin_protocol(
+            self.protocols.comptime_arithmetic[operator as usize],
+            self.protocols.arithmetic[operator as usize],
+            subject,
+            span,
+            operator.method(),
+        )
+    }
+
+    pub(super) fn selected_index_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        self.selected_comptime_twin_protocol(
+            self.protocols.comptime_index,
+            self.protocols.index,
+            subject,
+            span,
+            "Index",
+        )?
+        .ok_or_else(|| {
+            error(
+                span,
+                "indexing requires a bound Index protocol, BitVec or comptime List<Type>",
+            )
+        })
+    }
+
+    pub(super) fn selected_implies_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        self.selected_comptime_twin_protocol(
+            self.protocols.comptime_implies,
+            self.protocols.implies,
+            subject,
+            span,
+            "Implies",
+        )?
+        .ok_or_else(|| {
+            error(
+                span,
+                "`==>` on non-bool operands requires a bound Implies protocol",
+            )
+        })
+    }
+
+    pub(super) fn selected_concat_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        self.selected_comptime_twin_protocol(
+            self.protocols.comptime_concat,
+            self.protocols.concat,
+            subject,
+            span,
+            "Concat",
+        )?
+        .ok_or_else(|| {
+            error(
+                span,
+                "`++` on non-BitVec operands requires a bound Concat protocol",
+            )
+        })
+    }
+
+    pub(super) fn selected_comparison_protocol(
+        &self,
+        ordering: bool,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        let (ct_opt, rt_opt, label, missing_msg) = if ordering {
+            (
+                self.protocols.comptime_ordering,
+                self.protocols.ordering,
+                "comparison",
+                "ordering protocol for this type is not implemented without an Ord binding",
+            )
+        } else {
+            (
+                self.protocols.comptime_equality,
+                self.protocols.equality,
+                "comparison",
+                "equality protocol for this type is not implemented without an Eq binding",
+            )
+        };
+        self.selected_comptime_twin_protocol(ct_opt, rt_opt, subject, span, label)?
+            .ok_or_else(|| error(span, missing_msg))
     }
 
     pub(super) fn borrow_operand_for_pointer_arg(

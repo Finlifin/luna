@@ -892,6 +892,7 @@ fn all_resolved_protocols_in(
         protocols.index,
         protocols.index_mut,
         protocols.space_apply,
+        protocols.comptime_index,
         protocols.iterator,
         protocols.into_iterator,
         protocols.variadic_collector,
@@ -946,6 +947,7 @@ fn all_resolved_protocols_in(
             .iter()
             .copied()
             .all(decl_ok)
+        && protocols.comptime_arithmetic.iter().copied().all(decl_ok)
         && host_pair_ok(&protocols.host_fma)
         && host_pair_ok(&protocols.host_sqrt)
         && host_pair_ok(&protocols.host_copysign)

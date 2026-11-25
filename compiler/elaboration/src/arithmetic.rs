@@ -54,6 +54,24 @@ pub fn protocol(
     id: DeclarationId,
     operator: Operator,
 ) -> Result<&MethodContract, String> {
+    protocol_with_phase(traits, id, operator, false)
+}
+
+/// Validate a comptime arithmetic/unary protocol (`ComptimeAdd`..`ComptimeNot`).
+pub fn comptime_protocol(
+    traits: &[Trait],
+    id: DeclarationId,
+    operator: Operator,
+) -> Result<&MethodContract, String> {
+    protocol_with_phase(traits, id, operator, true)
+}
+
+fn protocol_with_phase(
+    traits: &[Trait],
+    id: DeclarationId,
+    operator: Operator,
+    require_comptime_only: bool,
+) -> Result<&MethodContract, String> {
     let mut candidates = traits
         .iter()
         .filter(|interface| interface.declaration == id);
@@ -62,6 +80,9 @@ pub fn protocol(
         .ok_or("arithmetic protocol is not a declared trait")?;
     if candidates.next().is_some() {
         return Err("duplicate arithmetic protocol identity".into());
+    }
+    if require_comptime_only && !interface.comptime_only {
+        return Err("comptime arithmetic protocol must be declared as a comptime trait".into());
     }
     let rhs = if operator.is_unary() {
         if !interface.type_parameters.is_empty() {
@@ -99,6 +120,15 @@ pub fn protocol(
             operator.method()
         ));
     };
+    if require_comptime_only
+        && (method.phase != nir::program::TraitPhase::Comptime
+            || !method.signature.is_comptime_callable())
+    {
+        return Err(format!(
+            "comptime arithmetic protocol requires a comptime {} method",
+            operator.method()
+        ));
+    }
     let subject = Term::Rigid {
         declaration: interface.self_parameter,
         sort: Sort::Type,

@@ -57,7 +57,8 @@ impl<'h> Frame<'h> {
             operand,
             operator,
             destination,
-            protocol: checker.protocols.arithmetic[operator as usize],
+            protocol: checker.protocols.arithmetic[operator as usize]
+                .or(checker.protocols.comptime_arithmetic[operator as usize]),
             phase: Phase::Start,
             pending: false,
             attempt: None,
@@ -158,7 +159,6 @@ impl<'h> Frame<'h> {
                         &self.source,
                         self.destination.expected(),
                         self.operator,
-                        self.protocol.expect("protocol probe"),
                         &mut self.checked,
                     )? {
                         return self.finish(checker, value);

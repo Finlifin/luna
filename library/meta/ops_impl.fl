@@ -1,8 +1,78 @@
 use List;
-use builtin.{Type, str, void}
+use builtin.{
+    Float,
+    Integer,
+    Type,
+    bf16,
+    bool,
+    f16,
+    f32,
+    f64,
+    str,
+    void,
+}
 use data.text.ComptimeTextBytes;
 
-{- Comptime operator protocol companions for meta.ops. -}
+{- Comptime operator protocol companions for meta.ops.
+   All comptime operator traits use value-reference `self` semantics with no pointers. -}
+
+pub pure comptime trait ComptimeAdd
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn add(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeSub
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn sub(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeMul
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn mul(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeDiv
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn div(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeRem
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn rem(self, rhs: Rhs) -> Output;
+}
+
+pub pure comptime trait ComptimeNeg {
+    assoc Output: Type;
+
+    pure comptime fn neg(self) -> Output;
+}
+
+pub pure comptime trait ComptimeNot {
+    assoc Output: Type;
+
+    pure comptime fn invert(self) -> Output;
+}
+
 pub pure comptime trait ComptimeImplies
 where
     .Rhs: Type = Self,
@@ -56,6 +126,15 @@ where
     pure comptime fn concat(self, rhs: Rhs) -> Output;
 }
 
+pub pure comptime trait ComptimeIndex
+where
+    Idx: Type,
+{
+    assoc Output: Type;
+
+    comptime fn index(self, idx: Idx) -> Output;
+}
+
 comptime impl ComptimeConcat<.Rhs = str> for str {
     assoc Output: Type = str;
 
@@ -69,5 +148,239 @@ comptime impl ComptimeConcat<.Rhs = List<T>> for List<T> where T: Type {
 
     pure comptime fn concat(self, rhs: List<T>) -> List<T> {
         List<T>.concat(self, rhs)
+    }
+}
+
+-- ── Standard Comptime Primitive Implementations ─────────────────────────────
+
+comptime impl ComptimeNot for bool {
+    assoc Output: Type = bool;
+
+    pure comptime fn invert(self) -> bool {
+        not self
+    }
+}
+
+comptime impl ComptimeAdd for Integer {
+    assoc Output: Type = Integer;
+
+    pure comptime fn add(self, rhs: Integer) -> Integer {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for Integer {
+    assoc Output: Type = Integer;
+
+    pure comptime fn sub(self, rhs: Integer) -> Integer {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for Integer {
+    assoc Output: Type = Integer;
+
+    pure comptime fn mul(self, rhs: Integer) -> Integer {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeNeg for Integer {
+    assoc Output: Type = Integer;
+
+    pure comptime fn neg(self) -> Integer {
+        -self
+    }
+}
+
+comptime impl ComptimeAdd for f16 {
+    assoc Output: Type = f16;
+
+    pure comptime fn add(self, rhs: f16) -> f16 {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for f16 {
+    assoc Output: Type = f16;
+
+    pure comptime fn sub(self, rhs: f16) -> f16 {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for f16 {
+    assoc Output: Type = f16;
+
+    pure comptime fn mul(self, rhs: f16) -> f16 {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeDiv for f16 {
+    assoc Output: Type = f16;
+
+    pure comptime fn div(self, rhs: f16) -> f16 {
+        self / rhs
+    }
+}
+
+comptime impl ComptimeNeg for f16 {
+    assoc Output: Type = f16;
+
+    pure comptime fn neg(self) -> f16 {
+        -self
+    }
+}
+
+comptime impl ComptimeAdd for bf16 {
+    assoc Output: Type = bf16;
+
+    pure comptime fn add(self, rhs: bf16) -> bf16 {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for bf16 {
+    assoc Output: Type = bf16;
+
+    pure comptime fn sub(self, rhs: bf16) -> bf16 {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for bf16 {
+    assoc Output: Type = bf16;
+
+    pure comptime fn mul(self, rhs: bf16) -> bf16 {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeDiv for bf16 {
+    assoc Output: Type = bf16;
+
+    pure comptime fn div(self, rhs: bf16) -> bf16 {
+        self / rhs
+    }
+}
+
+comptime impl ComptimeNeg for bf16 {
+    assoc Output: Type = bf16;
+
+    pure comptime fn neg(self) -> bf16 {
+        -self
+    }
+}
+
+comptime impl ComptimeAdd for f32 {
+    assoc Output: Type = f32;
+
+    pure comptime fn add(self, rhs: f32) -> f32 {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for f32 {
+    assoc Output: Type = f32;
+
+    pure comptime fn sub(self, rhs: f32) -> f32 {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for f32 {
+    assoc Output: Type = f32;
+
+    pure comptime fn mul(self, rhs: f32) -> f32 {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeDiv for f32 {
+    assoc Output: Type = f32;
+
+    pure comptime fn div(self, rhs: f32) -> f32 {
+        self / rhs
+    }
+}
+
+comptime impl ComptimeNeg for f32 {
+    assoc Output: Type = f32;
+
+    pure comptime fn neg(self) -> f32 {
+        -self
+    }
+}
+
+comptime impl ComptimeAdd for f64 {
+    assoc Output: Type = f64;
+
+    pure comptime fn add(self, rhs: f64) -> f64 {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for f64 {
+    assoc Output: Type = f64;
+
+    pure comptime fn sub(self, rhs: f64) -> f64 {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for f64 {
+    assoc Output: Type = f64;
+
+    pure comptime fn mul(self, rhs: f64) -> f64 {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeDiv for f64 {
+    assoc Output: Type = f64;
+
+    pure comptime fn div(self, rhs: f64) -> f64 {
+        self / rhs
+    }
+}
+
+comptime impl ComptimeNeg for f64 {
+    assoc Output: Type = f64;
+
+    pure comptime fn neg(self) -> f64 {
+        -self
+    }
+}
+
+comptime impl ComptimeAdd for Float {
+    assoc Output: Type = Float;
+
+    pure comptime fn add(self, rhs: Float) -> Float {
+        self + rhs
+    }
+}
+
+comptime impl ComptimeSub for Float {
+    assoc Output: Type = Float;
+
+    pure comptime fn sub(self, rhs: Float) -> Float {
+        self - rhs
+    }
+}
+
+comptime impl ComptimeMul for Float {
+    assoc Output: Type = Float;
+
+    pure comptime fn mul(self, rhs: Float) -> Float {
+        self * rhs
+    }
+}
+
+comptime impl ComptimeNeg for Float {
+    assoc Output: Type = Float;
+
+    pure comptime fn neg(self) -> Float {
+        -self
     }
 }

@@ -140,7 +140,7 @@ fn pending_value_inputs_do_not_hide_producer_contract_failures() {
         fn run() -> bool { forward<false>() }
     "#;
     let package = sysroot::compile(source).unwrap();
-    let failure = luna::instantiation::instantiate(&package, "run", 1_000_000)
+    let failure = luna::instantiation::instantiate(&package, "run", 10_000_000)
         .err()
         .expect("the factory must run even when its callback is unused");
     assert!(failure.contains("ProgramContractRejected"), "{failure}");

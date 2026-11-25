@@ -1,7 +1,7 @@
 //! Source-bound indexing: selection is ordinary method selection. The caller
 //! retains the declared result, including any pointer, phase and effect row.
 use nir::program::{MethodContract, Trait};
-use nir::{DeclarationId, Parameter, Sort, Term};
+use nir::{AssociatedTypeOrigin, DeclarationId, Parameter, Primitive, Sort, Term};
 
 pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<&MethodContract, String> {
     let mut declarations = traits.iter().filter(|item| item.declaration == id);
@@ -224,4 +224,86 @@ pub fn space_apply_protocol(traits: &[Trait], id: DeclarationId) -> Result<(), S
         );
     }
     Ok(())
+}
+
+/// Validate a comptime indexing protocol (`ComptimeIndex`), which uses value
+/// receiver semantics and returns `Output` by value without pointers.
+pub fn comptime_protocol(traits: &[Trait], id: DeclarationId) -> Result<&MethodContract, String> {
+    let mut declarations = traits.iter().filter(|item| item.declaration == id);
+    let interface = declarations
+        .next()
+        .ok_or("ComptimeIndex protocol is not a declared trait")?;
+    if declarations.next().is_some() {
+        return Err("duplicate ComptimeIndex protocol identity".into());
+    }
+    if !interface.comptime_only {
+        return Err("ComptimeIndex protocol must be declared as a comptime trait".into());
+    }
+    let [argument] = interface.type_parameters.as_slice() else {
+        return Err("ComptimeIndex protocol requires one index type parameter".into());
+    };
+    let outputs = interface
+        .associated
+        .iter()
+        .filter(|member| member.name == "Output")
+        .collect::<Vec<_>>();
+    let [output] = outputs.as_slice() else {
+        return Err("ComptimeIndex protocol requires one Output associated type".into());
+    };
+    if output.ty != Term::Primitive(Primitive::Type) {
+        return Err("ComptimeIndex Output must have type Type".into());
+    }
+    let methods = interface
+        .methods
+        .iter()
+        .filter(|method| method.name == "index")
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        return Err("ComptimeIndex protocol requires one index method".into());
+    };
+    if method.phase != nir::program::TraitPhase::Comptime
+        || !method.signature.is_comptime_callable()
+    {
+        return Err("ComptimeIndex protocol requires a comptime index method".into());
+    }
+    let subject = Term::Rigid {
+        declaration: interface.self_parameter,
+        sort: Sort::Type,
+    };
+    let idx = Term::Rigid {
+        declaration: *argument,
+        sort: Sort::Type,
+    };
+    let expected = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Runtime,
+                ty: subject.clone(),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: idx.clone(),
+            },
+        ],
+        result: Box::new(Term::AssociatedType {
+            origin: Box::new(AssociatedTypeOrigin {
+                interface: id,
+                member: output.declaration,
+            }),
+            arguments: vec![idx],
+            subject: Box::new(subject),
+        }),
+    };
+    if method.signature.callable_signature() != Ok(&expected)
+        || !method.by_value_receiver
+        || method.by_reference_receiver
+        || method.parameter_bindings.len() != 2
+        || !method.type_parameters.is_empty()
+        || !method.type_arguments.is_empty()
+    {
+        return Err(
+            "ComptimeIndex protocol requires comptime fn index(self, idx: Idx) -> Output".into(),
+        );
+    }
+    Ok(method)
 }
