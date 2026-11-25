@@ -341,6 +341,7 @@ pub struct Protocols {
     pub stable_map_pattern: Option<DeclarationId>,
     pub struct_pattern: Option<DeclarationId>,
     pub stable_struct_pattern: Option<DeclarationId>,
+    pub type_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
@@ -1572,6 +1573,10 @@ fn elaborate_candidate<'a, 'h>(
             checker.protocols.struct_pattern,
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.type_pattern {
+        crate::type_patterns::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)

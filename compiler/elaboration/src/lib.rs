@@ -37,6 +37,7 @@ pub mod indexing;
 pub mod list_patterns;
 pub mod range_patterns;
 pub mod record_patterns;
+pub mod type_patterns;
 
 pub mod literal_conversion;
 pub mod variadic_collectors;

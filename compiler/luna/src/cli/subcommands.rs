@@ -262,6 +262,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--stable-map-pattern-protocol"
                     | "--struct-pattern-protocol"
                     | "--stable-struct-pattern-protocol"
+                    | "--type-pattern-protocol"
                     | "--literal-into-protocol"
                     | "--iterator-protocol"
                     | "--into-iterator-protocol"

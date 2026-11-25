@@ -610,6 +610,7 @@ pub(crate) fn source_protocols(
         stable_map_pattern: options.stable_map_pattern_protocol.as_deref(),
         struct_pattern: options.struct_pattern_protocol.as_deref(),
         stable_struct_pattern: options.stable_struct_pattern_protocol.as_deref(),
+        type_pattern: options.type_pattern_protocol.as_deref(),
         iterator: options.iterator_protocol.as_deref(),
         into_iterator: options.into_iterator_protocol.as_deref(),
         variadic_collector: options.variadic_collector_protocol.as_deref(),

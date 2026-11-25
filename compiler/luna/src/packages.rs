@@ -910,6 +910,7 @@ fn all_resolved_protocols_in(
         protocols.stable_map_pattern,
         protocols.struct_pattern,
         protocols.stable_struct_pattern,
+        protocols.type_pattern,
         protocols.literal_into,
         protocols.handle_error,
         protocols.splice,

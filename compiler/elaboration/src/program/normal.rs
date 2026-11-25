@@ -973,7 +973,7 @@ impl Checker<'_, '_> {
                 if let n::Pattern::Binding { binding, inner } = pattern.as_ref()
                     && matches!(inner.as_ref(), n::Pattern::Wild)
                     && matches!(ty, Term::Primitive(primitive) if primitive.fixed_integer_layout().is_some()
-                        || matches!(primitive, P::Integer | P::Char | P::Symbol | P::Str | P::BitVec(_)))
+                        || matches!(primitive, P::Integer | P::Usize | P::Isize | P::Char | P::Symbol | P::Str | P::BitVec(_)))
                 {
                     return self.exact_scalar_guard_input(condition, *binding, ty, span, depth + 1);
                 }
@@ -1062,7 +1062,7 @@ impl Checker<'_, '_> {
                 *fuel -= (before - budget.steps) as u64;
                 let value = value.map_err(|failure| error(span, failure.to_string()))?;
                 if let (Some(Term::Integer(value)), Term::Primitive(primitive)) = (&value, ty)
-                    && let Some((signed, width)) = primitive.fixed_integer_layout()
+                    && let Some((signed, width)) = self.integer_layout(*primitive)
                     && (if signed {
                         value.to_signed(width).is_err()
                     } else {

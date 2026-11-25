@@ -42,6 +42,7 @@ pub struct Options {
     pub stable_map_pattern_protocol: Option<String>,
     pub struct_pattern_protocol: Option<String>,
     pub stable_struct_pattern_protocol: Option<String>,
+    pub type_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub variadic_collector_protocol: Option<String>,
@@ -212,6 +213,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut stable_map_pattern_protocol = None;
     let mut struct_pattern_protocol = None;
     let mut stable_struct_pattern_protocol = None;
+    let mut type_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut variadic_collector_protocol = None;
@@ -792,6 +794,17 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--type-pattern-protocol") => {
+                    if type_pattern_protocol.is_some() {
+                        return Err("--type-pattern-protocol may only be specified once".into());
+                    }
+                    type_pattern_protocol = Some(
+                        option_value(&mut args, "--type-pattern-protocol")?
+                            .into_string()
+                            .map_err(|_| "TypePatternView protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -1166,6 +1179,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         stable_map_pattern_protocol,
         struct_pattern_protocol,
         stable_struct_pattern_protocol,
+        type_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         variadic_collector_protocol,
@@ -1345,6 +1359,7 @@ mod tests {
                 stable_map_pattern_protocol: None,
                 struct_pattern_protocol: None,
                 stable_struct_pattern_protocol: None,
+                type_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,
@@ -1398,6 +1413,7 @@ mod tests {
                 stable_map_pattern_protocol: None,
                 struct_pattern_protocol: None,
                 stable_struct_pattern_protocol: None,
+                type_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,

@@ -237,6 +237,7 @@ fn compile_selected(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, S
         stable_map_pattern_protocol: None,
         struct_pattern_protocol: None,
         stable_struct_pattern_protocol: None,
+        type_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         variadic_collector_protocol: None,

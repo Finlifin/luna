@@ -1050,6 +1050,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         stable_map_pattern_protocol: None,
         struct_pattern_protocol: None,
         stable_struct_pattern_protocol: None,
+        type_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         variadic_collector_protocol: None,

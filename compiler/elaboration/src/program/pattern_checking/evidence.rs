@@ -226,7 +226,7 @@ pub(in crate::program) fn readonly_guard_operand(
             return Err(error(span, "guard observation depth exhausted"));
         }
         match &expr.kind {
-            K::Local(_) | K::Literal(_) | K::TypeValue(_) => {}
+            K::Local(_) | K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) => {}
             K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::Not(value)

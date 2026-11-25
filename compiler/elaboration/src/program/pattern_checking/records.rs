@@ -333,7 +333,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn has_record_protocol_impl(
+    pub(super) fn has_record_protocol_impl(
         &self,
         protocol: DeclarationId,
         ty: &Term,

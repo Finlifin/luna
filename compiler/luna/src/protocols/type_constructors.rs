@@ -32,6 +32,7 @@ pub struct Selectors<'a> {
     pub stable_map_pattern: Option<&'a str>,
     pub struct_pattern: Option<&'a str>,
     pub stable_struct_pattern: Option<&'a str>,
+    pub type_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -80,6 +81,7 @@ impl Selectors<'_> {
                 self.stable_map_pattern,
                 self.struct_pattern,
                 self.stable_struct_pattern,
+                self.type_pattern,
                 self.literal_into,
                 self.handle_error,
                 self.splice,
@@ -325,6 +327,11 @@ pub(crate) fn resolve_source(
                 "StableStructPatternView".into(),
                 selectors.stable_struct_pattern,
                 &mut result.stable_struct_pattern,
+            ),
+            (
+                "TypePatternView".into(),
+                selectors.type_pattern,
+                &mut result.type_pattern,
             ),
             (
                 "LiteralInto".into(),
@@ -619,6 +626,7 @@ pub(crate) struct SysrootBindings {
     stable_map_pattern: Option<String>,
     struct_pattern: Option<String>,
     stable_struct_pattern: Option<String>,
+    type_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     variadic_collector: Option<String>,
@@ -724,6 +732,7 @@ impl SysrootBindings {
                 "stable-map-pattern-protocol" => &mut result.stable_map_pattern,
                 "struct-pattern-protocol" => &mut result.struct_pattern,
                 "stable-struct-pattern-protocol" => &mut result.stable_struct_pattern,
+                "type-pattern-protocol" => &mut result.type_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "variadic-collector-protocol" => &mut result.variadic_collector,
@@ -962,6 +971,13 @@ impl SysrootBindings {
                     .stable_struct_pattern
                     .is_none()
                     .then_some(self.stable_struct_pattern.as_deref())
+                    .flatten()
+            }),
+            type_pattern: explicit.type_pattern.or_else(|| {
+                identities
+                    .type_pattern
+                    .is_none()
+                    .then_some(self.type_pattern.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1378,6 +1394,7 @@ mod stage_tests {
             stable_map_pattern_protocol: None,
             struct_pattern_protocol: None,
             stable_struct_pattern_protocol: None,
+            type_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             variadic_collector_protocol: None,

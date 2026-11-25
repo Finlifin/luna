@@ -3051,6 +3051,7 @@ fn scope_for_required(
         protocols_cfg.stable_map_pattern,
         protocols_cfg.struct_pattern,
         protocols_cfg.stable_struct_pattern,
+        protocols_cfg.type_pattern,
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,

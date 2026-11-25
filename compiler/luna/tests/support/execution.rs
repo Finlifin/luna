@@ -115,6 +115,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             stable_map_pattern_protocol: selectors.stable_map_pattern.map(str::to_owned),
             struct_pattern_protocol: selectors.struct_pattern.map(str::to_owned),
             stable_struct_pattern_protocol: selectors.stable_struct_pattern.map(str::to_owned),
+            type_pattern_protocol: selectors.type_pattern.map(str::to_owned),
             iterator_protocol: selectors.iterator.map(str::to_owned),
             into_iterator_protocol: selectors.into_iterator.map(str::to_owned),
             variadic_collector_protocol: selectors.variadic_collector.map(str::to_owned),

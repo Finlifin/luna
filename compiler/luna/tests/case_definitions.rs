@@ -41,6 +41,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         stable_map_pattern_protocol: None,
         struct_pattern_protocol: None,
         stable_struct_pattern_protocol: None,
+        type_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         variadic_collector_protocol: None,

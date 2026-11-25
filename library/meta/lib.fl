@@ -17,7 +17,7 @@ use data.{
     map,
     object,
     optional,
-    patterns,
+    patterns as data_patterns,
     set,
     text,
 }
@@ -56,7 +56,7 @@ pub use newtypes.*;
 pub use object.*;
 pub use optional.ComptimeOptionalOps;
 pub use ordering.ComptimeOrd;
-pub use patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
+pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
 pub use set.Set;
 pub use structs.*;
 pub use structure.*;
@@ -74,6 +74,41 @@ pub mod math {
     pub use scalar_math.*;
 }
 
+pub mod patterns {
+    use builtin.Type;
+
+    {- Error reasons produced by comptime pattern-view elaboration protocols. -}
+    pub enum PatternViewErr {
+        InvalidArity,
+        ExpectedConstantSlot,
+        InvalidPatternInput,
+        TypeMismatch,
+        UnsupportedSlotShape,
+        DisallowedContextEscape,
+    }
+
+    {- Structural classification of a pattern slot supplied to custom pattern views. -}
+    pub enum PatternShape {
+        wildcard,
+        binding,
+        constant,
+        tuple,
+        record,
+        list,
+        typed_binding,
+        complex,
+    }
+
+    {- Protocol for custom comptime type constructors that expose destructuring
+       without unfolding normal-form head definitions. Returning `null` indicates a
+       pattern mismatch and transfers control to the next match arm. -}
+    pub pure comptime trait TypePatternView {
+        assoc Args: Type;
+
+        pure comptime fn type_pattern_view_destructure(target: Type) -> ?Args;
+    }
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Map;
@@ -86,6 +121,6 @@ pub mod prelude {
     pub use hashing.ComptimeHash;
     pub use optional.ComptimeOptionalOps;
     pub use ordering.ComptimeOrd;
-    pub use patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
+    pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
     pub use text.ComptimeTextBytes;
 }
