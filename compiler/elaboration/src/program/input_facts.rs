@@ -8,6 +8,7 @@ use super::*;
 #[derive(Clone, Default)]
 pub(super) struct Parameters {
     declared: LocalBindings<(Term, Term)>,
+    declared_runtime: LocalBindings<(Term, Term)>,
     invalidated: BTreeSet<n::LocalId>,
 }
 
@@ -28,8 +29,43 @@ impl Parameters {
         }
     }
 
+    pub fn bind_runtime(&mut self, binding: n::LocalId, index: usize, domain: &Term) {
+        self.declared_runtime.insert(
+            binding,
+            (
+                Term::Bound {
+                    depth: 0,
+                    index,
+                    sort: Sort::Runtime,
+                },
+                domain.clone(),
+            ),
+        );
+    }
+
+    pub fn bind_runtime_value(&mut self, binding: n::LocalId, identity: Term, domain: Term) {
+        self.declared_runtime.insert(binding, (identity, domain));
+    }
+
+    pub fn runtime_identity(&self, binding: &n::LocalId) -> Option<&(Term, Term)> {
+        if self.invalidated.contains(binding) {
+            return None;
+        }
+        self.declared_runtime.get(binding)
+    }
+
+    pub fn runtime_identities(&self) -> impl Iterator<Item = (&n::LocalId, &(Term, Term))> {
+        self.declared_runtime
+            .iter()
+            .filter(|(id, _)| !self.invalidated.contains(id))
+    }
+
+    pub fn has_runtime_identities(&self) -> bool {
+        self.runtime_identities().next().is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.declared.is_empty()
+        self.declared.is_empty() && self.declared_runtime.is_empty()
     }
 
     fn entry_identity(&self, binding: &n::LocalId) -> Option<&(Term, Term)> {

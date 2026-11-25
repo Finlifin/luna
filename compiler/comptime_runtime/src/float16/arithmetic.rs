@@ -9,7 +9,9 @@ pub enum Float16Op {
     Subtract,
     Multiply,
     Divide,
+    Remainder,
 }
+
 impl fmt::Display for Float16Op {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -17,6 +19,7 @@ impl fmt::Display for Float16Op {
             Self::Subtract => "(float16-op subtract)",
             Self::Multiply => "(float16-op multiply)",
             Self::Divide => "(float16-op divide)",
+            Self::Remainder => "(float16-op remainder)",
         })
     }
 }
@@ -116,6 +119,23 @@ impl Float16Format {
                     return Ok(sign);
                 }
                 self.round_ratio(&Integer::from_u128(ma.into()), mb, ea - eb, sign, budget)
+            }
+            Float16Op::Remainder => {
+                if a == infinity || b == 0 {
+                    return Ok(nan);
+                }
+                if b == infinity || a == 0 {
+                    return Ok(left);
+                }
+                let common = ea.min(eb);
+                let num = scale(&Integer::from_u128(ma.into()), (ea - common) as u32, budget)?;
+                let den = scale(&Integer::from_u128(mb.into()), (eb - common) as u32, budget)?;
+                let (_, rem) = num.div_rem_trunc(&den, budget)?;
+                let left_sign = left & 0x8000;
+                if rem.is_zero() {
+                    return Ok(left_sign);
+                }
+                self.round_ratio(&rem, 1, common, left_sign, budget)
             }
         }
     }

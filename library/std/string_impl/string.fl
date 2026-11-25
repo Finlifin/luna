@@ -1,7 +1,7 @@
 use builtin.fmt.{ByteWriter, Debug, Display, FormatOptions}
 use builtin.fmt.options.{compute_pad_counts, parse_text_options, write_char_repeat}
 use collections_impl.vec.Vec;
-use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
+use mem_impl.allocator.{AllocErr, Allocator, DecideAllocErr, DefaultAllocator, Id}
 
 {-
     Byte offset at which UTF-8 validation first failed. All preceding bytes in
@@ -1061,3 +1061,27 @@ where
     requires A :- Allocator,
     quote a: lift *A,
 {}
+
+impl Concat<.Rhs = str> for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
+    assoc Output: Type = !DecideAllocErr(A, a) String<.A = A, .allocator = a>;
+
+    fn concat(self, rhs: str) -> !DecideAllocErr(A, a) String<.A = A, .allocator = a> {
+        var out = self;
+        inline if A == DefaultAllocator and Id<a> == Id<DefaultAllocator.GLOBAL.ref> {
+            out.ref.push_str(rhs) match {
+                _! => out,
+                error _ => {
+                    while true {}
+                },
+            }
+        } else {
+            out.ref.push_str(rhs)!;
+            out
+        }
+    }
+}

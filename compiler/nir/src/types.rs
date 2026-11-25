@@ -450,6 +450,15 @@ pub struct AssociatedTypeCall {
     pub call_arguments: Vec<Term>,
 }
 
+/// Application of a pure comptime callable to symbolic or open inputs inside a type.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ComptimeCall {
+    pub declaration: DeclarationId,
+    pub type_arguments: Vec<Term>,
+    pub arguments: Vec<Term>,
+    pub ty: Term,
+}
+
 /// A stable symbolic term. Eq/Hash compare representation only. In particular,
 /// two unequal terms can still require a semantic equality query.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -458,6 +467,12 @@ pub enum Term {
     /// Error labels are complete Type instances, independent of effect entries.
     ErrorResult {
         errors: Vec<Term>,
+        result: Box<Term>,
+    },
+    /// Deferred error-qualified type whose error row is a `meta.List<Type>` term.
+    /// Reduces via `deferred_error_result` / normalization once `errors` closes.
+    DeferredErrorResult {
+        errors: Box<Term>,
         result: Box<Term>,
     },
     /// Scoped effect occurrences in order. Repetition records handler layers,
@@ -478,6 +493,8 @@ pub enum Term {
     },
     /// Application of a Type-returning associated comptime callable to value arguments.
     AssociatedTypeCall(Box<AssociatedTypeCall>),
+    /// Application of a pure comptime callable inside a type or error row.
+    ComptimeCall(Box<ComptimeCall>),
     Nominal {
         declaration: DeclarationId,
         arguments: Vec<Term>,
@@ -676,6 +693,23 @@ impl Term {
         }
     }
 
+    /// Construct an error-qualified type from an open `meta.List<Type>` row.
+    /// Reduces immediately to `error_result` when the row is a closed list.
+    pub fn deferred_error_result(errors: Term, result: Term) -> Self {
+        if let Self::NominalValue {
+            variant: None,
+            fields,
+            ..
+        } = errors
+        {
+            return Self::error_result(fields, result);
+        }
+        Self::DeferredErrorResult {
+            errors: Box::new(errors),
+            result: Box::new(result),
+        }
+    }
+
     /// Rebuild a frozen result after substituting or resolving its components.
     /// An exposed inner result may flatten only with matching domain evidence.
     /// Callers meter component traversal before invoking this constructor.
@@ -788,6 +822,8 @@ impl Term {
                     | Self::Hole { .. }
                     | Self::AssociatedType { .. }
                     | Self::AssociatedTypeCall(_)
+                    | Self::ComptimeCall(_)
+                    | Self::DeferredErrorResult { .. }
                     | Self::NormalForm { .. }
             ) && matches!(
                 value.as_ref(),
@@ -822,6 +858,10 @@ impl Term {
                     pending.extend(errors);
                     pending.push(*result);
                 }
+                Self::DeferredErrorResult { errors, result } => {
+                    pending.push(*errors);
+                    pending.push(*result);
+                }
                 Self::Computation { effects, result } => {
                     pending.push(*result);
                     for operation in effects {
@@ -838,6 +878,11 @@ impl Term {
                     pending.push(call.subject);
                     pending.extend(call.arguments);
                     pending.extend(call.call_arguments);
+                }
+                Self::ComptimeCall(call) => {
+                    pending.push(call.ty);
+                    pending.extend(call.type_arguments);
+                    pending.extend(call.arguments);
                 }
                 Self::MethodValue(method) => {
                     pending.push(method.subject);
@@ -1022,6 +1067,7 @@ impl Term {
                 sort: Sort::ComptimeValue,
                 ..
             } => true,
+            Self::ComptimeCall(call) => call.ty == *domain,
             _ => false,
         }
     }
@@ -1272,6 +1318,7 @@ impl Term {
             | Self::Bound { sort, .. }
             | Self::Rigid { sort, .. }
             | Self::NormalForm { sort, .. } => *sort,
+            Self::ComptimeCall(call) => Sort::of_comptime_domain(&call.ty),
             Self::Runtime(_) | Self::RuntimeField { .. } => Sort::Runtime,
             Self::OptionalValue { .. }
             | Self::ErrorValue { .. }
@@ -1761,6 +1808,10 @@ impl Term {
             Self::ErrorResult { errors, result } => {
                 Self::error_result(many(errors, leaf)?, result.rewrite(nesting, leaf)?)
             }
+            Self::DeferredErrorResult { errors, result } => Self::deferred_error_result(
+                errors.rewrite(nesting, leaf)?,
+                result.rewrite(nesting, leaf)?,
+            ),
             Self::Computation { effects, result } => Self::computation(
                 effects
                     .iter()
@@ -1790,6 +1841,12 @@ impl Term {
                     call_arguments: many(&call.call_arguments, leaf)?,
                 }))
             }
+            Self::ComptimeCall(call) => Self::ComptimeCall(Box::new(ComptimeCall {
+                declaration: call.declaration,
+                type_arguments: many(&call.type_arguments, leaf)?,
+                arguments: many(&call.arguments, leaf)?,
+                ty: call.ty.rewrite(nesting, leaf)?,
+            })),
             Self::Nominal {
                 declaration,
                 arguments,
@@ -2503,6 +2560,12 @@ fn validate<'term>(
                 validate(ty, holes, frames, allow_free, core)?;
             }
         }
+        Term::DeferredErrorResult { errors, result } => {
+            require_sort(errors, Sort::ComptimeValue)?;
+            validate(errors, holes, frames, allow_free, core)?;
+            require_sort(result, Sort::Type)?;
+            validate(result, holes, frames, allow_free, core)?;
+        }
         Term::Computation { effects, result } => {
             require_sort(result, Sort::Type)?;
             validate(result, holes, frames, allow_free, core)?;
@@ -2791,6 +2854,16 @@ fn validate<'term>(
                 validate(argument, holes, frames, allow_free, core)?;
             }
         }
+        Term::ComptimeCall(call) => {
+            require_sort(&call.ty, Sort::Type)?;
+            validate(&call.ty, holes, frames, allow_free, core)?;
+            for argument in &call.type_arguments {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+            for argument in &call.arguments {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+        }
         Term::MethodValue(method) => {
             require_sort(&method.subject, Sort::Type)?;
             for argument in method.terms() {
@@ -2921,6 +2994,12 @@ impl fmt::Display for Term {
                 }
                 write!(f, ") (result {result}))")
             }
+            Self::DeferredErrorResult { errors, result } => {
+                write!(
+                    f,
+                    "(deferred-error-result-type (errors {errors}) (result {result}))"
+                )
+            }
             Self::Computation { effects, result } => {
                 f.write_str("(computation-type (effects")?;
                 for operation in effects {
@@ -2956,6 +3035,17 @@ impl fmt::Display for Term {
                 )?;
                 list(f, &call.call_arguments)?;
                 f.write_str("))")
+            }
+            Self::ComptimeCall(call) => {
+                write!(
+                    f,
+                    "(comptime-call (declaration {}) (type-arguments ",
+                    call.declaration
+                )?;
+                list(f, &call.type_arguments)?;
+                f.write_str(") (arguments ")?;
+                list(f, &call.arguments)?;
+                write!(f, ") (type {}))", call.ty)
             }
             Self::Nominal {
                 declaration,

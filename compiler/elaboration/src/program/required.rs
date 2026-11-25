@@ -1445,7 +1445,8 @@ impl Checker<'_, '_> {
             if let Some(owner) = self.default_input_owner.or(self.signature_owner)
                 && !defer_inputs
                 && let Some(frame) = input_frames.last()
-                && frame.iter().any(|sort| *sort != Sort::Runtime)
+                && (frame.iter().any(|sort| *sort != Sort::Runtime)
+                    || self.input_facts.parameters.has_runtime_identities())
             {
                 self.required_steps = self
                     .required_steps
@@ -1478,6 +1479,14 @@ impl Checker<'_, '_> {
                             .map(|(binding, (symbol, domain))| (binding, symbol, domain)),
                     )
                     .chain(self.input_facts.parameters.identities().filter_map(
+                        |(binding, (symbol, domain))| {
+                            (binding.owner == owner
+                                && !self.input_facts.types.contains_key(binding)
+                                && !self.input_facts.values.contains_key(binding))
+                            .then_some((binding, symbol, domain))
+                        },
+                    ))
+                    .chain(self.input_facts.parameters.runtime_identities().filter_map(
                         |(binding, (symbol, domain))| {
                             (binding.owner == owner
                                 && !self.input_facts.types.contains_key(binding)
@@ -3061,9 +3070,17 @@ fn scope_for_required(
         protocols_cfg.stable_list_pattern,
         protocols_cfg.list_pattern_endless,
         protocols_cfg.stable_list_pattern_endless,
+        protocols_cfg.range_full,
+        protocols_cfg.range_from,
+        protocols_cfg.range_to,
+        protocols_cfg.range_to_inclusive,
+        protocols_cfg.range,
+        protocols_cfg.range_inclusive,
         protocols_cfg.range_end,
         protocols_cfg.range_pattern,
         protocols_cfg.stable_range_pattern,
+        protocols_cfg.concat,
+        protocols_cfg.comptime_concat,
         protocols_cfg.concat_pattern,
         protocols_cfg.stable_concat_pattern,
         protocols_cfg.map_pattern,

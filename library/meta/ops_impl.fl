@@ -1,4 +1,6 @@
-use builtin.{Type, void};
+use List;
+use builtin.{Type, str, void}
+use data.text.ComptimeTextBytes;
 
 {- Comptime operator protocol companions for meta.ops. -}
 pub pure comptime trait ComptimeImplies
@@ -43,4 +45,29 @@ where
     .Rhs: Type = Self,
 {
     comptime fn rem_assign(self, rhs: Rhs) -> void;
+}
+
+pub pure comptime trait ComptimeConcat
+where
+    .Rhs: Type = Self,
+{
+    assoc Output: Type;
+
+    pure comptime fn concat(self, rhs: Rhs) -> Output;
+}
+
+comptime impl ComptimeConcat<.Rhs = str> for str {
+    assoc Output: Type = str;
+
+    pure comptime fn concat(self, rhs: str) -> str {
+        self.as(ComptimeTextBytes).concat(rhs)
+    }
+}
+
+comptime impl ComptimeConcat<.Rhs = List<T>> for List<T> where T: Type {
+    assoc Output: Type = List<T>;
+
+    pure comptime fn concat(self, rhs: List<T>) -> List<T> {
+        List<T>.concat(self, rhs)
+    }
 }

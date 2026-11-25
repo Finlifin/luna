@@ -54,6 +54,12 @@ pub trait Implies where .Rhs: Type = Self {
     fn implies(self, rhs: Rhs) -> Output;
 }
 
+pub trait Concat where .Rhs: Type = Self {
+    assoc Output: Type;
+
+    fn concat(self, rhs: Rhs) -> Output;
+}
+
 -- ── Index & SpaceApply ──────────────────────────────────────────────────────
 pub trait Index where Idx {
     assoc Output: Type;

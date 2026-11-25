@@ -7,6 +7,7 @@ pub enum Error {
     Budget,
     Invalid(&'static str),
 }
+
 impl Error {
     pub fn message(self) -> &'static str {
         match self {
@@ -15,6 +16,7 @@ impl Error {
         }
     }
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message())
@@ -106,7 +108,7 @@ pub fn validate_staged_in(
     let inputs = value
         .substitution_parameters()
         .map_err(|_| Error::Invalid("staged value has invalid invocation scope"))?;
-    if inputs.values().any(|sort| *sort == Sort::Runtime) {
+    if inputs.values().any(|sort| *sort == Sort::Runtime) && !matches!(domain, Term::Lift(_)) {
         return Err(Error::Invalid("staged value reads a runtime input"));
     }
     if let Term::Bound {
@@ -131,7 +133,13 @@ fn validate_scoped(
 ) -> Result<(), Error> {
     crate::type_computations::charge_term(value, fuel).map_err(|_| Error::Budget)?;
     crate::type_computations::charge_term(domain, fuel).map_err(|_| Error::Budget)?;
-    if value.sort() != Sort::ComptimeValue {
+    if matches!(domain, Term::Lift(_)) {
+        if value.sort() != Sort::Runtime {
+            return Err(Error::Invalid(
+                "captured runtime lift value requires a runtime term",
+            ));
+        }
+    } else if value.sort() != Sort::ComptimeValue {
         return Err(Error::Invalid(
             "captured comptime value requires a value term",
         ));

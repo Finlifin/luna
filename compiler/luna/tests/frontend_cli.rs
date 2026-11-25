@@ -1072,6 +1072,14 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         compound_arithmetic_protocols: Default::default(),
         comptime_compound_arithmetic_protocols: Default::default(),
         tuple_type: None,
+        range_full_type: None,
+        range_from_type: None,
+        range_to_type: None,
+        range_to_inclusive_type: None,
+        range_type: None,
+        range_inclusive_type: None,
+        concat_protocol: None,
+        comptime_concat_protocol: None,
         incremental: Default::default(),
     };
     let foreign = elaboration::program::Protocols {

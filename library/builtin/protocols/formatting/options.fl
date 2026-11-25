@@ -1426,11 +1426,11 @@ pub pure comptime fn repeat_comptime_char(ch: char, count: u32) -> str {
     var out = "";
     while rem > 0 {
         if rem % 2 == 1 {
-            out = out.concat(chunk);
+            out = out.as(ComptimeTextBytes).concat(chunk);
         }
         rem = rem / 2;
         if rem > 0 {
-            chunk = chunk.concat(chunk);
+            chunk = chunk.as(ComptimeTextBytes).concat(chunk);
         }
     }
     out
@@ -1443,7 +1443,7 @@ pub pure comptime fn pad_comptime_str(
     is_numeric: bool,
     allow_zero_pad: bool,
 ) -> str {
-    let content = prefix.concat(body);
+    let content = prefix.as(ComptimeTextBytes).concat(body);
     if not opts.has_len {
         return content;
     }
@@ -1455,14 +1455,18 @@ pub pure comptime fn pad_comptime_str(
     let content_chars = p_chars + b_chars;
     let pads = compute_comptime_pad_counts(opts, content_chars, is_numeric, allow_zero_pad);
     if pads.zero_pad > 0 {
-        return prefix.concat(repeat_comptime_char('0', pads.zero_pad)).concat(body);
+        return prefix
+            .as(ComptimeTextBytes)
+            .concat(repeat_comptime_char('0', pads.zero_pad))
+            .as(ComptimeTextBytes)
+            .concat(body);
     }
     var result = content;
     if pads.left > 0 {
-        result = repeat_comptime_char(opts.placeholder, pads.left).concat(result);
+        result = repeat_comptime_char(opts.placeholder, pads.left).as(ComptimeTextBytes).concat(result);
     }
     if pads.right > 0 {
-        result = result.concat(repeat_comptime_char(opts.placeholder, pads.right));
+        result = result.as(ComptimeTextBytes).concat(repeat_comptime_char(opts.placeholder, pads.right));
     }
     result
 }

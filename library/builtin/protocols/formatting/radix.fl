@@ -237,7 +237,7 @@ pure comptime fn format_u128_digits_comptime(value: u128, radix: u8) -> str {
             break;
         }
         let d = (v % base)'bitvec[0..8].as(u64);
-        out = comptime_digit_str(d, uppercase).concat(out);
+        out = comptime_digit_str(d, uppercase).as(ComptimeTextBytes).concat(out);
         v = v / base;
     }
     out
@@ -324,7 +324,7 @@ pub pure comptime fn format_integer_comptime(value: Integer, opts: FormatOptions
     } else {
         ""
     };
-    let prefix = sign_prefix.concat(alt_prefix);
+    let prefix = sign_prefix.as(ComptimeTextBytes).concat(alt_prefix);
     let base: Integer = if opts.radix == 1 or opts.radix == 2 {
         16
     } else if opts.radix == 3 {
@@ -342,7 +342,7 @@ pub pure comptime fn format_integer_comptime(value: Integer, opts: FormatOptions
         var digits = "";
         while mag > 0 {
             let rem = mag.rem_trunc(base);
-            digits = integer_digit_str(rem, uppercase).concat(digits);
+            digits = integer_digit_str(rem, uppercase).as(ComptimeTextBytes).concat(digits);
             mag = mag.div_trunc(base);
         }
         digits

@@ -8,6 +8,7 @@ use mem_impl.{slice, slice_ops};
 use protocols.capabilities.{effects as capability_effects, errors as capability_errors}
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
 use protocols.{conversion, hash as hash_protocol, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
+use range;
 use types.{equality, hashing, option, ordering, result, tuple}
 
 pub use capability_effects.{HandleCapturingEffect, HandleEffect};
@@ -37,6 +38,16 @@ pub use iterator.{
 }
 pub use ops.*;
 pub use option.OptionalOps;
+pub use range.{
+    Bound,
+    Range,
+    RangeBounds,
+    RangeFrom,
+    RangeFull,
+    RangeInclusive,
+    RangeTo,
+    RangeToInclusive,
+}
 pub use patterns.{
     ConcatPatternView,
     ListPatternView,
@@ -115,6 +126,16 @@ pub use implicit_passing.{CallDescription, Context, ImplicitPassing};
     pub use iterator.{FromIterator, IntoIterator, Iterator}
     pub use ops.*;
     pub use option.OptionalOps;
+    pub use range.{
+        Bound,
+        Range,
+        RangeBounds,
+        RangeFrom,
+        RangeFull,
+        RangeInclusive,
+        RangeTo,
+        RangeToInclusive,
+    }
     pub use patterns.{
         ConcatPatternView,
         ListPatternView,

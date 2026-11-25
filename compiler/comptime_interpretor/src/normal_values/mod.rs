@@ -36,7 +36,7 @@ impl Interpreter<'_> {
         }
         if let Term::Rigid {
             declaration,
-            sort: nir::Sort::ComptimeValue,
+            sort: nir::Sort::ComptimeValue | nir::Sort::Runtime,
         } = term
         {
             if self.comptime_only && self.abstract_value_parameters.get(declaration) == Some(ty) {
@@ -110,6 +110,15 @@ impl Interpreter<'_> {
                     sort: nir::Sort::ComptimeValue,
                     ..
                 } => {
+                    self.check_term_description(term, None)?;
+                    self.check_type_description(ty, None)?;
+                    self.admit_type(ty, depth)?;
+                    Value::NormalForm {
+                        term: term.clone(),
+                        ty: ty.clone(),
+                    }
+                }
+                Term::Runtime(_) | Term::RuntimeField { .. } if matches!(ty, Term::Lift(_)) => {
                     self.check_term_description(term, None)?;
                     self.check_type_description(ty, None)?;
                     self.admit_type(ty, depth)?;

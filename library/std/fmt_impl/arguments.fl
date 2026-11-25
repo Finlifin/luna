@@ -105,7 +105,7 @@ pub comptime fn comptime_format(
     var out = "";
     inline for (i, value) in varargs'tuple_indexed {
         let segment = str_at(segments, i);
-        out = out.concat(segment);
+        out = out.as(ComptimeTextBytes).concat(segment);
         let field_fmt = str_at(specs, i);
         let is_debug = bool_at(debug_flags, i);
         const T = value'type;
@@ -113,12 +113,12 @@ pub comptime fn comptime_format(
             assumes false;
         } else {
             inline if T :- Display {
-                out = out.concat(value.as(Display).comptime_fmt(.format = field_fmt));
+                out = out.as(ComptimeTextBytes).concat(value.as(Display).comptime_fmt(.format = field_fmt));
             }
         }
     }
     let tail = str_at(segments, specs.length());
-    out.concat(tail)
+    out.as(ComptimeTextBytes).concat(tail)
 }
 
 pub fn format(

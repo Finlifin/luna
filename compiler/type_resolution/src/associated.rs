@@ -361,6 +361,89 @@ pub fn associated_call_expression(
     })
 }
 
+/// Construct the IIR call expression for a closed `Term::ComptimeCall`.
+pub fn comptime_call_expression(
+    declaration: &nir::program::FunctionDeclaration,
+    call: &nir::ComptimeCall,
+    source: nir::program::SourceRange,
+    fuel: &mut usize,
+) -> Result<nir::program::Expr, QueryError> {
+    if call.type_arguments.len() != declaration.type_parameters.len() {
+        return Err("comptime call type argument count mismatch".into());
+    }
+    let callable_ty = declaration.callable_type();
+    charge_projection_copy(&callable_ty, fuel)?;
+    let instantiated_callable = if declaration.type_parameters.is_empty() {
+        callable_ty
+    } else {
+        let param_types = vec![Term::Primitive(Primitive::Type); declaration.type_parameters.len()];
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &declaration.type_parameters,
+            &param_types,
+            &call.type_arguments,
+            &[],
+            fuel,
+        )?;
+        substitution.instantiate_bounded(&callable_ty, fuel)?
+    };
+    let mut expected_types = Vec::with_capacity(call.arguments.len());
+    let _result = instantiated_callable
+        .instantiate_function(&call.arguments, |_index, _arg, expected| {
+            charge_projection_copy(expected, fuel)?;
+            expected_types.push(expected.clone());
+            Ok::<_, QueryError>(())
+        })
+        .map_err(|error| {
+            QueryError::Invalid(format!("comptime call contract mismatch: {error:?}"))
+        })?;
+    let callee_kind = if call.type_arguments.is_empty() {
+        ExprKind::Function(declaration.declaration)
+    } else {
+        ExprKind::FunctionInstance {
+            declaration: declaration.declaration,
+            arguments: call.type_arguments.clone(),
+        }
+    };
+    let callee = nir::program::Expr {
+        source,
+        ty: instantiated_callable,
+        kind: callee_kind,
+    };
+    let arguments = call
+        .arguments
+        .iter()
+        .zip(expected_types)
+        .enumerate()
+        .map(|(parameter, (arg, param_ty))| {
+            let kind = if param_ty == Term::Primitive(Primitive::Type) {
+                ExprKind::TypeValue(arg.clone())
+            } else {
+                ExprKind::ComptimeValue(arg.clone())
+            };
+            nir::program::CallArgument {
+                passing: nir::program::ArgumentPassing::Value,
+                parameter,
+                is_default: false,
+                value: nir::program::Expr {
+                    source,
+                    ty: param_ty,
+                    kind,
+                },
+            }
+        })
+        .collect();
+    Ok(nir::program::Expr {
+        source,
+        ty: call.ty.clone(),
+        kind: ExprKind::Call {
+            callee: Box::new(callee),
+            arguments,
+            env_arguments: Vec::new(),
+            parameter_bindings: Vec::new(),
+        },
+    })
+}
+
 impl fmt::Display for AssociatedTypeResolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -615,6 +698,14 @@ pub trait TypeProjectionEnvironment {
         projection: &Term,
         budget: &mut Budget,
     ) -> Result<TypeProjection, QueryError>;
+
+    fn resolve_comptime_call(
+        &mut self,
+        _call: &nir::ComptimeCall,
+        _budget: &mut Budget,
+    ) -> Result<Option<Term>, QueryError> {
+        Ok(None)
+    }
 }
 
 type InstanceResolver<'a> = dyn FnMut(
@@ -744,6 +835,36 @@ impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_, '_> {
         self.observations.push((key.clone(), observation));
         Ok(TypeProjection::Ready(result))
     }
+
+    fn resolve_comptime_call(
+        &mut self,
+        call: &nir::ComptimeCall,
+        budget: &mut Budget,
+    ) -> Result<Option<Term>, QueryError> {
+        let Some(evaluate) = self.host.as_mut() else {
+            return Ok(None);
+        };
+        let key = Term::ComptimeCall(Box::new(call.clone()));
+        charge_projection_copy(&key, &mut budget.steps)?;
+        let result = evaluate(
+            &self.scope,
+            &key,
+            call.declaration,
+            nir::program::SourceRange::generated(0),
+            budget,
+        )?;
+        if let Some((definitions, next)) = result.publication {
+            if !definitions.is_empty() {
+                self.scope.to_mut().install_published_nominals(
+                    definitions,
+                    call.declaration.package,
+                    next,
+                    budget,
+                )?;
+            }
+        }
+        Ok(Some(result.value))
+    }
 }
 
 pub(crate) struct DeliveredTypeView<'s> {
@@ -790,6 +911,34 @@ impl<'s> crate::dispatch::DeclarationScope<'s> {
             observations: world.observations,
         })
     }
+}
+
+fn has_open_comptime_call_input(term: &nir::ComptimeCall) -> bool {
+    let mut stack: Vec<&Term> = term
+        .type_arguments
+        .iter()
+        .chain(term.arguments.iter())
+        .chain(std::iter::once(&term.ty))
+        .collect();
+    while let Some(node) = stack.pop() {
+        match node {
+            Term::Bound { .. }
+            | Term::Rigid { .. }
+            | Term::Hole { .. }
+            | Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. }
+            | Term::RuntimeField { .. } => return true,
+            _ => {
+                let _ = node.visit_children(|child| {
+                    stack.push(child);
+                    Ok::<_, ()>(())
+                });
+            }
+        }
+    }
+    false
 }
 
 pub fn scoped_type_view_in(
@@ -913,6 +1062,61 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                 self.many(errors, depth + 1)?,
                 self.normalize(result, depth + 1)?,
             ),
+            Term::DeferredErrorResult { errors, result } => Term::deferred_error_result(
+                self.normalize(errors, depth + 1)?,
+                self.normalize(result, depth + 1)?,
+            ),
+            Term::ComptimeCall(call) => {
+                let key_call = nir::ComptimeCall {
+                    declaration: call.declaration,
+                    type_arguments: self.many(&call.type_arguments, depth + 1)?,
+                    arguments: self.many(&call.arguments, depth + 1)?,
+                    ty: self.normalize(&call.ty, depth + 1)?,
+                };
+                let key = Term::ComptimeCall(Box::new(key_call.clone()));
+                if self.preserve_given && key.check_scope(&[]).is_err() {
+                    key.check_scope(&self.frames).map_err(|e| e.to_string())?;
+                    return Ok(key);
+                }
+                if let Some(value) = self
+                    .completed
+                    .get(&key)
+                    .or_else(|| self.shared.and_then(|cache| cache.get(&key)))
+                {
+                    charge_projection_copy(value, &mut self.remaining)?;
+                    return Ok(value.clone());
+                }
+                if has_open_comptime_call_input(&key_call) || key.check_scope(&[]).is_err() {
+                    return Ok(key);
+                }
+                if !self.active.insert(key.clone()) {
+                    return Err(QueryError::Unresolved(
+                        "cyclic comptime call normalization".into(),
+                    ));
+                }
+                let result = (|| {
+                    let mut allowance = Budget {
+                        steps: self.remaining,
+                        ..self.budget
+                    };
+                    let resolved = self
+                        .environment
+                        .resolve_comptime_call(&key_call, &mut allowance);
+                    self.remaining = allowance.steps;
+                    match resolved? {
+                        Some(raw) => {
+                            let value = self.normalize(&raw, depth + 1)?;
+                            self.charge_copy(&value)?;
+                            self.charge_copy(&key)?;
+                            self.completed.insert(key.clone(), value.clone());
+                            Ok(value)
+                        }
+                        None => Ok(key.clone()),
+                    }
+                })();
+                self.active.remove(&key);
+                return result;
+            }
             Term::Computation { effects, result } => {
                 self.spend(effects.len())?;
                 let operations = effects

@@ -2322,7 +2322,13 @@ impl Checker<'_, '_> {
                             this.local_type_views.insert(binding, views);
                         }
                     }
-                    this.input_facts.parameters.bind(binding, slot, *sort, ty);
+                    if sig.modifiers.is_comptime && *sort == Sort::Runtime {
+                        this.input_facts
+                            .parameters
+                            .bind_runtime(binding, slot, ty);
+                    } else {
+                        this.input_facts.parameters.bind(binding, slot, *sort, ty);
+                    }
                 }
                 locals.insert(local(parameter.hir_id), description);
             }
@@ -3209,6 +3215,161 @@ impl Checker<'_, '_> {
                     self.tuple_value_type(types, expr.span)?
                 })
             }
+            H::Range {
+                start,
+                end,
+                inclusive,
+            } => match (*start, *end, *inclusive) {
+                (None, None, false) => self.describe_known_region(expr, expected)?,
+                (None, None, true) | (Some(_), None, true) => {
+                    return Err(error(expr.span, "inclusive range requires an upper bound"));
+                }
+                (Some(endpoint), None, false)
+                | (None, Some(endpoint), false)
+                | (None, Some(endpoint), true) => {
+                    let decl = match (*start, *inclusive) {
+                        (Some(_), _) => self.protocols.range_from,
+                        (None, false) => self.protocols.range_to,
+                        (None, true) => self.protocols.range_to_inclusive,
+                    };
+                    let elem_hint = match (expected, decl) {
+                        (Some(D::Known(ty)), Some(decl)) => self
+                            .range_expected_element(Some(ty), decl, expr.span)?
+                            .map(D::Known),
+                        _ => None,
+                    };
+                    let desc = self.describe_open_expression(
+                        endpoint,
+                        locals,
+                        returns,
+                        elem_hint.as_ref(),
+                        depth + 1,
+                    )?;
+                    let D::Known(elem_ty) = desc else {
+                        return Err(error(
+                            endpoint.span,
+                            "range construction requires an established endpoint type",
+                        ));
+                    };
+                    self.with_open_operand(elem_ty, endpoint.span, |this, placeholder| {
+                        let probe = Expr {
+                            hir_id: expr.hir_id,
+                            span: expr.span,
+                            kind: H::Range {
+                                start: start.map(|_| placeholder),
+                                end: end.map(|_| placeholder),
+                                inclusive: *inclusive,
+                            },
+                        };
+                        this.describe_known_region(&probe, expected)
+                    })?
+                }
+                (Some(s), Some(e), inclusive) => {
+                    if is_numeric_literal(s) && is_numeric_literal(e) {
+                        return self.describe_known_region(expr, expected);
+                    }
+                    let decl = if inclusive {
+                        self.protocols.range_inclusive
+                    } else {
+                        self.protocols.range
+                    };
+                    let elem_hint = match (expected, decl) {
+                        (Some(D::Known(ty)), Some(decl)) => self
+                            .range_expected_element(Some(ty), decl, expr.span)?
+                            .map(D::Known),
+                        _ => None,
+                    };
+                    if is_numeric_literal(s) {
+                        let desc = self.describe_open_expression(
+                            e,
+                            locals,
+                            returns,
+                            elem_hint.as_ref(),
+                            depth + 1,
+                        )?;
+                        let D::Known(right_ty) = desc else {
+                            return Err(error(
+                                e.span,
+                                "range construction requires established endpoint types",
+                            ));
+                        };
+                        self.with_open_operand(right_ty, e.span, |this, placeholder| {
+                            let probe = Expr {
+                                hir_id: expr.hir_id,
+                                span: expr.span,
+                                kind: H::Range {
+                                    start: Some(s),
+                                    end: Some(placeholder),
+                                    inclusive,
+                                },
+                            };
+                            this.describe_known_region(&probe, expected)
+                        })?
+                    } else {
+                        let left_desc = self.describe_open_expression(
+                            s,
+                            locals,
+                            returns,
+                            elem_hint.as_ref(),
+                            depth + 1,
+                        )?;
+                        let D::Known(left_ty) = left_desc else {
+                            return Err(error(
+                                s.span,
+                                "range construction requires established endpoint types",
+                            ));
+                        };
+                        if is_numeric_literal(e) {
+                            self.with_open_operand(left_ty, s.span, |this, placeholder| {
+                                let probe = Expr {
+                                    hir_id: expr.hir_id,
+                                    span: expr.span,
+                                    kind: H::Range {
+                                        start: Some(placeholder),
+                                        end: Some(e),
+                                        inclusive,
+                                    },
+                                };
+                                this.describe_known_region(&probe, expected)
+                            })?
+                        } else {
+                            let right_hint = elem_hint.or_else(|| {
+                                (!is_never(&left_ty)).then(|| D::Known(left_ty.clone()))
+                            });
+                            let right_desc =
+                                self.with_open_reachability(!is_never(&left_ty), e.span, |this| {
+                                    this.describe_open_expression(
+                                        e,
+                                        locals,
+                                        returns,
+                                        right_hint.as_ref(),
+                                        depth + 1,
+                                    )
+                                })?;
+                            let D::Known(right_ty) = right_desc else {
+                                return Err(error(
+                                    e.span,
+                                    "range construction requires established endpoint types",
+                                ));
+                            };
+                            self.with_open_operand(left_ty, s.span, |this, left_ph| {
+                                this.with_open_operand(right_ty, e.span, |this, right_ph| {
+                                    let probe = Expr {
+                                        hir_id: expr.hir_id,
+                                        span: expr.span,
+                                        kind: H::Range {
+                                            start: Some(left_ph),
+                                            end: Some(right_ph),
+                                            inclusive,
+                                        },
+                                    };
+                                    this.describe_known_region(&probe, expected)
+                                })
+                            })?
+                        }
+                    }
+                }
+            },
             H::Application(callee, args) => {
                 if let Some((_, arg)) = self.type_predicate_kind_call(expr)? {
                     self.describe_open_expression(
@@ -6651,7 +6812,11 @@ impl Checker<'_, '_> {
                 if let D::Known(ty) = description {
                     let binding = local(parameter.hir_id);
                     this.locals.insert(binding, ty.clone());
-                    this.input_facts.parameters.bind(binding, index, *sort, ty);
+                    if sig.modifiers.is_comptime && *sort == Sort::Runtime {
+                        this.input_facts.parameters.bind_runtime(binding, index, ty);
+                    } else {
+                        this.input_facts.parameters.bind(binding, index, *sort, ty);
+                    }
                 }
             }
             this.normal_value_argument(default, domain)
@@ -7248,9 +7413,13 @@ impl Checker<'_, '_> {
                 {
                     route.require_collection_type(self, &domain, expr.span)?;
                     let input = route.expression(expr);
-                    let value =
-                        self.with_staged_input(true, |this| this.expr(&input, Some(&domain)))?;
-                    self.freeze_open_call_input(&input, value)?
+                    if let Term::Lift(inner) = &domain {
+                        self.runtime_lift_input_expr(&input, &domain, inner)?
+                    } else {
+                        let value =
+                            self.with_staged_input(true, |this| this.expr(&input, Some(&domain)))?;
+                        self.freeze_open_call_input(&input, value)?
+                    }
                 } else {
                     if (0..slot).any(|earlier| {
                         !assigned[earlier]
@@ -8485,6 +8654,7 @@ impl Checker<'_, '_> {
                 expr.span, "gradual result requires a concrete delivery domain; no result context was supplied",
             )))?;
         let result = self.observe_call_type(&result, expr)?;
+        let result = self.simplify_deferred_error_result(&result, expr.span)?;
         let signature = Term::Function {
             parameters: parameters.clone(),
             result: Box::new(result.clone()),
@@ -9240,7 +9410,17 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "missing open function body"))?;
             this.dependent_result_instantiation =
                 this.open_functions.get(&owner).is_some_and(|definition| {
-                    !matches!(&definition.result, Annotation::Known(ty) if ty.check_scope(&[]).is_ok())
+                    !matches!(
+                        &definition.result,
+                        Annotation::Known(ty)
+                            if ty.check_scope(&[]).is_ok()
+                                && !ty.structural_terms().any(|term| {
+                                    matches!(
+                                        term,
+                                        Term::DeferredErrorResult { .. } | Term::ComptimeCall(_)
+                                    )
+                                })
+                    )
                 });
             let body = this.function_body(owner, body.value, result)?;
             let decreases = this.program_decreases(owner)?;

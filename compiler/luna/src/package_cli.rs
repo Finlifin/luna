@@ -232,9 +232,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--stable-list-pattern-protocol"
                 | "--list-pattern-endless-protocol"
                 | "--stable-list-pattern-endless-protocol"
+                | "--range-full-type"
+                | "--range-from-type"
+                | "--range-to-type"
+                | "--range-to-inclusive-type"
+                | "--range-type"
+                | "--range-inclusive-type"
                 | "--range-end-type"
                 | "--range-pattern-protocol"
                 | "--stable-range-pattern-protocol"
+                | "--concat-protocol"
+                | "--comptime-concat-protocol"
                 | "--concat-pattern-protocol"
                 | "--stable-concat-pattern-protocol"
                 | "--index-protocol"
@@ -778,9 +786,17 @@ impl Request {
                 stable_list_pattern_endless: options
                     .stable_list_pattern_endless_protocol
                     .as_deref(),
+                range_full: options.range_full_type.as_deref(),
+                range_from: options.range_from_type.as_deref(),
+                range_to: options.range_to_type.as_deref(),
+                range_to_inclusive: options.range_to_inclusive_type.as_deref(),
+                range: options.range_type.as_deref(),
+                range_inclusive: options.range_inclusive_type.as_deref(),
                 range_end: options.range_end_type.as_deref(),
                 range_pattern: options.range_pattern_protocol.as_deref(),
                 stable_range_pattern: options.stable_range_pattern_protocol.as_deref(),
+                concat: options.concat_protocol.as_deref(),
+                comptime_concat: options.comptime_concat_protocol.as_deref(),
                 concat_pattern: options.concat_pattern_protocol.as_deref(),
                 stable_concat_pattern: options.stable_concat_pattern_protocol.as_deref(),
                 map_pattern: options.map_pattern_protocol.as_deref(),

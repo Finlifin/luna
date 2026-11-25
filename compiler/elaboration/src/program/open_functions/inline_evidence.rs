@@ -76,20 +76,43 @@ impl Checker<'_, '_> {
         self.context
             .validate_formula(&fact, &mut crate::ptc::Budget::default())
             .map_err(|e| error(condition.span, e.to_string()))?;
+        let simplify_opt =
+            |this: &mut Self, value: Option<&D>, span: Span| -> Result<Option<D>, Error> {
+                match value {
+                    Some(D::Known(ty)) if matches!(ty, Term::DeferredErrorResult { .. }) => Ok(
+                        Some(D::Known(this.simplify_deferred_error_result(ty, span)?)),
+                    ),
+                    Some(other) => Ok(Some(other.clone())),
+                    None => Ok(None),
+                }
+            };
         let has_else = no.is_some();
         let saved = self.context.clone();
+        let saved_control_result = self.control.result.clone();
         self.context.assume(fact.clone());
+        let yes_returns = simplify_opt(self, returns, expr.span)?;
+        let yes_expected = if has_else {
+            simplify_opt(self, expected, expr.span)?
+        } else {
+            None
+        };
+        if let Some(target) = saved_control_result.as_ref()
+            && matches!(target, Term::DeferredErrorResult { .. })
+        {
+            self.control.result = Some(self.simplify_deferred_error_result(target, expr.span)?);
+        }
         self.definition_refinements
             .requirements
             .push(predicate.clone());
         let yes = self.describe_open_block(
             yes,
             &mut locals.clone(),
-            returns,
-            if has_else { expected } else { None },
+            yes_returns.as_ref(),
+            yes_expected.as_ref(),
             depth + 1,
         );
         self.definition_refinements.requirements.pop();
+        self.control.result = saved_control_result.clone();
         self.context = saved.clone();
         let yes = yes?;
         let yes = if !has_else && !matches!(&yes, D::Known(ty) if is_never(ty)) {
@@ -99,6 +122,13 @@ impl Checker<'_, '_> {
         };
         let no = if let Some(no) = no {
             self.context.assume(fact.negate());
+            let no_returns = simplify_opt(self, returns, expr.span)?;
+            let no_expected = simplify_opt(self, expected, expr.span)?;
+            if let Some(target) = saved_control_result.as_ref()
+                && matches!(target, Term::DeferredErrorResult { .. })
+            {
+                self.control.result = Some(self.simplify_deferred_error_result(target, expr.span)?);
+            }
             self.definition_refinements
                 .requirements
                 .push(n::TypePredicate::Not(Box::new(predicate)));
@@ -111,14 +141,21 @@ impl Checker<'_, '_> {
                     yes2,
                     no2,
                     locals,
-                    returns,
-                    expected,
+                    no_returns.as_ref(),
+                    no_expected.as_ref(),
                     depth + 1,
                 )
             } else {
-                self.describe_open_expression(no, &mut locals.clone(), returns, expected, depth + 1)
+                self.describe_open_expression(
+                    no,
+                    &mut locals.clone(),
+                    no_returns.as_ref(),
+                    no_expected.as_ref(),
+                    depth + 1,
+                )
             };
             self.definition_refinements.requirements.pop();
+            self.control.result = saved_control_result;
             self.context = saved;
             result?
         } else {

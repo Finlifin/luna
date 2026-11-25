@@ -120,6 +120,7 @@ impl Discovery<'_> {
         let before = usize::try_from(*steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let result = nir::visit::retained_expressions_checked(roots, &mut fuel, |expr, fuel| {
+            self.collect_required_types(std::iter::once(&expr.ty), &mut found, fuel)?;
             match &expr.kind {
                 K::Function(id)
                 | K::PlannedFunctionInstance {
@@ -136,6 +137,7 @@ impl Discovery<'_> {
                 } => {
                     found.insert(Dependency::Callable(*declaration));
                     self.collect_values(arguments, &mut found, fuel)?;
+                    self.collect_required_types(arguments, &mut found, fuel)?;
                 }
                 K::TraitMethod {
                     member,
@@ -157,6 +159,14 @@ impl Discovery<'_> {
                         &mut found,
                         fuel,
                     )?;
+                    self.collect_required_types(
+                        interface_arguments
+                            .iter()
+                            .chain(method_arguments)
+                            .chain(std::iter::once(subject)),
+                        &mut found,
+                        fuel,
+                    )?;
                 }
                 K::AssociatedValue {
                     member,
@@ -173,9 +183,15 @@ impl Discovery<'_> {
                     )?;
 
                     self.collect_values(&interface.arguments, &mut found, fuel)?;
+                    self.collect_required_types(
+                        interface.arguments.iter().chain(std::iter::once(subject)),
+                        &mut found,
+                        fuel,
+                    )?;
                 }
                 K::ComptimeValue(value) | K::StagedValue(value) => {
                     self.collect_values([value], &mut found, fuel)?;
+                    self.collect_required_types([value], &mut found, fuel)?;
                 }
                 _ => {}
             }
@@ -230,9 +246,68 @@ impl Discovery<'_> {
     ) -> Result<(), nir::visit::Error> {
         let before = usize::try_from(*steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let result = self.collect_values(values, found, &mut fuel);
+        let items: Vec<&'a Term> = values.into_iter().collect();
+        let result = self
+            .collect_values(items.iter().copied(), found, &mut fuel)
+            .and_then(|()| self.collect_required_types(items.iter().copied(), found, &mut fuel));
         *steps -= (before - fuel) as u64;
         result
+    }
+
+    fn collect_required_types<'a>(
+        self,
+        terms: impl IntoIterator<Item = &'a Term>,
+        found: &mut BTreeSet<Dependency>,
+        fuel: &mut usize,
+    ) -> Result<(), nir::visit::Error> {
+        if !matches!(self, Self::Required(..)) {
+            return Ok(());
+        }
+        let mut pending = Vec::new();
+        let enqueue = |pending: &mut Vec<&'a Term>, term: &'a Term, fuel: &mut usize| {
+            *fuel = fuel.checked_sub(1).ok_or(nir::visit::Error::Budget(
+                "required comptime type dependency budget exhausted",
+            ))?;
+            pending.push(term);
+            Ok(())
+        };
+        for root in terms {
+            enqueue(&mut pending, root, fuel)?;
+            while let Some(term) = pending.pop() {
+                match term {
+                    Term::AssociatedType {
+                        origin,
+                        arguments,
+                        subject,
+                    } => {
+                        self.member(
+                            origin.interface,
+                            arguments,
+                            subject,
+                            Member::Associated(origin.member),
+                            found,
+                            fuel,
+                        )?;
+                    }
+                    Term::AssociatedTypeCall(call) => {
+                        self.member(
+                            call.origin.interface,
+                            &call.arguments,
+                            &call.subject,
+                            Member::Associated(call.origin.member),
+                            found,
+                            fuel,
+                        )?;
+                    }
+                    Term::ComptimeCall(call) => {
+                        found.insert(Dependency::Callable(call.declaration));
+                    }
+                    _ => {}
+                }
+                term.visit_children(|child| enqueue(&mut pending, child, fuel))?;
+            }
+        }
+        Ok(())
     }
 
     // Walk data operands only. A Type identity, including an opaque application,

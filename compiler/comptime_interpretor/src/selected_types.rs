@@ -227,6 +227,16 @@ fn walk<'p, L: Lookup<'p>>(
                 call_arguments: walk_many(&call.call_arguments, values, fuel, depth + 1)?,
             }))
         }
+        Term::ComptimeCall(call) => Term::ComptimeCall(Box::new(nir::ComptimeCall {
+            declaration: call.declaration,
+            type_arguments: walk_many(&call.type_arguments, values, fuel, depth + 1)?,
+            arguments: walk_many(&call.arguments, values, fuel, depth + 1)?,
+            ty: walk(&call.ty, values, fuel, depth + 1)?,
+        })),
+        Term::DeferredErrorResult { errors, result } => Term::deferred_error_result(
+            walk(errors, values, fuel, depth + 1)?,
+            walk(result, values, fuel, depth + 1)?,
+        ),
         Term::Nominal {
             declaration,
             arguments,

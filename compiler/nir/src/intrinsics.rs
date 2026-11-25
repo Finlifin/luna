@@ -828,6 +828,8 @@ pub fn concrete_payload(ty: &Term) -> bool {
                     | Term::Hole { .. }
                     | Term::AssociatedType { .. }
                     | Term::AssociatedTypeCall(_)
+                    | Term::ComptimeCall(_)
+                    | Term::DeferredErrorResult { .. }
                     | Term::ListConcat { .. }
             )
         })

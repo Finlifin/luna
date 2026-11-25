@@ -253,14 +253,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 Some(RoutedDeclarationInput::Source(input)) => {
                     let expected_domain = self.pending.as_ref().unwrap().domain.ty.clone();
                     checker
-                        .runtime_lift_argument(input, &expected_inner)
-                        .map(|term| {
-                            n::NormalFormArgument::Value(n::Expr {
-                                source: source(input.span),
-                                ty: expected_domain,
-                                kind: K::ComptimeValue(term),
-                            })
-                        })
+                        .runtime_lift_input_expr(input, &expected_domain, &expected_inner)
+                        .map(|(expr, _)| n::NormalFormArgument::Value(expr))
                 }
                 None => {
                     let provider = provider.expect("omitted input has a default provider");

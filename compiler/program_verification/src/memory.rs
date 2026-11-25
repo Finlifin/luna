@@ -2798,6 +2798,8 @@ impl<'a> Infer<'a, '_> {
                 | Term::Rigid { .. }
                 | Term::AssociatedType { .. }
                 | Term::AssociatedTypeCall(_)
+                | Term::ComptimeCall(_)
+                | Term::DeferredErrorResult { .. }
                 | Term::NormalForm { .. }
                 | Term::Hole { .. }
         ) {
@@ -8546,6 +8548,8 @@ fn term_rank(term: &Term) -> u8 {
         Term::Float(_) => 50,
         Term::Value { .. } => 51,
         Term::AssociatedTypeCall(_) => 53,
+        Term::ComptimeCall(_) => 54,
+        Term::DeferredErrorResult { .. } => 55,
     }
 }
 
@@ -8605,6 +8609,22 @@ pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
             .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
             .then_with(|| cmp_term(&a.subject, &b.subject))
             .then_with(|| cmp_term_slice(&a.call_arguments, &b.call_arguments)),
+        (Term::ComptimeCall(a), Term::ComptimeCall(b)) => a
+            .declaration
+            .cmp(&b.declaration)
+            .then_with(|| cmp_term_slice(&a.type_arguments, &b.type_arguments))
+            .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
+            .then_with(|| cmp_term(&a.ty, &b.ty)),
+        (
+            Term::DeferredErrorResult {
+                errors: ae,
+                result: ar,
+            },
+            Term::DeferredErrorResult {
+                errors: be,
+                result: br,
+            },
+        ) => cmp_term(ae, be).then_with(|| cmp_term(ar, br)),
         (
             Term::Nominal {
                 declaration: ad,

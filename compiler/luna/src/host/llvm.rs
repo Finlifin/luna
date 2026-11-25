@@ -2643,6 +2643,7 @@ impl Emitter<'_> {
             nir::program::FloatOp::Subtract => "fsub",
             nir::program::FloatOp::Multiply => "fmul",
             nir::program::FloatOp::Divide => "fdiv",
+            nir::program::FloatOp::Remainder => "frem",
         };
         if a.ty == Ty::BFloat16 {
             return Ok(self.bfloat_arithmetic(operation, &a, &b));

@@ -871,8 +871,10 @@ fn supported_float_operation(expr: &Expr) -> bool {
         return match &expr.kind {
             K::FloatNegate(value) => value.ty == expr.ty,
             K::FloatBinary { op, left, right } => {
-                !matches!(op, nir::program::FloatOp::Divide)
-                    && left.ty == expr.ty
+                !matches!(
+                    op,
+                    nir::program::FloatOp::Divide | nir::program::FloatOp::Remainder
+                ) && left.ty == expr.ty
                     && right.ty == expr.ty
             }
             _ => false,
@@ -945,7 +947,9 @@ fn fold_float_operation<'layout>(
                 nir::program::FloatOp::Add => left.add(&right, &mut budget),
                 nir::program::FloatOp::Subtract => left.subtract(&right, &mut budget),
                 nir::program::FloatOp::Multiply => left.multiply(&right, &mut budget),
-                nir::program::FloatOp::Divide => unreachable!("unsupported exact division"),
+                nir::program::FloatOp::Divide | nir::program::FloatOp::Remainder => {
+                    unreachable!("unsupported exact division")
+                }
             }
             .and_then(|v| v.to_literal(&mut budget));
             *fuel = budget.steps;

@@ -165,6 +165,20 @@ pub(super) fn type_initializer_host<'a>(
                 scope.capabilities().context.scope(),
                 &mut budget.steps,
             )?,
+            Term::ComptimeCall(call) => {
+                let package = scope.declaration_source().package();
+                let function = package
+                    .functions
+                    .iter()
+                    .find(|f| f.declaration == call.declaration)
+                    .ok_or("comptime call target declaration missing")?;
+                crate::associated::comptime_call_expression(
+                    function,
+                    call,
+                    site,
+                    &mut budget.steps,
+                )?
+            }
             _ => return Err("expected an associated Type projection".into()),
         };
         let snapshot = Snapshot::for_scope(retained, scope, &mut budget.steps)
@@ -177,6 +191,17 @@ pub(super) fn type_initializer_host<'a>(
             expansion.map(|p| (p, implementation.package)),
         ) {
             Ok((Value::Type(value), publication)) => {
+                Ok(crate::associated::TypeInitializerResult { value, publication })
+            }
+            Ok((other, publication)) if matches!(key, Term::ComptimeCall(_)) => {
+                let mut rt_budget = comptime_runtime::Budget {
+                    steps: budget.steps,
+                    max_limbs: 4096,
+                };
+                let value = other
+                    .to_normal_term(&mut rt_budget)
+                    .map_err(|error| format!("comptime call result export failed: {error:?}"))?;
+                budget.steps = rt_budget.steps;
                 Ok(crate::associated::TypeInitializerResult { value, publication })
             }
             Ok(_) => Err("associated Type initializer did not return a type identity".into()),

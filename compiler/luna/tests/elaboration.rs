@@ -4,6 +4,7 @@ mod effect_fixture;
 
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -219,17 +220,21 @@ fn details(output: &Output) -> String {
 fn accepted(source: &str) -> String {
     accepted_with_tuple(source, false)
 }
+
 fn accepted_tuple(source: &str) -> String {
     accepted_with_tuple(&tuple_source(source), true)
 }
+
 fn accepted_bound_tuple(source: &str) -> String {
     accepted_with_tuple(source, true)
 }
+
 fn tuple_source(source: &str) -> String {
     format!(
         "pure comptime fn TupleElements<T>->.Type'builtin {{T}} pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>>->.Type'builtin {{bool}} {source}"
     )
 }
+
 fn accepted_with_tuple(source: &str, tuple: bool) -> String {
     let source = source.to_owned();
     let mut args = vec!["--emit", "nir"];
@@ -248,15 +253,19 @@ fn accepted_with_tuple(source: &str, tuple: bool) -> String {
     assert!(dump.starts_with("(nir-package"));
     dump
 }
+
 fn rejected(source: &str, message: &str) {
     rejected_with_tuple(source, message, false)
 }
+
 fn rejected_tuple(source: &str, message: &str) {
     rejected_with_tuple(&tuple_source(source), message, true)
 }
+
 fn rejected_bound_tuple(source: &str, message: &str) {
     rejected_with_tuple(source, message, true)
 }
+
 fn rejected_with_tuple(source: &str, message: &str, tuple: bool) {
     let source = source.to_owned();
     let sandbox = Sandbox::new(&source);
@@ -375,6 +384,7 @@ fn calls_branches_locals_and_not_reach_typed_nir() {
         assert!(dump.contains(tag), "{dump}");
     }
 }
+
 #[test]
 fn forward_functions_and_recursion_use_declared_signatures() {
     let dump = accepted(
@@ -382,6 +392,7 @@ fn forward_functions_and_recursion_use_declared_signatures() {
     );
     assert_eq!(dump.matches("(call ").count(), 2);
 }
+
 #[test]
 fn parameter_identities_remain_distinct() {
     let dump = accepted(
@@ -391,6 +402,7 @@ fn parameter_identities_remain_distinct() {
         assert_eq!(dump.matches(id).count(), 2, "{dump}");
     }
 }
+
 #[test]
 fn tuples_and_explicit_returns_are_checked() {
     accepted_tuple(
@@ -401,11 +413,13 @@ fn tuples_and_explicit_returns_are_checked() {
         "type mismatch",
     );
 }
+
 #[test]
 fn statement_semicolon_discards_but_tail_returns() {
     accepted("fn okay() -> bool { true } fn sink() { true; }");
     rejected("fn bad() -> bool { true; }", "type mismatch");
 }
+
 #[test]
 fn call_arity_and_parameter_type_fail_without_output() {
     rejected(
@@ -418,6 +432,7 @@ fn call_arity_and_parameter_type_fail_without_output() {
     );
     rejected("fn bad() { true(); }", "not a function");
 }
+
 #[test]
 fn condition_and_branch_types_are_checked() {
     rejected(
@@ -430,6 +445,7 @@ fn condition_and_branch_types_are_checked() {
     );
     rejected("fn bad() -> bool { if true { true } }", "type mismatch");
 }
+
 #[test]
 fn branch_bindings_and_parameters_do_not_escape() {
     rejected(
@@ -441,11 +457,13 @@ fn branch_bindings_and_parameters_do_not_escape() {
         "Unresolved identifier",
     );
 }
+
 #[test]
 fn shadowing_initializer_reads_outer_binding() {
     accepted("fn shadow(value: bool) -> bool { let value = not value; value }");
     rejected("fn bad() { let value = value; }", "Unresolved identifier");
 }
+
 #[test]
 fn type_alias_chains_work_and_cycles_fail() {
     accepted("typealias First = Second; typealias Second = bool; fn id(x: First) -> Second { x }");
@@ -454,12 +472,14 @@ fn type_alias_chains_work_and_cycles_fail() {
         "cyclic type alias",
     );
 }
+
 #[test]
 fn logical_operators_keep_short_circuit_structure() {
     let dump = accepted("fn logic(x: bool,y: bool) -> bool { x and y or not x }");
     assert!(dump.contains("(and "));
     assert!(dump.contains("(or "));
 }
+
 #[test]
 fn unbound_numeric_suffix_does_not_become_checked_nir() {
     rejected(
@@ -528,6 +548,7 @@ fn lambda_parameters_use_callable_expectations() {
         "lambda parameter count",
     );
 }
+
 #[test]
 fn typed_lambdas_infer_results_and_support_local_calls() {
     accepted("fn run() -> bool { let invert = |x: bool| not x; invert(true) }");
@@ -537,6 +558,7 @@ fn typed_lambdas_infer_results_and_support_local_calls() {
         "type mismatch",
     );
 }
+
 #[test]
 fn captures_are_explicit_and_cannot_erase_into_plain_functions() {
     let dump =
@@ -551,6 +573,7 @@ fn captures_are_explicit_and_cannot_erase_into_plain_functions() {
         "type mismatch",
     );
 }
+
 #[test]
 fn nested_capture_and_shadowing_preserve_binding_identity() {
     let dump = accepted(
@@ -565,6 +588,7 @@ fn nested_capture_and_shadowing_preserve_binding_identity() {
         "Unresolved identifier",
     );
 }
+
 #[test]
 fn lambda_return_does_not_return_from_enclosing_function() {
     accepted("fn run() -> 'x''type { let f = || { return true; } f(); 'x' }");
@@ -623,6 +647,7 @@ fn optional_defaults_resolve_earlier_parameters_in_definition_scope() {
         "Unresolved identifier",
     );
 }
+
 #[test]
 fn explicit_named_values_disable_their_default_and_keep_source_order() {
     let dump = accepted(
@@ -635,6 +660,7 @@ fn explicit_named_values_disable_their_default_and_keep_source_order() {
     let first = call.find("(argument (parameter 1)").unwrap();
     assert!(second < value && value < first, "{call}");
 }
+
 #[test]
 fn default_chains_follow_declaration_order_after_explicit_arguments() {
     let dump = accepted(
@@ -651,6 +677,7 @@ fn default_chains_follow_declaration_order_after_explicit_arguments() {
     );
     assert_eq!(call.matches("(default true)").count(), 2);
 }
+
 #[test]
 fn optional_routing_rejects_unknown_duplicate_and_anchored_names() {
     let prefix = "typealias Flag = bool; fn select(value: Flag, .fallback: Flag = true) -> Flag { fallback } ";
@@ -667,6 +694,7 @@ fn optional_routing_rejects_unknown_duplicate_and_anchored_names() {
         rejected(&format!("{prefix} fn run() -> Flag {{ {call} }}"), message);
     }
 }
+
 #[test]
 fn default_purity_and_parameter_types_are_checked_at_definition() {
     rejected(
@@ -698,6 +726,7 @@ fn optional_entries_do_not_consume_positional_arguments() {
     let last = call.find("(argument (parameter 2) (default true)").unwrap();
     assert!(supplied < first && first < last, "{call}");
 }
+
 #[test]
 fn defaults_preserve_declaration_bindings_and_reject_duplicate_parameters() {
     let dump = accepted(
@@ -723,6 +752,7 @@ fn assignments_check_place_type_and_capture_effect_boundary() {
     rejected("fn bad() { true = false; }", "assignment place");
     accepted("fn pending(flag: bool) { let write = || { flag = false; } }");
 }
+
 #[test]
 fn loop_transfers_cannot_escape_functions_or_lambdas() {
     rejected("fn bad() { break; }", "outside a loop");
@@ -6449,35 +6479,45 @@ fn direct_passing_declarations_reject_arguments_async_and_missing_outer_supply()
         "direct passing effects must be synchronous and have no parameters",
     );
     rejected(
-        effect_fixture!("effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}"),
+        effect_fixture!(
+            "effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}"
+        ),
         "direct passing effects must be synchronous and have no parameters",
     );
     rejected(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}"
+        ),
         "partial effect handler requires an outer entry",
     );
     rejected(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}"
+        ),
         "explicit allowed effect row",
     );
     rejected(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}"
+        ),
         "type",
     );
-    accepted(
-        effect_fixture!("^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}"),
-    );
+    accepted(effect_fixture!(
+        "^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}"
+    ));
 }
 
 #[test]
 fn direct_passing_installation_invalidates_captured_arithmetic_facts_before_subject() {
     rejected(
-        effect_fixture!("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}"),
+        effect_fixture!(
+            "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}"
+        ),
         "machine arithmetic range is not proven",
     );
-    accepted(
-        effect_fixture!("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}"),
-    );
+    accepted(effect_fixture!(
+        "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}"
+    ));
 }
 
 #[test]
@@ -8251,7 +8291,11 @@ fn unsigned_division_requires_nonzero_and_does_not_invent_signed_rounding() {
         "divisor is not proven nonzero",
     );
     rejected(
-        "fn divide(a:.i32'builtin,b:.i32'builtin)->.i32'builtin where requires b > 0 {a / b}",
+        "fn divide(a:.i32'builtin,b:.i32'builtin)->.i32'builtin {a / b}",
+        "divisor is not proven nonzero",
+    );
+    rejected(
+        "comptime fn divide(a:.Integer'builtin,b:.Integer'builtin)->.Integer'builtin {a / b}",
         "Integer division operator rounding protocol",
     );
     rejected(
@@ -8284,7 +8328,7 @@ fn unsigned_remainder_rejects_zero_false_contracts_and_unselected_rounding() {
         "fn remainder(a:.u8'builtin,b:.u8'builtin)->result:.u8'builtin where requires b != 0, ensures result > 0 {a % b}",
         "postcondition",
     );
-    for ty in ["i32", "Integer", "f32", "f64"] {
+    for ty in ["Integer", "Float"] {
         rejected(
             &format!(
                 "comptime fn remainder(a:.{ty}'builtin,b:.{ty}'builtin)->.{ty}'builtin {{a % b}}"

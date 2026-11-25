@@ -29,8 +29,7 @@ impl Checker<'_, '_> {
                 );
             }
             H::ErrorPropagate(input) => {
-                let target = self.control.result.clone();
-                if target.is_none()
+                if self.control.result.is_none()
                     && !matches!(
                         self.control.return_observations,
                         Some(ReturnObservations::Infer(_))
@@ -41,14 +40,20 @@ impl Checker<'_, '_> {
                         "error propagation requires a function result context",
                     ));
                 }
+                let target = if self.in_unselected_inline && self.dependent_result_instantiation {
+                    None
+                } else {
+                    self.control.result.clone()
+                };
                 let input = self.expr(input, None)?;
                 if is_never(&input.ty) {
                     return Ok(input);
                 }
+                let input_ty = self.simplify_deferred_error_result(&input.ty, expr.span)?;
                 let Term::ErrorResult {
                     errors,
                     result: payload,
-                } = &input.ty
+                } = &input_ty
                 else {
                     return Err(error(
                         expr.span,

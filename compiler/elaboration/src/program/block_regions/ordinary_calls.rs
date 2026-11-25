@@ -310,6 +310,22 @@ impl<'h> Root<'h> for CallInputs<'h> {
                     });
                     continue;
                 }
+                if let Term::Lift(inner) = &domain
+                    && let Some(expr) = input.single_source()
+                {
+                    let identity = checker.runtime_lift_argument(expr, inner)?;
+                    self.arguments.push(n::CallArgument {
+                        passing: Default::default(),
+                        parameter: slot,
+                        value: n::Expr {
+                            source: super::super::source(expr.span),
+                            ty: domain,
+                            kind: K::ComptimeValue(identity),
+                        },
+                        is_default: false,
+                    });
+                    continue;
+                }
                 self.waiting = Some((slot, checker.in_staged_input));
                 checker.in_staged_input |= parameter.sort != Sort::Runtime;
                 return Ok(Poll::Child(Request::routed(
@@ -485,7 +501,8 @@ impl Completion<'_> {
                         format!("dependent call result is not available: {e}"),
                     )
                 })?;
-            checker.observe_call_type(&result, expr)?
+            let observed = checker.observe_call_type(&result, expr)?;
+            checker.simplify_deferred_error_result(&observed, expr.span)?
         };
         if let Some(expected) = &expected {
             checker.require_expression(&ty, expected, expr.span)?;

@@ -1,0 +1,618 @@
+use bindings;
+use mem_impl.raw as raw_mem;
+use numeric.comparison.{Eq, Ord}
+use primitives.{
+    Type,
+    bool,
+    i128,
+    i16,
+    i32,
+    i64,
+    i8,
+    isize,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+    void,
+}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.iterator.{Iterator, emit_item}
+use protocols.resources.{Clone, Copy}
+use types.tuple.Tuple;
+
+{- Endpoint bound descriptor used by `RangeBounds` and `ComptimeRangeBounds`. -}
+pub enum Bound
+where
+    T: Type,
+{
+    included(T),
+    excluded(T),
+    unbounded,
+}
+
+-- Clone-only enum payloads await borrowed pointer-match views.
+impl Clone for Bound<T> where T :- Copy {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for Bound<T> where T :- Copy {}
+
+impl Eq for Bound<T> where T :- Eq, requires T :- Copy {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .included(a) =>
+                other.* match {
+                    .included(b) => a.ref.as(Eq).eq(b.ref),
+                    _ => false,
+                },
+            .excluded(a) =>
+                other.* match {
+                    .excluded(b) => a.ref.as(Eq).eq(b.ref),
+                    _ => false,
+                },
+            .unbounded => other.* matches .unbounded,
+        }
+    }
+}
+
+impl Debug for Bound<T> where T :- Debug, requires T :- Copy {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .included(v) => {
+                output.write_str("Bound.included(")!;
+                v.as(Debug).write_debug(output)!;
+                output.write_str(")")
+            },
+            .excluded(v) => {
+                output.write_str("Bound.excluded(")!;
+                v.as(Debug).write_debug(output)!;
+                output.write_str(")")
+            },
+            .unbounded => output.write_str("Bound.unbounded"),
+        }
+    }
+}
+
+{- An unbounded range (`..`). -}
+pub struct RangeFull {}
+
+impl Clone for RangeFull {
+    fn clone(*self) -> Self {
+        RangeFull {}
+    }
+}
+
+impl Copy for RangeFull {}
+
+impl Eq for RangeFull {
+    fn eq(*self, _other: *Self) -> bool {
+        true
+    }
+}
+
+impl Debug for RangeFull {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("..")
+    }
+}
+
+{- A range only bounded inclusively below (`start..`). -}
+pub struct RangeFrom
+where
+    Idx: Type,
+{
+    start: Idx,
+}
+
+impl Clone for RangeFrom<Idx> where Idx :- Clone {
+    fn clone(*self) -> Self {
+        RangeFrom<Idx> {
+            start: Idx.as(Clone).clone(self.start),
+        }
+    }
+}
+
+impl Copy for RangeFrom<Idx> where Idx :- Copy {}
+
+impl Eq for RangeFrom<Idx> where Idx :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        self.start.as(Eq).eq(other.start)
+    }
+}
+
+impl Debug for RangeFrom<Idx> where Idx :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.start.as(Debug).write_debug(output)!;
+        output.write_str("..")
+    }
+}
+
+{- A range only bounded exclusively above (`..end`). -}
+pub struct RangeTo
+where
+    Idx: Type,
+{
+    end: Idx,
+}
+
+impl Clone for RangeTo<Idx> where Idx :- Clone {
+    fn clone(*self) -> Self {
+        RangeTo<Idx> {
+            end: Idx.as(Clone).clone(self.end),
+        }
+    }
+}
+
+impl Copy for RangeTo<Idx> where Idx :- Copy {}
+
+impl Eq for RangeTo<Idx> where Idx :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        self.end.as(Eq).eq(other.end)
+    }
+}
+
+impl Debug for RangeTo<Idx> where Idx :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("..")!;
+        self.end.as(Debug).write_debug(output)
+    }
+}
+
+{- A range only bounded inclusively above (`..=end`). -}
+pub struct RangeToInclusive
+where
+    Idx: Type,
+{
+    end: Idx,
+}
+
+impl Clone for RangeToInclusive<Idx> where Idx :- Clone {
+    fn clone(*self) -> Self {
+        RangeToInclusive<Idx> {
+            end: Idx.as(Clone).clone(self.end),
+        }
+    }
+}
+
+impl Copy for RangeToInclusive<Idx> where Idx :- Copy {}
+
+impl Eq for RangeToInclusive<Idx> where Idx :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        self.end.as(Eq).eq(other.end)
+    }
+}
+
+impl Debug for RangeToInclusive<Idx> where Idx :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("..=")!;
+        self.end.as(Debug).write_debug(output)
+    }
+}
+
+{- A half-open range (`start..end`). -}
+pub struct Range
+where
+    Idx: Type,
+{
+    start: Idx,
+    end: Idx,
+}
+
+impl Range<Idx> where Idx: Type {
+    pub fn is_empty(*self) -> bool
+    where
+        requires Idx :- Ord,
+    {
+        not self.start.as(Ord).lt(self.end)
+    }
+
+    pub fn contains(*self, item: *Idx) -> bool
+    where
+        requires Idx :- Ord,
+    {
+        self.start.as(Ord).le(item) and item.as(Ord).lt(self.end)
+    }
+}
+
+impl Clone for Range<Idx> where Idx :- Clone {
+    fn clone(*self) -> Self {
+        Range<Idx> {
+            start: Idx.as(Clone).clone(self.start),
+            end: Idx.as(Clone).clone(self.end),
+        }
+    }
+}
+
+impl Copy for Range<Idx> where Idx :- Copy {}
+
+impl Eq for Range<Idx> where Idx :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        self.start.as(Eq).eq(other.start) and self.end.as(Eq).eq(other.end)
+    }
+}
+
+impl Debug for Range<Idx> where Idx :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.start.as(Debug).write_debug(output)!;
+        output.write_str("..")!;
+        self.end.as(Debug).write_debug(output)
+    }
+}
+
+{- A closed range (`start..=end`). Tracks `exhausted` separately so full-width ranges such as `0u8..=255u8` never require `end + 1`. -}
+pub struct RangeInclusive
+where
+    Idx: Type,
+{
+    start: Idx,
+    end: Idx,
+    exhausted: bool,
+}
+
+impl RangeInclusive<Idx> where Idx: Type {
+    pub fn new(start: Idx, end: Idx) -> RangeInclusive<Idx> {
+        RangeInclusive<Idx> {
+            start: start,
+            end: end,
+            exhausted: false,
+        }
+    }
+
+    pub fn start(*self) -> *Idx {
+        self.start
+    }
+
+    pub fn end(*self) -> *Idx {
+        self.end
+    }
+
+    pub fn into_inner(self) -> Tuple<Idx, Idx> {
+        (self.start, self.end)
+    }
+
+    pub pure comptime fn deconstruct(self) -> Tuple<Idx, Idx, bool> {
+        (self.start, self.end, self.exhausted)
+    }
+
+    pub fn is_empty(*self) -> bool
+    where
+        requires Idx :- Ord,
+    {
+        self.exhausted.* or self.start.as(Ord).gt(self.end)
+    }
+
+    pub fn contains(*self, item: *Idx) -> bool
+    where
+        requires Idx :- Ord,
+    {
+        if self.exhausted.* {
+            return false;
+        }
+        self.start.as(Ord).le(item) and item.as(Ord).le(self.end)
+    }
+}
+
+impl Clone for RangeInclusive<Idx> where Idx :- Clone {
+    fn clone(*self) -> Self {
+        RangeInclusive<Idx> {
+            start: Idx.as(Clone).clone(self.start),
+            end: Idx.as(Clone).clone(self.end),
+            exhausted: self.exhausted.*,
+        }
+    }
+}
+
+impl Copy for RangeInclusive<Idx> where Idx :- Copy {}
+
+impl Eq for RangeInclusive<Idx> where Idx :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        if self.exhausted.* != other.exhausted.* {
+            return false;
+        }
+        self.start.as(Eq).eq(other.start) and self.end.as(Eq).eq(other.end)
+    }
+}
+
+impl Debug for RangeInclusive<Idx> where Idx :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.start.as(Debug).write_debug(output)!;
+        output.write_str("..=")!;
+        self.end.as(Debug).write_debug(output)
+    }
+}
+
+{- Query interface over the lower and upper bounds of all range forms. -}
+pub trait RangeBounds where T: Type {
+    fn start_bound(*self) -> Bound<*T>;
+    fn end_bound(*self) -> Bound<*T>;
+
+    fn contains(*self, item: *T) -> bool
+    where
+        requires T :- Ord,
+    {
+        let start_ok = self.start_bound() match {
+            .included(s) => s.as(Ord).le(item),
+            .excluded(s) => s.as(Ord).lt(item),
+            .unbounded => true,
+        }
+        if not start_ok {
+            return false;
+        }
+        self.end_bound() match {
+            .included(e) => item.as(Ord).le(e),
+            .excluded(e) => item.as(Ord).lt(e),
+            .unbounded => true,
+        }
+    }
+}
+
+impl RangeBounds<T> for RangeFull where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        .unbounded
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        .unbounded
+    }
+}
+
+impl RangeBounds<T> for RangeFrom<T> where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        .included(self.start)
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        .unbounded
+    }
+}
+
+impl RangeBounds<T> for RangeTo<T> where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        .unbounded
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        .excluded(self.end)
+    }
+}
+
+impl RangeBounds<T> for RangeToInclusive<T> where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        .unbounded
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        .included(self.end)
+    }
+}
+
+impl RangeBounds<T> for Range<T> where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        .included(self.start)
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        .excluded(self.end)
+    }
+}
+
+impl RangeBounds<T> for RangeInclusive<T> where T: Type {
+    fn start_bound(*self) -> Bound<*T> {
+        if self.exhausted.* {
+            .excluded(self.end)
+        } else {
+            .included(self.start)
+        }
+    }
+
+    fn end_bound(*self) -> Bound<*T> {
+        if self.exhausted.* {
+            .excluded(self.end)
+        } else {
+            .included(self.end)
+        }
+    }
+
+    fn contains(*self, item: *T) -> bool
+    where
+        requires T :- Ord,
+    {
+        if self.exhausted.* {
+            return false;
+        }
+        self.start.as(Ord).le(item) and item.as(Ord).le(self.end)
+    }
+}
+
+-- ── Integer Iterator implementations ────────────────────────────────────────
+
+trait RangeIntegerStep :- Copy + Eq + Ord {
+    fn next_before(self, bound: Self) -> Self;
+    fn checked_next(self) -> ?Self;
+}
+
+impl RangeIntegerStep for u8 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 255 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for u16 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 65535 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for u32 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 4294967295 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for u64 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 18446744073709551615 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for u128 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 340282366920938463463374607431768211455 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for usize {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        raw_mem.checked_add_usize(self, 1)
+    }
+}
+
+impl RangeIntegerStep for i8 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 127 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for i16 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 32767 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for i32 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 2147483647 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for i64 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 9223372036854775807 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for i128 {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 170141183460469231731687303715884105727 { self + 1 } else { null }
+    }
+}
+
+impl RangeIntegerStep for isize {
+    fn next_before(self, bound: Self) -> Self {
+        if self < bound { self + 1 } else { self }
+    }
+
+    fn checked_next(self) -> ?Self {
+        if self < 0 {
+            self + 1
+        } else {
+            raw_mem.checked_add_usize(self'bitvec.as(usize), 1) match {
+                n? => bindings.try_usize_to_isize(n),
+                null => null,
+            }
+        }
+    }
+}
+
+fn range_step_lt(a: I, b: I) -> bool where I :- Copy + Ord {
+    a.ref.as(Ord).lt(b.ref)
+}
+
+fn range_step_gt(a: I, b: I) -> bool where I :- Copy + Ord {
+    a.ref.as(Ord).gt(b.ref)
+}
+
+impl Iterator for Range<I> where I :- RangeIntegerStep {
+    assoc Item: Type = I;
+
+    inline fn iterate(self) -> #emit_item<I> void {
+        var cur: I = self.start;
+        let end: I = self.end;
+        while range_step_lt<I>(cur, end) {
+            emit_item<I>(cur)#;
+            cur = cur.as(RangeIntegerStep).next_before(end);
+        }
+    }
+}
+
+impl Iterator for RangeInclusive<I> where I :- RangeIntegerStep {
+    assoc Item: Type = I;
+
+    inline fn iterate(self) -> #emit_item<I> void {
+        if self.exhausted or range_step_gt<I>(self.start, self.end) {
+            return;
+        }
+        var cur: I = self.start;
+        let end: I = self.end;
+        while range_step_lt<I>(cur, end) {
+            emit_item<I>(cur)#;
+            cur = cur.as(RangeIntegerStep).next_before(end);
+        }
+        emit_item<I>(end)#;
+    }
+}
+
+impl Iterator for RangeFrom<I> where I :- RangeIntegerStep {
+    assoc Item: Type = I;
+
+    inline fn iterate(self) -> #emit_item<I> void {
+        var cur: I = self.start;
+        while true {
+            emit_item<I>(cur)#;
+            cur = cur.as(RangeIntegerStep).checked_next() match {
+                next? => next,
+                null => break,
+            }
+        }
+    }
+}

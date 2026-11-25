@@ -32,6 +32,7 @@ pub(super) fn subject_view(
                 | Term::NormalForm { .. }
                 | Term::AssociatedType { .. }
                 | Term::AssociatedTypeCall(_)
+                | Term::ComptimeCall(_)
         )
     {
         return Ok((subject.clone(), None));

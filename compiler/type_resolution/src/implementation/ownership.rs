@@ -166,10 +166,12 @@ fn local_identity(
             // Opaque applications expose neither the resulting nominal head
             // nor ownership through their inputs. Never unfold a local factory.
             Term::ErrorResult { .. }
+            | Term::DeferredErrorResult { .. }
             | Term::Computation { .. }
             | Term::NormalForm { .. }
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
             | Term::Rigid { .. }
             | Term::Bound { .. }
             | Term::Hole { .. }

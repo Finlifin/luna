@@ -98,6 +98,12 @@ impl<'h> RoutedArgument<'h> {
         matches!(self.supply, Supply::Collection(_))
     }
 
+    pub(super) fn single_source(&self) -> Option<&'h Expr<'h>> {
+        matches!(self.supply, Supply::Single)
+            .then(|| self.inputs.first().map(|(_, expr)| *expr))
+            .flatten()
+    }
+
     pub(super) fn property_fields(&self) -> Option<&[hir::expr::FieldExpr<'h>]> {
         if self.is_collected() {
             return None;

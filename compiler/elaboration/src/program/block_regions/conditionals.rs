@@ -9,6 +9,7 @@ struct Ambient {
     in_code_body: bool,
     suppressed: bool,
     callee: Option<hir::HirId>,
+    control_result: Option<Term>,
 }
 
 impl Ambient {
@@ -18,6 +19,7 @@ impl Ambient {
             in_code_body: checker.in_code_body,
             suppressed: checker.in_unselected_inline,
             callee: checker.comptime_callee_result,
+            control_result: checker.control.result.clone(),
         }
     }
 
@@ -26,6 +28,7 @@ impl Ambient {
         checker.in_code_body = self.in_code_body;
         checker.in_unselected_inline = self.suppressed;
         checker.comptime_callee_result = self.callee;
+        checker.control.result = self.control_result.clone();
     }
 }
 
@@ -238,6 +241,8 @@ impl<'h> Frame<'h> {
                     }
                     _ => self.destination.clone(),
                 };
+                let destination =
+                    self.simplify_branch_destination(checker, destination, yes.span)?;
                 self.state = State::Then(condition);
                 Ok(Step::Child(Request::Block(yes, destination)))
             }
@@ -288,6 +293,8 @@ impl<'h> Frame<'h> {
                     }
                 };
                 self.enter_branch(checker, &condition, false, Some(no.hir_id))?;
+                let destination =
+                    self.simplify_branch_destination(checker, destination, no.span)?;
                 self.state = State::Else(condition, value, destination.clone());
                 Ok(Step::Child(Request::expression(no, destination)))
             }
@@ -485,6 +492,13 @@ impl<'h> Frame<'h> {
             positive,
             self.source.span,
         )?);
+        if self.selection.is_some()
+            && let Some(target) = checker.control.result.clone()
+            && matches!(target, Term::DeferredErrorResult { .. })
+        {
+            checker.control.result =
+                Some(checker.simplify_deferred_error_result(&target, self.source.span)?);
+        }
         if self
             .ambient
             .as_ref()
@@ -493,6 +507,28 @@ impl<'h> Frame<'h> {
             checker.comptime_callee_result = delivery;
         }
         Ok(())
+    }
+
+    fn simplify_branch_destination(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        destination: Destination,
+        span: Span,
+    ) -> Result<Destination, Error> {
+        if self.selection.is_none() {
+            return Ok(destination);
+        }
+        let Some(expected) = destination.expected().cloned() else {
+            return Ok(destination);
+        };
+        if !matches!(expected, Term::DeferredErrorResult { .. }) {
+            return Ok(destination);
+        }
+        let simplified = checker.simplify_deferred_error_result(&expected, span)?;
+        if simplified == expected {
+            return Ok(destination);
+        }
+        destination.with_expected(checker, Some(&simplified), span)
     }
 
     fn finish_ordinary(
@@ -523,6 +559,13 @@ impl<'h> Frame<'h> {
             }
         } else if control::conditional_never(&condition, &yes.ty, &other) {
             p(P::Never)
+        } else if no.is_some()
+            && self.selection == Some(usize::MAX)
+            && self.destination.expected().is_some()
+        {
+            // Each inline branch was checked against its premise-simplified
+            // view of the outer destination; restore that outer destination type.
+            self.destination.expected().unwrap().clone()
         } else if no.is_some() && context.is_some() {
             // Completing branches already justified this destination under
             // their own premises; do not require that equality again outside.

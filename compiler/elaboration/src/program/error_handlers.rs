@@ -3,7 +3,9 @@ use super::*;
 
 mod catches;
 mod layouts;
-mod type_labels;
+pub(in crate::program) mod type_labels;
+
+pub(in crate::program) use type_labels::ErrorTypeRow;
 
 impl Checker<'_, '_> {
     fn error_node(&mut self, ty: Term, kind: K, span: Span) -> Result<n::Expr, Error> {
@@ -961,7 +963,8 @@ impl Checker<'_, '_> {
         if is_never(&value.ty) {
             return Ok(value);
         }
-        let target_view = self.flatten_error_result_view(target, span)?;
+        let target = self.simplify_deferred_error_result(target, span)?;
+        let target_view = self.flatten_error_result_view(&target, span)?;
         if matches!(target_view, Term::ErrorResult { .. }) {
             let value_view = self.flatten_error_result_view(&value.ty, span)?;
             let conversion = if matches!(value_view, Term::ErrorResult { .. }) {
@@ -969,9 +972,9 @@ impl Checker<'_, '_> {
             } else {
                 nir::error_results::Conversion::Success
             };
-            self.convert_error_value(value, target, conversion, span)
+            self.convert_error_value(value, &target, conversion, span)
         } else {
-            self.require(&value.ty, target, span)?;
+            self.require(&value.ty, &target, span)?;
             Ok(value)
         }
     }
@@ -990,7 +993,8 @@ impl Checker<'_, '_> {
         if is_never(&input.ty) {
             return Ok(input);
         }
-        let Term::ErrorResult { errors, result } = &input.ty else {
+        let input_ty = self.simplify_deferred_error_result(&input.ty, expression.span)?;
+        let Term::ErrorResult { errors, result } = &input_ty else {
             return Err(error(
                 expression.span,
                 "error elimination requires an error-qualified operand",

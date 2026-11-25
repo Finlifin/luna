@@ -268,7 +268,7 @@ impl FormatPlan {
                         value? => value,
                         null => "",
                     }
-                    current = current.concat(chunk);
+                    current = current.as(ComptimeTextBytes).concat(chunk);
                 },
                 FormatPiece.argument(_, _, _) or FormatPiece.debug_argument(_, _, _) => {
                     segments = segments.concat([current]);

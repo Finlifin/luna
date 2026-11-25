@@ -767,6 +767,8 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
             Term::Hole { .. }
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. }
             | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(ty.clone()));
             }
@@ -965,6 +967,8 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
             Term::Hole { .. }
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. }
             | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(ty.clone()));
             }
@@ -1553,7 +1557,8 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
             Term::Hole { .. }
             | Term::ListConcat { .. }
             | Term::AssociatedType { .. }
-            | Term::AssociatedTypeCall(_) => {
+            | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_) => {
                 return Err(TypeIdError::Unresolved(term.clone()));
             }
             _ => return Err(TypeIdError::Unsupported(term.clone())),
@@ -1629,6 +1634,8 @@ impl<W: TypeIdWorld> MerkleEngine<'_, W> {
             Term::Hole { .. }
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. }
             | Term::ListConcat { .. } => {
                 return Err(TypeIdError::Unresolved(domain.clone()));
             }

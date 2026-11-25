@@ -67,6 +67,12 @@ impl Checker<'_, '_> {
             if matches!(target, Term::ErrorResult { .. }) {
                 return self.computed_error_delivery(actual, target, span);
             }
+            if matches!(target, Term::DeferredErrorResult { .. }) {
+                let target_view = self.flatten_error_result_view(target, span)?;
+                if matches!(target_view, Term::ErrorResult { .. }) {
+                    return self.computed_error_delivery(actual, &target_view, span);
+                }
+            }
             if !matches!(target, Term::Primitive(_))
                 && matches!(self.type_identity_view(target, span)?, Term::Optional(_))
             {

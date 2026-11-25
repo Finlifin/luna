@@ -1,0 +1,164 @@
+use builtin.{
+    Bound,
+    Range,
+    RangeFrom,
+    RangeFull,
+    RangeInclusive,
+    RangeTo,
+    RangeToInclusive,
+    Type,
+    bool,
+}
+use numeric.equality.ComptimeEq;
+use numeric.ordering.ComptimeOrd;
+
+{- Comptime range boundary query protocol (value-based without pointers). -}
+pub pure comptime trait ComptimeRangeBounds where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T>;
+    pure comptime fn end_bound(self) -> Bound<T>;
+
+    comptime fn contains(self, item: T) -> bool where requires T :- ComptimeOrd {
+        let start_ok = self.start_bound() match {
+            .included(s) => T.as(ComptimeOrd).le(s, item),
+            .excluded(s) => T.as(ComptimeOrd).lt(s, item),
+            .unbounded => true,
+        }
+        if not start_ok {
+            return false;
+        }
+        self.end_bound() match {
+            .included(e) => T.as(ComptimeOrd).le(item, e),
+            .excluded(e) => T.as(ComptimeOrd).lt(item, e),
+            .unbounded => true,
+        }
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for RangeFull where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        .unbounded
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        .unbounded
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for RangeFrom<T> where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        .included(self.start)
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        .unbounded
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for RangeTo<T> where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        .unbounded
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        .excluded(self.end)
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for RangeToInclusive<T> where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        .unbounded
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        .included(self.end)
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for Range<T> where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        .included(self.start)
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        .excluded(self.end)
+    }
+}
+
+comptime impl ComptimeRangeBounds<T> for RangeInclusive<T> where T: Type {
+    pure comptime fn start_bound(self) -> Bound<T> {
+        let (start_val, end_val, exhausted) = self.deconstruct();
+        if exhausted {
+            .excluded(end_val)
+        } else {
+            .included(start_val)
+        }
+    }
+
+    pure comptime fn end_bound(self) -> Bound<T> {
+        let (_, end_val, exhausted) = self.deconstruct();
+        if exhausted {
+            .excluded(end_val)
+        } else {
+            .included(end_val)
+        }
+    }
+}
+
+comptime impl ComptimeEq for Bound<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self match {
+            .included(a) =>
+                other match {
+                    .included(b) => a.as(ComptimeEq).eq(b),
+                    _ => false,
+                },
+            .excluded(a) =>
+                other match {
+                    .excluded(b) => a.as(ComptimeEq).eq(b),
+                    _ => false,
+                },
+            .unbounded => other matches .unbounded,
+        }
+    }
+}
+
+comptime impl ComptimeEq for RangeFull {
+    comptime fn eq(self, other: Self) -> bool {
+        true
+    }
+}
+
+comptime impl ComptimeEq for RangeFrom<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self.start.as(ComptimeEq).eq(other.start)
+    }
+}
+
+comptime impl ComptimeEq for RangeTo<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self.end.as(ComptimeEq).eq(other.end)
+    }
+}
+
+comptime impl ComptimeEq for RangeToInclusive<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self.end.as(ComptimeEq).eq(other.end)
+    }
+}
+
+comptime impl ComptimeEq for Range<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self.start.as(ComptimeEq).eq(other.start) and self.end.as(ComptimeEq).eq(other.end)
+    }
+}
+
+comptime impl ComptimeEq for RangeInclusive<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        let (a_start, a_end, a_exhausted) = self.deconstruct();
+        let (b_start, b_end, b_exhausted) = other.deconstruct();
+        if a_exhausted != b_exhausted {
+            return false;
+        }
+        a_start.as(ComptimeEq).eq(b_start) and a_end.as(ComptimeEq).eq(b_end)
+    }
+}

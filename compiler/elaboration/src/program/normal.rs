@@ -564,12 +564,57 @@ impl Checker<'_, '_> {
                 }))
     }
 
+    /// Build an argument expression and symbolic identity for a `Term::Lift`
+    /// parameter. When `value` forwards a symbolic `quote` parameter (`Bound`
+    /// or `Rigid`) of an enclosing `comptime fn`, preserve `K::Local` so the
+    /// comptime interpreter reads the actual caller-supplied identity instead
+    /// of freezing a dangling placeholder.
+    pub(super) fn runtime_lift_input_expr(
+        &mut self,
+        value: &Expr<'_>,
+        expected: &Term,
+        expected_inner: &Term,
+    ) -> Result<(n::Expr, Term), Error> {
+        let identity = self.runtime_lift_argument(value, expected_inner)?;
+        let kind = if let H::ResolvedFnParam(_, id) = value.kind
+            && !self.runtime_dependency_body(self.signature_owner)
+            && matches!(
+                identity,
+                Term::Bound {
+                    sort: Sort::Runtime,
+                    ..
+                } | Term::Rigid {
+                    sort: Sort::Runtime,
+                    ..
+                }
+            )
+            && self
+                .input_facts
+                .parameters
+                .runtime_identity(&local(id))
+                .is_some()
+        {
+            K::Local(local(id))
+        } else {
+            K::ComptimeValue(identity.clone())
+        };
+        Ok((
+            n::Expr {
+                source: source(value.span),
+                ty: expected.clone(),
+                kind,
+            },
+            identity,
+        ))
+    }
+
     pub(super) fn runtime_lift_argument(
         &mut self,
         value: &Expr<'_>,
         expected_inner: &Term,
     ) -> Result<Term, Error> {
-        if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
+        let expected = (expected_inner != &Term::AnyType).then_some(expected_inner);
+        if let Some(identity) = self.forward_runtime_dependency(value, expected)? {
             let (root, _) = self.runtime_field_path(&identity, value.span)?;
             self.local_runtime_origins
                 .sources
@@ -583,18 +628,59 @@ impl Checker<'_, '_> {
             ));
         }
         if !self.runtime_dependency_body(self.signature_owner) {
+            if let H::ResolvedFnParam(_, id) = value.kind
+                && let Some((identity, domain)) = self
+                    .input_facts
+                    .parameters
+                    .runtime_identity(&local(id))
+                    .cloned()
+            {
+                let actual = match &domain {
+                    Term::Lift(inner) => inner.as_ref(),
+                    other => other,
+                };
+                if let Some(expected) = expected {
+                    self.require(actual, expected, value.span)?;
+                }
+                return Ok(identity);
+            }
             if let Some(identity) = self.signature_runtime_projection(value, expected_inner)? {
                 return Ok(identity);
+            }
+            let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+            let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+            let saved_observing = std::mem::replace(&mut self.observing_type, false);
+            let saved_code_body = std::mem::replace(&mut self.in_code_body, true);
+            let saved_captures = std::mem::take(&mut self.captures);
+            let checked = expected
+                .map(|ty| self.callable_input_view(ty, value.span))
+                .transpose()
+                .and_then(|ty| self.expr(value, ty.as_ref()));
+            self.captures = saved_captures;
+            self.in_code_body = saved_code_body;
+            self.observing_type = saved_observing;
+            self.in_staged_input = saved_staged;
+            self.in_required_comptime = saved_required;
+            if let Ok(checked) = checked
+                && !is_never(&checked.ty)
+                && let Some(crate::program::runtime_origins::Place::Global(origin)) =
+                    self.runtime_place(&checked, value.span)?
+            {
+                return self
+                    .intern_global_runtime_operand(origin, checked, value.span)
+                    .map(Term::Runtime);
             }
             return Err(error(
                 value.span,
                 "runtime quote argument requires a runtime function body or enclosing quote parameter",
             ));
         }
-        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
+        let expected_view = expected
+            .map(|ty| self.callable_input_view(ty, value.span))
+            .transpose()?;
         let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
         let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
-        let checked = self.expr(value, Some(&expected_inner));
+        let checked = self.expr(value, expected_view.as_ref());
         self.in_staged_input = saved_staged;
         self.in_required_comptime = saved_required;
         let checked = checked?;
@@ -1752,7 +1838,9 @@ impl Checker<'_, '_> {
                         n::FloatOp::Add => left.add(&right, budget)?,
                         n::FloatOp::Subtract => left.subtract(&right, budget)?,
                         n::FloatOp::Multiply => left.multiply(&right, budget)?,
-                        n::FloatOp::Divide => return Err(Failure::Unavailable),
+                        n::FloatOp::Divide | n::FloatOp::Remainder => {
+                            return Err(Failure::Unavailable);
+                        }
                     }),
                     (Term::Float32(left), Term::Float32(right)) => {
                         Term::Float32(op.evaluate_f32(left, right))

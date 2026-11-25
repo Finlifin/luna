@@ -610,7 +610,10 @@ pub fn contains_associated_projection(
     visit_expanded_term(root, fuel, depth, &BTreeMap::new(), &mut |term| {
         found |= matches!(
             term,
-            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+            Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
+                | Term::ComptimeCall(_)
+                | Term::DeferredErrorResult { .. }
         );
     })?;
     Ok(found)
@@ -642,7 +645,9 @@ pub fn runtime_dependencies_bounded(
             Term::Rigid { .. }
             | Term::Hole { .. }
             | Term::AssociatedType { .. }
-            | Term::AssociatedTypeCall(_) => {
+            | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. } => {
                 dependencies.may_change = true;
             }
             _ => {}

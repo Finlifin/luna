@@ -33,9 +33,17 @@ pub struct Options {
     pub stable_list_pattern_protocol: Option<String>,
     pub list_pattern_endless_protocol: Option<String>,
     pub stable_list_pattern_endless_protocol: Option<String>,
+    pub range_full_type: Option<String>,
+    pub range_from_type: Option<String>,
+    pub range_to_type: Option<String>,
+    pub range_to_inclusive_type: Option<String>,
+    pub range_type: Option<String>,
+    pub range_inclusive_type: Option<String>,
     pub range_end_type: Option<String>,
     pub range_pattern_protocol: Option<String>,
     pub stable_range_pattern_protocol: Option<String>,
+    pub concat_protocol: Option<String>,
+    pub comptime_concat_protocol: Option<String>,
     pub concat_pattern_protocol: Option<String>,
     pub stable_concat_pattern_protocol: Option<String>,
     pub map_pattern_protocol: Option<String>,
@@ -218,9 +226,17 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut stable_list_pattern_protocol = None;
     let mut list_pattern_endless_protocol = None;
     let mut stable_list_pattern_endless_protocol = None;
+    let mut range_full_type = None;
+    let mut range_from_type = None;
+    let mut range_to_type = None;
+    let mut range_to_inclusive_type = None;
+    let mut range_type = None;
+    let mut range_inclusive_type = None;
     let mut range_end_type = None;
     let mut range_pattern_protocol = None;
     let mut stable_range_pattern_protocol = None;
+    let mut concat_protocol = None;
+    let mut comptime_concat_protocol = None;
     let mut concat_pattern_protocol = None;
     let mut stable_concat_pattern_protocol = None;
     let mut map_pattern_protocol = None;
@@ -701,14 +717,31 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
-                Some("--range-end-type") => {
-                    if range_end_type.is_some() {
-                        return Err("--range-end-type may only be specified once".into());
+                Some(
+                    option @ ("--range-full-type"
+                    | "--range-from-type"
+                    | "--range-to-type"
+                    | "--range-to-inclusive-type"
+                    | "--range-type"
+                    | "--range-inclusive-type"
+                    | "--range-end-type"),
+                ) => {
+                    let target = match option {
+                        "--range-full-type" => &mut range_full_type,
+                        "--range-from-type" => &mut range_from_type,
+                        "--range-to-type" => &mut range_to_type,
+                        "--range-to-inclusive-type" => &mut range_to_inclusive_type,
+                        "--range-type" => &mut range_type,
+                        "--range-inclusive-type" => &mut range_inclusive_type,
+                        _ => &mut range_end_type,
+                    };
+                    if target.is_some() {
+                        return Err(format!("{option} may only be specified once"));
                     }
-                    range_end_type = Some(
-                        option_value(&mut args, "--range-end-type")?
+                    *target = Some(
+                        option_value(&mut args, option)?
                             .into_string()
-                            .map_err(|_| "RangeEnd type selector must be valid UTF-8")?,
+                            .map_err(|_| "Range type selector must be valid UTF-8")?,
                     );
                     continue;
                 }
@@ -960,6 +993,28 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                         option_value(&mut args, "--comptime-eq-protocol")?
                             .into_string()
                             .map_err(|_| "ComptimeEq protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--concat-protocol") => {
+                    if concat_protocol.is_some() {
+                        return Err("--concat-protocol may only be specified once".into());
+                    }
+                    concat_protocol = Some(
+                        option_value(&mut args, "--concat-protocol")?
+                            .into_string()
+                            .map_err(|_| "Concat protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--comptime-concat-protocol") => {
+                    if comptime_concat_protocol.is_some() {
+                        return Err("--comptime-concat-protocol may only be specified once".into());
+                    }
+                    comptime_concat_protocol = Some(
+                        option_value(&mut args, "--comptime-concat-protocol")?
+                            .into_string()
+                            .map_err(|_| "ComptimeConcat protocol selector must be valid UTF-8")?,
                     );
                     continue;
                 }
@@ -1375,9 +1430,17 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         stable_list_pattern_protocol,
         list_pattern_endless_protocol,
         stable_list_pattern_endless_protocol,
+        range_full_type,
+        range_from_type,
+        range_to_type,
+        range_to_inclusive_type,
+        range_type,
+        range_inclusive_type,
         range_end_type,
         range_pattern_protocol,
         stable_range_pattern_protocol,
+        concat_protocol,
+        comptime_concat_protocol,
         concat_pattern_protocol,
         stable_concat_pattern_protocol,
         map_pattern_protocol,
@@ -1571,9 +1634,17 @@ mod tests {
                 stable_list_pattern_protocol: None,
                 list_pattern_endless_protocol: None,
                 stable_list_pattern_endless_protocol: None,
+                range_full_type: None,
+                range_from_type: None,
+                range_to_type: None,
+                range_to_inclusive_type: None,
+                range_type: None,
+                range_inclusive_type: None,
                 range_end_type: None,
                 range_pattern_protocol: None,
                 stable_range_pattern_protocol: None,
+                concat_protocol: None,
+                comptime_concat_protocol: None,
                 concat_pattern_protocol: None,
                 stable_concat_pattern_protocol: None,
                 map_pattern_protocol: None,
@@ -1639,9 +1710,17 @@ mod tests {
                 stable_list_pattern_protocol: None,
                 list_pattern_endless_protocol: None,
                 stable_list_pattern_endless_protocol: None,
+                range_full_type: None,
+                range_from_type: None,
+                range_to_type: None,
+                range_to_inclusive_type: None,
+                range_type: None,
+                range_inclusive_type: None,
                 range_end_type: None,
                 range_pattern_protocol: None,
                 stable_range_pattern_protocol: None,
+                concat_protocol: None,
+                comptime_concat_protocol: None,
                 concat_pattern_protocol: None,
                 stable_concat_pattern_protocol: None,
                 map_pattern_protocol: None,

@@ -426,9 +426,17 @@ pub struct Protocols {
     pub stable_list_pattern: Option<DeclarationId>,
     pub list_pattern_endless: Option<DeclarationId>,
     pub stable_list_pattern_endless: Option<DeclarationId>,
+    pub range_full: Option<DeclarationId>,
+    pub range_from: Option<DeclarationId>,
+    pub range_to: Option<DeclarationId>,
+    pub range_to_inclusive: Option<DeclarationId>,
+    pub range: Option<DeclarationId>,
+    pub range_inclusive: Option<DeclarationId>,
     pub range_end: Option<DeclarationId>,
     pub range_pattern: Option<DeclarationId>,
     pub stable_range_pattern: Option<DeclarationId>,
+    pub concat: Option<DeclarationId>,
+    pub comptime_concat: Option<DeclarationId>,
     pub concat_pattern: Option<DeclarationId>,
     pub stable_concat_pattern: Option<DeclarationId>,
     pub map_pattern: Option<DeclarationId>,
@@ -4991,7 +4999,15 @@ impl Checker<'_, '_> {
                     && !parameter.ty.is_comptime()
                     && !parameter.ty.is_lambda()
                     && matches!(parameter.ty.kind, TyParamKind::Positional(_));
-                let allowed_flags = if is_contextual_quote {
+                let is_comptime_quote = sig.modifiers.is_comptime
+                    && parameter.ty.is_quote()
+                    && !parameter.ty.is_comptime()
+                    && !parameter.ty.is_lambda()
+                    && matches!(
+                        parameter.ty.kind,
+                        TyParamKind::Positional(_) | TyParamKind::Optional(..)
+                    );
+                let allowed_flags = if is_contextual_quote || is_comptime_quote {
                     hir::common::TPARAM_IMPLICIT
                         | hir::common::TPARAM_LAMBDA
                         | hir::common::TPARAM_COMPTIME
@@ -5117,8 +5133,21 @@ impl Checker<'_, '_> {
                 // Ordinary inputs of a comptime function are available to
                 // deferred signature computations without changing their sort.
                 if sig.modifiers.is_comptime {
-                    self.locals
-                        .insert(local(parameter.hir_id), parameter_type.ty.clone());
+                    if parameter_type.sort == Sort::Runtime && parameter.ty.is_quote() {
+                        self.input_facts.parameters.bind_runtime(
+                            local(parameter.hir_id),
+                            parameter_index,
+                            &parameter_type.ty,
+                        );
+                        let inner = match &parameter_type.ty {
+                            Term::Lift(inner) => (**inner).clone(),
+                            other => other.clone(),
+                        };
+                        self.locals.insert(local(parameter.hir_id), inner);
+                    } else {
+                        self.locals
+                            .insert(local(parameter.hir_id), parameter_type.ty.clone());
+                    }
                 }
                 annotations.push((
                     parameter_type.sort,
@@ -6337,10 +6366,14 @@ impl Checker<'_, '_> {
                         )
                     })
             }
-            H::ErrorQualifiedType(errors, result) => {
-                let labels = self.error_type_labels(errors)?;
-                Ok(Term::error_result(labels, self.type_expr(result)?))
-            }
+            H::ErrorQualifiedType(errors, result) => match self.error_type_row(errors)? {
+                error_handlers::ErrorTypeRow::Labels(labels) => {
+                    Ok(Term::error_result(labels, self.type_expr(result)?))
+                }
+                error_handlers::ErrorTypeRow::Deferred(row) => {
+                    Ok(Term::deferred_error_result(row, self.type_expr(result)?))
+                }
+            },
             H::EffectQualifiedType(effects, result) => {
                 let operations = self.effect_row(effects, 0)?;
                 Ok(Term::computation(operations, self.type_expr(result)?))
@@ -8619,7 +8652,9 @@ impl Checker<'_, '_> {
         let ty = if actual.iter().any(is_never) {
             p(P::Never)
         } else {
-            self.callable_input_view(&instance.result, expr.span)?
+            let result = self.callable_input_view(&instance.result, expr.span)?;
+            let observed = self.observe_call_type(&result, expr)?;
+            self.simplify_deferred_error_result(&observed, expr.span)?
         };
         let callee_expr = if let Some(method) = selected_method {
             method.callee(self, owner, &full_arguments, expr.span)?
@@ -9203,29 +9238,28 @@ impl Checker<'_, '_> {
         } else {
             shape.clone()
         };
-        if *op == BinOp::Rem
-            && !matches!(shape, Term::Primitive(p) if matches!(self.integer_layout(p), Some((false, _))))
-            && !self.proved_integer_family(&shape, true)
-        {
+        let is_float = matches!(
+            shape,
+            Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
+        ) || self.proved_float_family(&shape);
+        if shape == p(P::Float) && *op == BinOp::Div {
+            return Err(error(expr.span, "exact Float division is not implemented"));
+        }
+        if shape == p(P::Float) && *op == BinOp::Rem {
             return Err(error(
                 expr.span,
                 "protocol or construct not yet implemented: remainder rounding for this type",
             ));
         }
-        if shape == p(P::Float) && *op == BinOp::Div {
-            return Err(error(expr.span, "exact Float division is not implemented"));
-        }
-        let kind = if matches!(
-            shape,
-            Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64)
-        ) || self.proved_float_family(&shape)
-        {
+        let kind = if is_float {
             K::FloatBinary {
                 op: match op {
                     BinOp::Add => n::FloatOp::Add,
                     BinOp::Sub => n::FloatOp::Subtract,
                     BinOp::Mul => n::FloatOp::Multiply,
-                    _ => n::FloatOp::Divide,
+                    BinOp::Div => n::FloatOp::Divide,
+                    BinOp::Rem => n::FloatOp::Remainder,
+                    _ => unreachable!(),
                 },
                 left: Box::new(left),
                 right: Box::new(right),
@@ -9240,13 +9274,16 @@ impl Checker<'_, '_> {
             };
             self.require(&left.ty, &integer_type, expr.span)?;
             self.require(&right.ty, &integer_type, expr.span)?;
-            if *op == BinOp::Div
-                && !matches!(shape, Term::Primitive(p) if matches!(self.integer_layout(p), Some((false, _))))
-                && !self.proved_integer_family(&shape, true)
-            {
+            if *op == BinOp::Div && integer_type == p(P::Integer) {
                 return Err(error(
                     expr.span,
                     "Integer division operator rounding protocol is not implemented",
+                ));
+            }
+            if *op == BinOp::Rem && integer_type == p(P::Integer) {
+                return Err(error(
+                    expr.span,
+                    "protocol or construct not yet implemented: remainder rounding for this type",
                 ));
             }
             K::IntegerBinary {

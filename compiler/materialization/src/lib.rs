@@ -2062,10 +2062,151 @@ impl Builder<'_, '_> {
         result
     }
 
+    fn static_type_predicate_expr(
+        &mut self,
+        expr: &n::Expr,
+        depth: usize,
+    ) -> Result<Option<n::TypePredicate>, String> {
+        if depth >= 128 {
+            return Err("static conditional folding depth exceeded".into());
+        }
+        self.tick(depth)?;
+        match &expr.kind {
+            K::Literal(n::Literal::Bool(value)) => Ok(Some(n::TypePredicate::Bool(*value))),
+            K::Not(inner) => Ok(self
+                .static_type_predicate_expr(inner, depth + 1)?
+                .map(|pred| n::TypePredicate::Not(Box::new(pred)))),
+            K::And(left, right) => {
+                let Some(left) = self.static_type_predicate_expr(left, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(right) = self.static_type_predicate_expr(right, depth + 1)? else {
+                    return Ok(None);
+                };
+                Ok(Some(n::TypePredicate::And(vec![left, right])))
+            }
+            K::Or(left, right) => {
+                let Some(left) = self.static_type_predicate_expr(left, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(right) = self.static_type_predicate_expr(right, depth + 1)? else {
+                    return Ok(None);
+                };
+                Ok(Some(n::TypePredicate::Or(vec![left, right])))
+            }
+            K::TypeEqual(left, right) => {
+                let (K::TypeValue(lhs), K::TypeValue(rhs)) = (&left.kind, &right.kind) else {
+                    return Ok(None);
+                };
+                let lhs = self.normalized_type(lhs)?;
+                let rhs = self.normalized_type(rhs)?;
+                Ok(Some(n::TypePredicate::Equal(lhs, rhs)))
+            }
+            K::TypeKind { kind, operand } => {
+                let K::TypeValue(ty) = &operand.kind else {
+                    return Ok(None);
+                };
+                let ty = self.normalized_type(ty)?;
+                Ok(Some(n::TypePredicate::Kind(ty, *kind)))
+            }
+            K::TypeNotSized { operand } => {
+                let K::TypeValue(ty) = &operand.kind else {
+                    return Ok(None);
+                };
+                let ty = self.normalized_type(ty)?;
+                Ok(Some(n::TypePredicate::NotSized(ty)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn eval_static_if_condition(
+        &mut self,
+        condition: &n::Expr,
+        depth: usize,
+    ) -> Result<Option<bool>, String> {
+        if depth >= 128 {
+            return Err("static conditional evaluation depth exceeded".into());
+        }
+        self.tick(depth)?;
+        match &condition.kind {
+            K::Literal(n::Literal::Bool(value)) => Ok(Some(*value)),
+            K::Not(inner) => Ok(self.eval_static_if_condition(inner, depth + 1)?.map(|b| !b)),
+            K::And(left, right) => match self.eval_static_if_condition(left, depth + 1)? {
+                Some(false) => Ok(Some(false)),
+                Some(true) => self.eval_static_if_condition(right, depth + 1),
+                None => Ok(None),
+            },
+            K::Or(left, right) => match self.eval_static_if_condition(left, depth + 1)? {
+                Some(true) => Ok(Some(true)),
+                Some(false) => self.eval_static_if_condition(right, depth + 1),
+                None => Ok(None),
+            },
+            K::TypeEqual(..) | K::TypeKind { .. } | K::TypeNotSized { .. } => {
+                let Some(predicate) = self.static_type_predicate_expr(condition, depth + 1)? else {
+                    return Ok(None);
+                };
+                if predicate.trivial_truth() == Some(true)
+                    || matches!(
+                        self.prove_requirement(&predicate)?,
+                        crate::ptc::Outcome::Entailed(_)
+                    )
+                {
+                    return Ok(Some(true));
+                }
+                let negated = n::TypePredicate::Not(Box::new(predicate));
+                if matches!(
+                    self.prove_requirement(&negated)?,
+                    crate::ptc::Outcome::Entailed(_)
+                ) {
+                    return Ok(Some(false));
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn fold_static_inline_conditionals(&mut self, expression: &mut n::Expr) -> Result<(), String> {
+        let mut fuel = self.fuel;
+        let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
+            self.fuel = *fuel;
+            while let K::If { condition, .. } = &expr.kind {
+                let Some(selected) = self.eval_static_if_condition(condition, 0)? else {
+                    break;
+                };
+                let K::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } = std::mem::replace(&mut expr.kind, K::Unit)
+                else {
+                    unreachable!()
+                };
+                *expr = if selected {
+                    *then_branch
+                } else {
+                    else_branch
+                        .map(|branch| *branch)
+                        .unwrap_or_else(|| n::Expr {
+                            source: expr.source,
+                            ty: Term::Primitive(nir::Primitive::Void),
+                            kind: K::Unit,
+                        })
+                };
+            }
+            *fuel = self.fuel;
+            Ok(true)
+        });
+        self.fuel = fuel.min(self.fuel);
+        result.map_err(Into::into)
+    }
+
     fn normalize_expression(&mut self, expression: &mut n::Expr) -> Result<(), String> {
         // Private working copies are discarded on any failure. Selected values
         // are substituted before dependency discovery, including nested patterns.
         if self.instances.is_some() {
+            self.fold_static_inline_conditionals(expression)?;
             dead_tails::prune(expression, &mut self.fuel)?;
             // Expose runtime template factories before collecting local target
             // choices. Their argument frames and effects remain runtime code.
@@ -3848,7 +3989,26 @@ impl Builder<'_, '_> {
         let mut pending = vec![(root, 0usize)];
         while let Some((node, depth)) = pending.pop() {
             self.tick(depth)?;
-            if let Some((origin, arguments, subject, call_arguments)) = match node {
+            if let Term::ComptimeCall(call) = node
+                && node.check_scope(&[]).is_ok()
+            {
+                let mut normalized_type_arguments = Vec::with_capacity(call.type_arguments.len());
+                for argument in &call.type_arguments {
+                    normalized_type_arguments.push(self.staging_type_view(argument)?);
+                }
+                let mut normalized_arguments = Vec::with_capacity(call.arguments.len());
+                for argument in &call.arguments {
+                    normalized_arguments.push(self.staging_type_view(argument)?);
+                }
+                let key = Term::ComptimeCall(Box::new(nir::ComptimeCall {
+                    declaration: call.declaration,
+                    type_arguments: normalized_type_arguments,
+                    arguments: normalized_arguments,
+                    ty: self.staging_type_view(&call.ty)?,
+                }));
+                crate::associated::charge_projection_copy(&key, &mut self.fuel)?;
+                self.queue.push_back(Task::Type(key));
+            } else if let Some((origin, arguments, subject, call_arguments)) = match node {
                 Term::AssociatedType {
                     origin,
                     arguments,
@@ -4341,6 +4501,31 @@ impl Builder<'_, '_> {
                 children.extend(call.call_arguments.iter().cloned());
                 children.push(call.subject.clone());
             }
+            Term::ComptimeCall(call) => {
+                if self.instances.is_some() {
+                    return Err("IIR requires comptime call resolution".into());
+                }
+                if ty.sort() == nir::Sort::Type {
+                    let normalized = self.dispatch_type_view(&ty)?;
+                    if normalized != ty {
+                        children.push(normalized);
+                    }
+                }
+                children.extend(call.type_arguments.iter().cloned());
+                children.extend(call.arguments.iter().cloned());
+                children.push(call.ty.clone());
+            }
+            Term::DeferredErrorResult { errors, result } => {
+                if self.instances.is_some() {
+                    return Err("IIR requires deferred error result resolution".into());
+                }
+                let normalized = self.dispatch_type_view(&ty)?;
+                if normalized != ty {
+                    children.push(normalized);
+                }
+                children.push((**errors).clone());
+                children.push((**result).clone());
+            }
             Term::ErrorResult { errors, result } => {
                 children.extend(errors.iter().cloned());
                 children.push((**result).clone());
@@ -4481,7 +4666,7 @@ impl Builder<'_, '_> {
                 | K::IntegerNegate(value)
                 | K::FloatNegate(value)
                 | K::BitConvert(value)
-                | K::ErrorConvert { value: value, .. }
+                | K::ErrorConvert { value, .. }
                 | K::NewtypeConvert(value)
                 | K::Snapshot(value)
                 | K::TakeBits(value)
@@ -5073,7 +5258,7 @@ impl Builder<'_, '_> {
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::BitConvert(value)
-            | K::ErrorConvert { value: value, .. }
+            | K::ErrorConvert { value, .. }
             | K::NewtypeConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)

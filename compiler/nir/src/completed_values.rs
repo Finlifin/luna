@@ -23,6 +23,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 .saturating_add(method.interface.arguments.len())
                 .saturating_add(method.method_arguments.len()),
             Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
+            Term::DeferredErrorResult { .. } => 2,
             Term::Computation { effects, .. } => {
                 charge(fuel, effects.len())?;
                 effects.iter().fold(1usize, |width, operation| {
@@ -34,6 +35,11 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 .arguments
                 .len()
                 .saturating_add(call.call_arguments.len())
+                .saturating_add(1),
+            Term::ComptimeCall(call) => call
+                .type_arguments
+                .len()
+                .saturating_add(call.arguments.len())
                 .saturating_add(1),
             Term::ClosureValue {
                 ty: _, captures, ..
@@ -72,6 +78,10 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 children.push(result.as_ref());
                 children.extend(errors);
             }
+            Term::DeferredErrorResult { errors, result } => {
+                children.push(errors.as_ref());
+                children.push(result.as_ref());
+            }
             Term::Computation { effects, result } => {
                 children.push(result.as_ref());
                 for operation in effects {
@@ -88,6 +98,11 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 children.push(&call.subject);
                 children.extend(&call.arguments);
                 children.extend(&call.call_arguments);
+            }
+            Term::ComptimeCall(call) => {
+                children.push(&call.ty);
+                children.extend(&call.type_arguments);
+                children.extend(&call.arguments);
             }
             Term::ClosureValue {
                 ty: inner,

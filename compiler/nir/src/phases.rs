@@ -1908,6 +1908,8 @@ impl<'a> PhaseContext<'a> {
                                         .is_some_and(|(field, _)| field == name) => {}
                                 crate::Term::AssociatedType { .. }
                                 | crate::Term::AssociatedTypeCall(_)
+                                | crate::Term::ComptimeCall(_)
+                                | crate::Term::DeferredErrorResult { .. }
                                 | crate::Term::Rigid { .. }
                                 | crate::Term::NormalForm { .. }
                                 | crate::Term::Bound { .. }

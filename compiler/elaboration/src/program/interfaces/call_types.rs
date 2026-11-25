@@ -227,4 +227,144 @@ impl crate::associated::TypeProjectionEnvironment for CallTypeEnvironment<'_, '_
         self.observations.push((key.clone(), fact));
         Ok(TypeProjection::Ready(result))
     }
+
+    fn resolve_comptime_call(
+        &mut self,
+        call: &nir::ComptimeCall,
+        budget: &mut Budget,
+    ) -> Result<Option<Term>, nir::NominalAdmissionError> {
+        let Some(owner) = self.checker.source_declarations.owner(call.declaration) else {
+            return Ok(None);
+        };
+        let Some(signature) = self
+            .checker
+            .declared_signature(owner)
+            .map(|sig| sig.into_owned())
+        else {
+            return Ok(None);
+        };
+        let type_parameters = self
+            .checker
+            .type_parameters
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        if type_parameters.len() != call.type_arguments.len() {
+            return Err(nir::NominalAdmissionError::Invalid(
+                "comptime call type argument count mismatch".into(),
+            ));
+        }
+        let callable_ty = self.checker.callable_type(owner, signature);
+        crate::associated::charge_projection_copy(&callable_ty, &mut budget.steps)?;
+        let instantiated_callable = if type_parameters.is_empty() {
+            callable_ty
+        } else {
+            let param_types = vec![p(P::Type); type_parameters.len()];
+            let substitution = nir::DeclarationSubstitution::bounded(
+                &type_parameters,
+                &param_types,
+                &call.type_arguments,
+                &[],
+                &mut budget.steps,
+            )?;
+            substitution.instantiate_bounded(&callable_ty, &mut budget.steps)?
+        };
+        let mut expected_types = Vec::with_capacity(call.arguments.len());
+        let _result = instantiated_callable
+            .instantiate_function(&call.arguments, |_index, _arg, expected| {
+                crate::associated::charge_projection_copy(expected, &mut budget.steps)?;
+                expected_types.push(expected.clone());
+                Ok::<_, nir::NominalAdmissionError>(())
+            })
+            .map_err(|error| {
+                nir::NominalAdmissionError::Invalid(format!(
+                    "comptime call contract mismatch: {error:?}"
+                ))
+            })?;
+        let expr_source = source(self.site.span);
+        let callee_kind = if call.type_arguments.is_empty() {
+            K::Function(call.declaration)
+        } else {
+            K::FunctionInstance {
+                declaration: call.declaration,
+                arguments: call.type_arguments.clone(),
+            }
+        };
+        let callee = n::Expr {
+            source: expr_source,
+            ty: instantiated_callable,
+            kind: callee_kind,
+        };
+        let arguments = call
+            .arguments
+            .iter()
+            .zip(expected_types)
+            .enumerate()
+            .map(|(parameter, (arg, param_ty))| {
+                let kind = if param_ty == p(P::Type) {
+                    K::TypeValue(arg.clone())
+                } else {
+                    K::ComptimeValue(arg.clone())
+                };
+                n::CallArgument {
+                    passing: n::ArgumentPassing::Value,
+                    parameter,
+                    is_default: false,
+                    value: n::Expr {
+                        source: expr_source,
+                        ty: param_ty,
+                        kind,
+                    },
+                }
+            })
+            .collect();
+        let root = n::Expr {
+            source: expr_source,
+            ty: call.ty.clone(),
+            kind: K::Call {
+                callee: Box::new(callee),
+                arguments,
+                env_arguments: Vec::new(),
+                parameter_bindings: Vec::new(),
+            },
+        };
+        let read = (|| {
+            let (prepared, ()) = self.checker.prepare_required_root_with_live_inputs(
+                self.site,
+                required::RootKind::AssociatedType,
+                Vec::new(),
+                false,
+                &[],
+                |_| Ok((root, ())),
+            )?;
+            let (value, _) = self.checker.invoke_required_publishing(
+                prepared,
+                Vec::new(),
+                self.site.hir_id.owner,
+                self.site.span,
+            )?;
+            match value {
+                comptime_interpretor::Value::Type(ty) => Ok(ty),
+                other => {
+                    let mut rt_budget = comptime_runtime::Budget {
+                        steps: budget.steps,
+                        max_limbs: 4096,
+                    };
+                    let term = other.to_normal_term(&mut rt_budget).map_err(|failure| {
+                        error(
+                            self.site.span,
+                            format!("comptime call result export failed: {failure:?}"),
+                        )
+                    })?;
+                    budget.steps = rt_budget.steps;
+                    Ok(term)
+                }
+            }
+        })();
+        let value = read.map_err(|failure| {
+            self.invocation_error = Some(failure);
+            nir::NominalAdmissionError::Invalid("comptime call invocation failed".into())
+        })?;
+        Ok(Some(value))
+    }
 }

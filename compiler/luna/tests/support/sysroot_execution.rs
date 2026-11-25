@@ -76,7 +76,7 @@ pub(crate) fn run(source: &str) -> Value {
 
 pub(crate) fn run_with_inputs(source: &str, entry: &str, inputs: Vec<Value>) -> Value {
     let package = compile(source).unwrap();
-    let graph = luna::instantiation::instantiate(&package, entry, 1_000_000).unwrap();
+    let graph = luna::instantiation::instantiate(&package, entry, 10_000_000).unwrap();
     let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
     vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }

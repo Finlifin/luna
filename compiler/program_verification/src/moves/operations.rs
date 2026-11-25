@@ -831,6 +831,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                 | Term::Runtime(_)
                                 | Term::AssociatedType { .. }
                                 | Term::AssociatedTypeCall(_)
+                                | Term::ComptimeCall(_)
+                                | Term::DeferredErrorResult { .. }
                         )
                         && self.storage_inputs_are_closed(&argument.ty, source)?
                     {

@@ -177,6 +177,19 @@ impl Splice for SystemAllocator {
 
 pub typealias DefaultAllocator = SystemAllocator;
 
+pub struct Id
+where
+    quote value: lift Type.vars.Any,
+{}
+
+pub pure comptime fn DecideAllocErr(comptime A: Type, quote allocator: lift *A) -> meta.List<Type> {
+    if A == DefaultAllocator and Id<allocator> == Id<DefaultAllocator.GLOBAL.ref> {
+        []
+    } else {
+        [AllocErr]
+    }
+}
+
 fn valid_usize_layout(layout: Layout) -> bool {
     let has_size = layout.byte_size_usize() match {
         _? => true,

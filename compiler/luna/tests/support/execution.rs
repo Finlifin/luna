@@ -110,9 +110,17 @@ pub(crate) fn compile_explicit_source_with_bindings(
             stable_list_pattern_endless_protocol: selectors
                 .stable_list_pattern_endless
                 .map(str::to_owned),
+            range_full_type: selectors.range_full.map(str::to_owned),
+            range_from_type: selectors.range_from.map(str::to_owned),
+            range_to_type: selectors.range_to.map(str::to_owned),
+            range_to_inclusive_type: selectors.range_to_inclusive.map(str::to_owned),
+            range_type: selectors.range.map(str::to_owned),
+            range_inclusive_type: selectors.range_inclusive.map(str::to_owned),
             range_end_type: selectors.range_end.map(str::to_owned),
             range_pattern_protocol: selectors.range_pattern.map(str::to_owned),
             stable_range_pattern_protocol: selectors.stable_range_pattern.map(str::to_owned),
+            concat_protocol: selectors.concat.map(str::to_owned),
+            comptime_concat_protocol: selectors.comptime_concat.map(str::to_owned),
             concat_pattern_protocol: selectors.concat_pattern.map(str::to_owned),
             stable_concat_pattern_protocol: selectors.stable_concat_pattern.map(str::to_owned),
             map_pattern_protocol: selectors.map_pattern.map(str::to_owned),

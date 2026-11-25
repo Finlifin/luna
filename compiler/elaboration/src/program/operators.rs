@@ -35,14 +35,14 @@ pub(super) fn native_arithmetic_operand(
     target: Option<nir::target::TargetData>,
 ) -> bool {
     match shape {
-        Term::Primitive(P::F16 | P::Bf16 | P::F32 | P::F64) => *op != BinOp::Rem,
+        Term::Primitive(P::F16 | P::Bf16 | P::F32 | P::F64) => true,
         Term::Primitive(P::Integer | P::Float) => !matches!(op, BinOp::Div | BinOp::Rem),
         Term::Primitive(primitive) => target
             .map_or_else(
                 || primitive.fixed_integer_layout(),
                 |target| target.integer_layout(*primitive),
             )
-            .is_some_and(|(signed, _)| !signed || !matches!(op, BinOp::Div | BinOp::Rem)),
+            .is_some(),
         _ => false,
     }
 }
@@ -190,9 +190,10 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn native_arithmetic_type(&self, op: &BinOp, shape: &Term) -> bool {
+        let _ = op;
         native_arithmetic_operand(op, shape, self.target)
-            || self.proved_integer_family(shape, matches!(op, BinOp::Div | BinOp::Rem))
-            || (*op != BinOp::Rem && self.proved_float_family(shape))
+            || self.proved_integer_family(shape, false)
+            || self.proved_float_family(shape)
     }
 
     /// Classify an existing rigid type from proved alternatives. This does not
@@ -505,14 +506,18 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn selected_implies_protocol(
+    fn selected_phase_protocol(
         &self,
         subject: &Term,
+        comptime_proto: Option<DeclarationId>,
+        runtime_proto: Option<DeclarationId>,
+        label: &str,
+        missing_error: &str,
         span: Span,
     ) -> Result<DeclarationId, Error> {
         use crate::ptc::{Budget, Formula, Outcome};
         let comptime = !self.runtime_value_context() && !self.in_code_body;
-        if comptime && let Some(ct_proto) = self.protocols.comptime_implies {
+        if comptime && let Some(ct_proto) = comptime_proto {
             let scope = self.call_inference_domains();
             let frames = if scope.is_empty() {
                 vec![]
@@ -553,23 +558,48 @@ impl Checker<'_, '_> {
                     .implementation_index
                     .candidates(Some(ct_proto), &[wildcard], subject, Budget::default())
                     .map_err(|reason| {
-                        error(span, format!("Implies candidate query failed: {reason:?}"))
+                        error(span, format!("{label} candidate query failed: {reason:?}"))
                     })?
                     .declarations()
                     .is_empty()
             } else {
                 false
             };
-            if has_impl || self.protocols.implies.is_none() {
+            if has_impl || runtime_proto.is_none() {
                 return Ok(ct_proto);
             }
         }
-        self.protocols.implies.ok_or_else(|| {
-            error(
-                span,
-                "`==>` on non-bool operands requires a bound Implies protocol",
-            )
-        })
+        runtime_proto.ok_or_else(|| error(span, missing_error))
+    }
+
+    pub(super) fn selected_implies_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        self.selected_phase_protocol(
+            subject,
+            self.protocols.comptime_implies,
+            self.protocols.implies,
+            "Implies",
+            "`==>` on non-bool operands requires a bound Implies protocol",
+            span,
+        )
+    }
+
+    pub(super) fn selected_concat_protocol(
+        &self,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        self.selected_phase_protocol(
+            subject,
+            self.protocols.comptime_concat,
+            self.protocols.concat,
+            "Concat",
+            "`++` on non-BitVec operands requires a bound Concat protocol",
+            span,
+        )
     }
 
     pub(super) fn selected_comparison_protocol(
@@ -901,31 +931,58 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        let (ty, kind) = match &expr.kind {
-            H::Binary(BinOp::Concat, a, b) => {
-                let a = self.expr(a, None)?;
-                let b = self.expr(b, None)?;
-                let Term::Primitive(P::BitVec(m)) = self.structural_type(&a.ty, expr.span)? else {
-                    return Err(error(expr.span, "concatenation requires BitVec operands"));
-                };
-                let Term::Primitive(P::BitVec(n)) = self.structural_type(&b.ty, expr.span)? else {
-                    return Err(error(expr.span, "concatenation requires BitVec operands"));
-                };
-                let width = m
-                    .checked_add(n)
-                    .ok_or_else(|| error(expr.span, "BitVec width overflow"))?;
-                (p(P::BitVec(width)), K::BitConcat(Box::new(a), Box::new(b)))
-            }
-            _ => unreachable!("operator dispatcher selected an incompatible expression"),
+        let H::Binary(BinOp::Concat, a, b) = &expr.kind else {
+            unreachable!("operator dispatcher selected an incompatible expression");
         };
-        if let Some(expected) = expected {
-            self.require_expression(&ty, expected, expr.span)?;
+        let left = {
+            let attempt = checking_attempts::Attempt::begin(
+                self,
+                a.span,
+                false,
+                CheckingDisposition::Commit,
+            )?;
+            let first = self.expr(a, None);
+            match attempt.finish(self, first)? {
+                Some(left) => left,
+                None => self.expr(a, expected)?,
+            }
+        };
+        if is_never(&left.ty) {
+            let attempt = checking_attempts::Attempt::begin(
+                self,
+                b.span,
+                false,
+                CheckingDisposition::Commit,
+            )?;
+            let right_res = self.expr(b, None);
+            let _ = attempt.finish(self, right_res)?;
+            if let Some(expected) = expected {
+                self.require_expression(&left.ty, expected, expr.span)?;
+            }
+            return Ok(left);
         }
-        Ok(n::Expr {
-            ty,
-            source: source(expr.span),
-            kind,
-        })
+        if let Term::Primitive(P::BitVec(m)) = self.structural_type(&left.ty, expr.span)? {
+            let right = self.expr(b, None)?;
+            let Term::Primitive(P::BitVec(n)) = self.structural_type(&right.ty, expr.span)? else {
+                return Err(error(expr.span, "concatenation requires BitVec operands"));
+            };
+            let width = m
+                .checked_add(n)
+                .ok_or_else(|| error(expr.span, "BitVec width overflow"))?;
+            let ty = p(P::BitVec(width));
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(n::Expr {
+                ty,
+                source: source(expr.span),
+                kind: K::BitConcat(Box::new(left), Box::new(right)),
+            });
+        }
+        let protocol = self.selected_concat_protocol(&left.ty, expr.span)?;
+        let rhs_hint = self.protocol_argument_context(&left.ty, protocol, expr.span)?;
+        let right = self.expr(b, rhs_hint.as_ref())?;
+        self.finish_binary_protocol_call(expr, protocol, "concat", left, right, expected)
     }
 }
 

@@ -264,6 +264,14 @@ fn projected_domain(
     )
 }
 
+fn lift_domain_accepts(actual: &Term, expected: &Term) -> bool {
+    actual == expected
+        || matches!(
+            (actual, expected),
+            (Term::Lift(_), Term::Lift(inner)) if inner.as_ref() == &Term::AnyType
+        )
+}
+
 pub(super) fn declared_domain_matches(
     frames: &[&[nir::Parameter]],
     values: &BTreeMap<DeclarationId, Term>,
@@ -277,8 +285,8 @@ pub(super) fn declared_domain_matches(
     if matches!(value, Term::RuntimeField { .. }) {
         nir::type_computations::charge_term(domain, fuel)?;
         return Ok(
-            projected_domain(frames, values, runtime_domains, value, field, fuel)?.as_ref()
-                == Some(domain),
+            projected_domain(frames, values, runtime_domains, value, field, fuel)?
+                .is_some_and(|actual| lift_domain_accepts(&actual, domain)),
         );
     }
     let Some((expected, distance)) = declared_domain(frames, values, runtime_domains, value) else {
@@ -287,12 +295,12 @@ pub(super) fn declared_domain_matches(
     nir::type_computations::charge_term(expected, fuel)?;
     nir::type_computations::charge_term(domain, fuel)?;
     if distance == 0 {
-        Ok(expected == domain)
+        Ok(lift_domain_accepts(expected, domain))
     } else {
-        Ok(expected
+        let shifted = expected
             .under_binders(distance)
-            .map_err(|error| error.to_string())?
-            == *domain)
+            .map_err(|error| error.to_string())?;
+        Ok(lift_domain_accepts(&shifted, domain))
     }
 }
 
@@ -608,7 +616,10 @@ pub(super) fn inspect<'signature>(
                 pending.push(Work::Visit(root, depth + fields.len()));
             }
             Term::Runtime(id) if runtime_domains.contains_key(id) => {}
-            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_) => {
+            Term::AssociatedType { .. }
+            | Term::AssociatedTypeCall(_)
+            | Term::ComptimeCall(_)
+            | Term::DeferredErrorResult { .. } => {
                 return Err(ErrorKind::UnmaterializedDispatch);
             }
             Term::Rigid { .. } | Term::Runtime(_) | Term::Value { .. } | Term::Hole { .. } => {

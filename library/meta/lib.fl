@@ -25,6 +25,7 @@ use definitions.{enums, newtypes, structs}
 use macros_impl;
 use numeric.{conversions, equality, ordering, scalar_math}
 use ops_impl;
+use range;
 use reflection.structure;
 use types.equality as type_equality;
 
@@ -56,12 +57,13 @@ pub use map.{Map, MapEntry}
 pub use newtypes.*;
 pub use object.*;
 pub use ops_impl.{
-    ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
-    ComptimeSubAssign,
+    ComptimeAddAssign, ComptimeConcat, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign,
+    ComptimeRemAssign, ComptimeSubAssign,
 };
 pub use optional.ComptimeOptionalOps;
 pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
 pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
+pub use range.ComptimeRangeBounds;
 pub use set.Set;
 pub use structs.*;
 pub use structure.*;
@@ -144,11 +146,12 @@ pub mod prelude {
     pub use errors.ComptimeErrorResultOps;
     pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
     pub use ops_impl.{
-        ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
-        ComptimeSubAssign,
+        ComptimeAddAssign, ComptimeConcat, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign,
+        ComptimeRemAssign, ComptimeSubAssign,
     };
     pub use optional.ComptimeOptionalOps;
     pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
+    pub use range.ComptimeRangeBounds;
     pub use text.ComptimeTextBytes;
 }

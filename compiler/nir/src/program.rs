@@ -1052,6 +1052,7 @@ pub enum FloatOp {
     Subtract,
     Multiply,
     Divide,
+    Remainder,
 }
 
 impl FloatOp {
@@ -1069,6 +1070,7 @@ impl FloatOp {
                 Self::Subtract => Op::Subtract,
                 Self::Multiply => Op::Multiply,
                 Self::Divide => Op::Divide,
+                Self::Remainder => Op::Remainder,
             },
             left,
             right,
@@ -1083,6 +1085,7 @@ impl FloatOp {
             Self::Subtract => left - right,
             Self::Multiply => left * right,
             Self::Divide => left / right,
+            Self::Remainder => left % right,
         };
         // Do not expose host-selected NaN payloads as invocation nondeterminism.
         if value.is_nan() {
@@ -1099,6 +1102,7 @@ impl FloatOp {
             Self::Subtract => left - right,
             Self::Multiply => left * right,
             Self::Divide => left / right,
+            Self::Remainder => left % right,
         };
         if value.is_nan() {
             0x7ff8000000000000
@@ -1115,6 +1119,7 @@ impl fmt::Display for FloatOp {
             Self::Subtract => "subtract",
             Self::Multiply => "multiply",
             Self::Divide => "divide",
+            Self::Remainder => "remainder",
         })
     }
 }

@@ -485,6 +485,28 @@ pub(super) fn validate(
                         .map(|t| (Work::Term(t), depth + 1)),
                 );
             }
+            Work::Term(Term::ComptimeCall(call)) => {
+                if call
+                    .type_arguments
+                    .len()
+                    .saturating_add(call.arguments.len())
+                    .saturating_add(1)
+                    > fuel
+                {
+                    return Err(nir::type_computations::Error::Budget);
+                }
+                pending.push((Work::Term(&call.ty), depth + 1));
+                pending.extend(
+                    call.type_arguments
+                        .iter()
+                        .map(|t| (Work::Term(t), depth + 1)),
+                );
+                pending.extend(call.arguments.iter().map(|t| (Work::Term(t), depth + 1)));
+            }
+            Work::Term(Term::DeferredErrorResult { errors, result }) => {
+                pending.push((Work::Term(errors), depth + 1));
+                pending.push((Work::Term(result), depth + 1));
+            }
             Work::Term(Term::OptionalValue { ty, value }) => {
                 pending.push((Work::Term(ty), depth + 1));
                 if let Some(value) = value {

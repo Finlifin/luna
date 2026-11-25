@@ -12,7 +12,9 @@ use std::{
     process::{Command, Output},
     sync::atomic::{AtomicU64, Ordering},
 };
+
 struct Work(PathBuf);
+
 impl Work {
     fn new(source: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -25,17 +27,20 @@ impl Work {
         primitive_bindings::write_fixture(path.join("source.fl"), source).unwrap();
         Self(path)
     }
+
     fn build(&self) -> Output {
         self.command()
             .args(["--build", "run", "--output", "native program"])
             .output()
             .unwrap()
     }
+
     fn command(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_luna"));
         c.current_dir(&self.0).arg("source.fl");
         c
     }
+
     fn execute(&self) -> Output {
         let mut command = Command::new(self.0.join("native program"));
         command.current_dir(&self.0);
@@ -58,11 +63,13 @@ impl Work {
         }
     }
 }
+
 impl Drop for Work {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
 fn success(out: &Output) {
     assert!(
         out.status.success(),
@@ -70,6 +77,7 @@ fn success(out: &Output) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
 fn native(source: &str, expected: &str) {
     let w = Work::new(source);
     success(&w.build());
@@ -77,6 +85,7 @@ fn native(source: &str, expected: &str) {
     success(&out);
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
+
 #[test]
 fn native_integer_contracts() {
     native(
@@ -142,6 +151,7 @@ fn short_circuit_partial_predicates_do_not_prove_opposite_or_stale_paths() {
         assert!(!work.0.join("native program").exists());
     }
 }
+
 #[test]
 fn native_boolean_control() {
     native(
@@ -149,6 +159,7 @@ fn native_boolean_control() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_early_returns() {
     native(
@@ -156,6 +167,7 @@ fn native_early_returns() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_defaults_and_source_order() {
     native(
@@ -163,6 +175,7 @@ fn native_defaults_and_source_order() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_checked_arithmetic() {
     native(
@@ -170,6 +183,7 @@ fn native_checked_arithmetic() {
         "(unsigned-integer 42)\n",
     );
 }
+
 #[test]
 fn native_signed_arithmetic() {
     native(
@@ -177,10 +191,12 @@ fn native_signed_arithmetic() {
         "(signed-integer -42)\n",
     );
 }
+
 #[test]
 fn native_unit() {
     native("fn run() {}", "(unit)\n");
 }
+
 #[test]
 fn unproven_overflow_is_rejected_before_codegen() {
     let w =
@@ -189,6 +205,7 @@ fn unproven_overflow_is_rejected_before_codegen() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("range is not proven"));
 }
+
 #[test]
 fn predicate_failure_traps() {
     let w =
@@ -196,6 +213,7 @@ fn predicate_failure_traps() {
     success(&w.build());
     assert!(!w.execute().status.success());
 }
+
 #[test]
 fn llvm_export_is_deterministic() {
     let w = Work::new("fn run()->bool {true}");
@@ -206,6 +224,7 @@ fn llvm_export_is_deterministic() {
     assert_eq!(a.stdout, b.stdout);
     assert!(String::from_utf8_lossy(&a.stdout).contains("define i32 @main()"));
 }
+
 #[test]
 fn missing_tool_preserves_output() {
     let w = Work::new("fn run()->bool {true}");
@@ -222,6 +241,7 @@ fn missing_tool_preserves_output() {
         b"old\0artifact"
     );
 }
+
 #[test]
 fn source_cannot_be_overwritten() {
     let source = "fn run()->bool {true}";
@@ -234,6 +254,7 @@ fn source_cannot_be_overwritten() {
     assert!(!out.status.success());
     assert_eq!(fs::read_to_string(w.0.join("source.fl")).unwrap(), source);
 }
+
 #[test]
 fn host_cli_rejects_conflicting_actions() {
     for args in [
@@ -255,6 +276,7 @@ fn native_recursion_and_integer_loop() {
         "(unsigned-integer 42)\n",
     );
 }
+
 #[test]
 fn native_named_arguments_evaluate_in_source_order() {
     native(
@@ -262,6 +284,7 @@ fn native_named_arguments_evaluate_in_source_order() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn unsupported_storage_preserves_output() {
     let w = Work::new("fn run()->bool {var value=true;let pointer=value.ref;pointer.*}");
@@ -276,6 +299,7 @@ fn unsupported_storage_preserves_output() {
     );
     assert_eq!(fs::read(w.0.join("native program")).unwrap(), b"old");
 }
+
 #[test]
 fn zero_divisor_traps() {
     let w = Work::new(
@@ -292,10 +316,12 @@ fn native_template_with_staged_type() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_entry_default_wrapper() {
     native("fn run(.value:bool=true)->bool {value}", "(bool true)\n");
 }
+
 #[test]
 fn native_partial_return() {
     native(
@@ -318,6 +344,7 @@ fn native_ieee_float_arithmetic_and_bits() {
         );
     }
 }
+
 #[test]
 fn native_ieee_nan_and_infinity_comparisons() {
     for ty in ["f32", "f64"] {
@@ -329,6 +356,7 @@ fn native_ieee_nan_and_infinity_comparisons() {
         );
     }
 }
+
 #[test]
 fn native_ieee_negative_zero() {
     for (ty, expected) in [
@@ -341,6 +369,7 @@ fn native_ieee_negative_zero() {
         );
     }
 }
+
 #[test]
 fn native_ieee_canonical_arithmetic_nan() {
     for (ty, expected) in [
@@ -367,6 +396,7 @@ fn native_ieee_precision_rounds_at_each_operation() {
         );
     }
 }
+
 #[test]
 fn native_ieee_subnormals_are_not_flushed() {
     for (ty, tiny, expected) in [
@@ -389,6 +419,7 @@ fn native_ieee_subnormals_are_not_flushed() {
         );
     }
 }
+
 #[test]
 fn native_ieee_comparisons_and_signed_zero_reciprocal() {
     for ty in ["f32", "f64"] {
@@ -431,6 +462,7 @@ fn native_i128_decimal_boundaries() {
         );
     }
 }
+
 #[test]
 fn native_u128_arithmetic_crosses_machine_word() {
     native(
@@ -438,6 +470,7 @@ fn native_u128_arithmetic_crosses_machine_word() {
         "(unsigned-integer 36893488147419103232)\n",
     );
 }
+
 #[test]
 fn native_u128_division_and_remainder() {
     native(
@@ -465,6 +498,7 @@ fn native_function_parameter_and_return_value() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_function_selection_and_reassignment() {
     native(
@@ -472,6 +506,7 @@ fn native_function_selection_and_reassignment() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_function_target_runs_before_arguments() {
     native(
@@ -488,6 +523,7 @@ fn native_indirect_call_keeps_callee_checked_assumes() {
     success(&w.build());
     assert!(!w.execute().status.success());
 }
+
 #[test]
 fn native_indirect_void_call() {
     native(
@@ -495,6 +531,7 @@ fn native_indirect_void_call() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_higher_order_function_default() {
     native(
@@ -502,6 +539,7 @@ fn native_higher_order_function_default() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_indirect_wide_integer_and_float_abis() {
     native(
@@ -542,6 +580,7 @@ fn native_empty_lambda_as_parameter_and_return_value() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_nested_empty_lambda() {
     native(
@@ -549,6 +588,7 @@ fn native_nested_empty_lambda() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_lambda_return_does_not_return_from_enclosing_function() {
     native(
@@ -564,6 +604,7 @@ fn native_lambda_does_not_inherit_parent_postcondition() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_lambda_calls_registered_function() {
     native(
@@ -571,6 +612,7 @@ fn native_lambda_calls_registered_function() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn empty_lambda_llvm_symbols_are_deterministic() {
     let w = Work::new(
@@ -585,6 +627,7 @@ fn empty_lambda_llvm_symbols_are_deterministic() {
     assert!(ir.contains("@flurry_lambda_0"));
     assert!(ir.contains("@flurry_lambda_1"));
 }
+
 #[test]
 fn native_captured_lambda_snapshots_and_preserves_mutation() {
     for source in [
@@ -787,6 +830,7 @@ fn native_scalar_match_bindings_and_priority() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_integer_range_match() {
     native(
@@ -794,6 +838,7 @@ fn native_integer_range_match() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_match_alternative_bindings() {
     native(
@@ -801,6 +846,7 @@ fn native_match_alternative_bindings() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_float_range_keeps_nan_unordered() {
     native(
@@ -816,6 +862,7 @@ fn native_let_else_and_successful_binding() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_failed_match_guard_preserves_external_writes() {
     native(
@@ -823,6 +870,7 @@ fn native_failed_match_guard_preserves_external_writes() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_match_subject_once_and_later_guards_skipped() {
     native(
@@ -830,6 +878,7 @@ fn native_match_subject_once_and_later_guards_skipped() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_or_pattern_binding_uses_selected_alternative() {
     native(
@@ -837,6 +886,7 @@ fn native_or_pattern_binding_uses_selected_alternative() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_computed_pattern_observes_bound_input() {
     native(
@@ -852,6 +902,7 @@ fn native_pattern_if_and_while_control() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_let_else_continue_keeps_loop_state() {
     native(
@@ -859,6 +910,7 @@ fn native_let_else_continue_keeps_loop_state() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_match_return_from_guard_skips_remaining_candidates() {
     native(
@@ -866,6 +918,7 @@ fn native_match_return_from_guard_skips_remaining_candidates() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_negated_float_range_matches_nan() {
     native(
@@ -889,6 +942,7 @@ fn native_anonymous_record_fields_and_assignment() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_nested_anonymous_record_return_and_projection() {
     native(
@@ -896,6 +950,7 @@ fn native_nested_anonymous_record_return_and_projection() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_anonymous_record_pattern() {
     native(
@@ -911,6 +966,7 @@ fn native_record_fields_evaluate_in_source_order() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_record_contains_unit_and_function_fields() {
     native(
@@ -918,6 +974,7 @@ fn native_record_contains_unit_and_function_fields() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_record_conditional_merge_and_independent_copies() {
     native(
@@ -925,6 +982,7 @@ fn native_record_conditional_merge_and_independent_copies() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_record_let_destructuring() {
     native(
@@ -932,6 +990,7 @@ fn native_record_let_destructuring() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_record_pointer_field_is_rejected_without_publishing() {
     let w = Work::new(
@@ -953,6 +1012,7 @@ fn shipped_record_example_executes_natively() {
 }
 
 const TUPLE_HEADER: &str = "pure comptime fn TupleElements<T> -> .Type'builtin {T} pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}";
+
 fn native_tuple(source: &str, expected: &str) {
     let w = Work::new(&format!("{TUPLE_HEADER}\n{source}"));
     let out = w
@@ -974,6 +1034,7 @@ fn native_tuple(source: &str, expected: &str) {
     success(&result);
     assert_eq!(String::from_utf8_lossy(&result.stdout), expected);
 }
+
 #[test]
 fn native_tuple_return_and_let_destructuring() {
     native_tuple(
@@ -981,6 +1042,7 @@ fn native_tuple_return_and_let_destructuring() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_nested_tuple_pattern_and_alternatives() {
     native_tuple(
@@ -988,6 +1050,7 @@ fn native_nested_tuple_pattern_and_alternatives() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_empty_and_singleton_tuple_layouts() {
     native_tuple(
@@ -995,6 +1058,7 @@ fn native_empty_and_singleton_tuple_layouts() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_tuple_evaluation_order() {
     native_tuple(
@@ -1010,6 +1074,7 @@ fn native_variadic_tuple_collection_and_spread() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_extended_variadic_tuple_and_record() {
     native_tuple(
@@ -1017,6 +1082,7 @@ fn native_extended_variadic_tuple_and_record() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn native_tuple_field_can_hold_empty_tuple_and_callback() {
     native_tuple(
@@ -1024,6 +1090,7 @@ fn native_tuple_field_can_hold_empty_tuple_and_callback() {
         "(bool true)\n",
     );
 }
+
 #[test]
 fn tuple_head_is_retained_in_iir_before_codegen() {
     let w = Work::new(&format!(
@@ -1124,6 +1191,7 @@ fn optimization_levels_preserve_shipped_examples() {
         }
     }
 }
+
 #[test]
 fn optimization_keeps_runtime_verification_traps() {
     for level in ["0", "1", "2", "3"] {
@@ -1146,6 +1214,7 @@ fn optimization_keeps_runtime_verification_traps() {
         assert!(!w.execute().status.success(), "level {level}");
     }
 }
+
 #[test]
 fn optimized_llvm_is_deterministic_and_changes_the_module() {
     let w = Work::new("fn run()->bool {var value=false;value=true;value}");
@@ -1168,6 +1237,7 @@ fn optimized_llvm_is_deterministic_and_changes_the_module() {
     assert!(String::from_utf8_lossy(&raw.stdout).contains("alloca i1"));
     assert!(!String::from_utf8_lossy(&first.stdout).contains("alloca i1"));
 }
+
 #[test]
 fn optimization_options_are_validated() {
     for args in [
@@ -1224,6 +1294,7 @@ fn optimization_preserves_ieee_bit_boundaries() {
         }
     }
 }
+
 #[test]
 fn optimized_dump_failure_preserves_previous_file() {
     let w = Work::new("fn run()->bool {true}");
@@ -1247,6 +1318,7 @@ fn optimized_dump_failure_preserves_previous_file() {
 
 const RESOURCE_HEADER: &str =
     "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}";
+
 fn resource_build(w: &Work) -> Output {
     w.command()
         .args([
@@ -1262,6 +1334,7 @@ fn resource_build(w: &Work) -> Output {
         .output()
         .unwrap()
 }
+
 #[test]
 fn native_resource_checked_scalar_entry() {
     let w = Work::new(&format!(
@@ -1272,6 +1345,7 @@ fn native_resource_checked_scalar_entry() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_resource_protocol_options_must_be_paired() {
     let w = Work::new(&format!("{RESOURCE_HEADER} fn run()->bool {{true}}"));
@@ -1291,6 +1365,7 @@ fn native_resource_protocol_options_must_be_paired() {
         assert_eq!(out.status.code(), Some(2));
     }
 }
+
 #[test]
 fn native_resource_selection_failure_preserves_artifact() {
     let w = Work::new("fn run()->bool {true}");
@@ -1299,6 +1374,7 @@ fn native_resource_selection_failure_preserves_artifact() {
     assert!(!out.status.success());
     assert_eq!(fs::read(w.0.join("native program")).unwrap(), b"old");
 }
+
 #[test]
 fn native_resource_nominal_cleanup_is_not_silently_removed() {
     let w = Work::new(&format!(
@@ -1321,6 +1397,7 @@ fn native_resource_checked_loop_and_default_call() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_resource_check_rejects_unproven_copy() {
     let w = Work::new(
@@ -1357,6 +1434,7 @@ fn native_checked_pointer_read_write_and_call() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_pointer_nested_record_projection() {
     let w = Work::new(&format!(
@@ -1367,6 +1445,7 @@ fn native_checked_pointer_nested_record_projection() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_pointer_to_pointer() {
     let w = Work::new(&format!(
@@ -1377,6 +1456,7 @@ fn native_checked_pointer_to_pointer() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_pointer_local_escape_rejected() {
     let w = Work::new(&format!(
@@ -1416,6 +1496,7 @@ fn native_checked_pointer_borrowed_return_and_alias_write() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_pointer_field_projection() {
     let w = Work::new(&format!(
@@ -1426,6 +1507,7 @@ fn native_checked_pointer_field_projection() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_pointer_to_zero_sized_value() {
     let w = Work::new(&format!(
@@ -1476,6 +1558,7 @@ fn native_checked_struct_fields_and_assignment() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_generic_struct_return() {
     let w = Work::new(&format!(
@@ -1486,6 +1569,7 @@ fn native_checked_generic_struct_return() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_struct_pointer_field_and_pattern() {
     let w = Work::new(&format!(
@@ -1507,6 +1591,7 @@ fn native_checked_nested_struct_and_receiver_method() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_empty_struct_has_zero_sized_storage() {
     let w = Work::new(&format!(
@@ -1517,6 +1602,7 @@ fn native_checked_empty_struct_has_zero_sized_storage() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_struct_layout_does_not_merge_type_identities() {
     let w = Work::new(&format!(
@@ -1528,6 +1614,7 @@ fn native_checked_struct_layout_does_not_merge_type_identities() {
     assert!(error.contains("elaboration failed"), "{error}");
     assert!(!w.0.join("native program").exists());
 }
+
 #[test]
 fn native_struct_without_resource_verification_rejected() {
     let w =
@@ -1577,6 +1664,7 @@ fn native_checked_newtype_scalar_round_trip() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_newtype_nested_generic_representation() {
     let w = Work::new(&format!(
@@ -1587,6 +1675,7 @@ fn native_checked_newtype_nested_generic_representation() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_newtype_struct_representation() {
     let w = Work::new(&format!(
@@ -1597,6 +1686,7 @@ fn native_checked_newtype_struct_representation() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_newtype_identity_cannot_be_bypassed_by_equal_layouts() {
     for source in [
@@ -1620,6 +1710,7 @@ fn native_checked_newtype_pointer_payload() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_newtype_conversion_preserves_operand_effects() {
     let w = Work::new(&format!(
@@ -1630,6 +1721,7 @@ fn native_checked_newtype_conversion_preserves_operand_effects() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_newtype_destructor_responsibility_is_not_erased() {
     let w = Work::new(&format!(
@@ -1680,6 +1772,7 @@ fn native_checked_fieldless_enum_construction_and_match() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_checked_enum_assignment_through_pointer() {
     let w = Work::new(&format!(
@@ -1690,6 +1783,7 @@ fn native_checked_enum_assignment_through_pointer() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_fixed_enum_uses_declared_bits_not_variant_indices() {
     let w = Work::new(&format!(
@@ -1745,6 +1839,7 @@ fn native_fixed_enum_preserves_full_128_bit_encoding() {
             .contains("ret i128 340282366920938463463374607431768211455")
     );
 }
+
 #[test]
 fn native_checked_enum_in_struct_pattern() {
     let w = Work::new(&format!(
@@ -1755,6 +1850,7 @@ fn native_checked_enum_in_struct_pattern() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_fieldless_enum_or_pattern_and_guard() {
     let w = Work::new(&format!(
@@ -1765,6 +1861,7 @@ fn native_fieldless_enum_or_pattern_and_guard() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_enum_payload_is_constructed_and_matched() {
     let w = Work::new(&format!(
@@ -1814,6 +1911,7 @@ fn native_fixed_enum_payload_encoding_and_extraction() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_fixed_enum_signed_payload() {
     let w = Work::new(&format!(
@@ -1824,6 +1922,7 @@ fn native_fixed_enum_signed_payload() {
     success(&out);
     assert_eq!(out.stdout, b"(bool true)\n");
 }
+
 #[test]
 fn native_fixed_enum_float_payload_negative_zero() {
     let w = Work::new(&format!(
@@ -6091,8 +6190,12 @@ fn native_checked_direct_handler_cleanup_matches_reference() {
         "fn run()->bool {(get()# {get()=>do {let watch=Watch {valid:true};get()#},})# {get()=>do {return true;},};false}",
         "fn run()->bool {(get()# {get() if false=>false,})# {get()=>do {let watch=Watch {valid:true};resume true;},}}",
         "effect consume(value:Watch)->bool;fn run()->bool {consume(Watch {valid:true})# {consume(value)=>true,}}",
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# and setting()#)# {setting()=>do {let watch=Watch {valid:true};resume true;},}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>do {let watch=Watch {valid:true};return true;},};false}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# and setting()#)# {setting()=>do {let watch=Watch {valid:true};resume true;},}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>do {let watch=Watch {valid:true};return true;},};false}"
+        ),
         "fn run()->bool {get()# {get()=>do {let watch=Watch {valid:true};resume true;},}}",
         "fn run()->bool {get()# {get()=>do {let watch=Watch {valid:true};return true;},};false}",
         "fn run()->bool {while true {get()# {get()=>do {let watch=Watch {valid:true};break;},};}true}",
@@ -6155,7 +6258,9 @@ fn native_checked_direct_handler_cleanup_matches_reference() {
 
 #[test]
 fn direct_passing_preserves_only_stable_installation_facts() {
-    let header = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}impl Duplicate for bool {} ^attrs.effects.direct_passing effect setting()->bool;");
+    let header = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}impl Duplicate for bool {} ^attrs.effects.direct_passing effect setting()->bool;"
+    );
     for computation in ["setting()#", "false and setting()#"] {
         let w = Work::new(&format!(
             "{header}fn keep(flag:bool)->result:bool where requires flag, ensures result {{let ignored=({computation})# {{setting()=>true,}};flag}}fn run()->bool {{keep(true)}}"
@@ -6845,15 +6950,33 @@ fn native_direct_handler_preserves_lexical_control_targets() {
 fn native_direct_passing_installs_once_before_computation() {
     for source in [
         include_str!("../../../development/examples/host-direct-passing.fl"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var flag=true;do {flag=false;setting()#}# {setting()=>flag,}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {do {let first=setting()#;let second=setting()# {setting()=>false,};let third=setting()#;first and not second and third}# {setting()=>true,}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;var active=true;var phase=false;while active {setting()# {setting()=>do {seen=not seen;true},};if phase {active=false;}phase=true;}not seen}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting() if false=>false,})# {setting()=>true,}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>true,}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(setting()# and setting()#)# {setting()=>do {seen=not seen;true},};result and seen}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(false and setting()#)# {setting()=>do {seen=true;true},};not result and seen}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting()=>not setting()#,})# {setting()=>false,}}"),
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;(setting()# {setting()=>do {return true;seen=true;false},});false}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var flag=true;do {flag=false;setting()#}# {setting()=>flag,}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {do {let first=setting()#;let second=setting()# {setting()=>false,};let third=setting()#;first and not second and third}# {setting()=>true,}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;var active=true;var phase=false;while active {setting()# {setting()=>do {seen=not seen;true},};if phase {active=false;}phase=true;}not seen}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting() if false=>false,})# {setting()=>true,}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>true,}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(setting()# and setting()#)# {setting()=>do {seen=not seen;true},};result and seen}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(false and setting()#)# {setting()=>do {seen=true;true},};not result and seen}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting()=>not setting()#,})# {setting()=>false,}}"
+        ),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;(setting()# {setting()=>do {return true;seen=true;false},});false}"
+        ),
     ] {
         let w = Work::new(source);
         let reference = w.command().args(["--interpret", "run"]).output().unwrap();
@@ -6882,9 +7005,9 @@ fn native_direct_passing_installs_once_before_computation() {
 
 #[test]
 fn native_direct_passing_rejects_unimplemented_slot_layouts() {
-    let w = Work::new(
-        effect_fixture!("^attrs.effects.direct_passing effect callback()->fn()->bool;fn run()->bool {(callback()# {callback()=>||true,})()}"),
-    );
+    let w = Work::new(effect_fixture!(
+        "^attrs.effects.direct_passing effect callback()->fn()->bool;fn run()->bool {(callback()# {callback()=>||true,})()}"
+    ));
     fs::write(w.0.join("native program"), b"previous").unwrap();
     let out = w.build();
     assert!(!out.status.success());
@@ -10591,7 +10714,8 @@ fn native_direct_passing_cross_function_calls_preserve_caller_arguments() {
 
 #[test]
 fn native_direct_passing_routes_branches_and_overrides() {
-    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+    let source = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect enabled()->bool;
         ^attrs.effects.direct_passing effect ready()->bool;
         fn read(value:bool)->#ready bool {value and ready()#}
@@ -10615,7 +10739,8 @@ fn native_direct_passing_routes_branches_and_overrides() {
             let f = matched(false);
             not c and d and not e and f and reversed() and overridden()
         }
-        fn run()->bool {subject()# {enabled()=>true,ready()=>false,}}");
+        fn run()->bool {subject()# {enabled()=>true,ready()=>false,}}"
+    );
     let w = Work::new(source);
     let reference = w
         .command()
@@ -10657,7 +10782,8 @@ fn native_direct_passing_routes_branches_and_overrides() {
 
 #[test]
 fn native_direct_passing_indirect_abi_with_resource_admission() {
-    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+    let source = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect enabled()->bool;
         ^attrs.effects.direct_passing effect ready()->bool;
         fn read(value:bool)->#ready bool {value and ready()#}
@@ -10669,7 +10795,8 @@ fn native_direct_passing_indirect_abi_with_resource_admission() {
             let a = indirect(true)# {enabled()=>true,ready()=>false,};
             let b = indirect(false)# {enabled()=>true,ready()=>false,};
             not a and b
-        }");
+        }"
+    );
     let w = Work::new(source);
     let reference = w.command().args(["--interpret", "run"]).output().unwrap();
     success(&reference);
@@ -10732,8 +10859,8 @@ fn native_direct_passing_indirect_abi_with_resource_admission() {
 
 #[test]
 fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
-    let w = Work::new(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let w = Work::new(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for *T where T {}
         struct Watch {target:*bool}
         impl Retire for Watch {fn drop(*self) {self.target.*.* = not self.target.*.*;}}
@@ -10743,8 +10870,8 @@ fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
             let seen = false; let target = seen.ref;
             let result = release(Watch {target:target})# {ready()=>true,};
             result and seen
-        }"),
-    );
+        }"
+    ));
     let reference = w
         .command()
         .args([
@@ -10785,8 +10912,8 @@ fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
 
 #[test]
 fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
-    let w = Work::new(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let w = Work::new(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         typealias U=.u128'builtin; typealias F=.f64'builtin;
         impl Duplicate for bool {} impl Duplicate for U {} impl Duplicate for F {}
         ^attrs.effects.direct_passing effect signal();
@@ -10804,8 +10931,8 @@ fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
                 real()=>3.5,
             };
             result and installed
-        }"),
-    );
+        }"
+    ));
     let reference = w
         .command()
         .args([
@@ -10864,8 +10991,8 @@ fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
 
 #[test]
 fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
-    let w = Work::new(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+    let w = Work::new(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect ready()->bool;
         typealias Action=%{flag:bool} fn(bool)->#ready bool;
         fn make(flag:bool)->Action {|value| flag and value and ready()#}
@@ -10878,8 +11005,8 @@ fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
             let other = make(false);
             let d = apply(other,true)# {ready()=>true,};
             a and not b and not c and not d
-        }"),
-    );
+        }"
+    ));
     let reference = w
         .command()
         .args([
@@ -10920,8 +11047,8 @@ fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
 
 #[test]
 fn native_direct_passing_generic_operation_instances_keep_abi_identity() {
-    let w = Work::new(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let w = Work::new(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         typealias U=.u128'builtin;
         impl Duplicate for bool {} impl Duplicate for U {}
         ^attrs.effects.direct_passing effect setting()->T where T;
@@ -10934,8 +11061,8 @@ fn native_direct_passing_generic_operation_instances_keep_abi_identity() {
         fn run()->bool {combine()# {
             setting<bool>()=>true,
             setting<U>()=>170141183460469231731687303715884105729,
-        }}"),
-    );
+        }}"
+    ));
     let reference = w
         .command()
         .args([
@@ -11104,16 +11231,19 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
 #[test]
 fn native_unused_direct_passing_row_retains_declared_operation_abi() {
     native(
-        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect setting()->bool;
         fn advertised()->#setting bool {true}
-        fn run()->bool {let action=advertised; true}"),
+        fn run()->bool {let action=advertised; true}"
+        ),
         "(bool true)\n",
     );
 }
 
 #[test]
 fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
-    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         struct Config {enabled:bool, mask:.u128'builtin}
         impl Duplicate for Config {}
@@ -11133,7 +11263,8 @@ fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
             let answer=nested()# {config()=>{assumes not installed;installed=true;
                 Config {enabled:true,mask:340282366920938463463374607431768211455}},};
             answer and installed
-        }");
+        }"
+    );
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11384,7 +11515,8 @@ fn native_direct_passing_generic_aggregates_keep_identity_through_higher_order_c
 
 #[test]
 fn native_direct_passing_error_results_preserve_success_and_error_payloads() {
-    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         enum Failure {bad(.u128'builtin),}
         impl Duplicate for Failure {}
@@ -11404,7 +11536,8 @@ fn native_direct_passing_error_results_preserve_success_and_error_payloads() {
             let success=forward()# {answer()=>true,};
             let no=forward()# {answer()=>false,};
             failed and success and not no and installed
-        }");
+        }"
+    );
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11481,8 +11614,8 @@ fn native_cross_function_direct_handlers_outline_scalar_captures() {
 
 #[test]
 fn native_cross_function_direct_handlers_preserve_outer_entries_and_fallback() {
-    let w = Work::new(
-        effect_fixture!("trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}
+    let w = Work::new(effect_fixture!(
+        "trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}
         effect read()->bool;
         ^attrs.effects.direct_passing effect bias()->bool;
         fn subject()->#read bool {read()#}
@@ -11492,8 +11625,8 @@ fn native_cross_function_direct_handlers_preserve_outer_entries_and_fallback() {
             let a=inner()# {read()=>true,bias()=>true,};
             let b=via_outer()# {read()=>true,bias()=>true,};
             a and b
-        }"),
-    );
+        }"
+    ));
     let reference = w
         .command()
         .args([
@@ -20593,11 +20726,11 @@ fn generic_integer_arithmetic_rejects_unproved_bounds_domains_and_rounding() {
         ),
         (
             "fn bad(a:T,b:T)->T where T, requires T == .i8'builtin or T == .i16'builtin {a / b}",
-            "rounding protocol",
+            "divisor is not proven nonzero",
         ),
         (
             "fn bad(a:T,b:T)->T where T, requires T == .i8'builtin or T == .i16'builtin {a % b}",
-            "remainder rounding",
+            "divisor is not proven nonzero",
         ),
         ("fn bad(a:T,b:T)->T where T {a + b}", "type mismatch"),
         (
@@ -20908,7 +21041,7 @@ fn generic_float_operators_reject_unproved_and_mixed_domains() {
         "fn bad(a:T,b:T)->T where T, requires T == .f32'builtin or T == .i32'builtin {a + b}",
         "fn bad(a:T)->T where T, requires T == .f64'builtin or T == bool { -a }",
         "fn bad(a:T,b:T)->bool where T, requires T == .f64'builtin or T == bool {a < b}",
-        "fn bad(a:T,b:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {a % b}",
+        "comptime fn bad(a:.Float'builtin,b:.Float'builtin)->.Float'builtin {a % b}",
         "pure comptime fn Identity<T> -> .Type'builtin {T} fn bad(a:T,b:T)->T where T, requires T == .f32'builtin or T == Identity<.f32'builtin> {a + b}",
     ] {
         let work = Work::new(&format!("{body} fn run()->bool {{true}}"));

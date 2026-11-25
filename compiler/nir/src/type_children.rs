@@ -11,6 +11,10 @@ macro_rules! visit_children {
                     $visit(error)?;
                 }
             }
+            Self::DeferredErrorResult { errors, result } => {
+                $visit(errors)?;
+                $visit(result)?;
+            }
             Self::Computation { effects, result } => {
                 $visit(result)?;
                 for operation in effects {
@@ -35,6 +39,15 @@ macro_rules! visit_children {
                 for argument in & $($borrow)? call.call_arguments {
                     $visit(argument)?;
                 }
+            }
+            Self::ComptimeCall(call) => {
+                for argument in & $($borrow)? call.type_arguments {
+                    $visit(argument)?;
+                }
+                for argument in & $($borrow)? call.arguments {
+                    $visit(argument)?;
+                }
+                $visit(& $($borrow)? call.ty)?;
             }
             Self::MethodValue(method) => {
                 for argument in method.$method_terms() {

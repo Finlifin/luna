@@ -192,6 +192,15 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             terms(errors, fuel, depth - 1)?;
             charge(result, fuel, depth - 1)
         }
+        Term::DeferredErrorResult { errors, result } => {
+            charge(errors, fuel, depth - 1)?;
+            charge(result, fuel, depth - 1)
+        }
+        Term::ComptimeCall(call) => {
+            terms(&call.type_arguments, fuel, depth - 1)?;
+            terms(&call.arguments, fuel, depth - 1)?;
+            charge(&call.ty, fuel, depth - 1)
+        }
         Term::TraitObject { arguments, .. } => terms(arguments, fuel, depth - 1),
         Term::Computation { effects, result } => {
             if effects.len() > *fuel {

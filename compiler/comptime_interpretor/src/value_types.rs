@@ -231,7 +231,10 @@ impl Interpreter<'_> {
             && self.graph.is_none()
             && matches!(
                 ty,
-                Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+                Term::AssociatedType { .. }
+                    | Term::AssociatedTypeCall(_)
+                    | Term::ComptimeCall(_)
+                    | Term::DeferredErrorResult { .. }
             )
             && !matches!(value, Value::AbstractValue { .. })
         {
@@ -391,7 +394,11 @@ impl Interpreter<'_> {
         } = value
         {
             return self.comptime_only
-                && domain == ty
+                && (domain == ty
+                    || matches!(
+                        (domain, ty),
+                        (Term::Lift(_), Term::Lift(inner)) if inner.as_ref() == &Term::AnyType
+                    ))
                 && self.abstract_value_parameters.get(declaration) == Some(domain);
         }
 
@@ -474,7 +481,10 @@ impl Interpreter<'_> {
 
         if matches!(
             ty,
-            Term::AssociatedType { .. } | Term::AssociatedTypeCall(_)
+            Term::AssociatedType { .. }
+                | Term::AssociatedTypeCall(_)
+                | Term::ComptimeCall(_)
+                | Term::DeferredErrorResult { .. }
         ) {
             return checks
                 .observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
@@ -816,7 +826,10 @@ impl Interpreter<'_> {
             }
             (Value::NormalForm { term, ty: actual }, expected) => {
                 self.comptime_only
-                    && checks.same(actual, expected, &self.associated_values)
+                    && (matches!(
+                        (actual, expected),
+                        (Term::Lift(_), Term::Lift(inner)) if inner.as_ref() == &Term::AnyType
+                    ) || checks.same(actual, expected, &self.associated_values))
                     && checks
                         .observe(|fuel| self.inspect_term_description(term, fuel))
                         .is_some()

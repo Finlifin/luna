@@ -346,6 +346,15 @@ fn separation_goal(
                     terms.extend(&call.call_arguments);
                     terms.push(&call.subject);
                 }
+                Term::ComptimeCall(call) => {
+                    terms.extend(&call.type_arguments);
+                    terms.extend(&call.arguments);
+                    terms.push(&call.ty);
+                }
+                Term::DeferredErrorResult { errors, result } => {
+                    terms.push(errors);
+                    terms.push(result);
+                }
                 Term::Rigid { declaration, .. } => {
                     used.insert(*declaration);
                 }

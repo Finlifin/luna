@@ -301,6 +301,8 @@ impl Checker<'_, '_> {
             let value = if let Some(value) = prepared {
                 self.require_expression(&value.ty, &expected, call.span)?;
                 value
+            } else if let Term::Lift(inner) = &expected {
+                self.runtime_lift_input_expr(input, &expected, inner)?.0
             } else {
                 self.with_staged_input(true, |this| this.expr(input, Some(&expected)))?
             };

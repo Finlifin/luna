@@ -28,6 +28,8 @@ pub(crate) fn evaluate_term(ty: &Term, head: DeclarationId) -> Option<bool> {
         | Term::Hole { .. }
         | Term::AssociatedType { .. }
         | Term::AssociatedTypeCall(_)
+        | Term::ComptimeCall(_)
+        | Term::DeferredErrorResult { .. }
         | Term::ClosureContextType
         | Term::ClosureContextValue(_)
         | Term::ContextualClosure { .. }

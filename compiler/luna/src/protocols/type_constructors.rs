@@ -27,9 +27,17 @@ pub struct Selectors<'a> {
     pub stable_list_pattern: Option<&'a str>,
     pub list_pattern_endless: Option<&'a str>,
     pub stable_list_pattern_endless: Option<&'a str>,
+    pub range_full: Option<&'a str>,
+    pub range_from: Option<&'a str>,
+    pub range_to: Option<&'a str>,
+    pub range_to_inclusive: Option<&'a str>,
+    pub range: Option<&'a str>,
+    pub range_inclusive: Option<&'a str>,
     pub range_end: Option<&'a str>,
     pub range_pattern: Option<&'a str>,
     pub stable_range_pattern: Option<&'a str>,
+    pub concat: Option<&'a str>,
+    pub comptime_concat: Option<&'a str>,
     pub concat_pattern: Option<&'a str>,
     pub stable_concat_pattern: Option<&'a str>,
     pub map_pattern: Option<&'a str>,
@@ -90,9 +98,17 @@ impl Selectors<'_> {
                 self.stable_list_pattern,
                 self.list_pattern_endless,
                 self.stable_list_pattern_endless,
+                self.range_full,
+                self.range_from,
+                self.range_to,
+                self.range_to_inclusive,
+                self.range,
+                self.range_inclusive,
                 self.range_end,
                 self.range_pattern,
                 self.stable_range_pattern,
+                self.concat,
+                self.comptime_concat,
                 self.concat_pattern,
                 self.stable_concat_pattern,
                 self.map_pattern,
@@ -405,6 +421,12 @@ pub(crate) fn resolve_source(
                 selectors.type_pattern,
                 &mut result.type_pattern,
             ),
+            ("Concat".into(), selectors.concat, &mut result.concat),
+            (
+                "ComptimeConcat".into(),
+                selectors.comptime_concat,
+                &mut result.comptime_concat,
+            ),
             (
                 "LiteralInto".into(),
                 selectors.literal_into,
@@ -628,6 +650,20 @@ pub(crate) fn resolve_source(
         return Err("IndexMut binding requires an Index binding".into());
     }
     for (label, selector, target) in [
+        ("RangeFull", selectors.range_full, &mut result.range_full),
+        ("RangeFrom", selectors.range_from, &mut result.range_from),
+        ("RangeTo", selectors.range_to, &mut result.range_to),
+        (
+            "RangeToInclusive",
+            selectors.range_to_inclusive,
+            &mut result.range_to_inclusive,
+        ),
+        ("Range", selectors.range, &mut result.range),
+        (
+            "RangeInclusive",
+            selectors.range_inclusive,
+            &mut result.range_inclusive,
+        ),
         ("Context", selectors.call_context, &mut result.call_context),
         (
             "CallDescription",
@@ -768,9 +804,17 @@ pub(crate) struct SysrootBindings {
     stable_list_pattern: Option<String>,
     list_pattern_endless: Option<String>,
     stable_list_pattern_endless: Option<String>,
+    range_full: Option<String>,
+    range_from: Option<String>,
+    range_to: Option<String>,
+    range_to_inclusive: Option<String>,
+    range: Option<String>,
+    range_inclusive: Option<String>,
     range_end: Option<String>,
     range_pattern: Option<String>,
     stable_range_pattern: Option<String>,
+    concat: Option<String>,
+    comptime_concat: Option<String>,
     concat_pattern: Option<String>,
     stable_concat_pattern: Option<String>,
     map_pattern: Option<String>,
@@ -888,9 +932,17 @@ impl SysrootBindings {
                 "stable-list-pattern-protocol" => &mut result.stable_list_pattern,
                 "list-pattern-endless-protocol" => &mut result.list_pattern_endless,
                 "stable-list-pattern-endless-protocol" => &mut result.stable_list_pattern_endless,
+                "range-full-type" => &mut result.range_full,
+                "range-from-type" => &mut result.range_from,
+                "range-to-type" => &mut result.range_to,
+                "range-to-inclusive-type" => &mut result.range_to_inclusive,
+                "range-type" => &mut result.range,
+                "range-inclusive-type" => &mut result.range_inclusive,
                 "range-end-type" => &mut result.range_end,
                 "range-pattern-protocol" => &mut result.range_pattern,
                 "stable-range-pattern-protocol" => &mut result.stable_range_pattern,
+                "concat-protocol" => &mut result.concat,
+                "comptime-concat-protocol" => &mut result.comptime_concat,
                 "concat-pattern-protocol" => &mut result.concat_pattern,
                 "stable-concat-pattern-protocol" => &mut result.stable_concat_pattern,
                 "map-pattern-protocol" => &mut result.map_pattern,
@@ -1121,6 +1173,48 @@ impl SysrootBindings {
                     .then_some(self.stable_list_pattern_endless.as_deref())
                     .flatten()
             }),
+            range_full: explicit.range_full.or_else(|| {
+                identities
+                    .range_full
+                    .is_none()
+                    .then_some(self.range_full.as_deref())
+                    .flatten()
+            }),
+            range_from: explicit.range_from.or_else(|| {
+                identities
+                    .range_from
+                    .is_none()
+                    .then_some(self.range_from.as_deref())
+                    .flatten()
+            }),
+            range_to: explicit.range_to.or_else(|| {
+                identities
+                    .range_to
+                    .is_none()
+                    .then_some(self.range_to.as_deref())
+                    .flatten()
+            }),
+            range_to_inclusive: explicit.range_to_inclusive.or_else(|| {
+                identities
+                    .range_to_inclusive
+                    .is_none()
+                    .then_some(self.range_to_inclusive.as_deref())
+                    .flatten()
+            }),
+            range: explicit.range.or_else(|| {
+                identities
+                    .range
+                    .is_none()
+                    .then_some(self.range.as_deref())
+                    .flatten()
+            }),
+            range_inclusive: explicit.range_inclusive.or_else(|| {
+                identities
+                    .range_inclusive
+                    .is_none()
+                    .then_some(self.range_inclusive.as_deref())
+                    .flatten()
+            }),
             range_end: explicit.range_end.or_else(|| {
                 identities
                     .range_end
@@ -1140,6 +1234,20 @@ impl SysrootBindings {
                     .stable_range_pattern
                     .is_none()
                     .then_some(self.stable_range_pattern.as_deref())
+                    .flatten()
+            }),
+            concat: explicit.concat.or_else(|| {
+                identities
+                    .concat
+                    .is_none()
+                    .then_some(self.concat.as_deref())
+                    .flatten()
+            }),
+            comptime_concat: explicit.comptime_concat.or_else(|| {
+                identities
+                    .comptime_concat
+                    .is_none()
+                    .then_some(self.comptime_concat.as_deref())
                     .flatten()
             }),
             concat_pattern: explicit.concat_pattern.or_else(|| {
@@ -1672,9 +1780,17 @@ mod stage_tests {
             stable_list_pattern_protocol: None,
             list_pattern_endless_protocol: None,
             stable_list_pattern_endless_protocol: None,
+            range_full_type: None,
+            range_from_type: None,
+            range_to_type: None,
+            range_to_inclusive_type: None,
+            range_type: None,
+            range_inclusive_type: None,
             range_end_type: None,
             range_pattern_protocol: None,
             stable_range_pattern_protocol: None,
+            concat_protocol: None,
+            comptime_concat_protocol: None,
             concat_pattern_protocol: None,
             stable_concat_pattern_protocol: None,
             map_pattern_protocol: None,

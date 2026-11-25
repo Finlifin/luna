@@ -561,15 +561,21 @@ impl Frame {
                     value
                 } else if let Some(input) = route {
                     input.require_collection_type(checker, &expected, source.span)?;
-                    self.phase = Phase::Child {
-                        slot,
-                        caller_staged: std::mem::replace(&mut checker.in_staged_input, true),
-                    };
-                    return Ok(Poll::Child(Request {
-                        slot,
-                        input: input.requested_source(source),
-                        expected,
-                    }));
+                    if let Term::Lift(inner) = &expected
+                        && let Some(expr) = input.single_source()
+                    {
+                        checker.runtime_lift_input_expr(expr, &expected, inner)?.0
+                    } else {
+                        self.phase = Phase::Child {
+                            slot,
+                            caller_staged: std::mem::replace(&mut checker.in_staged_input, true),
+                        };
+                        return Ok(Poll::Child(Request {
+                            slot,
+                            input: input.requested_source(source),
+                            expected,
+                        }));
+                    }
                 } else {
                     let owner = owner.ok_or_else(|| {
                         error(
@@ -1006,7 +1012,9 @@ impl Checker<'_, '_> {
             .filter_map(|(&id, capture)| capture.detached.then_some(id))
             .collect();
         let identity = match &value.kind {
-            K::TypeValue(ty) => Some(copy_evidence(ty, &mut self.required_steps, source.span)?),
+            K::TypeValue(ty) | K::ComptimeValue(ty) => {
+                Some(copy_evidence(ty, &mut self.required_steps, source.span)?)
+            }
             _ => self.preserved_input_with_snapshots(
                 &value,
                 |id, fuel| {

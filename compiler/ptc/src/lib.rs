@@ -1270,6 +1270,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .iter()
             .chain(std::iter::once(result.as_ref()))
             .collect(),
+        Term::DeferredErrorResult { errors, result } => {
+            vec![errors.as_ref(), result.as_ref()]
+        }
         Term::Computation { effects, result } => effects
             .iter()
             .flat_map(|operation| operation.arguments.iter())
@@ -1286,6 +1289,12 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .iter()
             .chain(call.call_arguments.iter())
             .chain(std::iter::once(&call.subject))
+            .collect(),
+        Term::ComptimeCall(call) => call
+            .type_arguments
+            .iter()
+            .chain(call.arguments.iter())
+            .chain(std::iter::once(&call.ty))
             .collect(),
         Term::OptionalValue { ty, value } => std::iter::once(ty.as_ref())
             .chain(value.as_deref())
@@ -1350,6 +1359,7 @@ fn has_bound(term: &Term) -> bool {
         }
         Term::ClosureValue { ty, captures, .. } => has_bound(ty) || captures.iter().any(has_bound),
         Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
+        Term::DeferredErrorResult { errors, result } => has_bound(errors) || has_bound(result),
         Term::Computation { effects, result } => {
             has_bound(result)
                 || effects
@@ -1363,6 +1373,11 @@ fn has_bound(term: &Term) -> bool {
             call.arguments.iter().any(has_bound)
                 || call.call_arguments.iter().any(has_bound)
                 || has_bound(&call.subject)
+        }
+        Term::ComptimeCall(call) => {
+            call.type_arguments.iter().any(has_bound)
+                || call.arguments.iter().any(has_bound)
+                || has_bound(&call.ty)
         }
         Term::OptionalValue { ty, value } => {
             has_bound(ty) || value.as_ref().is_some_and(|value| has_bound(value))
@@ -2031,6 +2046,14 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
         return a.origin == b.origin
             && a.arguments.len() == b.arguments.len()
             && a.call_arguments.len() == b.call_arguments.len();
+    }
+    if let (Term::ComptimeCall(a), Term::ComptimeCall(b)) = (a, b) {
+        return a.declaration == b.declaration
+            && a.type_arguments.len() == b.type_arguments.len()
+            && a.arguments.len() == b.arguments.len();
+    }
+    if let (Term::DeferredErrorResult { .. }, Term::DeferredErrorResult { .. }) = (a, b) {
+        return true;
     }
     // Type identity changes inside immutable tuple inputs lift forward through
     // the tuple. This does not admit a standalone value proposition, or make

@@ -239,9 +239,15 @@ impl Checker<'_, '_> {
                     self.local_type_views.insert(binding, views);
                 }
             }
-            self.input_facts
-                .parameters
-                .bind(binding, index, ty.sort, &ty.ty);
+            if sig.modifiers.is_comptime && ty.sort == Sort::Runtime && parameter.ty.is_quote() {
+                self.input_facts
+                    .parameters
+                    .bind_runtime(binding, index, &ty.ty);
+            } else {
+                self.input_facts
+                    .parameters
+                    .bind(binding, index, ty.sort, &ty.ty);
+            }
         }
         if let Some(parameters) = self.normal_parameters.get(&owner) {
             for (_, binding, ty) in parameters.iter().filter(|(_, _, ty)| *ty != p(P::Type)) {

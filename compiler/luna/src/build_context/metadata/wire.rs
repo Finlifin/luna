@@ -423,6 +423,18 @@ impl Writer {
                 self.term(&call.subject, d)?;
                 self.terms(&call.call_arguments, d)?;
             }
+            T::ComptimeCall(call) => {
+                self.byte(45)?;
+                self.id(call.declaration)?;
+                self.terms(&call.type_arguments, d)?;
+                self.terms(&call.arguments, d)?;
+                self.term(&call.ty, d)?;
+            }
+            T::DeferredErrorResult { errors, result } => {
+                self.byte(46)?;
+                self.term(errors, d)?;
+                self.term(result, d)?;
+            }
             T::TraitObject {
                 interface,
                 arguments,
@@ -745,6 +757,13 @@ impl<'a> Reader<'a> {
                 subject: self.term(d)?,
                 call_arguments: self.terms(d)?,
             })),
+            45 => T::ComptimeCall(Box::new(nir::ComptimeCall {
+                declaration: self.id()?,
+                type_arguments: self.terms(d)?,
+                arguments: self.terms(d)?,
+                ty: self.term(d)?,
+            })),
+            46 => T::deferred_error_result(self.term(d)?, self.term(d)?),
             _ => return Err(failure("unknown descriptor tag")),
         })
     }

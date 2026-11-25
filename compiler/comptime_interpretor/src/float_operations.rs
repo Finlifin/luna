@@ -21,7 +21,8 @@ impl Interpreter<'_> {
                         | Primitive::F64
                         | Primitive::Never
                 )
-            ) || (op != Some(FloatOp::Divide) && *ty == Term::Primitive(Primitive::Float))
+            ) || (!matches!(op, Some(FloatOp::Divide | FloatOp::Remainder))
+                && *ty == Term::Primitive(Primitive::Float))
         };
         let expected = if *scalar.left == never || scalar.right.is_some_and(|ty| *ty == never) {
             &never
@@ -60,7 +61,7 @@ impl Interpreter<'_> {
                         nir::program::FloatOp::Add => a.add(&b, budget),
                         nir::program::FloatOp::Subtract => a.subtract(&b, budget),
                         nir::program::FloatOp::Multiply => a.multiply(&b, budget),
-                        nir::program::FloatOp::Divide => {
+                        nir::program::FloatOp::Divide | nir::program::FloatOp::Remainder => {
                             unreachable!("unsupported exact division")
                         }
                     })?)
