@@ -245,6 +245,18 @@ impl Emitter<'_> {
                     format!("insertvalue {{ ptr, i64 }} {}, i64 {}, 1", s0.text, len64),
                 ))
             }
+            Operation::MemPtrAddr => {
+                let [ptr] = values else {
+                    return Err("host mem_ptr_addr requires 1 argument".into());
+                };
+                if ptr.ty != Ty::Pointer || !matches!(result_ty, Ty::Int(_, false)) {
+                    return Err("host mem_ptr_addr representation mismatch".into());
+                }
+                Ok(self.instruction(
+                    result_ty.clone(),
+                    format!("ptrtoint ptr {} to {}", ptr.text, result_ty.llvm()),
+                ))
+            }
             _ => Err(format!(
                 "operation `{}` is not a raw memory intrinsic",
                 operation.name()

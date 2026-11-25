@@ -1,7 +1,7 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
 use builtin.{Order, Type, bool, u64}
-use hashing.{ComptimeHash, mix_byte, mix_digest}
+use hashing.{ComptimeHash, ComptimeHasher}
 use numeric.equality.ComptimeEq;
 use numeric.ordering.ComptimeOrd;
 
@@ -137,17 +137,21 @@ where
     T :- ComptimeHash,
     E :- ComptimeHash,
 {
-    comptime fn hash(self) -> u64 =
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
         self match {
-            value! =>
-                mix_digest(
-                    mix_byte(14695981039346656037, 0),
-                    value.as(ComptimeHash).hash(),
-                ),
-            error failure =>
-                mix_digest(
-                    mix_byte(14695981039346656037, 1),
-                    failure.as(ComptimeHash).hash(),
-                ),
+            value! => {
+                acc.as(ComptimeHasher).write_u8(0);
+                value.as(ComptimeHash).hash(acc)
+            },
+            error failure => {
+                acc.as(ComptimeHasher).write_u8(1);
+                failure.as(ComptimeHash).hash(acc)
+            },
         }
+    }
 }

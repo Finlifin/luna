@@ -261,13 +261,71 @@ pub(super) fn type_may_hold_text_or_callable(
     Ok(walk(package, ty, fuel, 0, &mut visiting, &mut clean_false)?.0)
 }
 
+#[derive(Clone)]
+struct ReadonlyStorage {
+    message: &'static str,
+    frozen_locals: BTreeSet<LocalId>,
+    frozen_frames: BTreeSet<usize>,
+}
+
+impl ReadonlyStorage {
+    fn freeze_existing(message: &'static str, locals: &Locals, outer: Option<&Self>) -> Self {
+        Self {
+            message,
+            frozen_locals: locals.bindings.keys().copied().collect(),
+            frozen_frames: outer
+                .map(|existing| existing.frozen_frames.clone())
+                .unwrap_or_else(|| locals.frames.keys().copied().collect()),
+        }
+    }
+
+    fn check_pointer_write(&self, pointer: &Regions) -> Result<(), &'static str> {
+        let Some(targets) = pointer
+            .places
+            .get(&vec![])
+            .and_then(Option::as_ref)
+            .filter(|targets| !targets.is_empty())
+        else {
+            return Err(self.message);
+        };
+        for (root, _) in targets {
+            let frozen = match root {
+                DescriptorRoot::Local(id) => self.frozen_locals.contains(id),
+                DescriptorRoot::Frame(id) => self.frozen_frames.contains(id),
+            };
+            if frozen {
+                return Err(self.message);
+            }
+        }
+        Ok(())
+    }
+
+    fn callee_frames(
+        &self,
+        restore: &BTreeMap<DescriptorRoot, DescriptorRoot>,
+        count: usize,
+    ) -> BTreeSet<usize> {
+        (0..count)
+            .filter(|id| {
+                matches!(
+                    restore.get(&DescriptorRoot::Frame(*id)),
+                    Some(DescriptorRoot::Local(lid)) if self.frozen_locals.contains(lid)
+                ) || matches!(
+                    restore.get(&DescriptorRoot::Frame(*id)),
+                    Some(DescriptorRoot::Frame(fid)) if self.frozen_frames.contains(fid)
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct StorageKey {
     declaration: DeclarationId,
     arguments: Vec<Term>,
     actual: BTreeMap<usize, Regions>,
     storage: BTreeMap<usize, Regions>,
-    readonly: Option<&'static str>,
+    readonly: Option<(&'static str, BTreeSet<usize>)>,
 }
 
 impl Ord for StorageKey {
@@ -1177,7 +1235,7 @@ struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
     storage_current: Option<usize>,
     solving_storage: bool,
     next_storage_frame: usize,
-    readonly_storage: Option<&'static str>,
+    readonly_storage: Option<ReadonlyStorage>,
     parameter_ids: Vec<LocalId>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
@@ -1262,10 +1320,12 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         })?;
         let outer_loops = std::mem::take(&mut self.loops);
         let mut returned = None;
-        let previous_readonly = std::mem::replace(
-            &mut self.readonly_storage,
-            Some("text observation cannot write through pointers"),
+        let frozen = ReadonlyStorage::freeze_existing(
+            "text observation cannot write through pointers",
+            locals,
+            self.readonly_storage.as_ref(),
         );
+        let previous_readonly = std::mem::replace(&mut self.readonly_storage, Some(frozen));
         let result = self.expr(value, locals, &mut returned, depth);
         self.readonly_storage = previous_readonly;
         self.loops = outer_loops;
@@ -1757,10 +1817,12 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let caller_changed = std::mem::replace(&mut self.changed_callables, changed);
         let caller_loops = std::mem::take(&mut self.loops);
         self.exits.push(None);
-        let caller_readonly = std::mem::replace(
-            &mut self.readonly_storage,
-            Some("text default argument cannot write through pointers"),
+        let frozen = ReadonlyStorage::freeze_existing(
+            "text default argument cannot write through pointers",
+            &scope,
+            self.readonly_storage.as_ref(),
         );
+        let caller_readonly = std::mem::replace(&mut self.readonly_storage, Some(frozen));
         let mut returned = None;
         let result = (|| {
             let result = self.expr(value, &mut scope, &mut returned, depth)?;
@@ -2316,8 +2378,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             declaration,
             arguments: arguments.to_vec(),
             actual,
+            readonly: self
+                .readonly_storage
+                .as_ref()
+                .map(|ro| (ro.message, ro.callee_frames(&restore, storage.len()))),
             storage,
-            readonly: self.readonly_storage,
         };
         let cost = before.saturating_sub(*self.fuel).saturating_add(1);
         charge(self.fuel, cost)?;
@@ -2506,7 +2571,15 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let definitions = std::mem::take(&mut self.local_callables);
         let changed = std::mem::take(&mut self.changed_callables);
         let loops = std::mem::take(&mut self.loops);
-        let readonly = std::mem::replace(&mut self.readonly_storage, key.readonly);
+        let callee_ro = key
+            .readonly
+            .as_ref()
+            .map(|(message, frozen_frames)| ReadonlyStorage {
+                message,
+                frozen_locals: BTreeSet::new(),
+                frozen_frames: frozen_frames.clone(),
+            });
+        let readonly = std::mem::replace(&mut self.readonly_storage, callee_ro);
         let caller_parameters = std::mem::take(&mut self.parameter_ids);
         self.reads.push(BTreeSet::new());
         self.exits.push(Some(ExitRegions {
@@ -3183,12 +3256,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 pointer,
                 selections,
                 value,
-            } => {
-                if let Some(message) = self.readonly_storage {
-                    return Err(message.into());
-                }
-                self.transfer_bit_update(Some(pointer), selections, value, locals, returned, next)
-            }
+            } => self.transfer_bit_update(Some(pointer), selections, value, locals, returned, next),
             K::IntegerBinary { .. }
             | K::FloatBinary { .. }
             | K::BitEqual { .. }

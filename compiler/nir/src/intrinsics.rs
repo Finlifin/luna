@@ -117,6 +117,7 @@ pub enum Operation {
     MemSetBytes,
     MemCompareBytes,
     MemBorrowStr,
+    MemPtrAddr,
 }
 
 impl Operation {
@@ -185,6 +186,7 @@ impl Operation {
         Self::MemSetBytes,
         Self::MemCompareBytes,
         Self::MemBorrowStr,
+        Self::MemPtrAddr,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -252,6 +254,7 @@ impl Operation {
             Self::MemSetBytes => "mem_set_bytes",
             Self::MemCompareBytes => "mem_compare_bytes",
             Self::MemBorrowStr => "mem_borrow_str",
+            Self::MemPtrAddr => "mem_ptr_addr",
         }
     }
 
@@ -286,6 +289,7 @@ impl Operation {
                 | Self::MemSetBytes
                 | Self::MemCompareBytes
                 | Self::MemBorrowStr
+                | Self::MemPtrAddr
         )
     }
 
@@ -293,7 +297,11 @@ impl Operation {
     pub fn is_polymorphic_memory(self) -> bool {
         matches!(
             self,
-            Self::MemRawRead | Self::MemRawWrite | Self::MemRawPtr | Self::MemBorrowStr
+            Self::MemRawRead
+                | Self::MemRawWrite
+                | Self::MemRawPtr
+                | Self::MemBorrowStr
+                | Self::MemPtrAddr
         )
     }
 
@@ -333,7 +341,7 @@ impl Operation {
     pub fn payload_or_scalar<'a>(self, inputs: &'a [Term], output: &'a Term) -> &'a Term {
         if self.is_float_predicate() {
             inputs.first().unwrap_or(output)
-        } else if matches!(self, Self::MemBorrowStr) {
+        } else if matches!(self, Self::MemBorrowStr | Self::MemPtrAddr) {
             match inputs.first() {
                 Some(Term::Pointer(inner)) => inner.as_ref(),
                 _ => output,
@@ -382,7 +390,9 @@ impl Operation {
             use Primitive::*;
             match (self, index) {
                 (Self::MemRawWrite, 1) => scalar.clone(),
-                (Self::MemBorrowStr, 0) => Term::Pointer(Box::new(scalar.clone())),
+                (Self::MemBorrowStr | Self::MemPtrAddr, 0) => {
+                    Term::Pointer(Box::new(scalar.clone()))
+                }
                 (Self::MemRawRead, 0)
                 | (Self::MemRawWrite, 0)
                 | (Self::MemRawPtr, 0)
@@ -413,6 +423,7 @@ impl Operation {
             Self::MemRawPtr => Term::Pointer(Box::new(scalar.clone())),
             Self::MemCompareBytes => Term::Primitive(Primitive::I32),
             Self::MemBorrowStr => Term::Primitive(Primitive::Str),
+            Self::MemPtrAddr => Term::Primitive(Primitive::Usize),
             _ if self.is_platform() => Term::Primitive(Primitive::I64),
             _ if self.is_float_predicate() => Term::Primitive(Primitive::Bool),
             _ => scalar.clone(),
@@ -436,7 +447,7 @@ impl Operation {
             | Self::LinuxGetPid
             | Self::LinuxWriteRaw
             | Self::LinuxReadRaw => &[I64],
-            Self::LinuxAlloc | Self::MemRawRead | Self::MemRawPtr => &[Usize],
+            Self::LinuxAlloc | Self::MemRawRead | Self::MemRawPtr | Self::MemPtrAddr => &[Usize],
             Self::MemCompareBytes => &[I32],
             Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
@@ -510,7 +521,8 @@ impl Operation {
             | Self::LinuxClose
             | Self::LinuxUnlink
             | Self::MemRawRead
-            | Self::MemRawPtr => 1,
+            | Self::MemRawPtr
+            | Self::MemPtrAddr => 1,
             Self::LinuxGetPid => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot

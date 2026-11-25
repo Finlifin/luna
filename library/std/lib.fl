@@ -4,6 +4,7 @@ use collections_impl.{hash_map, hash_set, slice, vec, vec_deque}
 use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
+use hash_impl.sip;
 use io_impl.{buffered, errors, reader, writer}
 use mem_impl.{allocator, arena, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
@@ -55,6 +56,10 @@ pub mod collections {
     pub use slice.{Slice, SliceBounds};
     pub use vec.{Vec, VecIter}
     pub use vec_deque.{VecDeque, VecDequeIter, VecDequeSlice}
+}
+
+pub mod hash {
+    pub use sip.{DefaultHasher, RandomState}
 }
 
 pub mod string {

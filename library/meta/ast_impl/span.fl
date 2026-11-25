@@ -17,9 +17,9 @@ impl SourceSpan {
     pub pure comptime fn synthetic() -> SourceSpan {
         SourceSpan {
             file: "<synthetic>",
-            start: 0,
-            end: 0,
-            expansion_id: 0,
+            start: to_usize(0),
+            end: to_usize(0),
+            expansion_id: to_isize(0),
         }
     }
 
@@ -38,7 +38,7 @@ impl SourceSpan {
     }
 
     pub pure comptime fn is_synthetic(self) -> bool {
-        self.file == "<synthetic>" and self.start == 0 and self.end == 0
+        self.file == "<synthetic>" and self.start == to_usize(0) and self.end == to_usize(0)
     }
 
     pub pure comptime fn merge(self, other: SourceSpan) -> SourceSpan {

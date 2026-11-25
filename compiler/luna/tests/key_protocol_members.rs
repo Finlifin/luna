@@ -26,7 +26,10 @@ fn prepare(package: &Package, equality: &str, hashing: &str) -> Result<Protocol,
         package,
         &items,
         &Term::Primitive(Primitive::Bool),
-        Default::default(),
+        elaboration::ptc::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
     )
 }
 

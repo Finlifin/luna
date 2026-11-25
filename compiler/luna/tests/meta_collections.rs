@@ -23,8 +23,12 @@ fn meta_map_supports_crud_order_snapshots_types_equality_and_hashing() {
         }
 
         comptime impl meta.ComptimeHash for CustomKey {
-            comptime fn hash(self) -> u64 {
-                self.bucket.as(meta.ComptimeHash).hash()
+            comptime fn hash(self, state: H) -> H
+            where
+                H: Type,
+                requires H :- meta.ComptimeHasher,
+            {
+                self.bucket.as(meta.ComptimeHash).hash(state)
             }
         }
 
@@ -121,7 +125,7 @@ fn meta_map_supports_crud_order_snapshots_types_equality_and_hashing() {
             if not m1.as(ComptimeEq).eq(m2) {
                 return false;
             }
-            if m1.as(ComptimeHash).hash() != m2.as(ComptimeHash).hash() {
+            if DefaultComptimeHasher.new().hash_one(m1) != DefaultComptimeHasher.new().hash_one(m2) {
                 return false;
             }
             m2.insert("one", [1, 9]);
@@ -174,7 +178,8 @@ fn meta_map_supports_crud_order_snapshots_types_equality_and_hashing() {
             custom_rev.insert(CustomKey { bucket: 7, label: .y }, 200);
             custom_rev.insert(CustomKey { bucket: 7, label: .x }, 100);
             custom.as(ComptimeEq).eq(custom_rev)
-                and custom.as(ComptimeHash).hash() == custom_rev.as(ComptimeHash).hash()
+                and DefaultComptimeHasher.new().hash_one(custom)
+                    == DefaultComptimeHasher.new().hash_one(custom_rev)
         }
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
@@ -198,7 +203,8 @@ fn meta_set_and_nested_collections_work_in_comptime() {
                 return false;
             }
             if not left.as(ComptimeEq).eq(reordered)
-                or left.as(ComptimeHash).hash() != reordered.as(ComptimeHash).hash()
+                or DefaultComptimeHasher.new().hash_one(left)
+                    != DefaultComptimeHasher.new().hash_one(reordered)
             {
                 return false;
             }
@@ -263,7 +269,9 @@ fn meta_set_and_nested_collections_work_in_comptime() {
             g2.insert(.odd, Set<Integer>.from_list([3, 1]));
             g2.insert(.even, Set<Integer>.from_list([6, 4, 2]));
 
-            g1.as(ComptimeEq).eq(g2) and g1.as(ComptimeHash).hash() == g2.as(ComptimeHash).hash()
+            g1.as(ComptimeEq).eq(g2)
+                and DefaultComptimeHasher.new().hash_one(g1)
+                    == DefaultComptimeHasher.new().hash_one(g2)
         }
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));

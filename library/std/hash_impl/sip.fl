@@ -1,0 +1,273 @@
+{-
+    Runtime SipHash-1-3 streaming hasher (`DefaultHasher`) and hash builder
+    (`RandomState`) for `std.collections.HashMap` / `HashSet` and general hashing.
+-}
+
+pure fn wrapping_add_u64(a: u64, b: u64) -> u64 {
+    let sum = a'bitvec.as(u128) + b'bitvec.as(u128);
+    sum'bitvec[0..64].as(u64)
+}
+
+pure fn bit_xor64(a: u64, b: u64) -> u64 {
+    ((a'bitvec and not b'bitvec) or (not a'bitvec and b'bitvec)).as(u64)
+}
+
+pure fn bit_or64(a: u64, b: u64) -> u64 {
+    (a'bitvec or b'bitvec).as(u64)
+}
+
+pure fn rotl13(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 18446744073709551615 {
+        return 0;
+    }
+    let hi = (w * 8192)'bitvec[0..64].as(u64);
+    let lo = x'bitvec[51..64].as(u64);
+    bit_or64(hi, lo)
+}
+
+pure fn rotl16(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 18446744073709551615 {
+        return 0;
+    }
+    let hi = (w * 65536)'bitvec[0..64].as(u64);
+    let lo = x'bitvec[48..64].as(u64);
+    bit_or64(hi, lo)
+}
+
+pure fn rotl17(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 18446744073709551615 {
+        return 0;
+    }
+    let hi = (w * 131072)'bitvec[0..64].as(u64);
+    let lo = x'bitvec[47..64].as(u64);
+    bit_or64(hi, lo)
+}
+
+pure fn rotl21(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 18446744073709551615 {
+        return 0;
+    }
+    let hi = (w * 2097152)'bitvec[0..64].as(u64);
+    let lo = x'bitvec[43..64].as(u64);
+    bit_or64(hi, lo)
+}
+
+pure fn rotl32(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 18446744073709551615 {
+        return 0;
+    }
+    let hi = (w * 4294967296)'bitvec[0..64].as(u64);
+    let lo = x'bitvec[32..64].as(u64);
+    bit_or64(hi, lo)
+}
+
+pure fn shl56(x: u64) -> u64 {
+    let w = x'bitvec.as(u128);
+    if w > 255 {
+        return 0;
+    }
+    (w * 72057594037927936)'bitvec[0..64].as(u64)
+}
+
+pure fn lane_byte(value: u8, idx: u8) -> u64 {
+    let w = value'bitvec.as(u128);
+    if w > 255 {
+        return 0;
+    }
+    if idx == 0 {
+        value'bitvec.as(u64)
+    } else if idx == 1 {
+        (w * 256)'bitvec[0..64].as(u64)
+    } else if idx == 2 {
+        (w * 65536)'bitvec[0..64].as(u64)
+    } else if idx == 3 {
+        (w * 16777216)'bitvec[0..64].as(u64)
+    } else if idx == 4 {
+        (w * 4294967296)'bitvec[0..64].as(u64)
+    } else if idx == 5 {
+        (w * 1099511627776)'bitvec[0..64].as(u64)
+    } else if idx == 6 {
+        (w * 281474976710656)'bitvec[0..64].as(u64)
+    } else {
+        (w * 72057594037927936)'bitvec[0..64].as(u64)
+    }
+}
+
+pub struct DefaultHasher {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64,
+    length: u64,
+    tail: u64,
+    ntail: u8,
+}
+
+impl Clone for DefaultHasher {
+    fn clone(*self) -> Self {
+        DefaultHasher {
+            v0: self.v0.*,
+            v1: self.v1.*,
+            v2: self.v2.*,
+            v3: self.v3.*,
+            length: self.length.*,
+            tail: self.tail.*,
+            ntail: self.ntail.*,
+        }
+    }
+}
+
+impl Copy for DefaultHasher {}
+
+impl DefaultHasher {
+    pub pure fn new_with_keys(key0: u64, key1: u64) -> Self {
+        DefaultHasher {
+            v0: bit_xor64(key0, 8317987319222330741),
+            v1: bit_xor64(key1, 7237128888997146477),
+            v2: bit_xor64(key0, 7816392313619706465),
+            v3: bit_xor64(key1, 8387220255154660723),
+            length: 0,
+            tail: 0,
+            ntail: 0,
+        }
+    }
+
+    pub pure fn new() -> Self {
+        DefaultHasher.new_with_keys(0, 0)
+    }
+
+    fn sipround(*self) -> void {
+        self.v0.* = wrapping_add_u64(self.v0.*, self.v1.*);
+        self.v1.* = rotl13(self.v1.*);
+        self.v1.* = bit_xor64(self.v1.*, self.v0.*);
+        self.v0.* = rotl32(self.v0.*);
+        self.v2.* = wrapping_add_u64(self.v2.*, self.v3.*);
+        self.v3.* = rotl16(self.v3.*);
+        self.v3.* = bit_xor64(self.v3.*, self.v2.*);
+        self.v0.* = wrapping_add_u64(self.v0.*, self.v3.*);
+        self.v3.* = rotl21(self.v3.*);
+        self.v3.* = bit_xor64(self.v3.*, self.v0.*);
+        self.v2.* = wrapping_add_u64(self.v2.*, self.v1.*);
+        self.v1.* = rotl17(self.v1.*);
+        self.v1.* = bit_xor64(self.v1.*, self.v2.*);
+        self.v2.* = rotl32(self.v2.*);
+    }
+}
+
+impl Default for DefaultHasher {
+    fn default() -> Self {
+        DefaultHasher.new()
+    }
+}
+
+impl Hasher for DefaultHasher {
+    fn finish(*self) -> u64 {
+        var st = DefaultHasher {
+            v0: self.v0.*,
+            v1: self.v1.*,
+            v2: self.v2.*,
+            v3: self.v3.*,
+            length: self.length.*,
+            tail: self.tail.*,
+            ntail: self.ntail.*,
+        };
+        let len_byte = st.length'bitvec[0..8].as(u64);
+        let b = bit_or64(st.tail, shl56(len_byte));
+        st.v3 = bit_xor64(st.v3, b);
+        st.ref.sipround();
+        st.v0 = bit_xor64(st.v0, b);
+        st.v2 = bit_xor64(st.v2, 255);
+        st.ref.sipround();
+        st.ref.sipround();
+        st.ref.sipround();
+        bit_xor64(
+            bit_xor64(st.v0, st.v1),
+            bit_xor64(st.v2, st.v3),
+        )
+    }
+
+    fn write_u8(*self, value: u8) -> void {
+        let idx = self.ntail.*;
+        if idx > 7 {
+            return;
+        }
+        let lane = lane_byte(value, idx);
+        self.tail.* = bit_or64(self.tail.*, lane);
+        self.length.* = wrapping_add_u64(self.length.*, 1);
+        let next = idx + 1;
+        if next == 8 {
+            let m = self.tail.*;
+            self.v3.* = bit_xor64(self.v3.*, m);
+            self.sipround();
+            self.v0.* = bit_xor64(self.v0.*, m);
+            self.tail.* = 0;
+            self.ntail.* = 0;
+        } else {
+            self.ntail.* = next;
+        }
+    }
+
+    fn write(*self, bytes: Slice<u8>) -> void {
+        let len = bytes.len();
+        var i: usize = 0;
+        while i < len {
+            let byte = bytes.get(i) match {
+                v? => v,
+                null => break,
+            }
+            self.write_u8(byte);
+            i = i + 1;
+        }
+    }
+}
+
+pub struct RandomState {
+    key0: u64,
+    key1: u64,
+}
+
+impl Clone for RandomState {
+    fn clone(*self) -> Self {
+        RandomState {
+            key0: self.key0.*,
+            key1: self.key1.*,
+        }
+    }
+}
+
+impl Copy for RandomState {}
+
+impl RandomState {
+    pub pure fn from_keys(key0: u64, key1: u64) -> Self {
+        RandomState {
+            key0: key0,
+            key1: key1,
+        }
+    }
+
+    pub pure fn new() -> Self {
+        RandomState {
+            key0: 506097522914230528,
+            key1: 1084818905618843912,
+        }
+    }
+}
+
+impl Default for RandomState {
+    fn default() -> Self {
+        RandomState.new()
+    }
+}
+
+impl BuildHasher for RandomState {
+    assoc HasherTy: Type = DefaultHasher;
+
+    fn build_hasher(*self) -> DefaultHasher {
+        DefaultHasher.new_with_keys(self.key0.*, self.key1.*)
+    }
+}

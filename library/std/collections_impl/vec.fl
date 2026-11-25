@@ -785,6 +785,33 @@ where
     }
 }
 
+impl Hash for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Hash,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        let len = self.raw_len.*;
+        state.as(Hasher).write_length_prefix(len);
+        if len == 0 {
+            return;
+        }
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            let slot = slot_address<T>(base, i);
+            var item = unsafe { builtin.mem.raw_read<T>(slot) }
+            item.ref.as(Hash).hash(state);
+            unsafe {
+                builtin.mem.raw_write<T>(slot, item);
+            }
+            i = i + 1;
+        }
+    }
+}
+
 impl ByteWriter for Vec<u8, .A = A, .allocator = alloc>
 where
     A: Type,

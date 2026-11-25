@@ -72,7 +72,7 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
         comptime fn numbers() -> meta.List<Integer> {{ [17, 42] }}
         struct Row {{ flag: bool }}
         comptime fn rows() -> meta.List<Row> {{ [Row {{flag:true}}, Row {{flag:false}}] }}
-        comptime fn empty() -> meta.List<bool> {{ [] }}
+        comptime fn empty_list() -> meta.List<bool> {{ [] }}
         comptime fn early() -> bool {{ let xs: meta.List<bool> = [false, do {{return true;}}]; false }}
         comptime fn check() -> bool {{
             let xs = flags();
@@ -99,7 +99,7 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
         comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
     let result = vm.invoke(support::id(&package, "flags"), vec![]).unwrap();
     assert!(
-        matches!(vm.invoke(support::id(&package, "empty"), vec![]).unwrap(),
+        matches!(vm.invoke(support::id(&package, "empty_list"), vec![]).unwrap(),
         Value::List { values, .. } if values.is_empty())
     );
     let Value::List { ty, values } = &result else {
@@ -813,10 +813,15 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
 #[test]
 fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership() {
     let source = format!(
-        "mod builtin {{ {} }}\nmod conversion {{ {} }}\nmod resources {{ {} }}\n{}",
+        "mod primitives {{ {} }}\nmod builtin {{ pub use primitives.*; }}\nmod numeric {{ pub mod comparison {{ {} }} }}\npub mod resources {{ {} }}\nmod protocols {{\n    pub use resources;\n    pub mod formatting {{\n        pub mod writer {{\n            use primitives.{{Type, str, u8, void}};\n            pub trait ByteWriter {{ assoc Err: Type; fn write_byte(*self, byte: u8) -> !Err void; fn write_str(*self, text: str) -> !Err void; }}\n        }}\n        pub mod debug {{\n            use primitives.{{Type, void}};\n            use protocols.formatting.writer.ByteWriter;\n            pub trait Debug {{ fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter; }}\n        }}\n    }}\n}}\nmod conversion {{ {} }}\n{}",
         include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/protocols/conversion.fl"),
+        support::with_attrs(include_str!(
+            "../../../library/builtin/numeric/comparison.fl"
+        )),
         include!("support/resources_source.rs"),
+        support::with_attrs(include_str!(
+            "../../../library/builtin/protocols/conversion.fl"
+        )),
         include_str!("../../../development/examples/host-library-conversion.fl"),
     );
     let compile = |source: &str| {

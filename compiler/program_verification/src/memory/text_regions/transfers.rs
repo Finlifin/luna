@@ -225,12 +225,12 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             unreachable!("checked text transfer variant")
         };
         let empty = Some(Regions::new());
-        if let Some(message) = self.readonly_storage {
-            return Err(message.into());
-        }
         let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
             return Ok(None);
         };
+        if let Some(ro) = &self.readonly_storage {
+            ro.check_pointer_write(&pointer).map_err(str::to_owned)?;
+        }
         let Some(value_regions) = self.expr(value, locals, returned, next)? else {
             return Ok(None);
         };
@@ -1126,10 +1126,14 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         returned: &mut Option<Regions>,
         next: usize,
     ) -> Result<Option<Regions>, String> {
-        if let Some(pointer) = pointer
-            && self.expr(pointer, locals, returned, next)?.is_none()
-        {
-            return Ok(None);
+        if let Some(pointer) = pointer {
+            let Some(ptr_regions) = self.expr(pointer, locals, returned, next)? else {
+                return Ok(None);
+            };
+            if let Some(ro) = &self.readonly_storage {
+                ro.check_pointer_write(&ptr_regions)
+                    .map_err(str::to_owned)?;
+            }
         }
         for selection in selections {
             let normal = match selection {

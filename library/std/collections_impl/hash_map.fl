@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use hash_impl.sip.RandomState;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
 use string_impl.string.{String, raw_slot_equals_str}
@@ -372,6 +373,8 @@ pub struct HashMap
 where
     K,
     V,
+    .S: Type = RandomState,
+    requires S :- BuildHasher,
     .A: Type = DefaultAllocator,
     requires A :- Allocator,
     quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
@@ -380,12 +383,15 @@ where
     raw_len: usize,
     raw_tombstones: usize,
     raw_cap: usize,
+    raw_build_hasher: S,
 }
 
-impl Drop for HashMap<K, V, .A = A, .allocator = alloc>
+impl Drop for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K,
     V,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -419,50 +425,110 @@ where
     }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K,
     V,
+    S: Type,
+    requires S :- BuildHasher + Default,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    pub pure fn new() -> Self {
-        HashMap<K, V, .A = A, .allocator = alloc> {
+    pub fn new() -> Self {
+        HashMap<K, V, .S = S, .A = A, .allocator = alloc>.with_hasher(S.as(Default).default())
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
+        HashMap<K, V, .S = S, .A = A, .allocator = alloc>.with_capacity_and_hasher(
+            capacity,
+            S.as(Default).default(),
+        )
+    }
+}
+
+impl Default for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    S: Type,
+    requires S :- BuildHasher + Default,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn default() -> Self {
+        HashMap<K, V, .S = S, .A = A, .allocator = alloc>.new()
+    }
+}
+
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    S: Type,
+    requires S :- BuildHasher,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn with_hasher(hash_builder: S) -> Self {
+        HashMap<K, V, .S = S, .A = A, .allocator = alloc> {
             raw_addr: 0,
             raw_len: 0,
             raw_tombstones: 0,
             raw_cap: 0,
+            raw_build_hasher: hash_builder,
         }
     }
 
-    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
+    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> !AllocErr Self {
         if capacity == 0 {
-            return HashMap<K, V, .A = A, .allocator = alloc>.new();
+            return HashMap<K, V, .S = S, .A = A, .allocator = alloc>.with_hasher(hash_builder);
         }
         let target_cap = buckets_for_capacity(capacity) match {
             v? => v,
-            null => return error AllocErr.InvalidLayout,
+            null => {
+                retire_value<S>(hash_builder);
+                return error AllocErr.InvalidLayout;
+            },
         }
         let tl = table_layout<K, V>(target_cap) match {
             v? => v,
-            null => return error AllocErr.InvalidLayout,
+            null => {
+                retire_value<S>(hash_builder);
+                return error AllocErr.InvalidLayout;
+            },
         }
         let layout = layout_for_table(tl) match {
             v? => v,
-            null => return error AllocErr.InvalidLayout,
+            null => {
+                retire_value<S>(hash_builder);
+                return error AllocErr.InvalidLayout;
+            },
         }
-        let block = alloc.as(Allocator).allocate(layout)!;
+        let block = alloc.as(Allocator).allocate(layout) match {
+            b! => b,
+            error err => {
+                retire_value<S>(hash_builder);
+                return error err;
+            },
+        }
         let addr = block.address();
         unsafe {
             builtin.mem.set_bytes(addr, STATE_EMPTY, target_cap);
         }
-        HashMap<K, V, .A = A, .allocator = alloc> {
+        HashMap<K, V, .S = S, .A = A, .allocator = alloc> {
             raw_addr: addr,
             raw_len: 0,
             raw_tombstones: 0,
             raw_cap: target_cap,
+            raw_build_hasher: hash_builder,
         }
+    }
+
+    pub fn hasher(*self) -> *S {
+        self.raw_build_hasher
     }
 
     pub fn len(*self) -> usize {
@@ -612,14 +678,21 @@ where
     }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
+    fn hash_key(*self, key: *K) -> u64 {
+        mix_hash(self.raw_build_hasher.as(BuildHasher).hash_one(key))
+    }
+
     fn find_slot(*self, key: *K, target_hash: u64) -> ?usize {
         let addr = self.raw_addr.*;
         let cap = self.raw_cap.*;
@@ -750,7 +823,7 @@ where
             null => return error AllocErr.InvalidLayout,
         }
         var incoming = key;
-        let target_hash = mix_hash(incoming.as(Clone).clone().as(Hash).hash());
+        let target_hash = self.hash_key(incoming.ref);
         let probe = self.probe_for_insert(incoming.ref, target_hash) match {
             p? => p,
             null => {
@@ -795,7 +868,7 @@ where
 
     pub fn remove(*self, key: K) -> ?V {
         var needle = key;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let target_hash = self.hash_key(needle.ref);
         let slot = self.find_slot(needle.ref, target_hash) match {
             v? => v,
             null => {
@@ -828,61 +901,68 @@ where
         unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, slot)) }
     }
 
+    pub fn contains_key_ref(*self, key: *K) -> bool {
+        let target_hash = self.hash_key(key);
+        self.find_slot(key, target_hash).is_some()
+    }
+
     pub fn contains_key(*self, key: K) -> bool {
         var needle = key;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
-        let found = self.find_slot(needle.ref, target_hash).is_some();
+        let found = self.contains_key_ref(needle.ref);
         retire_value<K>(needle);
         found
     }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V :- Copy,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    pub fn get(*self, key: K) -> ?V {
-        var needle = key;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
-        let slot = self.find_slot(needle.ref, target_hash) match {
+    pub fn get_ref(*self, key: *K) -> ?V {
+        let target_hash = self.hash_key(key);
+        let slot = self.find_slot(key, target_hash) match {
             v? => v,
-            null => {
-                retire_value<K>(needle);
-                return null;
-            },
+            null => return null,
         }
-        retire_value<K>(needle);
         let tl = table_layout<K, V>(self.raw_cap.*) match {
             v? => v,
             null => return null,
         }
         unsafe { builtin.mem.raw_read<V>(val_addr<V>(self.raw_addr.*, tl, slot)) }
     }
+
+    pub fn get(*self, key: K) -> ?V {
+        var needle = key;
+        let out = self.get_ref(needle.ref);
+        retire_value<K>(needle);
+        out
+    }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V :- Clone,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    pub fn get_cloned(*self, key: K) -> ?V {
-        var needle = key;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
-        let slot = self.find_slot(needle.ref, target_hash) match {
+    pub fn get_cloned_ref(*self, key: *K) -> ?V {
+        let target_hash = self.hash_key(key);
+        let slot = self.find_slot(key, target_hash) match {
             v? => v,
-            null => {
-                retire_value<K>(needle);
-                return null;
-            },
+            null => return null,
         }
-        retire_value<K>(needle);
         let addr = self.raw_addr.*;
         let tl = table_layout<K, V>(self.raw_cap.*) match {
             v? => v,
@@ -896,12 +976,21 @@ where
         }
         cloned
     }
+
+    pub fn get_cloned(*self, key: K) -> ?V {
+        var needle = key;
+        let out = self.get_cloned_ref(needle.ref);
+        retire_value<K>(needle);
+        out
+    }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K :- Clone,
     V,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -930,10 +1019,12 @@ where
     }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K :- Clone,
     V :- Clone,
+    S: Type,
+    requires S :- BuildHasher + Clone,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -943,13 +1034,18 @@ where
         let src_cap = self.raw_cap.*;
         let src_len = self.raw_len.*;
         if src_addr == 0 or src_cap == 0 or src_len == 0 {
-            return HashMap<K, V, .A = A, .allocator = alloc>.new();
+            return HashMap<K, V, .S = S, .A = A, .allocator = alloc>.with_hasher(
+                S.as(Clone).clone(self.raw_build_hasher),
+            );
         }
         let src_tl = table_layout<K, V>(src_cap) match {
             v? => v,
             null => return error AllocErr.InvalidLayout,
         }
-        var out = HashMap<K, V, .A = A, .allocator = alloc>.with_capacity(src_len)!;
+        var out = HashMap<K, V, .S = S, .A = A, .allocator = alloc>.with_capacity_and_hasher(
+            src_len,
+            S.as(Clone).clone(self.raw_build_hasher),
+        )!;
         let dst_addr = out.raw_addr;
         let dst_cap = out.raw_cap;
         if dst_addr == 0 or dst_cap == 0 {
@@ -1105,10 +1201,12 @@ where
     }
 }
 
-impl IntoIterator for HashMap<K, V, .A = A, .allocator = alloc>
+impl IntoIterator for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K,
     V,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1131,10 +1229,12 @@ where
     }
 }
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K :- Debug,
     V,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1176,10 +1276,12 @@ where
     }
 }
 
-impl Debug for HashMap<K, V, .A = A, .allocator = alloc>
+impl Debug for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
     K :- Debug,
     V :- Debug,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1233,9 +1335,12 @@ where
     V
 }
 
-impl MapPatternView for HashMap<Symbol, V, .A = A, .allocator = alloc>
+impl MapPatternView for HashMap<Symbol, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1253,7 +1358,8 @@ where
             v? => v,
             null => return null,
         }
-        let target_hash = mix_hash(property.as(Hash).hash());
+        let key = property;
+        let target_hash = self.hash_key(key.ref);
         var idx = bucket_index(target_hash, cap);
         var steps: usize = 0;
         while steps < cap {
@@ -1289,17 +1395,23 @@ where
     }
 }
 
-impl StableMapPatternView for HashMap<Symbol, V, .A = A, .allocator = alloc>
+impl StableMapPatternView for HashMap<Symbol, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
 
-impl MapPatternView for HashMap<str, V, .A = A, .allocator = alloc>
+impl MapPatternView for HashMap<str, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1311,20 +1423,26 @@ where
     }
 }
 
-impl StableMapPatternView for HashMap<str, V, .A = A, .allocator = alloc>
+impl StableMapPatternView for HashMap<str, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
 
-impl MapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .A = A, .allocator = alloc>
+impl MapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
     SA: Type,
     requires SA :- Allocator,
     quote sa: lift *SA,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1343,7 +1461,7 @@ where
             v? => v,
             null => return null,
         }
-        let target_hash = mix_hash(name.as(Hash).hash());
+        let target_hash = mix_hash(self.raw_build_hasher.as(BuildHasher).hash_one(name.ref));
         var idx = bucket_index(target_hash, cap);
         var steps: usize = 0;
         while steps < cap {
@@ -1373,21 +1491,27 @@ where
     }
 }
 
-impl StableMapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .A = A, .allocator = alloc>
+impl StableMapPatternView for HashMap<String<.A = SA, .allocator = sa>, V, .S = S, .A = A, .allocator = alloc>
 where
     V :- Copy,
     SA: Type,
     requires SA :- Allocator,
     quote sa: lift *SA,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {}
 
-impl HashMap<K, V, .A = A, .allocator = alloc>
+impl HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1406,10 +1530,13 @@ where
     }
 }
 
-impl Index<K> for HashMap<K, V, .A = A, .allocator = alloc>
+impl Index<K> for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -1418,7 +1545,7 @@ where
 
     fn index(*self, idx: K) -> *V {
         var needle = idx;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let target_hash = self.hash_key(needle.ref);
         let found = self.value_address(needle.ref, target_hash);
         retire_value<K>(needle);
         let addr = found match {
@@ -1432,17 +1559,20 @@ where
     }
 }
 
-impl IndexMut<K> for HashMap<K, V, .A = A, .allocator = alloc>
+impl IndexMut<K> for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
 where
-    K :- Eq + Hash + Clone,
+    K :- Eq + Hash,
     V,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
     fn index_mut(*self, idx: K) -> *V {
         var needle = idx;
-        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let target_hash = self.hash_key(needle.ref);
         let found = self.value_address(needle.ref, target_hash);
         retire_value<K>(needle);
         let addr = found match {

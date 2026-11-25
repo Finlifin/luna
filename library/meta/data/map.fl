@@ -1,6 +1,6 @@
 use List;
-use builtin.{Integer, bool, u64}
-use hashing.{ComptimeHash, mix_byte, mix_digest}
+use builtin.{Integer, MapPatternView, StableMapPatternView, Symbol, Type, bool, u64}
+use hashing.{ComptimeHash, ComptimeHasher, DefaultComptimeHasher}
 use numeric.equality.ComptimeEq;
 
 {-
@@ -176,10 +176,15 @@ comptime impl ComptimeEq for MapEntry<K, V> where K :- ComptimeEq, V :- Comptime
 }
 
 comptime impl ComptimeHash for MapEntry<K, V> where K :- ComptimeHash, V :- ComptimeHash {
-    comptime fn hash(self) -> u64 {
-        let with_tag = mix_byte(14695981039346656037, 69);
-        let with_key = mix_digest(with_tag, self.key.as(ComptimeHash).hash());
-        mix_digest(with_key, self.value.as(ComptimeHash).hash())
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u8(69);
+        acc = self.key.as(ComptimeHash).hash(acc);
+        self.value.as(ComptimeHash).hash(acc)
     }
 }
 
@@ -211,26 +216,27 @@ comptime impl ComptimeEq for Map<K, V> where K :- ComptimeEq, V :- ComptimeEq {
 }
 
 comptime impl ComptimeHash for Map<K, V> where K :- ComptimeHash, V :- ComptimeHash {
-    comptime fn hash(self) -> u64 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
         let input = self;
         let count = input.raw_keys.length();
         var combined: u64 = 0;
         var index: Integer = 0;
         while index < count {
-            let key_seed = mix_digest(
-                14695981039346656037,
-                input.raw_keys[index].as(ComptimeHash).hash(),
-            );
-            let entry_digest = mix_digest(
-                key_seed,
-                input.raw_values[index].as(ComptimeHash).hash(),
-            );
-            combined = xor_u64(combined, entry_digest);
+            var entry_hasher = DefaultComptimeHasher.new();
+            entry_hasher = input.raw_keys[index].as(ComptimeHash).hash(entry_hasher);
+            entry_hasher = input.raw_values[index].as(ComptimeHash).hash(entry_hasher);
+            combined = xor_u64(combined, entry_hasher.finish());
             index = index + 1;
         }
-        let with_tag = mix_byte(14695981039346656037, 77);
-        let with_count = mix_digest(with_tag, count.as(ComptimeHash).hash());
-        mix_digest(with_count, combined)
+        var acc = state;
+        acc.as(ComptimeHasher).write_u8(77);
+        acc = count.as(ComptimeHash).hash(acc);
+        acc.as(ComptimeHasher).write_u64(combined);
+        acc
     }
 }
 

@@ -18,6 +18,7 @@ pub mod target {
         set_bytes,
         compare_bytes,
         borrow_str,
+        ptr_addr,
     }
 }
 
@@ -57,6 +58,10 @@ pub unsafe fn borrow_str(owner: *T, addr: usize, len: usize) -> str where T {
         .Memory
         .borrow_str'intrinsic(owner, addr, len)
         .as(str)
+}
+
+pub unsafe fn ptr_addr(ptr: *T) -> usize where T {
+    target.Memory.ptr_addr'intrinsic(ptr).as(usize)
 }
 
 pub pure fn usize_max() -> usize {

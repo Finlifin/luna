@@ -1,4 +1,69 @@
 -- Explicit conversion protocols, independent of formatting and allocation.
+use numeric.comparison.Eq;
+use primitives.{Symbol, Type, bool, void}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.resources.{Clone, Copy}
+
+pub enum InfallibleErr {}
+
+impl Clone for InfallibleErr {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for InfallibleErr {}
+
+impl Eq for InfallibleErr {
+    fn eq(*self, _other: *Self) -> bool {
+        true
+    }
+}
+
+impl Debug for InfallibleErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.as(ByteWriter).write_str("InfallibleErr")
+    }
+}
+
+pub enum ConversionErr {
+    Overflow,
+    Underflow,
+    OutOfRange,
+    InvalidFormat,
+}
+
+impl Clone for ConversionErr {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for ConversionErr {}
+
+impl Eq for ConversionErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .Overflow => other.* matches .Overflow,
+            .Underflow => other.* matches .Underflow,
+            .OutOfRange => other.* matches .OutOfRange,
+            .InvalidFormat => other.* matches .InvalidFormat,
+        }
+    }
+}
+
+impl Debug for ConversionErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Overflow => output.as(ByteWriter).write_str("ConversionErr.Overflow"),
+            .Underflow => output.as(ByteWriter).write_str("ConversionErr.Underflow"),
+            .OutOfRange => output.as(ByteWriter).write_str("ConversionErr.OutOfRange"),
+            .InvalidFormat => output.as(ByteWriter).write_str("ConversionErr.InvalidFormat"),
+        }
+    }
+}
+
 pub trait Into where Target {
     fn into(self) -> Target;
 }
@@ -8,11 +73,78 @@ pub trait From where Source {
 }
 
 pub trait TryInto where Target {
-    fn try_into(self) -> ?Target;
+    assoc Err: Type;
+
+    fn try_into(self) -> !Err Target;
 }
 
 pub trait TryFrom where Source {
-    fn try_from(source: Source) -> ?Self;
+    assoc Err: Type;
+
+    fn try_from(source: Source) -> !Err Self;
+}
+
+pub trait AsRef where Target: Type {
+    fn as_ref(*self) -> *Target;
+}
+
+pub trait AsMut where Target: Type {
+    fn as_mut(*self) -> *Target;
+}
+
+impl From<T> for T where T {
+    fn from(source: T) -> Self {
+        source
+    }
+}
+
+impl Into<Target> for Source
+where
+    Source,
+    Target,
+    requires Target :- From<Source>,
+{
+    fn into(self) -> Target {
+        Target.as(From<Source>).from(self)
+    }
+}
+
+impl TryFrom<Source> for Target
+where
+    Source,
+    Target,
+    requires Source :- Into<Target>,
+{
+    assoc Err: Type = InfallibleErr;
+
+    fn try_from(source: Source) -> !InfallibleErr Self {
+        source.as(Into<Target>).into()
+    }
+}
+
+impl TryInto<Target> for Source
+where
+    Source,
+    Target,
+    requires Target :- TryFrom<Source>,
+{
+    assoc Err: Type = Target.as(TryFrom<Source>).Err;
+
+    fn try_into(self) -> !Err Target {
+        Target.as(TryFrom<Source>).try_from(self)
+    }
+}
+
+impl AsRef<T> for T where T {
+    fn as_ref(*self) -> *T {
+        self
+    }
+}
+
+impl AsMut<T> for T where T {
+    fn as_mut(*self) -> *T {
+        self
+    }
 }
 
 pub trait LiteralInto where suffix: Symbol, R: Type {

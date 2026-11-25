@@ -292,8 +292,8 @@ pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> 
                     return null;
                 }
                 let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-                    c? => c,
-                    null => return null,
+                    c! => c,
+                    error _ => return null,
                 }
                 return ParsedEscape {
                     ch: scalar,
@@ -332,8 +332,8 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
     }
     if b0 <= 127 {
         let scalar = char.as(ComptimeTryFrom<u32>).try_from(b0'bitvec.as(u32)) match {
-            c? => c,
-            null => return null,
+            c! => c,
+            error _ => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -358,8 +358,8 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         }
         let code = hi * 64 + lo;
         let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c? => c,
-            null => return null,
+            c! => c,
+            error _ => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -392,8 +392,8 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
             return null;
         }
         let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c? => c,
-            null => return null,
+            c! => c,
+            error _ => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -431,8 +431,8 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
             return null;
         }
         let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c? => c,
-            null => return null,
+            c! => c,
+            error _ => return null,
         }
         return ParsedScalar {
             ch: scalar,

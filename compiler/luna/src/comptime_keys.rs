@@ -25,17 +25,21 @@ pub struct Snapshot {
     ty: Arc<Term>,
     owner: Arc<()>,
 }
+
 impl Snapshot {
     pub(crate) fn expanded_size(&self) -> usize {
         self.expanded_size
     }
+
     pub fn value(&self) -> &Value {
         &self.value
     }
+
     pub fn ty(&self) -> &Term {
         &self.ty
     }
 }
+
 impl std::fmt::Display for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -50,10 +54,12 @@ pub struct Protocol {
     binding: Binding,
     execution: Execution,
 }
+
 struct Execution {
     code: comptime_interpretor::CodeSession,
     stats: crate::invocation::InvocationStats,
 }
+
 struct Binding {
     owner: Arc<()>,
     subject: Arc<Term>,
@@ -62,6 +68,7 @@ struct Binding {
     hash: Selected,
     budget: ptc::Budget,
 }
+
 impl Protocol {
     /// Bind both operations and prove their declared type capabilities.
     /// Transitive method dependencies are selected at the actual invocation.
@@ -154,14 +161,16 @@ impl Protocol {
                                 format!("key capability copy budget exhausted: {error:?}")
                             })?;
                     }
-                    if !matches!(
-                        world.check_predicate_metered(
-                            &TypePredicate::Trait(capability.clone()),
-                            &mut work
-                        )?,
-                        ptc::Outcome::Entailed(_)
-                    ) {
-                        return Err("comptime key capability is not established".into());
+                    match world.check_predicate_metered(
+                        &TypePredicate::Trait(capability.clone()),
+                        &mut work,
+                    )? {
+                        ptc::Outcome::Entailed(_) => {}
+                        ptc::Outcome::Unknown {
+                            reason: ptc::UnknownReason::BudgetExhausted,
+                            ..
+                        } => return Err("comptime key capability budget exhausted".into()),
+                        _ => return Err("comptime key capability is not established".into()),
                     }
                 }
             }
@@ -185,10 +194,12 @@ impl Protocol {
         *remaining -= before - work.steps;
         prepared
     }
+
     /// Counters from the most recent VM admission or method execution.
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
         self.execution.stats
     }
+
     /// Snapshot a key while the source activation retains its original argument.
     pub(crate) fn admit_borrowed(
         &mut self,
@@ -199,6 +210,7 @@ impl Protocol {
         context.spend::<String>(size.owned)?;
         Ok(self.snapshot(value.clone(), size.expanded))
     }
+
     /// Validate fresh immutable data using this protocol's source session.
     /// Code reuse never supplies the current value's admission evidence.
     pub fn admit(
@@ -229,7 +241,28 @@ impl Protocol {
         }
     }
 }
+
 impl Binding {
+    fn invoke_streaming_hash(
+        &self,
+        execution: &mut Execution,
+        value: &Value,
+        streaming: &elaboration::key_protocols::StreamingHasher,
+        context: &mut Context,
+    ) -> Result<Value, Error<String>> {
+        self.run(execution, context, |interpreter| {
+            let size = interpreter.admitted_immutable_size(value, &self.subject)?;
+            interpreter.charge_preparation(size.owned)?;
+            let initial = interpreter.invoke_instantiated(streaming.init_body, vec![], vec![])?;
+            let updated = interpreter.invoke_instantiated(
+                self.hash.method.body,
+                self.hash.method.arguments.clone(),
+                vec![value.clone(), initial],
+            )?;
+            interpreter.invoke_instantiated(streaming.finish_body, vec![], vec![updated])
+        })
+    }
+
     fn invoke(
         &self,
         execution: &mut Execution,
@@ -249,6 +282,7 @@ impl Binding {
             )
         })
     }
+
     fn run<R>(
         &self,
         execution: &mut Execution,
@@ -301,12 +335,18 @@ impl Binding {
         })
     }
 }
+
 impl KeyProtocol<Value> for Protocol {
     type Error = String;
+
     fn hash(&mut self, value: &Value, context: &mut Context) -> Result<u64, Error<String>> {
-        let value =
+        let value = if let Some(streaming) = &self.binding.hash.streaming_hasher {
             self.binding
-                .invoke(&mut self.execution, &self.binding.hash, &[value], context)?;
+                .invoke_streaming_hash(&mut self.execution, value, streaming, context)?
+        } else {
+            self.binding
+                .invoke(&mut self.execution, &self.binding.hash, &[value], context)?
+        };
         let mut bucket = std::collections::hash_map::DefaultHasher::new();
         match value {
             Value::Integer(value) => {
@@ -320,6 +360,7 @@ impl KeyProtocol<Value> for Protocol {
         // This digest only chooses a bucket. Semantic Eq always decides a hit.
         Ok(bucket.finish())
     }
+
     fn equivalent(
         &mut self,
         a: &Value,
@@ -335,12 +376,15 @@ impl KeyProtocol<Value> for Protocol {
         }
     }
 }
+
 impl KeyProtocol<Snapshot> for Protocol {
     type Error = String;
+
     fn hash(&mut self, value: &Snapshot, context: &mut Context) -> Result<u64, Error<String>> {
         self.check_owner(value)?;
         <Self as KeyProtocol<Value>>::hash(self, value.value(), context)
     }
+
     fn equivalent(
         &mut self,
         a: &Snapshot,
@@ -352,10 +396,12 @@ impl KeyProtocol<Snapshot> for Protocol {
         <Self as KeyProtocol<Value>>::equivalent(self, a.value(), b.value(), context)
     }
 }
+
 impl Protocol {
     pub(crate) fn owns(&self, value: &Snapshot) -> bool {
         Arc::ptr_eq(&self.binding.owner, &value.owner)
     }
+
     fn check_owner(&self, value: &Snapshot) -> Result<(), Error<String>> {
         if self.owns(value) {
             Ok(())
@@ -366,6 +412,7 @@ impl Protocol {
         }
     }
 }
+
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -375,6 +422,7 @@ impl std::fmt::Display for Protocol {
         )
     }
 }
+
 fn protocol_error(error: comptime_interpretor::Error) -> Error<String> {
     match error.kind {
         comptime_interpretor::ErrorKind::StepsExhausted => Error::BudgetExhausted,

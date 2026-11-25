@@ -1,6 +1,8 @@
+use List;
 use builtin.{
     Integer,
     Symbol,
+    Type,
     bool,
     char,
     i128,
@@ -16,6 +18,7 @@ use builtin.{
     u64,
     u8,
     usize,
+    void,
 }
 use numeric.bindings.{
     integer_byte,
@@ -24,6 +27,8 @@ use numeric.bindings.{
     isize_representation as hash_isize_representation,
     usize_representation as hash_usize_representation,
 }
+use numeric.conversions.ComptimeDefault;
+use numeric.ordering.TotalFloat;
 use text_impl.bindings.{
     byte as hash_str_byte,
     byte_length as hash_str_byte_length,
@@ -32,152 +37,13 @@ use text_impl.bindings.{
 }
 
 {-
-    The same representation/content hashes as builtin.Hash, with independent
-    comptime implementations. Hash collisions require ComptimeEq comparison;
-    these hashes are not cryptographic and never establish logical type equality.
+    Comptime streaming hashing traits and FNV-1a default implementation.
+
+    Comptime has no pointers: `ComptimeHasher.write*` mutates `self` via
+    comptime value-reference semantics, and `ComptimeHash.hash(self, state: H)`
+    threads `H` explicitly without `.ref` or `*H`.
 -}
-pub pure comptime trait ComptimeHash {
-    comptime fn hash(self) -> u64;
-}
 
-comptime impl ComptimeHash for bool {
-    comptime fn hash(self) -> u64 {
-        if self { 1 } else { 0 }
-    }
-}
-
-comptime impl ComptimeHash for u8 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for u16 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for u32 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for u64 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for i8 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for i16 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for i32 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for i64 {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for u128 {
-    comptime fn hash(self) -> u64 {
-        let bits = self'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
-comptime impl ComptimeHash for i128 {
-    comptime fn hash(self) -> u64 {
-        let bits = self'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
-comptime impl ComptimeHash for char {
-    comptime fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl ComptimeHash for str {
-    comptime fn hash(self) -> u64 {
-        let name = self;
-        let length = hash_str_byte_length(name);
-        var index: u64 = 0;
-        var state: u64 = 14695981039346656037;
-        while index < length {
-            let byte = hash_str_byte(name, index) match {
-                value? => value,
-                null => return state,
-            }
-            state = mix_byte(state, byte);
-            index = index + 1;
-        }
-        state
-    }
-}
-
-comptime impl ComptimeHash for Symbol {
-    comptime fn hash(self) -> u64 {
-        let name = self;
-        let length = hash_symbol_byte_length(name);
-        var index: u64 = 0;
-        var state: u64 = 14695981039346656037;
-        while index < length {
-            let byte = hash_symbol_byte(name, index) match {
-                value? => value,
-                null => return state,
-            }
-            state = mix_byte(state, byte);
-            index = index + 1;
-        }
-        state
-    }
-}
-
-comptime impl ComptimeHash for usize {
-    comptime fn hash(self) -> u64 {
-        let widened = hash_usize_representation(self);
-        let bits = widened'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
-comptime impl ComptimeHash for isize {
-    comptime fn hash(self) -> u64 {
-        let widened = hash_isize_representation(self);
-        let bits = widened'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
-{-
-    FNV-1a byte mixing with explicit modulo-2^64 reduction. Shared by text,
-    Symbol and Integer encodings; collisions still require equality checking.
--}
 pub pure comptime fn mix_byte(state: u64, byte: u8) -> u64 {
     let bits = state'bitvec;
     let widened = byte'bitvec.as(u64);
@@ -188,25 +54,6 @@ pub pure comptime fn mix_byte(state: u64, byte: u8) -> u64 {
     product'bitvec[0..64].as(u64)
 }
 
-comptime impl ComptimeHash for Integer {
-    {-
-        Canonical sign byte (zero or one), then unsigned magnitude bytes in
-        little-endian order. Zero has one zero magnitude byte; no high zero
-        bytes or target-width conversions participate in the encoding.
-    -}
-    comptime fn hash(self) -> u64 {
-        let negative = self < 0;
-        var magnitude = if negative { -self } else { self }
-        var state = mix_byte(14695981039346656037, if negative { 1 } else { 0 });
-        while magnitude >= 256 {
-            state = mix_byte(state, integer_byte(integer_rem_trunc(magnitude, 256)));
-            magnitude = integer_div_trunc(magnitude, 256);
-        }
-        mix_byte(state, integer_byte(magnitude))
-    }
-}
-
-{- Mix a complete protocol digest in target-independent little-endian order. -}
 pub pure comptime fn mix_digest(state: u64, digest: u64) -> u64 {
     var mixed = state;
     mixed = mix_byte(mixed, digest'bitvec[0..8].as(u8));
@@ -218,4 +65,453 @@ pub pure comptime fn mix_digest(state: u64, digest: u64) -> u64 {
     mixed = mix_byte(mixed, digest'bitvec[48..56].as(u8));
     mixed = mix_byte(mixed, digest'bitvec[56..64].as(u8));
     mixed
+}
+
+pub pure comptime trait ComptimeHasher {
+    pure comptime fn finish(self) -> u64;
+
+    comptime fn write(self, bytes: List<u8>) -> void;
+
+    comptime fn write_u8(self, value: u8) -> void {
+        self.write([value]);
+    }
+
+    comptime fn write_u16(self, value: u16) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+    }
+
+    comptime fn write_u32(self, value: u32) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+        self.write_u8(bits[16..24].as(u8));
+        self.write_u8(bits[24..32].as(u8));
+    }
+
+    comptime fn write_u64(self, value: u64) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+        self.write_u8(bits[16..24].as(u8));
+        self.write_u8(bits[24..32].as(u8));
+        self.write_u8(bits[32..40].as(u8));
+        self.write_u8(bits[40..48].as(u8));
+        self.write_u8(bits[48..56].as(u8));
+        self.write_u8(bits[56..64].as(u8));
+    }
+
+    comptime fn write_u128(self, value: u128) -> void {
+        let bits = value'bitvec;
+        self.write_u64(bits[0..64].as(u64));
+        self.write_u64(bits[64..128].as(u64));
+    }
+
+    comptime fn write_usize(self, value: usize) -> void {
+        self.write_u128(hash_usize_representation(value));
+    }
+
+    comptime fn write_i8(self, value: i8) -> void {
+        self.write_u8(value'bitvec.as(u8));
+    }
+
+    comptime fn write_i16(self, value: i16) -> void {
+        self.write_u16(value'bitvec.as(u16));
+    }
+
+    comptime fn write_i32(self, value: i32) -> void {
+        self.write_u32(value'bitvec.as(u32));
+    }
+
+    comptime fn write_i64(self, value: i64) -> void {
+        self.write_u64(value'bitvec.as(u64));
+    }
+
+    comptime fn write_i128(self, value: i128) -> void {
+        self.write_u128(value'bitvec.as(u128));
+    }
+
+    comptime fn write_isize(self, value: isize) -> void {
+        self.write_u128(hash_isize_representation(value));
+    }
+
+    comptime fn write_length_prefix(self, len: usize) -> void {
+        self.write_usize(len);
+    }
+
+    comptime fn write_str(self, value: str) -> void {
+        let length = hash_str_byte_length(value);
+        var index: u64 = 0;
+        while index < length {
+            let byte = hash_str_byte(value, index) match {
+                v? => v,
+                null => break,
+            }
+            self.write_u8(byte);
+            index = index + 1;
+        }
+        self.write_u8(255);
+    }
+}
+
+pub pure comptime trait ComptimeHash {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher;
+
+    comptime fn hash_slice(data: List<Self>, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        let count = data.length();
+        var index: Integer = 0;
+        while index < count {
+            acc = data[index].as(ComptimeHash).hash(acc);
+            index = index + 1;
+        }
+        acc
+    }
+}
+
+pub pure comptime trait ComptimeBuildHasher {
+    assoc HasherTy: Type;
+
+    pure comptime fn build_hasher(self) -> HasherTy
+    where
+        requires HasherTy :- ComptimeHasher;
+
+    comptime fn hash_one(self, value: T) -> u64
+    where
+        T: Type,
+        requires T :- ComptimeHash,
+        requires HasherTy :- ComptimeHasher,
+    {
+        let h0 = self.build_hasher();
+        let h1 = value.as(ComptimeHash).hash(h0);
+        h1.as(ComptimeHasher).finish()
+    }
+}
+
+pub struct DefaultComptimeHasher {
+    state: u64,
+}
+
+impl DefaultComptimeHasher {
+    pub pure comptime fn new() -> Self {
+        DefaultComptimeHasher {
+            state: 14695981039346656037,
+        }
+    }
+}
+
+comptime impl ComptimeDefault for DefaultComptimeHasher {
+    pure comptime fn default() -> Self {
+        DefaultComptimeHasher.new()
+    }
+}
+
+comptime impl ComptimeHasher for DefaultComptimeHasher {
+    pure comptime fn finish(self) -> u64 {
+        self.state
+    }
+
+    comptime fn write_u8(self, value: u8) -> void {
+        self.state = mix_byte(self.state, value);
+    }
+
+    comptime fn write(self, bytes: List<u8>) -> void {
+        let count = bytes.length();
+        var index: Integer = 0;
+        while index < count {
+            self.write_u8(bytes[index]);
+            index = index + 1;
+        }
+    }
+}
+
+comptime impl ComptimeBuildHasher for DefaultComptimeHasher {
+    assoc HasherTy: Type = DefaultComptimeHasher;
+
+    pure comptime fn build_hasher(self) -> DefaultComptimeHasher {
+        DefaultComptimeHasher.new()
+    }
+}
+
+comptime impl ComptimeHash for bool {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u8(if self { 1 } else { 0 });
+        acc
+    }
+}
+
+comptime impl ComptimeHash for u8 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u8(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for u16 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u16(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for u32 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u32(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for u64 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u64(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for u128 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u128(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for usize {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_usize(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for i8 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_i8(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for i16 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_i16(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for i32 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_i32(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for i64 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_i64(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for i128 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_i128(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for isize {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_isize(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for char {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u32(self'bitvec.as(u32));
+        acc
+    }
+}
+
+comptime impl ComptimeHash for TotalFloat<builtin.f16> {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u16(self.comptime_into_inner()'bitvec.as(u16));
+        acc
+    }
+}
+
+comptime impl ComptimeHash for TotalFloat<builtin.bf16> {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u16(self.comptime_into_inner()'bitvec.as(u16));
+        acc
+    }
+}
+
+comptime impl ComptimeHash for TotalFloat<builtin.f32> {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u32(self.comptime_into_inner()'bitvec.as(u32));
+        acc
+    }
+}
+
+comptime impl ComptimeHash for TotalFloat<builtin.f64> {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_u64(self.comptime_into_inner()'bitvec.as(u64));
+        acc
+    }
+}
+
+comptime impl ComptimeHash for str {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        acc.as(ComptimeHasher).write_str(self);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for Symbol {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        let name = self;
+        let length = hash_symbol_byte_length(name);
+        var index: u64 = 0;
+        while index < length {
+            let byte = hash_symbol_byte(name, index) match {
+                value? => value,
+                null => break,
+            }
+            acc.as(ComptimeHasher).write_u8(byte);
+            index = index + 1;
+        }
+        acc.as(ComptimeHasher).write_u8(255);
+        acc
+    }
+}
+
+comptime impl ComptimeHash for Integer {
+    {-
+        Canonical sign byte (zero or one), then unsigned magnitude bytes in
+        little-endian order. Zero has one zero magnitude byte; no high zero
+        bytes or target-width conversions participate in the encoding.
+    -}
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
+        let negative = self < 0;
+        var magnitude = if negative { -self } else { self }
+        acc.as(ComptimeHasher).write_u8(if negative { 1 } else { 0 });
+        while magnitude >= 256 {
+            acc.as(ComptimeHasher).write_u8(integer_byte(integer_rem_trunc(magnitude, 256)));
+            magnitude = integer_div_trunc(magnitude, 256);
+        }
+        acc.as(ComptimeHasher).write_u8(integer_byte(magnitude));
+        acc
+    }
 }

@@ -176,8 +176,8 @@ fn non_copy_eq_ord_and_containers_borrow_without_consuming() {
         }
 
         impl Hash for TrackedKey {
-            fn hash(self) -> u64 {
-                self.id.as(Hash).hash()
+            fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+                self.id.as(Hash).hash(state);
             }
         }
 
@@ -276,7 +276,7 @@ fn non_copy_eq_ord_and_containers_borrow_without_consuming() {
                 return false;
             }
 
-            -- 5. HashMap probing borrows stored keys without calling Clone.
+            -- 5. HashMap probing and hashing borrow keys without calling Clone.
             var map = HashMap<TrackedKey, u32>.new();
             var clone_count: u32 = 0;
             map.ref.insert(TrackedKey { id: 1, clones: clone_count.ref }, 100)!;
@@ -287,11 +287,9 @@ fn non_copy_eq_ord_and_containers_borrow_without_consuming() {
                 null => false,
             };
             let contains_hit = map.ref.contains_key(TrackedKey { id: 2, clones: clone_count.ref });
-            -- Note: get/contains_key still call Hash.hash which clones once for the probe key
-            -- (Hash -> *self is Milestone 2B), while the stored bucket key is borrowed without clone.
             assumes clone_count >= clones_before_probe;
             let extra_clones = clone_count - clones_before_probe;
-            if not hit or not contains_hit or extra_clones != 2 {
+            if not hit or not contains_hit or extra_clones != 0 {
                 return false;
             }
 
@@ -503,7 +501,9 @@ fn total_ord_and_total_float_order_nan_and_signed_zero_consistently() {
         }
 
         fn generic_eq_ord(a: T, b: T) -> bool where T :- Eq + Ord + Hash {
-            let _ = a.as(Hash).hash();
+            var hasher = std.hash.DefaultHasher.new();
+            a.ref.as(Hash).hash(hasher.ref);
+            let _ = hasher.ref.finish();
             a < b and a != b
         }
 

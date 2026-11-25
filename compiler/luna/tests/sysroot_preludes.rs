@@ -570,13 +570,20 @@ fn complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing() {
         comptime fn checked() -> bool {
             "é🦀".byte_length() == 6 and "é🦀".contains("🦀")
                 and ("é".byte(1) matches 169?)
-                and "é".hash() == "é".hash()
+                and DefaultComptimeHasher.new().hash_one("é")
+                    == DefaultComptimeHasher.new().hash_one("é")
                 and "é".eq("é") and "é".ne("é")
         }
         fn run() -> bool {
             const staged = checked();
             let value: u8 = 255;
-            staged and value.hash() == 255 and value.eq(value) and value.ne(0)
+            let zero: u8 = 0;
+            var hasher = std.hash.DefaultHasher.new();
+            value.ref.as(Hash).hash(hasher.ref);
+            let digest = hasher.ref.finish();
+            var hasher2 = std.hash.DefaultHasher.new();
+            hasher2.ref.write_u8(255);
+            staged and digest == hasher2.ref.finish() and value.eq(value.ref) and value.ne(zero.ref)
         }
     "#,
     );

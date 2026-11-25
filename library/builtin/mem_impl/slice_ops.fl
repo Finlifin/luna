@@ -1,0 +1,122 @@
+use mem_impl.raw.{align_up_usize, checked_add_usize, checked_mul_usize, raw_ptr}
+use mem_impl.slice.Slice;
+use primitives.{Type, usize, void}
+use protocols.ops.{Index, IndexMut, SpaceApply, VariadicCollector}
+use protocols.resources.{Clone, Copy}
+use types.tuple.Tuple;
+
+pub struct SliceBounds {
+    start: usize,
+    end: usize,
+}
+
+impl SliceBounds {
+    pub pure fn new(start: usize, end: usize) -> SliceBounds {
+        SliceBounds { start: start, end: end }
+    }
+
+    pub pure fn start(self) -> usize {
+        self.start
+    }
+
+    pub pure fn end(self) -> usize {
+        self.end
+    }
+}
+
+impl Clone for SliceBounds {
+    fn clone(*self) -> Self {
+        SliceBounds {
+            start: self.start.*,
+            end: self.end.*,
+        }
+    }
+}
+
+impl Copy for SliceBounds {}
+
+fn elem_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    let align = Type.align_of(T);
+    align_up_usize(size, align)
+}
+
+fn slot_address(base: usize, index: usize) -> usize where T {
+    let stride = elem_stride<T>() match {
+        value? => value,
+        null => return Type.align_of(T),
+    }
+    if stride == 0 {
+        return Type.align_of(T);
+    }
+    let offset = checked_mul_usize(index, stride) match {
+        value? => value,
+        null => return 0,
+    }
+    checked_add_usize(base, offset) match {
+        addr? => addr,
+        null => 0,
+    }
+}
+
+fn discard_collector_arg(value: T) where T {}
+
+impl VariadicCollector for SliceBounds {
+    assoc Tmp: Type = void;
+
+    fn variadic_init() -> void where _S {
+        ()
+    }
+
+    fn variadic_collect(_tmp: *void, args: S) -> SliceBounds where S {
+        inline if S == Tuple<usize, usize> {
+            let pair: Tuple<usize, usize> = args;
+            let (start, end) = pair;
+            SliceBounds {
+                start: start,
+                end: end,
+            }
+        } else {
+            discard_collector_arg<S>(args);
+            assumes false;
+            SliceBounds { start: 0, end: 0 }
+        }
+    }
+}
+
+impl Index<usize> for Slice<T> where T {
+    assoc Output: Type = T;
+
+    fn index(*self, idx: usize) -> *T {
+        assumes idx < self.len();
+        unsafe { raw_ptr<T>(slot_address<T>(self.as_addr(), idx)) }
+    }
+}
+
+impl IndexMut<usize> for Slice<T> where T {
+    fn index_mut(*self, idx: usize) -> *T {
+        assumes idx < self.len();
+        unsafe { raw_ptr<T>(slot_address<T>(self.as_addr(), idx)) }
+    }
+}
+
+impl SpaceApply for Slice<T> where T {
+    assoc CollectTo: Type = SliceBounds;
+    assoc Target: Type = Slice<T>;
+
+    fn space_apply(*self, index: SliceBounds) -> Slice<T> {
+        let start = index.start;
+        let end = index.end;
+        assumes start <= end and end <= self.len();
+        self.slice(start, end) match {
+            s? => s,
+            null => {
+                assumes false;
+                Slice<T>.empty()
+            }
+        }
+    }
+}

@@ -42,6 +42,13 @@ impl fmt::Display for Operation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamingHasher {
+    pub hasher_type: Term,
+    pub init_body: DeclarationId,
+    pub finish_body: DeclarationId,
+}
+
 #[derive(Debug)]
 pub struct Selected {
     pub operation: Operation,
@@ -55,6 +62,7 @@ pub struct Selected {
     pub capabilities: Vec<TraitRequirement>,
     /// Retain the complete resolution, including its captured assumption scope.
     pub selection: capabilities::Resolution,
+    pub streaming_hasher: Option<StreamingHasher>,
 }
 
 impl fmt::Display for Selected {
@@ -172,8 +180,12 @@ pub fn select_metered(
     let member = methods
         .next()
         .ok_or("comptime key protocol method is missing")?;
+    let streaming_h_param = match (operation, member.type_parameters.as_slice()) {
+        (Operation::Hash, [h_param]) if member.type_arguments.is_empty() => Some(*h_param),
+        _ => None,
+    };
     if methods.next().is_some()
-        || !member.type_parameters.is_empty()
+        || (!member.type_parameters.is_empty() && streaming_h_param.is_none())
         || !member.type_arguments.is_empty()
     {
         return Err("comptime key protocol method is duplicated or generic".into());
@@ -181,7 +193,14 @@ pub fn select_metered(
     if member.phase != nir::program::TraitPhase::Comptime {
         return Err("key protocol method requires comptime trait membership".into());
     }
-    let Ok(Term::ComptimeFunction(signature)) = member.signature.ordinary() else {
+    let ordinary_signature = member
+        .signature
+        .ordinary()
+        .map_err(|_| "key protocol requires a comptime method")?;
+    let Term::ComptimeFunction(signature) = (match ordinary_signature {
+        Term::PureFunction(inner) => inner.as_ref(),
+        other => other,
+    }) else {
         return Err("key protocol requires a comptime method".into());
     };
     let Term::Function { parameters, result } = signature.as_ref() else {
@@ -191,6 +210,11 @@ pub fn select_metered(
     let self_type = Term::Rigid {
         declaration: interface.self_parameter,
         sort: Sort::Type,
+    };
+    let expected_arity = if streaming_h_param.is_some() {
+        2
+    } else {
+        operation.arity()
     };
     let expected = match operation {
         Operation::Eq => {
@@ -213,25 +237,164 @@ pub fn select_metered(
                 },
             ]
         }
-        Operation::Hash => vec![Parameter {
-            sort: Sort::Runtime,
-            ty: self_type,
-        }],
+        Operation::Hash => {
+            if let Some(h_param) = streaming_h_param {
+                let h_type = Term::Rigid {
+                    declaration: h_param,
+                    sort: Sort::Type,
+                };
+                vec![
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: self_type,
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: h_type,
+                    },
+                ]
+            } else {
+                vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: self_type,
+                }]
+            }
+        }
     };
     let valid_result = match operation {
         Operation::Eq => result.as_ref() == &Term::Primitive(Primitive::Bool),
         Operation::Hash => {
-            matches!(result.as_ref(), Term::Primitive(p) if *p == Primitive::Integer || p.fixed_integer_layout().is_some())
+            if let Some(h_param) = streaming_h_param {
+                result.as_ref()
+                    == &Term::Rigid {
+                        declaration: h_param,
+                        sort: Sort::Type,
+                    }
+            } else {
+                matches!(result.as_ref(), Term::Primitive(p) if *p == Primitive::Integer || p.fixed_integer_layout().is_some())
+            }
         }
     };
     if parameters != &expected
         || !valid_result
         || !member.by_value_receiver
         || member.by_reference_receiver
-        || member.parameter_bindings.len() != operation.arity()
+        || member.parameter_bindings.len() != expected_arity
     {
         return Err("invalid comptime key protocol receiver, parameters or result".into());
     }
+    let streaming_hasher =
+        if let Some(h_param) = streaming_h_param {
+            let h_type = Term::Rigid {
+                declaration: h_param,
+                sort: Sort::Type,
+            };
+            let hasher_protocol = member
+                .capabilities
+                .iter()
+                .filter_map(|req| {
+                    (req.subject == h_type && req.interface_arguments.is_empty())
+                        .then_some(req.interface)
+                })
+                .chain(member.requirements.iter().filter_map(|pred| match pred {
+                    nir::program::TypePredicate::Trait(req)
+                        if req.subject == h_type && req.interface_arguments.is_empty() =>
+                    {
+                        Some(req.interface)
+                    }
+                    _ => None,
+                }))
+                .next()
+                .ok_or("streaming comptime hash requires ComptimeHasher constraint")?;
+            work::spend(
+                budget,
+                package
+                    .implementations
+                    .len()
+                    .saturating_add(world.implementations.len()),
+            )?;
+            let hasher_impl = package
+                .implementations
+                .iter()
+                .filter(|i| {
+                    i.interface == Some(hasher_protocol)
+                        && i.type_parameters.is_empty()
+                        && i.requirements.is_empty()
+                        && i.phases.comptime
+                        && world.implementations.iter().any(|w| {
+                            w.declaration == i.declaration && (std::ptr::eq(*i, w) || *i == w)
+                        })
+                })
+                .min_by_key(|i| {
+                    if i.declaration.package == hasher_protocol.package {
+                        0u8
+                    } else {
+                        1
+                    }
+                })
+                .ok_or("streaming comptime hash requires concrete ComptimeHasher implementation")?;
+            let hasher_type = hasher_impl.subject.clone();
+            work::charge_term(&hasher_type, budget)?;
+            let finish_body = hasher_impl
+                .methods
+                .iter()
+                .find(|(name, _)| name == "finish")
+                .ok_or("ComptimeHasher implementation is missing finish method")?
+                .1;
+            let finish_fn = package
+                .functions
+                .iter()
+                .find(|f| f.declaration == finish_body)
+                .ok_or("ComptimeHasher finish function is missing")?;
+            if finish_fn.phase != FunctionPhase::Comptime
+                || !finish_fn.type_parameters.is_empty()
+                || finish_fn.parameters.len() != 1
+                || !finish_fn.defaults.is_empty()
+            {
+                return Err("invalid ComptimeHasher finish signature".into());
+            }
+            let init_body = package
+                .implementations
+                .iter()
+                .filter(|i| {
+                    i.interface.is_none()
+                        && i.subject == hasher_type
+                        && i.type_parameters.is_empty()
+                        && world.implementations.iter().any(|w| {
+                            w.declaration == i.declaration && (std::ptr::eq(*i, w) || *i == w)
+                        })
+                })
+                .find_map(|i| {
+                    i.methods
+                        .iter()
+                        .find(|(name, _)| name == "new")
+                        .map(|(_, id)| *id)
+                })
+                .ok_or("ComptimeHasher type is missing comptime new() constructor")?;
+            let init_fn = package
+                .functions
+                .iter()
+                .find(|f| f.declaration == init_body)
+                .ok_or("ComptimeHasher new() function is missing")?;
+            if init_fn.phase != FunctionPhase::Comptime
+                || !init_fn.type_parameters.is_empty()
+                || !init_fn.parameters.is_empty()
+                || !init_fn.defaults.is_empty()
+            {
+                return Err("invalid ComptimeHasher new() signature".into());
+            }
+            Some((
+                h_param,
+                hasher_protocol,
+                StreamingHasher {
+                    hasher_type,
+                    init_body,
+                    finish_body,
+                },
+            ))
+        } else {
+            None
+        };
     let (binders, inputs) = if let [rhs_param] = interface.type_parameters.as_slice() {
         (
             vec![
@@ -245,6 +408,20 @@ pub fn select_metered(
                 },
             ],
             vec![subject.clone(), subject.clone()],
+        )
+    } else if let Some((h_param, _, hasher)) = &streaming_hasher {
+        (
+            vec![
+                nir::DeclarationParameter {
+                    declaration: interface.self_parameter,
+                    sort: Sort::Type,
+                },
+                nir::DeclarationParameter {
+                    declaration: *h_param,
+                    sort: Sort::Type,
+                },
+            ],
+            vec![subject.clone(), hasher.hasher_type.clone()],
         )
     } else {
         (
@@ -276,6 +453,18 @@ pub fn select_metered(
         capabilities: member
             .capabilities
             .iter()
+            .filter(|r| {
+                !matches!(
+                    streaming_h_param,
+                    Some(h_param)
+                        if r.subject
+                            == Term::Rigid {
+                                declaration: h_param,
+                                sort: Sort::Type,
+                            }
+                            && r.interface_arguments.is_empty()
+                )
+            })
             .map(|r| work::requirement(r, &binders, &inputs, budget))
             .collect::<Result<_, _>>()?,
         program: work::program(
@@ -401,18 +590,36 @@ pub fn select_metered(
     if bodies.next().is_some() {
         return Err("comptime key method body is duplicated".into());
     }
-    let arguments = if member.default == Some(body) {
-        inputs
+    let (arguments, method_arguments) = if member.default == Some(body) {
+        let mut args = inputs
             .iter()
             .map(|ty| work::term(ty, &[], &[], budget))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        let method_args = if let Some((_, _, hasher)) = &streaming_hasher {
+            vec![work::term(&hasher.hasher_type, &[], &[], budget)?]
+        } else {
+            vec![]
+        };
+        if member.default == Some(body) && args.len() > 1 && streaming_hasher.is_some() {
+            // Default body expects [impl_args..., method_arg] matching binders/inputs.
+            let _ = &mut args;
+        }
+        (args, method_args)
     } else {
         work::spend(budget, evidence.type_arguments.len())?;
-        evidence
+        let mut args = evidence
             .type_arguments
             .iter()
             .map(|ty| work::term(ty, &[], &[], budget))
-            .collect::<Result<_, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        let method_args = if let Some((_, _, hasher)) = &streaming_hasher {
+            let h_ty = work::term(&hasher.hasher_type, &[], &[], budget)?;
+            args.push(h_ty.clone());
+            vec![h_ty]
+        } else {
+            vec![]
+        };
+        (args, method_args)
     };
     work::spend(budget, package.functions.len())?;
     let mut functions = package.functions.iter().filter(|f| f.declaration == body);
@@ -423,12 +630,16 @@ pub fn select_metered(
     let method_binders =
         package.declaration_binders(&function.type_parameters, &mut budget.steps)?;
     let signature = work::term(&function.signature, &method_binders, &arguments, budget)?;
-    let Ok(Term::ComptimeFunction(expected)) = contract.signature.ordinary() else {
+    let expected_ordinary = contract.signature.ordinary().unwrap();
+    let Term::ComptimeFunction(expected) = (match expected_ordinary {
+        Term::PureFunction(inner) => inner.as_ref(),
+        other => other,
+    }) else {
         unreachable!()
     };
     if function.phase != FunctionPhase::Comptime
         || &signature != expected.as_ref()
-        || function.parameters.len() != operation.arity()
+        || function.parameters.len() != expected_arity
         || !function.defaults.is_empty()
     {
         return Err("selected key body does not implement the comptime protocol signature".into());
@@ -470,6 +681,13 @@ pub fn select_metered(
             budget,
         )?);
     }
+    if let Some((_, hasher_protocol, hasher)) = &streaming_hasher {
+        capabilities.retain(|cap| {
+            !(cap.interface == *hasher_protocol
+                && cap.subject == hasher.hasher_type
+                && cap.interface_arguments.is_empty())
+        });
+    }
     for capability in &interface.capabilities {
         capabilities.push(work::requirement(capability, &binders, &inputs, budget)?);
     }
@@ -496,12 +714,13 @@ pub fn select_metered(
             member: member.declaration,
             body,
             arguments,
-            method_arguments: vec![],
+            method_arguments,
         },
         contract,
         parameters: function.parameters.clone(),
         program,
         capabilities,
         selection,
+        streaming_hasher: streaming_hasher.map(|(_, _, hasher)| hasher),
     })
 }

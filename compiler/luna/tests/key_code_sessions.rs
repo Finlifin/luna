@@ -2,6 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
+
 use comptime_executor::{Context, KeyProtocol};
 use comptime_interpretor::Value;
 use luna::comptime_keys::Protocol;
@@ -27,7 +28,16 @@ fn bindings(package: &Package) -> intrinsic::LangItems {
 }
 
 fn prepare(package: &Package, subject: &Term) -> Protocol {
-    Protocol::prepare(package, &bindings(package), subject, Default::default()).unwrap()
+    Protocol::prepare(
+        package,
+        &bindings(package),
+        subject,
+        elaboration::ptc::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -52,7 +62,7 @@ fn borrowed_key_capture_is_bounded_and_shared_sources_remain_separate_bindings()
         "{error}"
     );
     let source = DeclarationSource::Borrowed(&package)
-        .retain_declarations(&mut 100_000)
+        .retain_declarations(&mut 1_000_000)
         .unwrap();
     let weak = std::sync::Arc::downgrade(source.package());
     let mut first =
@@ -91,13 +101,14 @@ fn key_code_reuse_preserves_fresh_inputs_contracts_and_receiver_storage() {
             }
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self) -> u64 {
+            comptime fn hash(self, state: H) -> H where H: Type, requires H :- ComptimeHasher {
                 assumes self.allowed;
                 var fresh = false;
                 fresh = not fresh;
                 let previous = self.value;
                 self.value = not previous;
-                if fresh and previous { 1 } else { 0 }
+                let tag: u8 = if fresh and previous { 1 } else { 0 };
+                tag.as(ComptimeHash).hash(state)
             }
         }",
     )
@@ -206,13 +217,13 @@ fn protocol_code_and_snapshots_belong_to_their_exact_source_world() {
         .find(|(name, _)| name == "hash")
         .unwrap()
         .1;
-    package
+    let hash_fn = package
         .functions
         .iter_mut()
         .find(|f| f.declaration == body)
-        .unwrap()
-        .body
-        .kind = nir::program::ExprKind::Literal(nir::program::Literal::UnsignedInteger(9));
+        .unwrap();
+    let state_param = hash_fn.parameters[1];
+    hash_fn.body.kind = nir::program::ExprKind::Local(state_param);
     let mut changed = prepare(&package, &subject);
     let changed_snapshot = changed
         .admit(Value::Bool(true), &mut Context::new(1_000_000))

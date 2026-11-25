@@ -1,6 +1,6 @@
 use List;
-use builtin.{Integer, bool, u64}
-use hashing.{ComptimeHash, mix_byte, mix_digest}
+use builtin.{Integer, Type, bool, u64}
+use hashing.{ComptimeHash, ComptimeHasher, DefaultComptimeHasher}
 use numeric.equality.ComptimeEq;
 
 {-
@@ -184,21 +184,25 @@ comptime impl ComptimeEq for Set<T> where T :- ComptimeEq {
 }
 
 comptime impl ComptimeHash for Set<T> where T :- ComptimeHash {
-    comptime fn hash(self) -> u64 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
         let input = self;
         let count = input.raw_elements.length();
         var combined: u64 = 0;
         var index: Integer = 0;
         while index < count {
-            let entry_digest = mix_digest(
-                14695981039346656037,
-                input.raw_elements[index].as(ComptimeHash).hash(),
-            );
-            combined = xor_u64(combined, entry_digest);
+            var elem_hasher = DefaultComptimeHasher.new();
+            elem_hasher = input.raw_elements[index].as(ComptimeHash).hash(elem_hasher);
+            combined = xor_u64(combined, elem_hasher.finish());
             index = index + 1;
         }
-        let with_tag = mix_byte(14695981039346656037, 83);
-        let with_count = mix_digest(with_tag, count.as(ComptimeHash).hash());
-        mix_digest(with_count, combined)
+        var acc = state;
+        acc.as(ComptimeHasher).write_u8(83);
+        acc = count.as(ComptimeHash).hash(acc);
+        acc.as(ComptimeHasher).write_u64(combined);
+        acc
     }
 }

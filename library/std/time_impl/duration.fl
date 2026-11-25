@@ -324,9 +324,9 @@ impl Ord for Duration {
 }
 
 impl Hash for Duration {
-    fn hash(self) -> u64 {
-        let state = fnv_mix_u64(14695981039346656037, self.raw_secs);
-        fnv_mix_u32(state, self.raw_nanos)
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        self.raw_secs.as(Hash).hash(state);
+        self.raw_nanos.as(Hash).hash(state);
     }
 }
 

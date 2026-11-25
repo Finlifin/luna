@@ -118,58 +118,76 @@ fn checked_integer_conversions_work_at_runtime_and_comptime_across_targets() {
         fn check_conversions() -> bool {
             let x64: u64 = 42;
             let via_from = usize.as(TryFrom<u64>).try_from(x64) match {
-                v? => v == 42,
-                null => false,
+                v! => v == 42,
+                error _ => false,
             };
             let via_into = x64.as(TryInto<usize>).try_into() match {
-                v? => v == 42,
-                null => false,
+                v! => v == 42,
+                error _ => false,
             };
             let too_big_u128: u128 = 18446744073709551616;
-            let u128_overflow = too_big_u128.as(TryInto<usize>).try_into().is_none();
+            let u128_overflow = too_big_u128.as(TryInto<usize>).try_into() match {
+                _! => false,
+                error err => err matches .Overflow,
+            };
             let u128_fit: u128 = 9001;
             let u128_ok = u128_fit.as(TryInto<usize>).try_into() match {
-                v? => v == 9001,
-                null => false,
+                v! => v == 9001,
+                error _ => false,
             };
 
             let neg: i64 = -1;
-            let neg_to_u32 = neg.as(TryInto<u32>).try_into().is_none();
+            let neg_to_u32 = neg.as(TryInto<u32>).try_into() match {
+                _! => false,
+                error err => err matches .Underflow,
+            };
             let neg_i8_min: i32 = -128;
             let i8_min_ok = neg_i8_min.as(TryInto<i8>).try_into() match {
-                v? => v == -128,
-                null => false,
+                v! => v == -128,
+                error _ => false,
             };
             let neg_i8_under: i32 = -129;
-            let i8_under = neg_i8_under.as(TryInto<i8>).try_into().is_none();
+            let i8_under = neg_i8_under.as(TryInto<i8>).try_into() match {
+                _! => false,
+                error err => err matches .Underflow,
+            };
 
             let u16_255: u16 = 255;
             let u8_max_ok = u16_255.as(TryInto<u8>).try_into() match {
-                v? => v == 255,
-                null => false,
+                v! => v == 255,
+                error _ => false,
             };
             let u16_256: u16 = 256;
-            let u8_over = u16_256.as(TryInto<u8>).try_into().is_none();
+            let u8_over = u16_256.as(TryInto<u8>).try_into() match {
+                _! => false,
+                error err => err matches .Overflow,
+            };
 
             let u8_127: u8 = 127;
             let u8_to_i8_ok = u8_127.as(TryInto<i8>).try_into() match {
-                v? => v == 127,
-                null => false,
+                v! => v == 127,
+                error _ => false,
             };
             let u8_128: u8 = 128;
-            let u8_to_i8_over = u8_128.as(TryInto<i8>).try_into().is_none();
+            let u8_to_i8_over = u8_128.as(TryInto<i8>).try_into() match {
+                _! => false,
+                error err => err matches .Overflow,
+            };
 
             let max_u = builtin.mem.usize_max();
-            let usize_to_isize_over = max_u.as(TryInto<isize>).try_into().is_none();
+            let usize_to_isize_over = max_u.as(TryInto<isize>).try_into() match {
+                _! => false,
+                error err => err matches .Overflow,
+            };
             let small_u: usize = 77;
             let usize_to_isize_ok = small_u.as(TryInto<isize>).try_into() match {
-                v? => v == 77,
-                null => false,
+                v! => v == 77,
+                error _ => false,
             };
             let same_u32: u32 = 99;
             let same_ok = same_u32.as(TryInto<u32>).try_into() match {
-                v? => v == 99,
-                null => false,
+                v! => v == 99,
+                error _ => false,
             };
 
             via_from and via_into and u128_overflow and u128_ok
@@ -195,28 +213,34 @@ fn checked_integer_conversions_work_at_runtime_and_comptime_across_targets() {
         comptime fn check_fit_32_ok() -> bool {
             let v: u64 = 4294967295;
             v.as(ComptimeTryInto<usize>).try_into() match {
-                n? => n == 4294967295,
-                null => false,
+                n! => n == 4294967295,
+                error _ => false,
             }
         }
-        comptime fn make_over_32() -> ?usize {
+        comptime fn make_over_32() -> !builtin.ConversionErr usize {
             let v: u64 = 4294967296;
             v.as(ComptimeTryInto<usize>).try_into()
         }
         comptime fn check_neg_rejected() -> bool {
             let v: i16 = -1;
-            u8.as(ComptimeTryFrom<i16>).try_from(v).is_none()
+            u8.as(ComptimeTryFrom<i16>).try_from(v) match {
+                _! => false,
+                error err => err matches .Underflow,
+            }
         }
         comptime fn check_narrowed_signed() -> bool {
             let v: i32 = -128;
             v.as(ComptimeTryInto<i8>).try_into() match {
-                n? => n == -128,
-                null => false,
+                n! => n == -128,
+                error _ => false,
             }
         }
 
         comptime fn check_over_32_is_none() -> bool {
-            make_over_32().is_none()
+            make_over_32() match {
+                _! => false,
+                error err => err matches .Overflow,
+            }
         }
 
         const fit_32_ok: bool = check_fit_32_ok();

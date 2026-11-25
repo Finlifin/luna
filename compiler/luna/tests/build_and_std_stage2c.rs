@@ -385,8 +385,9 @@ fn std_time_duration_and_std_process_run_natively() {
                 return 16;
             }
 
-            if d.as(Hash).hash() != d_cloned.as(Hash).hash()
-                or d.as(Hash).hash() == ZERO.as(Hash).hash()
+            let rs = std.hash.RandomState.new();
+            if rs.ref.hash_one(d.ref) != rs.ref.hash_one(d_cloned.ref)
+                or rs.ref.hash_one(d.ref) == rs.ref.hash_one(ZERO.ref)
             {
                 return 17;
             }
@@ -580,8 +581,8 @@ fn std_collections_debug_impls_preserve_once_elements_and_custom_allocators() {
         }
 
         impl Hash for KeyTag {
-            fn hash(self) -> u64 {
-                self.id.as(Hash).hash()
+            fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+                self.id.as(Hash).hash(state);
             }
         }
 

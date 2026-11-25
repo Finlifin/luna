@@ -5,7 +5,14 @@
 concat!(
     "mod attrs {\n", include!("attrs_source.rs"), "\n}\n",
     "mod primitives {\n", include_str!("../../../../library/builtin/primitives.fl"),
-    "\n} mod comparison {\n", include_str!("../../../../library/builtin/numeric/comparison.fl"), "\n} mod builtin {pub use primitives.*; pub use comparison.{Order, TotalFloat, TotalOrd};\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
+    "\n} mod comparison {\n", include_str!("../../../../library/builtin/numeric/comparison.fl"),
+    "\n} mod staging { use primitives.Type; pub trait Splice { assoc RuntimeTarget: Type; fn splice(comptime data: Self) -> RuntimeTarget; } }\n",
+    "mod implicit_passing {\n", include_str!("../../../../library/builtin/protocols/implicit_passing.fl"),
+    "\n} mod builtin_patterns { use primitives.{Symbol, Type}; pub trait ConcatPatternView { assoc Part: Type; assoc Rest: Type = Self; fn concat_pattern_view_strip_prefix(*self, part: Part) -> ?Rest; fn concat_pattern_view_strip_suffix(*self, part: Part) -> ?Rest; ^attrs.comptime_phase assoc PartComptime: Type; ^attrs.comptime_phase assoc RestComptime: Type = Self; ^attrs.comptime_phase comptime fn concat_pattern_view_strip_prefix_comptime(self, part: PartComptime) -> ?RestComptime; ^attrs.comptime_phase comptime fn concat_pattern_view_strip_suffix_comptime(self, part: PartComptime) -> ?RestComptime; } pub trait StableConcatPatternView :- ConcatPatternView {} pub trait MapPatternView { assoc FieldType: pure comptime fn(Symbol) -> Type; fn map_pattern_view_get(*self, comptime property: Symbol) -> ?FieldType(property); ^attrs.comptime_phase assoc FieldTypeComptime: pure comptime fn(Symbol) -> Type; ^attrs.comptime_phase comptime fn map_pattern_view_get_comptime(self, property: Symbol) -> ?FieldTypeComptime(property); } pub trait StableMapPatternView :- MapPatternView {} }\n",
+    "mod builtin {pub use primitives.*; pub use comparison.{Order, TotalFloat, TotalOrd}; pub use staging.Splice; pub use implicit_passing.{CallDescription, Context, ImplicitPassing}; pub use builtin_patterns.{ConcatPatternView, MapPatternView, StableConcatPatternView, StableMapPatternView}; pub enum InfallibleErr {} pub enum ConversionErr { Overflow, Underflow, OutOfRange, InvalidFormat }\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
+    "mod ops_impl {\n", include_str!("../../../../library/meta/ops_impl.fl"), "\n}\n",
+    "mod code { pub mod combinators {\n", include_str!("../../../../library/meta/code/combinators.fl"),
+    "\n} pub mod types {\n", include_str!("../../../../library/meta/code/types.fl"), "\n} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
     "mod types {mod bindings {\n", include_str!("../../../../library/meta/types/bindings.fl"),
@@ -43,6 +50,14 @@ concat!(
     "mod macros_impl {\n",
     "mod attributes {\n", include_str!("../../../../library/meta/macros_impl/attributes.fl"), "\n}\n",
     include_str!("../../../../library/meta/macros_impl/mod.fl"), "\n}\n",
-    "mod ops_impl {\n", include_str!("../../../../library/meta/ops_impl.fl"), "\n}\n",
     include_str!("../../../../library/meta/lib.fl"),
-).replace("use numeric.{conversions, equality, ordering, scalar_math}\n", "use numeric.{conversions, equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
+).replace("use numeric.{conversions, equality, ordering, scalar_math}\n", "use numeric.{conversions, equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "").replace(
+    "use builtin.{CallDescription, Clone, Context, Copy, ImplicitPassing, Integer, Splice, Type, bool, isize, str, usize}",
+    "use builtin.{CallDescription, Context, ImplicitPassing, Integer, Splice, Type, bool, isize, str, usize}",
+).replace(
+    "impl Clone for SourceSpan {\n    fn clone(*self) -> Self {\n        SourceSpan {\n            file: self.file.*,\n            start: self.start.*,\n            end: self.end.*,\n            expansion_id: self.expansion_id.*,\n        }\n    }\n}\n\nimpl Copy for SourceSpan {}\n\n",
+    "",
+).replace(
+    "pub trait SourceSpanOps {\n    pure fn file(self) -> str;\n    pure fn start(self) -> usize;\n    pure fn end(self) -> usize;\n    pure fn expansion_id(self) -> isize;\n}\n\nimpl SourceSpanOps for SourceSpan {\n    pure fn file(self) -> str {\n        self.file\n    }\n\n    pure fn start(self) -> usize {\n        self.start\n    }\n\n    pure fn end(self) -> usize {\n        self.end\n    }\n\n    pure fn expansion_id(self) -> isize {\n        self.expansion_id\n    }\n}",
+    "pub trait SourceSpanOps {\n    fn file(self) -> str;\n    fn start(self) -> usize;\n    fn end(self) -> usize;\n    fn expansion_id(self) -> isize;\n}\n\nimpl SourceSpanOps for SourceSpan {\n    fn file(self) -> str {\n        self.file\n    }\n\n    fn start(self) -> usize {\n        self.start\n    }\n\n    fn end(self) -> usize {\n        self.end\n    }\n\n    fn expansion_id(self) -> isize {\n        self.expansion_id\n    }\n}",
+)

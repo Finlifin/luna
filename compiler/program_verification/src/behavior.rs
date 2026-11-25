@@ -1634,6 +1634,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             Op::MemRawRead | Op::MemRawPtr | Op::MemCompareBytes | Op::MemBorrowStr => {
                 self.memory = self.memory.join(MemoryEffect::ReadOnly);
             }
+            Op::MemPtrAddr => {}
             Op::MemRawWrite | Op::MemCopy | Op::MemCopyNonOverlapping | Op::MemSetBytes => {
                 self.memory = MemoryEffect::Unknown;
                 self.written.fill(true);

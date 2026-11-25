@@ -1,24 +1,23 @@
 use List;
-use builtin.{Integer, u64}
-use hashing.{ComptimeHash, mix_byte, mix_digest}
+use builtin.{Integer, Type}
+use hashing.{ComptimeHash, ComptimeHasher}
 
 {-
-    Hash a fixed snapshot in index order. Each element contributes its protocol
-    digest exactly once, encoded as eight little-endian bytes. The list prefix
-    and fixed-width encoding do not depend on target size or element storage.
-    Hash collisions still require the element-based ComptimeEq implementation.
+    Hash a fixed snapshot in index order by feeding a length prefix followed by
+    each element into the caller-supplied ComptimeHasher. Hash collisions still
+    require the element-based ComptimeEq implementation.
 -}
 comptime impl ComptimeHash for List<T> where T :- ComptimeHash {
-    comptime fn hash(self) -> u64 {
+    comptime fn hash(self, state: H) -> H
+    where
+        H: Type,
+        requires H :- ComptimeHasher,
+    {
+        var acc = state;
         let input = self;
         let count = input.length();
-        var state = mix_byte(14695981039346656037, 76);
-        var index: Integer = 0;
-        while index < count {
-            let digest = input[index].as(ComptimeHash).hash();
-            state = mix_digest(state, digest);
-            index = index + 1;
-        }
-        state
+        acc.as(ComptimeHasher).write_u8(76);
+        acc = count.as(ComptimeHash).hash(acc);
+        T.as(ComptimeHash).hash_slice(input, acc)
     }
 }

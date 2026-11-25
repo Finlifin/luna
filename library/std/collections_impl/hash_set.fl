@@ -1,11 +1,12 @@
 use builtin.fmt.{ByteWriter, Debug}
 use collections_impl.hash_map.{HashMap, HashMapIter}
+use hash_impl.sip.RandomState;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 
 {-
-    Hash-indexed set HashSet<T, .A, .allocator> and consuming iterator
+    Hash-indexed set HashSet<T, .S, .A, .allocator> and consuming iterator
     HashSetIter<T, .A, .allocator>, structurally backed by
-    HashMap<T, void, .A = A, .allocator = allocator>.
+    HashMap<T, void, .S = S, .A = A, .allocator = allocator>.
 
     Inherits structural affine Drop, zero-sized value array optimization, and
     runtime-dependent allocator delivery with zero overhead for globals.
@@ -13,29 +14,75 @@ use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 pub struct HashSet
 where
     T,
+    .S: Type = RandomState,
+    requires S :- BuildHasher,
     .A: Type = DefaultAllocator,
     requires A :- Allocator,
     quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
 {
-    raw_map: HashMap<T, void, .A = A, .allocator = allocator>,
+    raw_map: HashMap<T, void, .S = S, .A = A, .allocator = allocator>,
 }
 
-impl HashSet<T, .A = A, .allocator = alloc>
+impl HashSet<T, .S = S, .A = A, .allocator = alloc>
 where
     T,
+    S: Type,
+    requires S :- BuildHasher + Default,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    pub pure fn new() -> Self {
-        HashSet<T, .A = A, .allocator = alloc> {
-            raw_map: HashMap<T, void, .A = A, .allocator = alloc>.new(),
+    pub fn new() -> Self {
+        HashSet<T, .S = S, .A = A, .allocator = alloc> {
+            raw_map: HashMap<T, void, .S = S, .A = A, .allocator = alloc>.new(),
         }
     }
 
     pub fn with_capacity(capacity: usize) -> !AllocErr Self {
-        let map = HashMap<T, void, .A = A, .allocator = alloc>.with_capacity(capacity)!;
-        HashSet<T, .A = A, .allocator = alloc> { raw_map: map }
+        let map = HashMap<T, void, .S = S, .A = A, .allocator = alloc>.with_capacity(capacity)!;
+        HashSet<T, .S = S, .A = A, .allocator = alloc> { raw_map: map }
+    }
+}
+
+impl Default for HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T,
+    S: Type,
+    requires S :- BuildHasher + Default,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn default() -> Self {
+        HashSet<T, .S = S, .A = A, .allocator = alloc>.new()
+    }
+}
+
+impl HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T,
+    S: Type,
+    requires S :- BuildHasher,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn with_hasher(hash_builder: S) -> Self {
+        HashSet<T, .S = S, .A = A, .allocator = alloc> {
+            raw_map: HashMap<T, void, .S = S, .A = A, .allocator = alloc>.with_hasher(hash_builder),
+        }
+    }
+
+    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> !AllocErr Self {
+        let map = HashMap<T, void, .S = S, .A = A, .allocator = alloc>.with_capacity_and_hasher(
+            capacity,
+            hash_builder,
+        )!;
+        HashSet<T, .S = S, .A = A, .allocator = alloc> { raw_map: map }
+    }
+
+    pub fn hasher(*self) -> *S {
+        self.raw_map.hasher()
     }
 
     pub fn len(*self) -> usize {
@@ -59,9 +106,12 @@ where
     }
 }
 
-impl HashSet<T, .A = A, .allocator = alloc>
+impl HashSet<T, .S = S, .A = A, .allocator = alloc>
 where
-    T :- Eq + Hash + Clone,
+    T :- Eq + Hash,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -75,12 +125,30 @@ where
         self.raw_map.remove(value).is_some()
     }
 
+    pub fn contains_ref(*self, value: *T) -> bool {
+        self.raw_map.contains_key_ref(value)
+    }
+
     pub fn contains(*self, value: T) -> bool {
         self.raw_map.contains_key(value)
     }
+}
 
-    pub fn is_subset(*self, other: *HashSet<T, .A = B, .allocator = other_alloc>) -> bool
+impl HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T :- Eq + Hash + Clone,
+    S: Type,
+    requires S :- BuildHasher,
+    requires S.as(BuildHasher).HasherTy :- Hasher,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn is_subset(*self, other: *HashSet<T, .S = OS, .A = B, .allocator = other_alloc>) -> bool
     where
+        OS: Type,
+        requires OS :- BuildHasher,
+        requires OS.as(BuildHasher).HasherTy :- Hasher,
         B: Type,
         requires B :- Allocator,
         quote other_alloc: lift *B,
@@ -104,8 +172,11 @@ where
         true
     }
 
-    pub fn is_disjoint(*self, other: *HashSet<T, .A = B, .allocator = other_alloc>) -> bool
+    pub fn is_disjoint(*self, other: *HashSet<T, .S = OS, .A = B, .allocator = other_alloc>) -> bool
     where
+        OS: Type,
+        requires OS :- BuildHasher,
+        requires OS.as(BuildHasher).HasherTy :- Hasher,
         B: Type,
         requires B :- Allocator,
         quote other_alloc: lift *B,
@@ -127,16 +198,18 @@ where
     }
 }
 
-impl HashSet<T, .A = A, .allocator = alloc>
+impl HashSet<T, .S = S, .A = A, .allocator = alloc>
 where
     T :- Clone,
+    S: Type,
+    requires S :- BuildHasher + Clone,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
     pub fn try_clone(*self) -> !AllocErr Self {
         let cloned = self.raw_map.try_clone()!;
-        HashSet<T, .A = A, .allocator = alloc> { raw_map: cloned }
+        HashSet<T, .S = S, .A = A, .allocator = alloc> { raw_map: cloned }
     }
 }
 
@@ -171,9 +244,11 @@ where
     }
 }
 
-impl IntoIterator for HashSet<T, .A = A, .allocator = alloc>
+impl IntoIterator for HashSet<T, .S = S, .A = A, .allocator = alloc>
 where
     T,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
@@ -187,14 +262,30 @@ where
     }
 }
 
-impl Debug for HashSet<T, .A = A, .allocator = alloc>
+impl Debug for HashSet<T, .S = S, .A = A, .allocator = alloc>
 where
     T :- Debug,
+    S: Type,
+    requires S :- BuildHasher,
     A: Type,
     requires A :- Allocator,
     quote alloc: lift *A,
 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         self.raw_map.write_debug_keys(output)
+    }
+}
+
+impl AsRef<HashMap<T, void, .S = S, .A = A, .allocator = alloc>> for HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T,
+    S: Type,
+    requires S :- BuildHasher,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn as_ref(*self) -> *HashMap<T, void, .S = S, .A = A, .allocator = alloc> {
+        self.raw_map
     }
 }

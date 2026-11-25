@@ -925,9 +925,20 @@ where
     requires A :- Allocator,
     quote a: lift *A,
 {
-    fn hash(self) -> u64 {
-        var this = self;
-        this.ref.hash_bytes()
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        state.as(Hasher).write(self.bytes.as_slice());
+        state.as(Hasher).write_u8(255);
+    }
+}
+
+impl AsRef<Vec<u8, .A = A, .allocator = a>> for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
+    fn as_ref(*self) -> *Vec<u8, .A = A, .allocator = a> {
+        self.bytes
     }
 }
 

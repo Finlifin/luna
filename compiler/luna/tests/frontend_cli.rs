@@ -4411,15 +4411,35 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
     }
     sandbox.write_exact("input.fl","
         struct Key {value:u8}
+        struct SumHasher { total: u64 }
+        impl Hasher for SumHasher {
+            fn finish(*self) -> u64 { self.total.* }
+            fn write(*self, bytes: Slice<u8>) {
+                let len = bytes.len();
+                var i: usize = 0;
+                while i < len {
+                    let b = bytes.get(i) match { v? => v, null => 0 };
+                    let next = self.total.*'bitvec.as(u128) + b'bitvec.as(u128);
+                    self.total.* = next'bitvec[0..64].as(u64);
+                    i = i + 1;
+                }
+            }
+            fn write_u64(*self, value: u64) {
+                let next = self.total.*'bitvec.as(u128) + value'bitvec.as(u128);
+                self.total.* = next'bitvec[0..64].as(u64);
+            }
+        }
         impl Eq for Key {fn eq(*self,other:*Self)->bool {self.value.* == other.value.*}}
         impl Ord for Key {fn cmp(*self,other:*Self)->Order {
             if self.value.* < other.value.* {.less} else if self.value.* == other.value.* {.equal} else {.greater}
         }}
-        impl Hash for Key {fn hash(self)->u64 {7}}
+        impl Hash for Key {fn hash(*self, state: *H) where H: Type, requires H :- Hasher {state.as(Hasher).write_u64(7);}}
         fn run()->bool {
             let k1 = Key {value:1};
             let k2 = Key {value:2};
             let k3 = Key {value:3};
+            var h = SumHasher { total: 0 };
+            k1.ref.as(Hash).hash(h.ref);
             k1.as(Ord).lt(k2.ref) and
             not k2.as(Ord).lt(k2.ref) and
             not k3.as(Ord).lt(k2.ref) and
@@ -4432,7 +4452,7 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
             not k1.as(Ord).ge(k2.ref) and
             k2.as(Ord).ge(k2.ref) and
             k3.as(Ord).ge(k2.ref) and
-            k1.as(Hash).hash() == 7}");
+            h.ref.finish() == 7}");
     let output = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }

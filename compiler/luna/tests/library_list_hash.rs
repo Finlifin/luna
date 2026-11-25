@@ -8,7 +8,7 @@ use comptime_interpretor::{Budget, ErrorKind, Interpreter, Value};
 fn compile(body: &str) -> Result<nir::program::Package, String> {
     support::compile_with_source_bindings(
         &format!(
-            "mod meta {{ {} }} use meta.{{List, ComptimeEq, ComptimeHash}}; use meta.builtin.{{Integer, u64}}; {body}",
+            "mod meta {{ {} }} use meta.{{List, ComptimeBuildHasher, ComptimeEq, ComptimeHash, ComptimeHasher, DefaultComptimeHasher}}; use meta.builtin.{{Integer, Type, u64}}; {body}",
             include!("support/meta_source.rs")
         ),
         &support::meta_fixture_protocols(),
@@ -19,31 +19,66 @@ fn compile(body: &str) -> Result<nir::program::Package, String> {
     )
 }
 
+fn fnv1a_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(14695981039346656037u64, |state, byte| {
+        (state ^ u64::from(*byte)).wrapping_mul(1099511628211)
+    })
+}
+
+fn push_list_u64_stream(out: &mut Vec<u8>, values: &[u64]) {
+    out.push(76u8);
+    out.push(0u8); // non-negative Integer sign byte
+    let mut n = values.len();
+    while n >= 256 {
+        out.push((n % 256) as u8);
+        n /= 256;
+    }
+    out.push(n as u8);
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
 fn list_digest(values: &[u64]) -> u64 {
-    std::iter::once(76u8)
-        .chain(values.iter().flat_map(|value| value.to_le_bytes()))
-        .fold(14695981039346656037, |state, byte| {
-            (state ^ u64::from(byte)).wrapping_mul(1099511628211)
-        })
+    let mut bytes = Vec::new();
+    push_list_u64_stream(&mut bytes, values);
+    fnv1a_bytes(&bytes)
+}
+
+fn nested_list_digest(lists: &[&[u64]]) -> u64 {
+    let mut bytes = Vec::new();
+    bytes.push(76u8);
+    bytes.push(0u8);
+    let mut n = lists.len();
+    while n >= 256 {
+        bytes.push((n % 256) as u8);
+        n /= 256;
+    }
+    bytes.push(n as u8);
+    for list in lists {
+        push_list_u64_stream(&mut bytes, list);
+    }
+    fnv1a_bytes(&bytes)
 }
 
 #[test]
 fn list_hashes_encode_complete_element_digests_in_order_without_target_data() {
     let package = compile(
-        "comptime fn empty()->u64 {let values:List<u64> = []; values.hash()}
-         comptime fn forward()->u64 {let values:List<u64> = [1,256,18446744073709551615]; values.hash()}
-         comptime fn reverse()->u64 {let values:List<u64> = [18446744073709551615,256,1]; values.hash()}
-         comptime fn nested()->u64 {let values:List<List<u64>> = [[],[1,256,18446744073709551615]]; values.hash()}
+        "comptime fn empty_list()->u64 {let values:List<u64> = []; DefaultComptimeHasher.new().hash_one(values)}
+         comptime fn forward()->u64 {let values:List<u64> = [1,256,18446744073709551615]; DefaultComptimeHasher.new().hash_one(values)}
+         comptime fn reverse()->u64 {let values:List<u64> = [18446744073709551615,256,1]; DefaultComptimeHasher.new().hash_one(values)}
+         comptime fn nested()->u64 {let values:List<List<u64>> = [[],[1,256,18446744073709551615]]; DefaultComptimeHasher.new().hash_one(values)}
          fn required()->bool {inline if nested()==nested() {true} else {false}}",
     ).unwrap();
     assert!(package.target.is_none());
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let forward = list_digest(&[1, 256, u64::MAX]);
+    let nested = nested_list_digest(&[&[], &[1, 256, u64::MAX]]);
     for (name, expected) in [
-        ("empty", list_digest(&[])),
+        ("empty_list", list_digest(&[])),
         ("forward", forward),
         ("reverse", list_digest(&[u64::MAX, 256, 1])),
-        ("nested", list_digest(&[list_digest(&[]), forward])),
+        ("nested", nested),
     ] {
         assert_eq!(
             vm.invoke(support::id(&package, name), vec![]).unwrap(),
@@ -61,21 +96,23 @@ fn custom_hashes_preserve_snapshots_and_propagate_failures() {
             comptime fn eq(self,other:Self)->bool {self.value.rem_euclid(10)==other.value.rem_euclid(10)}
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self)->u64 {
+            comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
                 let previous=self.value;
                 self.value=99;
                 let observed=1.div_trunc(if previous==99 {0} else {1});
-                if previous.rem_euclid(10)==2 and observed==1 {2} else {0}
+                let digest: u64 = if previous.rem_euclid(10)==2 and observed==1 {2} else {0};
+                digest.as(ComptimeHash).hash(state)
             }
         }
         comptime fn run()->bool {
             let a:List<Key> = [Key {value:12},Key {value:22}];
             let b:List<Key> = [Key {value:22},Key {value:12}];
             let words:List<u64> = [2,2];
-            a.eq(b) and a.hash()==b.hash() and a.hash()==words.hash()
+            let hasher = DefaultComptimeHasher.new();
+            a.eq(b) and hasher.hash_one(a)==hasher.hash_one(b) and hasher.hash_one(a)==hasher.hash_one(words)
                 and a[0].value==12 and a[1].value==22
         }
-        comptime fn fail()->u64 {let values:List<Key> = [Key {value:99}];values.hash()}",
+        comptime fn fail()->u64 {let values:List<Key> = [Key {value:99}]; DefaultComptimeHasher.new().hash_one(values)}",
     ).unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -99,7 +136,7 @@ fn equality_alone_does_not_supply_aggregate_hashing() {
     for domain in ["List<Key>", "?Key"] {
         let source = "struct Key {value:bool}
         comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {self.value==other.value}}
-        comptime fn bad(values:DOMAIN)->u64 {values.as(ComptimeHash).hash()}".replace("DOMAIN", domain);
+        comptime fn bad(values:DOMAIN)->u64 {DefaultComptimeHasher.new().hash_one(values)}".replace("DOMAIN", domain);
         let failure = compile(&source)
             .err()
             .expect("missing payload hash must reject the call");
@@ -114,9 +151,18 @@ fn equality_alone_does_not_supply_aggregate_hashing() {
 fn list_key_protocol_checks_equality_after_element_hash_collisions() {
     use comptime_executor::{Context, KeyProtocol};
     let package = compile(
-        "use meta.builtin.u128;
-         comptime fn low()->List<u128> {[1]}
-         comptime fn high()->List<u128> {[18446744073709551616]}",
+        "use meta.builtin.u8;
+         struct Collide { key: u8, tag: u8 }
+         comptime impl ComptimeEq for Collide {
+             comptime fn eq(self, other: Self) -> bool { self.key == other.key and self.tag == other.tag }
+         }
+         comptime impl ComptimeHash for Collide {
+             comptime fn hash(self, state: H) -> H where H: Type, requires H :- ComptimeHasher {
+                 self.key.as(ComptimeHash).hash(state)
+             }
+         }
+         comptime fn low()->List<Collide> {[Collide { key: 1, tag: 1 }]}
+         comptime fn high()->List<Collide> {[Collide { key: 1, tag: 2 }]}",
     )
     .unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -157,7 +203,16 @@ fn prepare_protocol(
         )
     });
     items.bind_source_traits(&package, &bindings).unwrap();
-    luna::comptime_keys::Protocol::prepare(package, &items, ty, Default::default()).unwrap()
+    luna::comptime_keys::Protocol::prepare(
+        package,
+        &items,
+        ty,
+        elaboration::ptc::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -209,7 +264,10 @@ fn key_methods_can_call_user_helpers_with_ordinary_type_inputs() {
             }
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self)->u64 {if passthrough(bool,self.value) {1} else {0}}
+            comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
+                let d: u64 = if passthrough(bool,self.value) {1} else {0};
+                d.as(ComptimeHash).hash(state)
+            }
         }
         comptime fn make(value:bool)->Key {Key {value:value}}",
     )
@@ -245,7 +303,7 @@ fn key_helpers_resolve_traits_after_binding_ordinary_type_inputs() {
         {left.as(ComptimeEq).eq(right)}
         comptime fn digest(comptime T:Type,value:T)->u64
         where requires T:-ComptimeHash
-        {value.as(ComptimeHash).hash()}
+        {DefaultComptimeHasher.new().hash_one(value)}
         struct Key {value:bool}
         comptime impl ComptimeEq for Key {
             comptime fn eq(self,other:Self)->bool {
@@ -253,9 +311,9 @@ fn key_helpers_resolve_traits_after_binding_ordinary_type_inputs() {
             }
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self)->u64 {
+            comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
                 let flag = digest(bool,self.value);
-                digest(u64,flag)
+                flag.as(ComptimeHash).hash(state)
             }
         }
         comptime fn make(value:bool)->Key {Key {value:value}}",
@@ -303,8 +361,9 @@ fn key_helpers_resolve_associated_values_after_binding_type_inputs() {
             }
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self)->u64 {
-                if self.value {code(bool)} else {code(u64)}
+            comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
+                let c = if self.value {code(bool)} else {code(u64)};
+                c.as(ComptimeHash).hash(state)
             }
         }
         comptime fn make(value:bool)->Key {Key {value:value}}",
@@ -336,25 +395,26 @@ fn key_helpers_resolve_associated_values_after_binding_type_inputs() {
 #[test]
 fn optional_hashes_encode_presence_and_complete_payload_digests() {
     let package = compile(
-        "comptime fn absent()->u64 {let v:?u64=null; v.hash()}
-         comptime fn present()->u64 {let v:?u64=18446744073709551615; v.hash()}
+        "comptime fn absent()->u64 {let v:?u64=null; DefaultComptimeHasher.new().hash_one(v)}
+         comptime fn present()->u64 {let v:?u64=18446744073709551615; DefaultComptimeHasher.new().hash_one(v)}
          comptime fn wrap(value:?u64)->??u64 {value}
-         comptime fn nested()->u64 {let inner:?u64=null; wrap(inner).hash()}
+         comptime fn nested()->u64 {let inner:?u64=null; DefaultComptimeHasher.new().hash_one(wrap(inner))}
          struct Key {value:Integer}
          comptime impl ComptimeHash for Key {
-             comptime fn hash(self)->u64 {
+             comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
                  let observed=1.div_trunc(if self.value==99 {0} else {1});
                  let before=self.value;
                  self.value=99;
-                 before.rem_euclid(10).hash()
+                 before.rem_euclid(10).as(ComptimeHash).hash(state)
              }
          }
          comptime fn snapshots()->bool {
              let a:?Key=Key {value:12}; let b:?Key=Key {value:22};
-             a.hash()==b.hash() and a.hash()==b.hash()
+             let h = DefaultComptimeHasher.new();
+             h.hash_one(a)==h.hash_one(b) and h.hash_one(a)==h.hash_one(b)
          }
-         comptime fn empty_key()->u64 {let a:?Key=null; a.hash()}
-         comptime fn fail()->u64 {let a:?Key=Key {value:99}; a.hash()}",
+         comptime fn empty_key()->u64 {let a:?Key=null; DefaultComptimeHasher.new().hash_one(a)}
+         comptime fn fail()->u64 {let a:?Key=Key {value:99}; DefaultComptimeHasher.new().hash_one(a)}",
     )
     .unwrap();
     let digest = |value: Option<u64>| {
@@ -364,11 +424,12 @@ fn optional_hashes_encode_presence_and_complete_payload_digests() {
                 (state ^ u64::from(byte)).wrapping_mul(1099511628211)
             })
     };
+    let nested_expected = fnv1a_bytes(&[1u8, 0u8]);
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for (name, expected) in [
         ("absent", digest(None)),
         ("present", digest(Some(u64::MAX))),
-        ("nested", digest(Some(digest(None)))),
+        ("nested", nested_expected),
         ("empty_key", digest(None)),
     ] {
         assert_eq!(
@@ -405,11 +466,11 @@ fn error_result_protocols_use_matching_payload_branches() {
             }
         }
         comptime impl ComptimeHash for Key {
-            comptime fn hash(self)->u64 {
+            comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {
                 let checked=1.div_trunc(if self.value==99 {0} else {1});
                 let before=self.value;
                 self.value=99;
-                before.rem_euclid(10).hash()
+                before.rem_euclid(10).as(ComptimeHash).hash(state)
             }
         }
         comptime fn run()->bool {
@@ -417,14 +478,15 @@ fn error_result_protocols_use_matching_payload_branches() {
             let e:!Key Key=error Key {value:12}; let f:!Key Key=error Key {value:22};
             let poison_ok:!Key Key=Key {value:99};
             let poison_error:!Key Key=error Key {value:99};
+            let h = DefaultComptimeHasher.new();
             a.eq(b) and e.eq(f) and a.ne(e) and e.ne(a)
                 and poison_ok.ne(poison_error) and poison_error.ne(poison_ok)
-                and a.hash()==b.hash() and e.hash()==f.hash()
-                and a.hash()==b.hash() and e.hash()==f.hash()
+                and h.hash_one(a)==h.hash_one(b) and h.hash_one(e)==h.hash_one(f)
+                and h.hash_one(a)==h.hash_one(b) and h.hash_one(e)==h.hash_one(f)
         }
-        comptime fn good()->u64 {let a:!u64 u64=7; a.hash()}
-        comptime fn bad()->u64 {let a:!u64 u64=error 7; a.hash()}
-        comptime fn fail()->u64 {let a:!Key Key=error Key {value:99}; a.hash()}",
+        comptime fn good()->u64 {let a:!u64 u64=7; DefaultComptimeHasher.new().hash_one(a)}
+        comptime fn bad()->u64 {let a:!u64 u64=error 7; DefaultComptimeHasher.new().hash_one(a)}
+        comptime fn fail()->u64 {let a:!Key Key=error Key {value:99}; DefaultComptimeHasher.new().hash_one(a)}",
     )
     .unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -460,7 +522,11 @@ fn error_protocols_require_both_payloads_to_supply_the_requested_interface() {
     for domain in ["!Key bool", "!bool Key"] {
         for (interface, method, result) in [
             ("ComptimeEq", "eq(value)", "bool"),
-            ("ComptimeHash", "hash()", "u64"),
+            (
+                "ComptimeHash",
+                "hash(DefaultComptimeHasher.new())",
+                "DefaultComptimeHasher",
+            ),
         ] {
             let source = format!(
                 "struct Key {{value:bool}} comptime fn bad(value:{domain})->{result} {{value.as({interface}).{method}}}"
@@ -482,7 +548,7 @@ fn key_invocation_clones_shared_payloads_without_charging_their_expanded_size() 
     let package = compile(
         "struct Key {values:List<bool>}
         comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {true}}
-        comptime impl ComptimeHash for Key {comptime fn hash(self)->u64 {0}}
+        comptime impl ComptimeHash for Key {comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {state}}
         comptime fn make()->Key {Key {values:[]}}",
     )
     .unwrap();
@@ -556,7 +622,7 @@ fn key_protocol_input_cloning_shares_text_without_granting_content_equality() {
         "use meta.builtin.str;
         struct Key {value:str}
         comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {self.value.eq(other.value)}}
-        comptime impl ComptimeHash for Key {comptime fn hash(self)->u64 {0}}
+        comptime impl ComptimeHash for Key {comptime fn hash(self, state: H)->H where H: Type, requires H :- ComptimeHasher {state}}
         comptime fn make()->Key {Key {value:\"\"}}",
     ).unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

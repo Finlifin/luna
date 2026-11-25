@@ -78,25 +78,34 @@ fn char_from_u32_and_try_from_work_at_runtime_and_comptime() {
 
         comptime fn check_comptime() -> bool {
             let a_ok = char.as(ComptimeTryFrom<u32>).try_from(65) match {
-                ch? => ch == 'A',
-                null => false,
+                ch! => ch == 'A',
+                error _ => false,
             };
             let han_code: u32 = 20013;
             let han_ok = han_code.as(ComptimeTryInto<char>).try_into() match {
-                ch? => ch == '中',
-                null => false,
+                ch! => ch == '中',
+                error _ => false,
             };
             let max_code: u32 = 1114111;
             let max_ok = max_code.as(ComptimeTryInto<char>).try_into() match {
-                ch? => ch == '\x{10ffff}',
-                null => false,
+                ch! => ch == '\x{10ffff}',
+                error _ => false,
             };
             let sur_low: u32 = 55296;
             let sur_high: u32 = 57343;
             let over: u32 = 1114112;
-            let sur_low_none = char.as(ComptimeTryFrom<u32>).try_from(sur_low).is_none();
-            let sur_high_none = sur_high.as(ComptimeTryInto<char>).try_into().is_none();
-            let over_none = over.as(ComptimeTryInto<char>).try_into().is_none();
+            let sur_low_none = char.as(ComptimeTryFrom<u32>).try_from(sur_low) match {
+                _! => false,
+                error err => err matches .OutOfRange,
+            };
+            let sur_high_none = sur_high.as(ComptimeTryInto<char>).try_into() match {
+                _! => false,
+                error err => err matches .OutOfRange,
+            };
+            let over_none = over.as(ComptimeTryInto<char>).try_into() match {
+                _! => false,
+                error err => err matches .OutOfRange,
+            };
             a_ok and han_ok and max_ok and sur_low_none and sur_high_none and over_none
         }
 
@@ -109,20 +118,26 @@ fn char_from_u32_and_try_from_work_at_runtime_and_comptime() {
             };
             let han_code: u32 = 20013;
             let han_ok = char.as(TryFrom<u32>).try_from(han_code) match {
-                ch? => ch == '中',
-                null => false,
+                ch! => ch == '中',
+                error _ => false,
             };
             let max_code: u32 = 1114111;
             let max_ok = max_code.as(TryInto<char>).try_into() match {
-                ch? => ch == '\x{10ffff}',
-                null => false,
+                ch! => ch == '\x{10ffff}',
+                error _ => false,
             };
             let sur_low: u32 = 55296;
             let sur_high: u32 = 57343;
             let over: u32 = 1114112;
             let sur_low_none = char.from_u32(sur_low).is_none();
-            let sur_high_none = char.as(TryFrom<u32>).try_from(sur_high).is_none();
-            let over_none = over.as(TryInto<char>).try_into().is_none();
+            let sur_high_none = char.as(TryFrom<u32>).try_from(sur_high) match {
+                _! => false,
+                error err => err matches .OutOfRange,
+            };
+            let over_none = over.as(TryInto<char>).try_into() match {
+                _! => false,
+                error err => err matches .OutOfRange,
+            };
             COMPTIME_CHAR_OK and a_ok and han_ok and max_ok
                 and sur_low_none and sur_high_none and over_none
         }
@@ -761,8 +776,11 @@ fn string_utf8_validation_mutation_search_and_protocols_work_natively() {
             let ord_gt = s.ref.as(Ord).cmp(s_less.ref) match { .greater => true, _ => false };
             let ord_eq = s.ref.as(Ord).cmp(s.ref) match { .equal => true, _ => false };
             let abc = String.from_str("abc")!;
-            let hash_ok = s.as(Hash).hash() == "Aé中😀".as(Hash).hash()
-                and abc.as(Hash).hash() == "abc".as(Hash).hash();
+            let rs = std.hash.RandomState.new();
+            let literal_utf8: str = "Aé中😀";
+            let literal_abc: str = "abc";
+            let hash_ok = rs.ref.hash_one(s.ref) == rs.ref.hash_one(literal_utf8.ref)
+                and rs.ref.hash_one(abc.ref) == rs.ref.hash_one(literal_abc.ref);
 
             eq_ok and ord_lt and ord_gt and ord_eq and hash_ok
         }

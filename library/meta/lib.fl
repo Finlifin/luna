@@ -46,11 +46,11 @@ pub use code_types.{
     ContextEntry,
     Substitution,
 }
-pub use conversions.{ComptimeDefault, ComptimeTryFrom, ComptimeTryInto}
+pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFrom, ComptimeTryInto}
 pub use enums.*;
 pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
-pub use hashing.ComptimeHash;
+pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
 pub use integer.*;
 pub use map.{Map, MapEntry}
 pub use newtypes.*;
@@ -118,6 +118,20 @@ pub mod patterns {
     }
 }
 
+pub mod hash {
+    pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
+}
+
+pub mod convert {
+    pub use conversions.{
+        ComptimeDefault,
+        ComptimeFrom,
+        ComptimeInto,
+        ComptimeTryFrom,
+        ComptimeTryInto,
+    };
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Map;
@@ -125,14 +139,14 @@ pub mod prelude {
     pub use .Object;
     pub use .Set;
     pub use ast_impl.{ComptimeSourceSpanOps, SourceSpanOps}
-    pub use conversions.{ComptimeDefault, ComptimeTryFrom, ComptimeTryInto}
+    pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
-    pub use hashing.ComptimeHash;
+    pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
     pub use ops_impl.{
-    ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
-    ComptimeSubAssign,
-};
+        ComptimeAddAssign, ComptimeDivAssign, ComptimeImplies, ComptimeMulAssign, ComptimeRemAssign,
+        ComptimeSubAssign,
+    };
     pub use optional.ComptimeOptionalOps;
     pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}

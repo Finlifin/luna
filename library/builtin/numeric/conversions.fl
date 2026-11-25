@@ -1,884 +1,1422 @@
 use bindings.*;
 use primitives.*;
-use protocols.conversion.{TryFrom, TryInto}
+use protocols.conversion.{ConversionErr, From, TryFrom}
 
--- Explicit checked machine-integer conversions.
-impl TryInto<Target> for Source where Source, Target :- TryFrom<Source> {
-    fn try_into(self) -> ?Target {
-        Target.as(TryFrom<Source>).try_from(self)
+-- Explicit infallible widening and checked machine-integer conversions.
+impl From<bool> for u8 {
+    fn from(source: bool) -> Self {
+        if source { 1 } else { 0 }
     }
 }
 
-impl TryFrom<u8> for u8 {
-    fn try_from(source: u8) -> ?Self {
-        source
+impl From<char> for u32 {
+    fn from(source: char) -> Self {
+        source'bitvec.as(u32)
     }
 }
 
 impl TryFrom<u16> for u8 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u16) -> !ConversionErr Self {
+        try_u16_to_u8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u32> for u8 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_u8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for u8 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_u8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for u8 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_u8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for u8 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_u8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for u8 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for u8 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for u8 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for u8 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for u8 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for u8 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_u8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_u8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for u16 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_u16(source)
-    }
-}
-
-impl TryFrom<u16> for u16 {
-    fn try_from(source: u16) -> ?Self {
-        source
+impl From<u8> for u16 {
+    fn from(source: u8) -> Self {
+        try_u8_to_u16(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u32> for u16 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_u16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for u16 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_u16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for u16 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_u16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for u16 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_u16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for u16 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for u16 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for u16 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for u16 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for u16 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for u16 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_u16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_u16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for u32 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_u32(source)
+impl From<u8> for u32 {
+    fn from(source: u8) -> Self {
+        try_u8_to_u32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for u32 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_u32(source)
-    }
-}
-
-impl TryFrom<u32> for u32 {
-    fn try_from(source: u32) -> ?Self {
-        source
+impl From<u16> for u32 {
+    fn from(source: u16) -> Self {
+        try_u16_to_u32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u64> for u32 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_u32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for u32 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_u32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for u32 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_u32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for u32 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for u32 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for u32 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for u32 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for u32 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for u32 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_u32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_u32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for u64 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_u64(source)
+impl From<u8> for u64 {
+    fn from(source: u8) -> Self {
+        try_u8_to_u64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for u64 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_u64(source)
+impl From<u16> for u64 {
+    fn from(source: u16) -> Self {
+        try_u16_to_u64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u32> for u64 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_u64(source)
-    }
-}
-
-impl TryFrom<u64> for u64 {
-    fn try_from(source: u64) -> ?Self {
-        source
+impl From<u32> for u64 {
+    fn from(source: u32) -> Self {
+        try_u32_to_u64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u128> for u64 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_u64(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for u64 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_u64(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for u64 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for u64 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for u64 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for u64 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for u64 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for u64 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_u64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_u64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for u128 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_u128(source)
+impl From<u8> for u128 {
+    fn from(source: u8) -> Self {
+        try_u8_to_u128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for u128 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_u128(source)
+impl From<u16> for u128 {
+    fn from(source: u16) -> Self {
+        try_u16_to_u128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u32> for u128 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_u128(source)
+impl From<u32> for u128 {
+    fn from(source: u32) -> Self {
+        try_u32_to_u128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u64> for u128 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_u128(source)
-    }
-}
-
-impl TryFrom<u128> for u128 {
-    fn try_from(source: u128) -> ?Self {
-        source
+impl From<u64> for u128 {
+    fn from(source: u64) -> Self {
+        try_u64_to_u128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<usize> for u128 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_u128(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for u128 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for u128 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for u128 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for u128 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for u128 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for u128 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_u128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_u128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<u8> for usize {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u8) -> !ConversionErr Self {
+        try_u8_to_usize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u16> for usize {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u16) -> !ConversionErr Self {
+        try_u16_to_usize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u32> for usize {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_usize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for usize {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_usize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for usize {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_usize(source)
-    }
-}
+    assoc Err: Type = ConversionErr;
 
-impl TryFrom<usize> for usize {
-    fn try_from(source: usize) -> ?Self {
-        source
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_usize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for usize {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for usize {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for usize {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for usize {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for usize {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for usize {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_usize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_usize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<u8> for i8 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u8) -> !ConversionErr Self {
+        try_u8_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u16> for i8 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u16) -> !ConversionErr Self {
+        try_u16_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u32> for i8 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for i8 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for i8 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for i8 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_i8(source)
-    }
-}
+    assoc Err: Type = ConversionErr;
 
-impl TryFrom<i8> for i8 {
-    fn try_from(source: i8) -> ?Self {
-        source
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_i8(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i16> for i8 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_i8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for i8 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_i8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for i8 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_i8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for i8 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_i8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for i8 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_i8(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_i8(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for i16 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_i16(source)
+impl From<u8> for i16 {
+    fn from(source: u8) -> Self {
+        try_u8_to_i16(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u16> for i16 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u16) -> !ConversionErr Self {
+        try_u16_to_i16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u32> for i16 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_i16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for i16 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_i16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for i16 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_i16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for i16 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_i16(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
-impl TryFrom<i8> for i16 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_i16(source)
-    }
-}
-
-impl TryFrom<i16> for i16 {
-    fn try_from(source: i16) -> ?Self {
-        source
+impl From<i8> for i16 {
+    fn from(source: i8) -> Self {
+        try_i8_to_i16(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<i32> for i16 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_i16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for i16 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_i16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for i16 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_i16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for i16 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_i16(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_i16(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for i32 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_i32(source)
+impl From<u8> for i32 {
+    fn from(source: u8) -> Self {
+        try_u8_to_i32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for i32 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_i32(source)
+impl From<u16> for i32 {
+    fn from(source: u16) -> Self {
+        try_u16_to_i32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u32> for i32 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_i32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for i32 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_i32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for i32 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_i32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for i32 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_i32(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
-impl TryFrom<i8> for i32 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_i32(source)
+impl From<i8> for i32 {
+    fn from(source: i8) -> Self {
+        try_i8_to_i32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i16> for i32 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_i32(source)
-    }
-}
-
-impl TryFrom<i32> for i32 {
-    fn try_from(source: i32) -> ?Self {
-        source
+impl From<i16> for i32 {
+    fn from(source: i16) -> Self {
+        try_i16_to_i32(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<i64> for i32 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_i32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for i32 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_i32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for i32 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_i32(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_i32(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for i64 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_i64(source)
+impl From<u8> for i64 {
+    fn from(source: u8) -> Self {
+        try_u8_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for i64 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_i64(source)
+impl From<u16> for i64 {
+    fn from(source: u16) -> Self {
+        try_u16_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u32> for i64 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_i64(source)
+impl From<u32> for i64 {
+    fn from(source: u32) -> Self {
+        try_u32_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u64> for i64 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_i64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_i64(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for i64 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_i64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_i64(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for i64 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_i64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_i64(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
-impl TryFrom<i8> for i64 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_i64(source)
+impl From<i8> for i64 {
+    fn from(source: i8) -> Self {
+        try_i8_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i16> for i64 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_i64(source)
+impl From<i16> for i64 {
+    fn from(source: i16) -> Self {
+        try_i16_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i32> for i64 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_i64(source)
-    }
-}
-
-impl TryFrom<i64> for i64 {
-    fn try_from(source: i64) -> ?Self {
-        source
+impl From<i32> for i64 {
+    fn from(source: i32) -> Self {
+        try_i32_to_i64(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<i128> for i64 {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_i64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_i64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<isize> for i64 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_i64(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_i64(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
-impl TryFrom<u8> for i128 {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_i128(source)
+impl From<u8> for i128 {
+    fn from(source: u8) -> Self {
+        try_u8_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u16> for i128 {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_i128(source)
+impl From<u16> for i128 {
+    fn from(source: u16) -> Self {
+        try_u16_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u32> for i128 {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_i128(source)
+impl From<u32> for i128 {
+    fn from(source: u32) -> Self {
+        try_u32_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<u64> for i128 {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_i128(source)
+impl From<u64> for i128 {
+    fn from(source: u64) -> Self {
+        try_u64_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<u128> for i128 {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_i128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_i128(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for i128 {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_i128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_i128(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
-impl TryFrom<i8> for i128 {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_i128(source)
+impl From<i8> for i128 {
+    fn from(source: i8) -> Self {
+        try_i8_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i16> for i128 {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_i128(source)
+impl From<i16> for i128 {
+    fn from(source: i16) -> Self {
+        try_i16_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i32> for i128 {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_i128(source)
+impl From<i32> for i128 {
+    fn from(source: i32) -> Self {
+        try_i32_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
-impl TryFrom<i64> for i128 {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_i128(source)
-    }
-}
-
-impl TryFrom<i128> for i128 {
-    fn try_from(source: i128) -> ?Self {
-        source
+impl From<i64> for i128 {
+    fn from(source: i64) -> Self {
+        try_i64_to_i128(source) match {
+            value? => value,
+            null => 0,
+        }
     }
 }
 
 impl TryFrom<isize> for i128 {
-    fn try_from(source: isize) -> ?Self {
-        try_isize_to_i128(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: isize) -> !ConversionErr Self {
+        try_isize_to_i128(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<u8> for isize {
-    fn try_from(source: u8) -> ?Self {
-        try_u8_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u8) -> !ConversionErr Self {
+        try_u8_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u16> for isize {
-    fn try_from(source: u16) -> ?Self {
-        try_u16_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u16) -> !ConversionErr Self {
+        try_u16_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u32> for isize {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u64> for isize {
-    fn try_from(source: u64) -> ?Self {
-        try_u64_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u64) -> !ConversionErr Self {
+        try_u64_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<u128> for isize {
-    fn try_from(source: u128) -> ?Self {
-        try_u128_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u128) -> !ConversionErr Self {
+        try_u128_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<usize> for isize {
-    fn try_from(source: usize) -> ?Self {
-        try_usize_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: usize) -> !ConversionErr Self {
+        try_usize_to_isize(source) match {
+            value? => value,
+            null => return error ConversionErr.Overflow,
+        }
     }
 }
 
 impl TryFrom<i8> for isize {
-    fn try_from(source: i8) -> ?Self {
-        try_i8_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i8) -> !ConversionErr Self {
+        try_i8_to_isize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i16> for isize {
-    fn try_from(source: i16) -> ?Self {
-        try_i16_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i16) -> !ConversionErr Self {
+        try_i16_to_isize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i32> for isize {
-    fn try_from(source: i32) -> ?Self {
-        try_i32_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i32) -> !ConversionErr Self {
+        try_i32_to_isize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i64> for isize {
-    fn try_from(source: i64) -> ?Self {
-        try_i64_to_isize(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: i64) -> !ConversionErr Self {
+        try_i64_to_isize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<i128> for isize {
-    fn try_from(source: i128) -> ?Self {
-        try_i128_to_isize(source)
-    }
-}
+    assoc Err: Type = ConversionErr;
 
-impl TryFrom<isize> for isize {
-    fn try_from(source: isize) -> ?Self {
-        source
+    fn try_from(source: i128) -> !ConversionErr Self {
+        try_i128_to_isize(source) match {
+            value? => value,
+            null => if source < 0 { return error ConversionErr.Underflow; } else { return error ConversionErr.Overflow; },
+        }
     }
 }
 
 impl TryFrom<u32> for char {
-    fn try_from(source: u32) -> ?Self {
-        try_u32_to_char(source)
+    assoc Err: Type = ConversionErr;
+
+    fn try_from(source: u32) -> !ConversionErr Self {
+        try_u32_to_char(source) match {
+            value? => value,
+            null => return error ConversionErr.OutOfRange,
+        }
     }
 }
-
 impl char {
     pub fn from_u32(code: u32) -> ?char {
         try_u32_to_char(code)

@@ -1,0 +1,321 @@
+use bindings.{
+    isize_representation as hash_isize_representation,
+    str_byte as hash_str_byte,
+    str_byte_length as hash_str_byte_length,
+    symbol_byte as hash_symbol_byte,
+    symbol_byte_length as hash_symbol_byte_length,
+    usize_representation as hash_usize_representation,
+}
+use mem_impl.raw.ptr_addr;
+use mem_impl.slice.Slice;
+use numeric.comparison.TotalFloat;
+use primitives.{
+    Symbol,
+    Type,
+    bool,
+    char,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    str,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    void,
+}
+use protocols.resources.Copy;
+
+-- ── Hasher ─────────────────────────────────────────────────────────────────
+
+pub trait Hasher {
+    fn finish(*self) -> u64;
+
+    fn write(*self, bytes: Slice<u8>) -> void;
+
+    fn write_u8(*self, value: u8) -> void {
+        let byte = value;
+        unsafe {
+            self.write(Slice<u8>.from_raw_parts(ptr_addr(byte.ref), 1));
+        }
+    }
+
+    fn write_u16(*self, value: u16) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+    }
+
+    fn write_u32(*self, value: u32) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+        self.write_u8(bits[16..24].as(u8));
+        self.write_u8(bits[24..32].as(u8));
+    }
+
+    fn write_u64(*self, value: u64) -> void {
+        let bits = value'bitvec;
+        self.write_u8(bits[0..8].as(u8));
+        self.write_u8(bits[8..16].as(u8));
+        self.write_u8(bits[16..24].as(u8));
+        self.write_u8(bits[24..32].as(u8));
+        self.write_u8(bits[32..40].as(u8));
+        self.write_u8(bits[40..48].as(u8));
+        self.write_u8(bits[48..56].as(u8));
+        self.write_u8(bits[56..64].as(u8));
+    }
+
+    fn write_u128(*self, value: u128) -> void {
+        let bits = value'bitvec;
+        self.write_u64(bits[0..64].as(u64));
+        self.write_u64(bits[64..128].as(u64));
+    }
+
+    fn write_usize(*self, value: usize) -> void {
+        let widened = hash_usize_representation(value);
+        if Type.size_of(usize) <= 4 {
+            self.write_u32(widened'bitvec[0..32].as(u32));
+        } else if Type.size_of(usize) <= 8 {
+            self.write_u64(widened'bitvec[0..64].as(u64));
+        } else {
+            self.write_u128(widened);
+        }
+    }
+
+    fn write_i8(*self, value: i8) -> void {
+        self.write_u8(value'bitvec.as(u8));
+    }
+
+    fn write_i16(*self, value: i16) -> void {
+        self.write_u16(value'bitvec.as(u16));
+    }
+
+    fn write_i32(*self, value: i32) -> void {
+        self.write_u32(value'bitvec.as(u32));
+    }
+
+    fn write_i64(*self, value: i64) -> void {
+        self.write_u64(value'bitvec.as(u64));
+    }
+
+    fn write_i128(*self, value: i128) -> void {
+        self.write_u128(value'bitvec.as(u128));
+    }
+
+    fn write_isize(*self, value: isize) -> void {
+        let widened = hash_isize_representation(value);
+        if Type.size_of(isize) <= 4 {
+            self.write_u32(widened'bitvec[0..32].as(u32));
+        } else if Type.size_of(isize) <= 8 {
+            self.write_u64(widened'bitvec[0..64].as(u64));
+        } else {
+            self.write_u128(widened);
+        }
+    }
+
+    fn write_length_prefix(*self, len: usize) -> void {
+        self.write_usize(len);
+    }
+
+    fn write_str(*self, value: str) -> void {
+        let length = hash_str_byte_length(value);
+        var index: u64 = 0;
+        while index < length {
+            let byte = hash_str_byte(value, index) match {
+                b? => b,
+                null => break,
+            }
+            self.write_u8(byte);
+            index = index + 1;
+        }
+        self.write_u8(255);
+    }
+}
+
+-- ── Hash ───────────────────────────────────────────────────────────────────
+
+pub trait Hash {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher;
+
+    fn hash_slice(data: Slice<Self>, state: *H) -> void
+    where
+        H: Type,
+        requires Self :- Copy,
+        requires H :- Hasher,
+    {
+        let len = data.len();
+        var i: usize = 0;
+        while i < len {
+            let elem = data.get(i) match {
+                v? => v,
+                null => break,
+            }
+            elem.ref.as(Hash).hash(state);
+            i = i + 1;
+        }
+    }
+}
+
+-- ── BuildHasher ────────────────────────────────────────────────────────────
+
+pub trait BuildHasher {
+    assoc HasherTy: Type;
+
+    fn build_hasher(*self) -> HasherTy
+    where
+        requires HasherTy :- Hasher;
+
+    fn hash_one(*self, value: *T) -> u64
+    where
+        T: Type,
+        requires T :- Hash,
+        requires HasherTy :- Hasher,
+    {
+        var hasher = self.build_hasher();
+        value.as(Hash).hash(hasher.ref);
+        hasher.as(Hasher).finish()
+    }
+}
+
+-- ── Primitive & Builtin Implementations ────────────────────────────────────
+
+impl Hash for bool {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u8(if self.* { 1 } else { 0 });
+    }
+}
+
+impl Hash for u8 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u8(self.*);
+    }
+}
+
+impl Hash for u16 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u16(self.*);
+    }
+}
+
+impl Hash for u32 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u32(self.*);
+    }
+}
+
+impl Hash for u64 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u64(self.*);
+    }
+}
+
+impl Hash for u128 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u128(self.*);
+    }
+}
+
+impl Hash for usize {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_usize(self.*);
+    }
+}
+
+impl Hash for i8 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_i8(self.*);
+    }
+}
+
+impl Hash for i16 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_i16(self.*);
+    }
+}
+
+impl Hash for i32 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_i32(self.*);
+    }
+}
+
+impl Hash for i64 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_i64(self.*);
+    }
+}
+
+impl Hash for i128 {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_i128(self.*);
+    }
+}
+
+impl Hash for isize {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_isize(self.*);
+    }
+}
+
+impl Hash for char {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u32(self.*'bitvec.as(u32));
+    }
+}
+
+impl Hash for TotalFloat<primitives.f16> {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u16(self.*.value'bitvec.as(u16));
+    }
+}
+
+impl Hash for TotalFloat<primitives.bf16> {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u16(self.*.value'bitvec.as(u16));
+    }
+}
+
+impl Hash for TotalFloat<primitives.f32> {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u32(self.*.value'bitvec.as(u32));
+    }
+}
+
+impl Hash for TotalFloat<primitives.f64> {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_u64(self.*.value'bitvec.as(u64));
+    }
+}
+
+impl Hash for str {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        state.as(Hasher).write_str(self.*);
+    }
+}
+
+{-
+    Symbol names have immutable storage independent of their local carrier.
+    Observe bytes directly and feed the same stream framing as `str`.
+-}
+impl Hash for Symbol {
+    fn hash(*self, state: *H) -> void where H: Type, requires H :- Hasher {
+        let name = self.*;
+        let length = hash_symbol_byte_length(name);
+        var index: u64 = 0;
+        while index < length {
+            let byte = hash_symbol_byte(name, index) match {
+                value? => value,
+                null => break,
+            }
+            state.as(Hasher).write_u8(byte);
+            index = index + 1;
+        }
+        state.as(Hasher).write_u8(255);
+    }
+}

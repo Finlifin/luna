@@ -4,9 +4,10 @@
   The prelude supplies default imports to other packages.
 -}
 use numeric.{comparison, conversions, literals, math_intrinsics}
+use mem_impl.{slice, slice_ops};
 use protocols.capabilities.{effects as capability_effects, errors as capability_errors}
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
-use protocols.{conversion, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
+use protocols.{conversion, hash as hash_protocol, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
 use types.{equality, hashing, option, ordering, result, tuple}
 
 pub use capability_effects.{HandleCapturingEffect, HandleEffect};
@@ -54,6 +55,7 @@ pub use patterns.{
 pub use primitives.*;
 pub use protocols.staging.{Splice, splice_auto};
 pub use result.ErrorResultOps;
+pub use slice.Slice;
 pub use text_impl.bytes.TextBytes;
 pub use traits.*;
 pub use tuple.Tuple;
@@ -63,8 +65,19 @@ pub mod compiler {
     pub use bindings.*;
 }
 
+pub mod hash {
+    pub use hash_protocol.{BuildHasher, Hash, Hasher};
+}
+
+pub mod convert {
+    pub use conversion.{AsMut, AsRef, ConversionErr, From, InfallibleErr, Into, LiteralInto, TryFrom, TryInto};
+    pub use traits.Default;
+}
+
 pub mod mem {
     pub use mem_impl.raw.*;
+    pub use slice.Slice;
+    pub use slice_ops.SliceBounds;
 }
 
 pub mod fmt {
@@ -120,6 +133,7 @@ pub use implicit_passing.{CallDescription, Context, ImplicitPassing};
     pub use primitives.*;
     pub use protocols.staging.{Splice, splice_auto};
     pub use result.ErrorResultOps;
+    pub use slice.Slice;
     pub use text_impl.bytes.TextBytes;
     pub use traits.*;
     pub use tuple.Tuple;
