@@ -6333,24 +6333,28 @@ impl Checker<'_, '_> {
                         "open closure contexts require environment-parameter elaboration not yet implemented",
                     ));
                 };
-                let mut names = std::collections::HashSet::new();
+                let mut names = BTreeSet::new();
                 let mut environment = Vec::new();
                 for binding in *bindings {
-                    if !names.insert(binding.name.name) {
+                    if !names.insert(binding.name.name.as_str().to_owned()) {
                         return Err(error(
                             binding.name.span,
                             "duplicate closure environment binding",
                         ));
                     }
-                    if binding.value.is_some() {
-                        return Err(error(
-                            binding.name.span,
-                            "closure environment sources require dependency/provenance checking not yet implemented",
-                        ));
-                    }
                     environment.push(self.type_expr(binding.ty)?);
                 }
                 let body = self.type_expr(body)?;
+                let comptime_body = body.is_comptime_callable();
+                for (binding, field_ty) in bindings.iter().zip(&environment) {
+                    if let Some(value) = binding.value {
+                        self.check_closure_environment_binding_value(
+                            value,
+                            Some(field_ty),
+                            comptime_body,
+                        )?;
+                    }
+                }
                 if environment.is_empty() {
                     return Ok(body);
                 }
@@ -9973,6 +9977,101 @@ fn strip_pure_callable_qualifier(ty: &Term) -> Option<Term> {
             environment: environment.clone(),
             signature: Box::new(signature),
         }),
+        Term::ContextualClosure { context, signature } => strip_pure_callable_qualifier(signature)
+            .map(|signature| Term::ContextualClosure {
+                context: context.clone(),
+                signature: Box::new(signature),
+            }),
         _ => None,
+    }
+}
+
+impl Checker<'_, '_> {
+    pub(in crate::program) fn check_closure_environment_binding_value(
+        &mut self,
+        value: &Expr<'_>,
+        expected_ty: Option<&Term>,
+        comptime_body: bool,
+    ) -> Result<(), Error> {
+        let captures = std::mem::take(&mut self.captures);
+        let locals = self.locals.clone();
+        let saved_control = std::mem::take(&mut self.control);
+        self.control.loops = saved_control.loops.clone();
+        let active_env_parameters = self.active_env_parameters.clone();
+        let local_runtime_deliveries = self.local_runtime_deliveries.clone();
+        let input_facts = self.input_facts.clone();
+        let immutable = self.immutable.clone();
+        let observing = std::mem::replace(&mut self.observing_type, true);
+        let checked = (|| {
+            let in_comptime_owner = self
+                .signature_owner
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| {
+                    matches!(
+                        &item.kind,
+                        ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
+                            if sig.modifiers.is_comptime
+                    )
+                });
+            if comptime_body
+                && !in_comptime_owner
+                && !self.in_required_comptime
+                && !self.in_staged_input
+            {
+                self.locals.clear();
+            }
+            if let Some(owner) = self.signature_owner
+                && let Some(item) = self.package.item(owner)
+                && let ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) =
+                    &item.kind
+            {
+                if let Some(domains) = self.signature_domains.get(&owner).cloned() {
+                    for (param, (sort, domain)) in sig.params.iter().zip(domains) {
+                        if comptime_body && sort == Sort::Runtime {
+                            continue;
+                        }
+                        if let Some(domain) = domain {
+                            let param_local = local(param.hir_id);
+                            if self.locals.get(&param_local).is_none() {
+                                self.locals.insert(param_local, domain);
+                            }
+                        }
+                    }
+                }
+                if !comptime_body
+                    && !sig.modifiers.is_comptime
+                    && !sig.modifiers.is_normal_form_head
+                    && let Some(type_params) = self.type_parameters.get(&owner).cloned()
+                    && let Ok(domains) = self.trait_domains(owner)
+                {
+                    for (decl_id, domain) in type_params.iter().zip(domains) {
+                        if let Term::Lift(inner) = domain
+                            && !self.active_env_parameters.contains_key(decl_id)
+                        {
+                            let inner_ty = self.callable_input_view(&inner, value.span)?;
+                            let binding = self.spread_binding(value.span)?;
+                            self.locals.insert(binding, inner_ty.clone());
+                            self.immutable.insert(binding);
+                            self.active_env_parameters
+                                .insert(*decl_id, (binding, inner_ty));
+                        }
+                    }
+                }
+            }
+            if comptime_body {
+                self.with_staged_input(true, |this| this.expr(value, expected_ty))
+            } else {
+                self.expr(value, expected_ty)
+            }
+        })();
+        self.observing_type = observing;
+        self.immutable = immutable;
+        self.input_facts = input_facts;
+        self.local_runtime_deliveries = local_runtime_deliveries;
+        self.active_env_parameters = active_env_parameters;
+        self.control = saved_control;
+        self.locals = locals;
+        self.captures = captures;
+        checked.map(|_| ())
     }
 }

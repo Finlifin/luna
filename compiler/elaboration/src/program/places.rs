@@ -25,7 +25,7 @@ impl Checker<'_, '_> {
     }
 
     /// Form aggregate loads; resource checking still requires Copy and live origins.
-    pub(super) fn copy_read_input(&self, ty: &Term) -> bool {
+    pub(super) fn copy_read_input(&self, ty: &Term, span: Span) -> bool {
         self.wrapped_read_input(ty)
             || self
                 .readable_storage_input(ty, &mut 10_000, 0, true, true)
@@ -40,7 +40,7 @@ impl Checker<'_, '_> {
                         interface,
                         interface_arguments: Vec::new(),
                     }),
-                    Span::default(),
+                    span,
                 )
                 .is_ok()
             })

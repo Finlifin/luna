@@ -57,7 +57,7 @@ impl Checker<'_, '_> {
             &self.data_consumers[&owner].checked_operands
         } else if let Some(definition) = self.pattern_generators.get(&owner) {
             if definition.checked_operands.is_none() {
-                self.check_pattern_generator(owner)?;
+                self.check_pattern_generator_at(owner, Some(callee.span))?;
             }
             &self.pattern_generators[&owner].checked_operands
         } else {

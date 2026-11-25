@@ -212,7 +212,10 @@ impl Checker<'_, '_> {
                 let mut fuel = before;
                 let free = nir::free_bindings::collect(&body, &mut fuel);
                 self.required_steps -= (before - fuel) as u64;
-                let frame = self.captures.last_mut().unwrap();
+                let frame = self
+                    .captures
+                    .last_mut()
+                    .ok_or_else(|| error(expr.span, "missing closure capture frame"))?;
                 for binding in free.map_err(|message| error(expr.span, message))? {
                     if let Some(ty) = self.ordinary_behavior_inputs.get(&binding)
                         && !frame.values.iter().any(|entry| entry.binding == binding)
@@ -245,17 +248,28 @@ impl Checker<'_, '_> {
                     }
                 }
             };
-            let mut captures = self.captures.last().unwrap().values.clone();
+            let mut captures = self
+                .captures
+                .last()
+                .ok_or_else(|| error(expr.span, "missing closure capture frame"))?
+                .values
+                .clone();
             let mut ty = build_closure_ty(&captures, &signature);
             // Any operational runtime dependency already carried by the closure
             // type stays out of semantic captures and is delivered operationally
             // at call sites. Dependencies absent from the closure type cannot
             // be known to callers and must be promoted to semantic captures.
             if !comptime {
-                let operational_runtime =
-                    std::mem::take(&mut self.captures.last_mut().unwrap().operational_runtime_envs);
-                let operational_rigid =
-                    std::mem::take(&mut self.captures.last_mut().unwrap().operational_rigid_envs);
+                let (operational_runtime, operational_rigid) = {
+                    let frame = self
+                        .captures
+                        .last_mut()
+                        .ok_or_else(|| error(expr.span, "missing closure capture frame"))?;
+                    (
+                        std::mem::take(&mut frame.operational_runtime_envs),
+                        std::mem::take(&mut frame.operational_rigid_envs),
+                    )
+                };
                 if !operational_runtime.is_empty() || !operational_rigid.is_empty() {
                     let runtime_deps = nominal_fields::metered(&mut self.required_steps, |fuel| {
                         nir::type_computations::runtime_dependencies_bounded(
@@ -332,7 +346,12 @@ impl Checker<'_, '_> {
                         }
                     }
                     if promoted {
-                        captures = self.captures.last().unwrap().values.clone();
+                        captures = self
+                            .captures
+                            .last()
+                            .ok_or_else(|| error(expr.span, "missing closure capture frame"))?
+                            .values
+                            .clone();
                         ty = build_closure_ty(&captures, &signature);
                     }
                 }
@@ -408,7 +427,12 @@ impl Checker<'_, '_> {
         } else {
             self.computation_body_with_input(body, result_type.as_ref(), result_context)?
         };
-        let returns = self.control.return_observations.as_ref().unwrap().clone();
+        let returns = self
+            .control
+            .return_observations
+            .as_ref()
+            .ok_or_else(|| error(span, "missing closure return observations"))?
+            .clone();
         let mut result = result_type.unwrap_or_else(|| {
             if !is_never(&body.ty) {
                 body.ty.clone()
@@ -538,10 +562,12 @@ impl Checker<'_, '_> {
         }) else {
             return self.check_closure_result(body, result, context, span);
         };
-        if self.in_code_body
-            || self.captures.last().unwrap().comptime
-            || !self.closure_needs_staging(body, ordinary)?
-        {
+        let frame_comptime = self
+            .captures
+            .last()
+            .ok_or_else(|| error(span, "missing closure capture frame"))?
+            .comptime;
+        if self.in_code_body || frame_comptime || !self.closure_needs_staging(body, ordinary)? {
             return self.check_closure_result(body, result, context, span);
         }
         if ordinary {
@@ -559,23 +585,31 @@ impl Checker<'_, '_> {
             CheckingDisposition::Probe,
         )?;
         let tactic = self.tactic_frame.clone();
-        self.captures.last_mut().unwrap().const_regions =
-            ClosureConstRegions::Describing(Default::default());
+        self.captures
+            .last_mut()
+            .ok_or_else(|| error(span, "missing closure capture frame"))?
+            .const_regions = ClosureConstRegions::Describing(Default::default());
         let checked = self
             .ordinary_closure_result(body, result, context, span)
             .and_then(|(witness, ty)| {
                 self.check_open_fragment(&witness, span, false)?;
-                let frame = self.captures.last_mut().unwrap();
+                let frame = self
+                    .captures
+                    .last_mut()
+                    .ok_or_else(|| error(span, "missing closure capture frame"))?;
                 let ClosureConstRegions::Describing(regions) =
                     std::mem::take(&mut frame.const_regions)
                 else {
-                    unreachable!()
+                    return Err(error(span, "missing closure const region description"));
                 };
                 Ok((regions, ty))
             });
         self.tactic_frame = tactic;
         let (regions, ty) = probe.finish_checked(self, checked)?;
-        self.captures.last_mut().unwrap().const_regions = ClosureConstRegions::Checked(regions);
+        self.captures
+            .last_mut()
+            .ok_or_else(|| error(span, "missing closure capture frame"))?
+            .const_regions = ClosureConstRegions::Checked(regions);
         self.check_closure_result(body, Some(ty), context, span)
     }
 }

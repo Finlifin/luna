@@ -738,7 +738,8 @@ impl Checker<'_, '_> {
                     || if self.protocols.copy.is_some() {
                         self.is_copy_type_for_pattern(&pointee)
                     } else {
-                        self.intrinsic_pointer_input(&pointee) || self.copy_read_input(&pointee)
+                        self.intrinsic_pointer_input(&pointee)
+                            || self.copy_read_input(&pointee, pattern.span)
                     };
                 if !allowed {
                     return Err(error(

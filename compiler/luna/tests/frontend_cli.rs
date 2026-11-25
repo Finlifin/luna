@@ -7978,12 +7978,12 @@ fn unsafe_hir_retains_nested_scopes_and_function_call_boundary() {
 #[test]
 fn callable_type_modifiers_survive_hir_without_erasing_admission() {
     let sandbox = Sandbox::new();
-    for (prefix, field) in [
-        ("unsafe", "unsafe"),
-        ("pure", "pure"),
-        ("inline", "inline"),
-        ("spec", "spec"),
-        ("verified", "verified"),
+    for (prefix, field, admitted) in [
+        ("unsafe", "unsafe", true),
+        ("pure", "pure", true),
+        ("inline", "inline", true),
+        ("spec", "spec", false),
+        ("verified", "verified", false),
     ] {
         sandbox.write(
             "input.fl",
@@ -7995,13 +7995,9 @@ fn callable_type_modifiers_survive_hir_without_erasing_admission() {
         assert!(hir.contains(&format!("({field} true)")), "{hir}");
         assert!(hir.contains("(comptime false)"), "{hir}");
         assert!(hir.contains("(ty-fn-arrow "), "{hir}");
-        assert_eq!(
-            hir.contains("function type modifiers"),
-            prefix != "unsafe",
-            "{hir}"
-        );
+        assert_eq!(hir.contains("function type modifiers"), !admitted, "{hir}");
         let output = sandbox.run(&["input.fl", "--emit", "nir"]);
-        if prefix == "unsafe" {
+        if admitted {
             success(&output);
         } else {
             failure(&output, 1);

@@ -8,7 +8,7 @@ use hir::{Block, Body, BodyId, Expr, HirId, ItemLocalId};
 const MAX_HIR_DEPTH: usize = 128;
 
 pub(super) struct ResolvedStrategyClauses<'h> {
-    pub bound: HashMap<DefId, &'h Expr<'h>>,
+    pub bound: BTreeMap<DefId, &'h Expr<'h>>,
     pub inferred: Vec<&'h ClauseParam<'h>>,
 }
 
@@ -40,14 +40,14 @@ pub(super) fn resolve_strategy_clauses<'h>(
             ));
         }
         return Ok(ResolvedStrategyClauses {
-            bound: HashMap::new(),
+            bound: BTreeMap::new(),
             inferred: Vec::new(),
         });
     }
 
     let mut strategy_defs = BTreeSet::new();
     let mut param_order = Vec::new();
-    let mut named_defs = HashMap::new();
+    let mut named_defs = BTreeMap::new();
     for parameter in generator.clause_params {
         charge(fuel, parameter.span)?;
         let def_id = parameter.definition.ok_or_else(|| {
@@ -57,12 +57,12 @@ pub(super) fn resolve_strategy_clauses<'h>(
             )
         })?;
         strategy_defs.insert(def_id);
-        named_defs.insert(parameter.name.name, def_id);
+        named_defs.insert(parameter.name.name.as_str().to_owned(), def_id);
         let is_optional = matches!(parameter.kind.unquoted(), K::Optional(..));
         param_order.push((def_id, parameter.name, is_optional));
     }
 
-    let mut bound: HashMap<DefId, &'h Expr<'h>> = HashMap::new();
+    let mut bound: BTreeMap<DefId, &'h Expr<'h>> = BTreeMap::new();
 
     // 1. Explicit strategy clause arguments: `strategy<...>`
     let mut positional_cursor = 0usize;
@@ -91,7 +91,7 @@ pub(super) fn resolve_strategy_clauses<'h>(
                 }
             }
             Arg::Named(ident, expr) => {
-                let Some(&def_id) = named_defs.get(&ident.name) else {
+                let Some(&def_id) = named_defs.get(ident.name.as_str()) else {
                     return Err(error(
                         ident.span,
                         format!("unknown strategy clause parameter `{}`", ident.name),
@@ -391,7 +391,7 @@ fn match_hir_expr<'h>(
     pattern: &'h Expr<'h>,
     actual: &'h Expr<'h>,
     strategy_defs: &BTreeSet<DefId>,
-    bound: &mut HashMap<DefId, &'h Expr<'h>>,
+    bound: &mut BTreeMap<DefId, &'h Expr<'h>>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), Error> {
@@ -553,14 +553,14 @@ pub(super) struct DraftSubst<'s, 'h> {
     arena: &'h HirArena,
     owner: OwnerId,
     next_local: u32,
-    temp_to_expr: &'s HashMap<DefId, &'h Expr<'h>>,
-    strategy_to_temp: &'s HashMap<DefId, DefId>,
-    request_mapping: &'s HashMap<DefId, DefId>,
+    temp_to_expr: &'s BTreeMap<DefId, &'h Expr<'h>>,
+    strategy_to_temp: &'s BTreeMap<DefId, DefId>,
+    request_mapping: &'s BTreeMap<DefId, DefId>,
     self_replacement: Option<&'h Expr<'h>>,
     owner_replacements: &'s BTreeMap<OwnerId, OwnerId>,
     resolution: Vec<(HirId, hir::definitions::ResolutionEvidence)>,
     bodies: Vec<(BodyId, Body<'h>)>,
-    body_map: HashMap<BodyId, Body<'h>>,
+    body_map: BTreeMap<HirId, Body<'h>>,
     fuel: usize,
 }
 
@@ -1328,7 +1328,7 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
     }
 
     fn rewrite_body_in_map(&mut self, id: BodyId, depth: usize) -> Result<(), Error> {
-        let Some(body) = self.body_map.remove(&id) else {
+        let Some(body) = self.body_map.remove(&id.hir_id) else {
             return Ok(());
         };
         let mut new_params = Vec::with_capacity(body.params.len());
@@ -1353,9 +1353,9 @@ pub(super) fn substitute_draft<'h>(
     source: &Package<'h>,
     arena: &'h HirArena,
     draft: &mut function_templates::ClonedMember<'h>,
-    temp_to_expr: &HashMap<DefId, &'h Expr<'h>>,
-    strategy_to_temp: &HashMap<DefId, DefId>,
-    request_mapping: &HashMap<DefId, DefId>,
+    temp_to_expr: &BTreeMap<DefId, &'h Expr<'h>>,
+    strategy_to_temp: &BTreeMap<DefId, DefId>,
+    request_mapping: &BTreeMap<DefId, DefId>,
     self_replacement: Option<&'h Expr<'h>>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
@@ -1373,7 +1373,11 @@ pub(super) fn substitute_draft<'h>(
         .checked_add(16)
         .ok_or_else(|| error(draft.item.span, "derivation HirId space exhausted"))?;
     let empty_owners = BTreeMap::new();
-    let original_bodies: HashMap<BodyId, Body<'h>> = draft.bodies.drain(..).collect();
+    let original_bodies: BTreeMap<HirId, Body<'h>> = draft
+        .bodies
+        .drain(..)
+        .map(|(id, body)| (id.hir_id, body))
+        .collect();
     let mut subst = DraftSubst {
         source,
         arena,
@@ -1436,7 +1440,7 @@ pub(super) fn substitute_draft<'h>(
             }
             _ => {}
         }
-        let remaining_ids: Vec<BodyId> = subst.body_map.keys().copied().collect();
+        let remaining_ids: Vec<BodyId> = subst.body_map.keys().copied().map(BodyId::new).collect();
         for body_id in remaining_ids {
             subst.rewrite_body_in_map(body_id, 0)?;
         }
@@ -1470,14 +1474,14 @@ pub(super) fn rewrite_body_item_owners<'h>(
         .map(|(id, _)| *id)
         .filter(|id| parent_owners.contains(&id.hir_id.owner))
         .collect();
-    let empty_exprs = HashMap::new();
-    let empty_defs = HashMap::new();
+    let empty_exprs = BTreeMap::new();
+    let empty_defs = BTreeMap::new();
     for body_id in body_ids {
         let Some(body) = candidate.body(body_id).cloned() else {
             continue;
         };
-        let mut body_map = HashMap::new();
-        body_map.insert(body_id, body);
+        let mut body_map = BTreeMap::new();
+        body_map.insert(body_id.hir_id, body);
         let mut subst = DraftSubst {
             source,
             arena,
@@ -1513,8 +1517,8 @@ pub(super) fn unused_strategy_check_draft<'h>(
     strategy: OwnerId,
     check_owner: OwnerId,
     self_def: DefId,
-    clause_defs: &HashMap<DefId, DefId>,
-    input_stages: &HashMap<HirId, DefId>,
+    clause_defs: &BTreeMap<DefId, DefId>,
+    input_stages: &BTreeMap<HirId, DefId>,
     body_info: &StrategyBody<'h>,
     fuel: &mut usize,
 ) -> Result<function_templates::ClonedMember<'h>, Error> {
@@ -1598,7 +1602,7 @@ pub(super) fn unused_strategy_check_draft<'h>(
     let next_local = max_local
         .checked_add(16)
         .ok_or_else(|| error(span, "unused strategy check HirId space exhausted"))?;
-    let empty_exprs = HashMap::new();
+    let empty_exprs = BTreeMap::new();
     let empty_owners = BTreeMap::new();
     let mut subst = DraftSubst {
         source,
@@ -1612,7 +1616,7 @@ pub(super) fn unused_strategy_check_draft<'h>(
         owner_replacements: &empty_owners,
         resolution: Vec::new(),
         bodies: Vec::new(),
-        body_map: HashMap::new(),
+        body_map: BTreeMap::new(),
         fuel: *fuel,
     };
     let mut cloned_clauses = Vec::with_capacity(generator.clause_params.len() + 1);
@@ -1671,8 +1675,8 @@ pub(super) fn unused_strategy_check_draft<'h>(
     Ok(draft)
 }
 
-fn empty_exprs_defs() -> HashMap<DefId, DefId> {
-    HashMap::new()
+fn empty_exprs_defs() -> BTreeMap<DefId, DefId> {
+    BTreeMap::new()
 }
 
 fn clone_source_clause_kind<'h>(
@@ -1704,13 +1708,13 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
     arena: &'h HirArena,
     request: &hir::item::DeriveRequest<'h>,
     strategy_constraints: &[ClauseConstraint<'h>],
-    temp_to_expr: &HashMap<DefId, &'h Expr<'h>>,
-    strategy_to_temp: &HashMap<DefId, DefId>,
+    temp_to_expr: &BTreeMap<DefId, &'h Expr<'h>>,
+    strategy_to_temp: &BTreeMap<DefId, DefId>,
     target_owner: OwnerId,
     target_identity: DefId,
     caller_owner: OwnerId,
-    target_clause_defs: &HashMap<DefId, DefId>,
-    caller_clause_defs: &HashMap<DefId, DefId>,
+    target_clause_defs: &BTreeMap<DefId, DefId>,
+    caller_clause_defs: &BTreeMap<DefId, DefId>,
     span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<
@@ -1722,8 +1726,8 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
 > {
     let has_quote = request.clause_params.iter().any(|cp| cp.kind.is_quote());
     let empty_owners = BTreeMap::new();
-    let empty_exprs = HashMap::new();
-    let empty_defs = HashMap::new();
+    let empty_exprs = BTreeMap::new();
+    let empty_defs = BTreeMap::new();
 
     // Helper 1: `fn $derive_req_target() where <req_clauses>, <strategy_reqs> {}`
     let mut target_subst = DraftSubst {
@@ -1738,7 +1742,7 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
         owner_replacements: &empty_owners,
         resolution: Vec::new(),
         bodies: Vec::new(),
-        body_map: HashMap::new(),
+        body_map: BTreeMap::new(),
         fuel: *fuel,
     };
     let mut target_clauses = Vec::with_capacity(request.clause_params.len());
@@ -1813,7 +1817,7 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
                 value: target_unit,
             },
         )],
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         nodes: target_nodes,
         attributes: Vec::new(),
         staged_parameters: Vec::new(),
@@ -1833,7 +1837,7 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
         owner_replacements: &empty_owners,
         resolution: Vec::new(),
         bodies: Vec::new(),
-        body_map: HashMap::new(),
+        body_map: BTreeMap::new(),
         fuel: *fuel,
     };
     let mut caller_clauses = Vec::with_capacity(request.clause_params.len());
@@ -1938,7 +1942,7 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
                 value: call_expr,
             },
         )],
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         nodes: caller_nodes,
         attributes: Vec::new(),
         staged_parameters: Vec::new(),

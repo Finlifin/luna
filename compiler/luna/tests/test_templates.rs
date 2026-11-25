@@ -2037,13 +2037,7 @@ fn template_collection_routing_rejects_ambiguity_before_invoking_inputs() {
 
 #[test]
 fn signature_templates_clone_modified_callable_interfaces_before_admission() {
-    for modifier in [
-        "pure",
-        "inline",
-        "spec",
-        "verified",
-        "pure comptime inline unsafe",
-    ] {
+    for modifier in ["spec", "verified"] {
         let source = format!(
             "template fn interface(callback:{modifier} fn(comptime T:.Type'builtin,value:T)->T)->bool;fn first use interface {{true}}fn second use interface {{false}}"
         );
@@ -2059,16 +2053,43 @@ fn signature_templates_clone_modified_callable_interfaces_before_admission() {
             "{error}"
         );
     }
-    let source = "template fn interface(callback:unsafe fn(comptime T:.Type'builtin,value:T)->T)->bool;fn first use interface {true}fn second use interface {false}";
-    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
-        unreachable!()
-    };
-    for name in ["first", "second"] {
-        let function = package.functions.iter().find(|f| f.name == name).unwrap();
-        let nir::Term::Function { parameters, .. } = &function.signature else {
+    let pure_unsafe_error = compile(
+        "template fn interface(callback:pure comptime inline unsafe fn(comptime T:.Type'builtin,value:T)->T)->bool;fn first use interface {true}fn second use interface {false}",
+        Emit::Nir,
+    )
+    .err()
+    .expect("pure unsafe callable type must remain rejected");
+    assert!(
+        pure_unsafe_error.contains("pure function type cannot be unsafe"),
+        "{pure_unsafe_error}"
+    );
+    for (modifier, check_fn) in [
+        (
+            "unsafe",
+            (|ty: &nir::Term| ty.is_unsafe_callable()) as fn(&nir::Term) -> bool,
+        ),
+        ("pure", |ty: &nir::Term| ty.is_pure_callable()),
+        ("inline", |ty: &nir::Term| {
+            matches!(ty, nir::Term::Function { .. })
+        }),
+    ] {
+        let source = format!(
+            "template fn interface(callback:{modifier} fn(comptime T:.Type'builtin,value:T)->T)->bool;fn first use interface {{true}}fn second use interface {{false}}"
+        );
+        let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
             unreachable!()
         };
-        assert!(parameters[0].ty.is_unsafe_callable());
+        for name in ["first", "second"] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let nir::Term::Function { parameters, .. } = &function.signature else {
+                unreachable!()
+            };
+            assert!(
+                check_fn(&parameters[0].ty),
+                "{modifier}: {}",
+                parameters[0].ty
+            );
+        }
     }
 }
 

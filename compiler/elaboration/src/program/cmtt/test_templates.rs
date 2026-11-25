@@ -130,7 +130,9 @@ impl Checker<'_, '_> {
         )>,
     ) -> Result<(n::Expr, nir::contracts::ProgramContract), Error> {
         let package = self.package;
-        let item = package.item(owner).unwrap();
+        let item = package
+            .item(owner)
+            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing test template item"))?;
         let ItemKind::Fn(signature, body) = &item.kind else {
             unreachable!()
         };
@@ -335,10 +337,7 @@ impl Checker<'_, '_> {
                 }
                 let hir::common::Arg::Named(name, value) = argument else {
                     return Err(error(
-                        self.package
-                            .item(self.signature_owner.unwrap())
-                            .unwrap()
-                            .span,
+                        signature.span,
                         "test template inputs require named optional arguments; the anchored input is supplied by the test body",
                     ));
                 };
@@ -368,6 +367,9 @@ impl Checker<'_, '_> {
                 }
             }
         }
+        let signature_owner = self
+            .signature_owner
+            .ok_or_else(|| error(signature.span, "missing test template owner"))?;
         let saved_forbidden = self.forbidden_default_inputs.clone();
         let saved_required = std::mem::replace(&mut self.in_required_comptime, true);
         let result = (|| {
@@ -388,7 +390,9 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 if let hir::ClauseParamKind::Varadic(_, annotation) = clause.kind {
-                    let definition = clause.definition.unwrap();
+                    let definition = clause
+                        .definition
+                        .ok_or_else(|| error(clause.span, "missing template clause identity"))?;
                     let id = DeclarationId {
                         package: semantic_package(&self.package_identities, definition.pkg),
                         local: definition.index,
@@ -423,10 +427,10 @@ impl Checker<'_, '_> {
                         .insert(id, (binding, domain.clone()));
                     self.generator_data.insert(binding, value);
                     self.forbidden_default_inputs.remove(&id);
-                    self.record_clause_input(self.signature_owner.unwrap(), id, binding, domain);
+                    self.record_clause_input(signature_owner, id, binding, domain);
                     if abstract_inputs {
                         self.ready_signature_capabilities_with_clauses(
-                            self.signature_owner.unwrap(),
+                            signature_owner,
                             &mut pending_capabilities,
                             false,
                             true,
@@ -440,7 +444,9 @@ impl Checker<'_, '_> {
                         "test template variadic clause inputs are not yet implemented",
                     ));
                 };
-                let definition = clause.definition.unwrap();
+                let definition = clause
+                    .definition
+                    .ok_or_else(|| error(clause.span, "missing template clause identity"))?;
                 let id = DeclarationId {
                     package: semantic_package(&self.package_identities, definition.pkg),
                     local: definition.index,
@@ -489,12 +495,12 @@ impl Checker<'_, '_> {
                 }
                 self.signature_owner = saved_owner;
                 self.forbidden_default_inputs.remove(&id);
-                self.record_clause_input(self.signature_owner.unwrap(), id, binding, domain);
+                self.record_clause_input(signature_owner, id, binding, domain);
                 if abstract_inputs {
                     // Only the completed prefix may authorize the next
                     // default. A later clause must remain unavailable.
                     self.ready_signature_capabilities_with_clauses(
-                        self.signature_owner.unwrap(),
+                        signature_owner,
                         &mut pending_capabilities,
                         false,
                         true,
@@ -652,6 +658,9 @@ impl Checker<'_, '_> {
         // Publish only positive conjunctive trait atoms, using the same
         // readiness/retry protocol as ordinary signatures. Concrete instances
         // must select actual implementations instead of acquiring assumptions.
+        let signature_owner = self
+            .signature_owner
+            .ok_or_else(|| error(signature.span, "missing test template owner"))?;
         if abstract_inputs {
             let mut pending = Vec::new();
             for clause in signature.clause_constraints {
@@ -659,7 +668,7 @@ impl Checker<'_, '_> {
                     super::super::required::signature_capability_atoms(value, &mut pending, 0)?;
                 }
             }
-            self.ready_signature_capabilities(self.signature_owner.unwrap(), &mut pending, true)?;
+            self.ready_signature_capabilities(signature_owner, &mut pending, true)?;
         }
         let mut contract = nir::contracts::ProgramContract::default();
         let mut postconditions = Vec::new();
@@ -698,7 +707,7 @@ impl Checker<'_, '_> {
             contract.preconditions.push(predicate);
         }
         let (predicates, snapshots) =
-            self.program_postcondition_values(self.signature_owner.unwrap(), None, postconditions)?;
+            self.program_postcondition_values(signature_owner, None, postconditions)?;
         contract.postconditions = predicates;
         contract.entry_snapshots = snapshots;
         Ok(contract)

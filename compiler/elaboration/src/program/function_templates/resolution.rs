@@ -6,16 +6,18 @@ use std::sync::Arc;
 type Candidates = Arc<[(hir::common::DefId, hir::common::DefId)]>;
 
 impl Rebind<'_, '_> {
-    fn candidates(&mut self, source: Option<&Candidates>) -> Result<Option<Candidates>, Error> {
+    fn candidates(
+        &mut self,
+        source: Option<&Candidates>,
+        span: rustc_span::Span,
+    ) -> Result<Option<Candidates>, Error> {
         let Some(source) = source else {
             return Ok(None);
         };
-        self.budget = self.budget.checked_sub(source.len()).ok_or_else(|| {
-            error(
-                rustc_span::DUMMY_SP,
-                "generated member resolution budget exhausted",
-            )
-        })?;
+        self.budget = self
+            .budget
+            .checked_sub(source.len())
+            .ok_or_else(|| error(span, "generated member resolution budget exhausted"))?;
         if self.definitions.is_empty() {
             return Ok(Some(source.clone()));
         }
@@ -35,16 +37,14 @@ impl Rebind<'_, '_> {
         ))
     }
 
-    pub(super) fn resolution(&mut self) -> Result<Vec<(HirId, ResolutionEvidence)>, Error> {
+    pub(super) fn resolution(
+        &mut self,
+        span: rustc_span::Span,
+    ) -> Result<Vec<(HirId, ResolutionEvidence)>, Error> {
         self.budget = self
             .budget
             .checked_sub(self.bindings.len())
-            .ok_or_else(|| {
-                error(
-                    rustc_span::DUMMY_SP,
-                    "generated member resolution budget exhausted",
-                )
-            })?;
+            .ok_or_else(|| error(span, "generated member resolution budget exhausted"))?;
         let mut bindings: Vec<_> = self.bindings.iter().map(|(a, b)| (*a, *b)).collect();
         bindings.sort_by_key(|(old, _)| (old.owner, old.local_id));
         let mut evidence = Vec::new();
@@ -54,8 +54,9 @@ impl Rebind<'_, '_> {
                 .member_projections
                 .get(&old)
                 .map(|id| self.definitions.get(id).copied().unwrap_or(*id));
-            let deferred = self.candidates(self.source.deferred_member_projections.get(&old))?;
-            let access = self.candidates(self.source.member_access.get(&old))?;
+            let deferred =
+                self.candidates(self.source.deferred_member_projections.get(&old), span)?;
+            let access = self.candidates(self.source.member_access.get(&old), span)?;
             let trait_sources = self
                 .source
                 .trait_sources
@@ -63,7 +64,7 @@ impl Rebind<'_, '_> {
                 .map(|source| {
                     source
                         .charge(&mut self.budget)
-                        .map_err(|message| error(rustc_span::DUMMY_SP, message))?;
+                        .map_err(|message| error(span, message))?;
                     if !source.names.iter().any(|name| {
                         matches!(name.fallback,
                     Ok(Some(id)) if self.definitions.contains_key(&id))

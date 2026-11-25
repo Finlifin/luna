@@ -5,8 +5,8 @@ use hir::common::DefId;
 
 #[derive(Default)]
 pub(super) struct Locals<'h> {
-    owners: HashMap<OwnerId, OwnerId>,
-    parents: HashMap<OwnerId, OwnerId>,
+    owners: BTreeMap<OwnerId, OwnerId>,
+    parents: BTreeMap<OwnerId, OwnerId>,
     completed: BTreeSet<OwnerId>,
     items: Vec<(OwnerId, DefId, hir::OwnerInfo<'h>)>,
     attributes: Vec<hir::DeferredDefinitionAttribute<'h>>,
@@ -39,7 +39,7 @@ impl<'h> Rebind<'_, 'h> {
         for entries in children.values_mut() {
             entries.sort();
         }
-        let mut staged: HashMap<OwnerId, Vec<DefId>> = HashMap::new();
+        let mut staged: BTreeMap<OwnerId, Vec<DefId>> = BTreeMap::new();
         for (&parameter, &identity) in &self.source.staged_parameter_definitions {
             self.charge(template.span, 0)?;
             staged.entry(parameter.owner).or_default().push(identity);
@@ -93,12 +93,13 @@ impl<'h> Rebind<'_, 'h> {
     pub(super) fn local_definition(
         &mut self,
         old: OwnerId,
+        span: rustc_span::Span,
         depth: usize,
     ) -> Result<OwnerId, Error> {
         let item = self
             .source
             .item(old)
-            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing template local definition"))?;
+            .ok_or_else(|| error(span, "missing template local definition"))?;
         self.charge(item.span, depth)?;
         let new = self.locals.owners.get(&old).copied().ok_or_else(|| {
             error(

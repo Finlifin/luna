@@ -4,7 +4,7 @@ use function_templates::ClonedMember;
 
 pub(super) fn retain_used<'h>(
     drafts: &mut [(ClonedMember<'h>, DefId)],
-    slots: &HashMap<DefId, usize>,
+    slots: &BTreeMap<DefId, usize>,
     arena: &'h HirArena,
     span: rustc_span::Span,
     fuel: &mut usize,
@@ -12,7 +12,7 @@ pub(super) fn retain_used<'h>(
     *fuel = fuel
         .checked_sub(drafts.len().saturating_add(slots.len()))
         .ok_or_else(|| error(span, "generation capture analysis budget exhausted"))?;
-    let indices: HashMap<_, _> = drafts
+    let indices: BTreeMap<_, _> = drafts
         .iter()
         .enumerate()
         .map(|(index, (_, identity))| (*identity, index))

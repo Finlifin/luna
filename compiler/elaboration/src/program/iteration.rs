@@ -366,8 +366,15 @@ impl Checker<'_, '_> {
         checked
     }
 
+    fn protocol_span(&self, id: DeclarationId) -> Span {
+        self.source_declarations
+            .owner(id)
+            .and_then(|owner| self.package.item(owner))
+            .map_or(rustc_span::DUMMY_SP, |item| item.span)
+    }
+
     pub(super) fn validate_iterator_protocol(&self, id: DeclarationId) -> Result<(), Error> {
-        let span = rustc_span::DUMMY_SP;
+        let span = self.protocol_span(id);
         let fail = |message: &str| error(span, message);
         let mut candidates = self
             .checked_traits
@@ -479,8 +486,9 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
     pub(super) fn validate_into_iterator_protocol(&self, id: DeclarationId) -> Result<(), Error> {
-        let span = rustc_span::DUMMY_SP;
+        let span = self.protocol_span(id);
         let fail = |message: &str| error(span, message);
         let mut candidates = self
             .checked_traits

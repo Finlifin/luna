@@ -4,7 +4,7 @@ use super::{Error, error};
 use hir::clause::ClauseConstraintKind as C;
 use hir::common::{Arg, TyParam, TyParamKind as T};
 use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 impl super::Checker<'_, '_> {
     pub(super) fn check_template_parameter_annotation(
@@ -242,7 +242,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 .map(|input| (input.formal, input.binding))
                 .collect(),
             member_owner: None,
-            captures: HashMap::new(),
+            captures: BTreeMap::new(),
             capture_uses: BTreeSet::new(),
             self_type: None,
             locals: Default::default(),
@@ -387,7 +387,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                     .insert(new_arm_id, new_import_expr);
             }
         }
-        for (id, evidence) in rebind.resolution()? {
+        for (id, evidence) in rebind.resolution(item.span)? {
             if let Some(plan) = evidence.trait_sources {
                 package.trait_sources.insert(id, plan);
             }
@@ -486,12 +486,12 @@ struct Rebind<'s, 'h> {
     source: &'s Package<'h>,
     arena: &'h HirArena,
     namespace: OwnerId,
-    bindings: HashMap<HirId, HirId>,
+    bindings: BTreeMap<HirId, HirId>,
     budget: usize,
     bodies: Vec<(hir::BodyId, hir::body::Body<'h>)>,
-    definitions: HashMap<hir::common::DefId, hir::common::DefId>,
+    definitions: BTreeMap<hir::common::DefId, hir::common::DefId>,
     member_owner: Option<OwnerId>,
-    captures: HashMap<HirId, InputCapture>,
+    captures: BTreeMap<HirId, InputCapture>,
     capture_uses: BTreeSet<hir::common::DefId>,
     self_type: Option<&'h Expr<'h>>,
     locals: local_definitions::Locals<'h>,
@@ -676,7 +676,7 @@ impl<'h> Rebind<'_, 'h> {
             }
         }
         let kind = match &expr.kind {
-            E::Item(owner) => E::Item(self.local_definition(*owner, depth)?),
+            E::Item(owner) => E::Item(self.local_definition(*owner, expr.span, depth)?),
             // These are completed Type values, not source binders. Preserve
             // semantic identities and let ordinary destination admission check
             // closure, formation contracts and declaration availability again.
@@ -1047,8 +1047,8 @@ pub(super) fn implementation_draft<'h>(
     request: &hir::item::DeriveRequest<'h>,
     strategy_trait: &'h Expr<'h>,
     members: Vec<OwnerId>,
-    definitions: &HashMap<hir::common::DefId, hir::common::DefId>,
-    captures: &HashMap<HirId, InputCapture>,
+    definitions: &BTreeMap<hir::common::DefId, hir::common::DefId>,
+    captures: &BTreeMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     *fuel = fuel
@@ -1063,7 +1063,7 @@ pub(super) fn implementation_draft<'h>(
         source,
         arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
         definitions: definitions.clone(),
@@ -1079,8 +1079,13 @@ pub(super) fn implementation_draft<'h>(
         let self_ty = rebind.expr(request.self_ty, 0)?;
         let trait_ref = rebind.expr(request.trait_ref, 0)?;
         let generation_trait = rebind.expr(strategy_trait, 0)?;
-        let resolution = rebind.resolution()?;
-        let original = source.item(request_owner).unwrap();
+        let resolution = rebind.resolution(request.self_ty.span)?;
+        let original = source.item(request_owner).ok_or_else(|| {
+            error(
+                request.self_ty.span,
+                "missing generated derive request source item",
+            )
+        })?;
         let item = hir::Item {
             owner_id: owner,
             ident: original.ident,

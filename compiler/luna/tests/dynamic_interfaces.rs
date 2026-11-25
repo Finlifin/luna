@@ -543,8 +543,8 @@ fn dynamic_interface_rejections_enforce_encapsulation_and_lifetimes() {
     "#;
     assert_rejected(comptime_trait_dyn, "pure comptime trait dyn Trait");
 
-    // 7. Closure env binding provenance `%{ s: *Scale = s1.ref }` is rejected without dropping identity.
-    let unverified_closure_env_source = r#"
+    // 7. Invalid closure env binding source type or dangling local pointer in `%{ _0: *Scale = ... }` is rejected.
+    let invalid_closure_env_source_type = r#"
         trait Reading {
             fn read(*self) -> i64;
         }
@@ -567,7 +567,7 @@ fn dynamic_interface_rejections_enforce_encapsulation_and_lifetimes() {
             }
         }
 
-        fn relay(sensor: Calibrated<scale>) -> %{ _0: *Scale = scale } dyn Reading
+        fn relay(sensor: Calibrated<scale>, bad: bool) -> %{ _0: *Scale = bad } dyn Reading
         where quote scale: lift *Scale
         {
             sensor.dyn(Reading)
@@ -575,13 +575,50 @@ fn dynamic_interface_rejections_enforce_encapsulation_and_lifetimes() {
 
         fn run() -> i64 {
             var s = Scale { factor: 2 };
-            relay(Calibrated<s.ref> { raw: 5 }).read()
+            relay(Calibrated<s.ref> { raw: 5 }, false).read()
         }
     "#;
     assert_rejected_with(
-        unverified_closure_env_source,
-        "closure env binding source value requires provenance checking",
-        &["closure environment sources"],
+        invalid_closure_env_source_type,
+        "closure env binding source with mismatched type",
+        &["type mismatch"],
+    );
+
+    let dangling_closure_env_source = r#"
+        trait Reading {
+            fn read(*self) -> i64;
+        }
+
+        struct Scale {
+            factor: i64,
+        }
+
+        struct Calibrated
+        where quote scale: lift *Scale
+        {
+            raw: i64,
+        }
+
+        impl Reading for Calibrated<scale>
+        where quote scale: lift *Scale
+        {
+            fn read(*self) -> i64 {
+                self.raw.* * scale.factor.*
+            }
+        }
+
+        fn escape_env() -> %{ _0: *Scale = local.ref } dyn Reading {
+            var local = Scale { factor: 2 };
+            Calibrated<local.ref> { raw: 5 }.dyn(Reading)
+        }
+
+        fn run() -> i64 {
+            escape_env().read()
+        }
+    "#;
+    assert_rejected(
+        dangling_closure_env_source,
+        "dangling local pointer inside explicit closure env binding source",
     );
 
     // 8. Dangling `Self` return escaping a local pointer captured inside `dyn Duplicate`.

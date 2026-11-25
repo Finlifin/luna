@@ -8,8 +8,8 @@ pub(in crate::program) fn relocate<'h>(
     strategy: OwnerId,
     shell: &mut ClonedMember<'h>,
     members: &mut [(ClonedMember<'h>, DefId)],
-    definitions: &HashMap<DefId, DefId>,
-    captures: &HashMap<HirId, InputCapture>,
+    definitions: &BTreeMap<DefId, DefId>,
+    captures: &BTreeMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
     *fuel = fuel
@@ -46,7 +46,7 @@ pub(in crate::program) fn relocate<'h>(
                 }
             }
         }
-        rebind.resolution()
+        rebind.resolution(shell.item.span)
     })();
     *fuel = rebind.budget;
     shell.bindings = rebind.bindings;

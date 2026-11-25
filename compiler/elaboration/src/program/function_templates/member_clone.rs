@@ -1,6 +1,7 @@
 //! Rebind a method or associated member draft before installing it into a generated implementation.
 use super::*;
 use hir::common::DefId;
+
 mod attributes;
 mod clauses;
 
@@ -11,7 +12,7 @@ pub(in crate::program) struct ClonedMember<'h> {
     pub capture_uses: BTreeSet<DefId>,
     pub item: hir::Item<'h>,
     pub bodies: Vec<(hir::BodyId, hir::Body<'h>)>,
-    pub bindings: HashMap<HirId, HirId>,
+    pub bindings: BTreeMap<HirId, HirId>,
     pub nodes: hir::OwnerNodes<'h>,
     pub attributes: Vec<hir::DeferredDefinitionAttribute<'h>>,
     pub staged_parameters: Vec<(HirId, DefId)>,
@@ -24,7 +25,7 @@ pub(in crate::program) fn clone_member<'h>(
     arena: &'h HirArena,
     member: OwnerId,
     owner: OwnerId,
-    definitions: &HashMap<DefId, DefId>,
+    definitions: &BTreeMap<DefId, DefId>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     clone_member_with_inputs(
@@ -33,7 +34,8 @@ pub(in crate::program) fn clone_member<'h>(
         member,
         owner,
         definitions,
-        &HashMap::new(),
+        &BTreeMap::new(),
+        rustc_span::DUMMY_SP,
         fuel,
     )
 }
@@ -43,13 +45,14 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
     arena: &'h HirArena,
     member: OwnerId,
     owner: OwnerId,
-    definitions: &HashMap<DefId, DefId>,
-    captures: &HashMap<HirId, InputCapture>,
+    definitions: &BTreeMap<DefId, DefId>,
+    captures: &BTreeMap<HirId, InputCapture>,
+    span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     let item = source
         .item(member)
-        .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing generated member source"))?;
+        .ok_or_else(|| error(span, "missing generated member source"))?;
     if owner == member || source.owner(owner).is_some() {
         return Err(error(
             item.span,
@@ -81,7 +84,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
         source,
         arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
         definitions: definitions.clone(),
@@ -157,7 +160,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
             _ => unreachable!(),
         };
         let attributes = rebind.attributes(member)?;
-        let resolution = rebind.resolution()?;
+        let resolution = rebind.resolution(item.span)?;
         let mut nodes = hir::OwnerNodes::new();
         for parameter in parameters {
             let parameter = arena.alloc_param(hir::body::BodyParam::from_fn_param(parameter));

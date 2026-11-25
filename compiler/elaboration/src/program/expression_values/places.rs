@@ -152,7 +152,7 @@ impl Checker<'_, '_> {
                 let Term::Pointer(ty) = &pointer.ty else {
                     return Err(error(expr.span, "dereference requires a pointer"));
                 };
-                if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty) {
+                if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty, expr.span) {
                     return Err(error(
                         expr.span,
                         "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
@@ -168,7 +168,7 @@ impl Checker<'_, '_> {
                     let Term::Pointer(ty) = &pointer.ty else {
                         return Err(error(target.span, "pointer assignment requires a pointer"));
                     };
-                    if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty) {
+                    if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty, expr.span) {
                         return Err(error(
                             target.span,
                             "non-Copy pointer writes require memory transfer contracts",

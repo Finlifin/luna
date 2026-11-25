@@ -3,7 +3,7 @@ use super::{Error, error, function_templates};
 use hir::common::DefId;
 use hir::definitions::DefinitionBatch;
 use hir::{ExprKind as E, HirArena, ItemKind, OwnerId, OwnerInfo, OwnerNode, Package};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod bindings;
 mod captures;
@@ -299,7 +299,7 @@ pub(super) fn expand<'h>(
         let impl_identity = batch
             .reserve_identity(pkg, fuel)
             .map_err(|e| error(span, e.to_string()))?;
-        let mut mapping = HashMap::<DefId, DefId>::new();
+        let mut mapping = BTreeMap::<DefId, DefId>::new();
         mapping.insert(source.owner_definition(strategy).unwrap(), impl_identity);
         for parameter in request.clause_params {
             charge(fuel, parameter.span)?;
@@ -311,9 +311,9 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(parameter.span, e.to_string()))?;
             mapping.insert(old, new);
         }
-        let mut strategy_to_temp = HashMap::<DefId, DefId>::new();
-        let mut temp_to_expr = HashMap::<DefId, &'h hir::Expr<'h>>::new();
-        let mut inferred_clause_defs = HashMap::<DefId, DefId>::new();
+        let mut strategy_to_temp = BTreeMap::<DefId, DefId>::new();
+        let mut temp_to_expr = BTreeMap::<DefId, &'h hir::Expr<'h>>::new();
+        let mut inferred_clause_defs = BTreeMap::<DefId, DefId>::new();
         let mut extra_strategy_constraints = Vec::new();
         let mut extra_strategy_computations = Vec::new();
         let mut synthetic_local = 1u32;
@@ -426,10 +426,10 @@ pub(super) fn expand<'h>(
         combined_computations.extend(extra_strategy_computations.iter().copied());
         combined_computations.extend(strategies[&strategy].computations.iter().copied());
 
-        let mut captures = HashMap::new();
-        let mut capture_slots = HashMap::new();
+        let mut captures = BTreeMap::new();
+        let mut capture_slots = BTreeMap::new();
         let mut inputs = Vec::new();
-        let mut input_stages = HashMap::new();
+        let mut input_stages = BTreeMap::new();
         let local_bindings = &strategies[&strategy].locals;
         let has_generic_req_check =
             !request.clause_params.is_empty() && !combined_constraints.is_empty();
@@ -591,12 +591,14 @@ pub(super) fn expand<'h>(
         for (member, owner, identity) in owners {
             drafts.push((
                 function_templates::clone_member_with_inputs(
-                    source, arena, member, owner, &mapping, &captures, fuel,
+                    source, arena, member, owner, &mapping, &captures, span, fuel,
                 )?,
                 identity,
             ));
         }
-        let ((shell, _), members) = drafts.split_first_mut().unwrap();
+        let ((shell, _), members) = drafts
+            .split_first_mut()
+            .ok_or_else(|| error(span, "missing derivation shell draft"))?;
         function_templates::relocate_generation_attributes(
             source, arena, strategy, shell, members, &mapping, &captures, fuel,
         )?;
@@ -719,8 +721,8 @@ pub(super) fn expand<'h>(
             let caller_identity = batch
                 .reserve_identity(pkg, fuel)
                 .map_err(|e| error(span, e.to_string()))?;
-            let mut target_clause_defs = HashMap::new();
-            let mut caller_clause_defs = HashMap::new();
+            let mut target_clause_defs = BTreeMap::new();
+            let mut caller_clause_defs = BTreeMap::new();
             for parameter in request.clause_params {
                 let old = parameter.definition.unwrap();
                 target_clause_defs.insert(
@@ -807,7 +809,7 @@ pub(super) fn expand<'h>(
         let self_def = batch
             .reserve_identity(pkg, fuel)
             .map_err(|e| error(span, e.to_string()))?;
-        let mut clause_defs = HashMap::new();
+        let mut clause_defs = BTreeMap::new();
         for parameter in generator.clause_params {
             charge(fuel, parameter.span)?;
             let old = parameter.definition.ok_or_else(|| {
@@ -821,7 +823,7 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(parameter.span, e.to_string()))?;
             clause_defs.insert(old, fresh);
         }
-        let mut input_stages = HashMap::new();
+        let mut input_stages = BTreeMap::new();
         for parameter in generator.parameters {
             charge(fuel, parameter.span)?;
             let stage = batch

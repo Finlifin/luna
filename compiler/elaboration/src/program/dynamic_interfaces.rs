@@ -158,7 +158,7 @@ impl Checker<'_, '_> {
                 .filter(|method| is_dyn_dispatchable_contract(method))
                 .any(|method| method.by_value_receiver)
         {
-            let copy_ok = self.copy_read_input(&subject)
+            let copy_ok = self.copy_read_input(&subject, expr.span)
                 || self.protocols.copy.is_some_and(|copy_id| {
                     self.establish_type_requirement(
                         &n::TypePredicate::Trait(n::TraitRequirement {

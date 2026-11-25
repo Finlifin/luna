@@ -76,7 +76,7 @@ fn independent_members_preserve_receiver_links_and_publish() {
     for _ in 0..2 {
         let owner = batch.reserve().unwrap();
         let draft =
-            clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1000).unwrap();
+            clone_member(&source, &arena, member, owner, &BTreeMap::new(), &mut 1000).unwrap();
         let ItemKind::Fn(signature, body) = &draft.item.kind else {
             panic!()
         };
@@ -172,7 +172,7 @@ fn delivered_type_members_clone_and_reenter_destination_admission() {
         let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
         let owner = batch.reserve().unwrap();
         let draft =
-            clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1000).unwrap();
+            clone_member(&source, &arena, member, owner, &BTreeMap::new(), &mut 1000).unwrap();
         let ItemKind::Fn(signature, _) = &draft.item.kind else {
             unreachable!()
         };
@@ -228,11 +228,11 @@ fn rejects_captures_occupied_owners_and_recovers_after_budget_exhaustion() {
     let arena = HirArena::new();
     let (source, member) = fixture(&arena, true);
     let owner = OwnerId::new(hir::LocalDefId::new(1));
-    assert!(clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1000).is_err());
+    assert!(clone_member(&source, &arena, member, owner, &BTreeMap::new(), &mut 1000).is_err());
     let (source, member) = fixture(&arena, false);
-    assert!(clone_member(&source, &arena, member, member, &HashMap::new(), &mut 1000).is_err());
-    assert!(clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1).is_err());
-    assert!(clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1000).is_ok());
+    assert!(clone_member(&source, &arena, member, member, &BTreeMap::new(), &mut 1000).is_err());
+    assert!(clone_member(&source, &arena, member, owner, &BTreeMap::new(), &mut 1).is_err());
+    assert!(clone_member(&source, &arena, member, owner, &BTreeMap::new(), &mut 1000).is_ok());
     assert_eq!(source.num_defs(), 1);
 }
 
@@ -248,11 +248,11 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
         source: &source,
         arena: &arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: 100,
         bodies: Vec::new(),
-        definitions: HashMap::from([(old, new)]),
-        captures: HashMap::new(),
+        definitions: BTreeMap::from([(old, new)]),
+        captures: BTreeMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: None,
         locals: Default::default(),
@@ -299,7 +299,7 @@ fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
         &arena,
         member,
         owner,
-        &HashMap::from([
+        &BTreeMap::from([
             (original_container, generated_container),
             (original_member, generated_member),
         ]),
@@ -346,7 +346,7 @@ fn cloned_resolution_remaps_both_candidate_roles_and_publishes_atomically() {
                 &arena,
                 owner,
                 OwnerId::new(hir::LocalDefId::new(999)),
-                &HashMap::from([(original_member, generated_member)]),
+                &BTreeMap::from([(original_member, generated_member)]),
                 &mut 1000,
             )
             .unwrap();
@@ -439,11 +439,11 @@ fn strategy_input_annotations_rebind_with_their_domains() {
         annotation,
         &[parameter.clone()],
         &[],
-        &HashMap::from([(parameter.hir_id, staged_input)]),
+        &BTreeMap::from([(parameter.hir_id, staged_input)]),
         &[],
         &[],
         &BTreeSet::from([0]),
-        &HashMap::from([(first, fresh_type)]),
+        &BTreeMap::from([(first, fresh_type)]),
         DUMMY_SP,
         &mut 1000,
     )
@@ -480,7 +480,7 @@ fn generic_method_defaults_and_returns_use_fresh_clause_identities() {
             &arena,
             member,
             owner,
-            &HashMap::from([(first, first_new), (second, second_new)]),
+            &BTreeMap::from([(first, first_new), (second, second_new)]),
             &mut 1000,
         )
         .unwrap();
@@ -517,9 +517,9 @@ fn generic_method_defaults_and_returns_use_fresh_clause_identities() {
     batch.publish(&mut 1000).unwrap();
     let owner = OwnerId::new(hir::LocalDefId::new(99));
     for mapping in [
-        HashMap::new(),
-        HashMap::from([(first, first), (second, second)]),
-        HashMap::from([(first, DefId::new(0, 80)), (second, DefId::new(0, 80))]),
+        BTreeMap::new(),
+        BTreeMap::from([(first, first), (second, second)]),
+        BTreeMap::from([(first, DefId::new(0, 80)), (second, DefId::new(0, 80))]),
     ] {
         assert!(clone_member(&source, &arena, member, owner, &mapping, &mut 1000).is_err());
     }
@@ -591,7 +591,7 @@ fn member_attributes_keep_order_targets_and_distinct_lexical_contexts() {
         &arena,
         member,
         owner,
-        &HashMap::from([(first, first_new), (second, second_new)]),
+        &BTreeMap::from([(first, first_new), (second, second_new)]),
         &mut 1000,
     )
     .unwrap();
@@ -665,7 +665,7 @@ fn staged_method_inputs_keep_independent_published_identities() {
         .insert(binding, original);
     source.reserve_definition_prefix(original.index + 1);
     let owner = OwnerId::new(hir::LocalDefId::new(1));
-    for mapping in [HashMap::new(), HashMap::from([(original, original)])] {
+    for mapping in [BTreeMap::new(), BTreeMap::from([(original, original)])] {
         assert!(clone_member(&source, &arena, member, owner, &mapping, &mut 1000).is_err());
     }
     let mut destination = source.clone();
@@ -679,7 +679,7 @@ fn staged_method_inputs_keep_independent_published_identities() {
             &arena,
             member,
             owner,
-            &HashMap::from([(original, fresh)]),
+            &BTreeMap::from([(original, fresh)]),
             &mut 1000,
         )
         .unwrap();
@@ -751,7 +751,7 @@ fn associated_members_rebind_generic_defaults_without_creating_function_bodies()
         &arena,
         member,
         owner,
-        &HashMap::from([(first, first_new), (second, second_new)]),
+        &BTreeMap::from([(first, first_new), (second, second_new)]),
         &mut 1000,
     )
     .unwrap();
@@ -786,14 +786,15 @@ fn explicit_generation_inputs_do_not_become_method_parameters() {
     for index in [1, 2] {
         let owner = OwnerId::new(hir::LocalDefId::new(index));
         let definition = DefId::new(0, 100 + index);
-        let captures = HashMap::from([(capture, InputCapture::Definition(definition))]);
+        let captures = BTreeMap::from([(capture, InputCapture::Definition(definition))]);
         let draft = clone_member_with_inputs(
             &source,
             &arena,
             member,
             owner,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &captures,
+            DUMMY_SP,
             &mut 1000,
         )
         .unwrap();
@@ -812,8 +813,9 @@ fn explicit_generation_inputs_do_not_become_method_parameters() {
                 &arena,
                 member,
                 owner,
-                &HashMap::new(),
+                &BTreeMap::new(),
                 &captures,
+                DUMMY_SP,
                 &mut 1
             )
             .is_err()

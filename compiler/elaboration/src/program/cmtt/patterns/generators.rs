@@ -595,10 +595,23 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
     ) -> Result<(), Error> {
+        self.check_pattern_generator_at(owner, None)
+    }
+
+    pub(in crate::program) fn check_pattern_generator_at(
+        &mut self,
+        owner: OwnerId,
+        site: Option<Span>,
+    ) -> Result<(), Error> {
         let span = self
             .package
             .item(owner)
-            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing pattern generator item"))?
+            .ok_or_else(|| {
+                error(
+                    site.unwrap_or(rustc_span::DUMMY_SP),
+                    "missing pattern generator item",
+                )
+            })?
             .span;
         self.ensure_pattern_generator(owner, span)?;
         let definition = self.copy_pattern_generator(owner, span)?;

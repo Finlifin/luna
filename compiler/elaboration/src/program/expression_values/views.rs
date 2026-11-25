@@ -192,7 +192,9 @@ impl Checker<'_, '_> {
                     if depth > 128 {
                         return Err(error(expr.span, "multi_deref depth exhausted"));
                     }
-                    if !self.intrinsic_pointer_input(&pointee) && !self.copy_read_input(&pointee) {
+                    if !self.intrinsic_pointer_input(&pointee)
+                        && !self.copy_read_input(&pointee, expr.span)
+                    {
                         return Err(error(
                             expr.span,
                             "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
@@ -222,7 +224,9 @@ impl Checker<'_, '_> {
                 };
                 let previous = std::mem::replace(&mut scope.active, true);
                 let result = self.expr(value, expected);
-                self.old_scope.as_mut().unwrap().active = previous;
+                if let Some(scope) = self.old_scope.as_mut() {
+                    scope.active = previous;
+                }
                 return result;
             }
             H::TakeTupleEnumerate(input) => {

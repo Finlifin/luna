@@ -266,7 +266,9 @@ impl Checker<'_, '_> {
                     let Term::Pointer(pointee) = &pointer.ty else {
                         unreachable!();
                     };
-                    if !self.intrinsic_pointer_input(pointee) && !self.copy_read_input(pointee) {
+                    if !self.intrinsic_pointer_input(pointee)
+                        && !self.copy_read_input(pointee, expr.span)
+                    {
                         return Err(error(
                             expr.span,
                             "reading a non-Copy static requires Copy evidence; take `.ref` instead",

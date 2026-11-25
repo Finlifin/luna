@@ -10,7 +10,7 @@ pub(super) fn collect<'h>(
     fuel: &mut usize,
 ) -> Result<(), Error> {
     let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = BTreeSet::new();
     while let Some(pattern) = pending.pop() {
         charge(fuel, pattern.span)?;
         match &pattern.kind {

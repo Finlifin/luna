@@ -154,7 +154,12 @@ impl<'h> RoutedArgument<'h> {
                         return C::Record(
                             target
                                 .iter()
-                                .map(|name| (name.to_string(), by_name.remove(*name).unwrap()))
+                                .map(|name| {
+                                    (
+                                        name.to_string(),
+                                        by_name.remove(*name).unwrap_or(C::Unknown),
+                                    )
+                                })
                                 .collect(),
                         );
                     }
@@ -458,10 +463,14 @@ impl Checker<'_, '_> {
             record_order =
                 super::extended::layout::property_order(properties, Some(&names), call.span)?;
             let mut fields: BTreeMap<_, _> = fields.into_iter().collect();
-            Ok(properties
+            properties
                 .iter()
-                .map(|property| fields.remove(property.ident.name.as_str()).unwrap())
-                .collect())
+                .map(|property| {
+                    fields
+                        .remove(property.ident.name.as_str())
+                        .ok_or_else(|| error(property.span, "missing record property field"))
+                })
+                .collect::<Result<Vec<_>, _>>()
         };
         let fields = match context {
             C::Known(ty) => match self.structural_type(ty, call.span)? {
@@ -537,8 +546,13 @@ impl Checker<'_, '_> {
         }
         let values = values
             .iter()
-            .map(|value| value.as_ref().unwrap().clone())
-            .collect::<Vec<_>>();
+            .map(|value| {
+                value
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| error(call.span, "missing collected variadic argument"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let (ty, kind) = if let Some(properties) = properties {
             let types = properties
                 .iter()

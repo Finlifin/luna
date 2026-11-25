@@ -18,7 +18,10 @@ impl Checker<'_, '_> {
         if !self.is_quote_function(owner) {
             return Ok(());
         }
-        let item = self.package.item(owner).unwrap();
+        let item = self
+            .package
+            .item(owner)
+            .ok_or_else(|| error(span, "missing quote function item"))?;
         let sig = match &item.kind {
             ItemKind::Fn(sig, _) => sig,
             ItemKind::FnDeclaration(sig)
@@ -358,7 +361,10 @@ impl Expansion<'_> {
                     None => BTreeMap::new(),
                 });
             }
-            let domains = self.parameter_domains.as_ref().unwrap();
+            let domains = self
+                .parameter_domains
+                .as_ref()
+                .ok_or_else(|| "missing quote parameter domains".to_string())?;
             ids.iter()
                 .map(|id| {
                     let domain = domains.get(id).unwrap_or(&Term::Primitive(P::Type));

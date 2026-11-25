@@ -185,10 +185,21 @@ impl Checker<'_, '_> {
         output: Option<&Expr<'hir>>,
         span: Span,
     ) -> Result<Term, Error> {
-        if modifiers.is_inline || modifiers.is_spec || modifiers.is_verified {
+        if modifiers.is_spec && modifiers.is_unsafe {
+            return Err(error(span, "spec function type cannot be unsafe"));
+        }
+        if modifiers.is_spec && modifiers.is_verified {
+            return Err(error(span, "spec function type cannot be verified"));
+        }
+        if modifiers.is_verified && modifiers.is_unsafe {
+            return Err(error(span, "verified function type cannot be unsafe"));
+        }
+        if modifiers.is_spec || modifiers.is_verified {
+            // First-class `spec` and `verified` function types require safety-tier
+            // carriers and call-site verification gates across nir/ptc/verification.
             return Err(error(
                 span,
-                "modified function type admission and compatibility are not implemented",
+                "spec and verified function type qualifiers are not yet implemented",
             ));
         }
         if modifiers.is_pure && modifiers.is_unsafe {
@@ -199,6 +210,8 @@ impl Checker<'_, '_> {
         } else {
             n::FunctionPhase::Runtime
         };
+        // `inline` on a callable type records an optimization intent without
+        // creating a distinct ABI or safety tier, matching `callable_type`.
         let signature = self.form_callable_type(inputs, output, phase, span)?;
         Ok(if modifiers.is_unsafe {
             Term::UnsafeFunction(Box::new(signature))

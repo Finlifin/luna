@@ -13,6 +13,7 @@ pub(in crate::program) struct GenerationBinding<'h> {
 fn synthetic(rebind: &mut Rebind<'_, '_>, index: u32) -> HirId {
     rebind.id(HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(index)))
 }
+
 fn finish<'h>(
     rebind: Rebind<'_, 'h>,
     name: &str,
@@ -46,11 +47,11 @@ pub(in crate::program) fn execution_draft<'h>(
     subject: &'h Expr<'h>,
     parameters: &[FnParam<'h>],
     constraints: &[hir::clause::ClauseConstraint<'h>],
-    input_stages: &HashMap<HirId, DefId>,
+    input_stages: &BTreeMap<HirId, DefId>,
     locals: &[GenerationBinding<'h>],
     computations: &[&'h Expr<'h>],
     exported: &BTreeSet<usize>,
-    definitions: &HashMap<DefId, DefId>,
+    definitions: &BTreeMap<DefId, DefId>,
     span: rustc_span::Span,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
@@ -61,11 +62,11 @@ pub(in crate::program) fn execution_draft<'h>(
         source,
         arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
         definitions: definitions.clone(),
-        captures: HashMap::new(),
+        captures: BTreeMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: Some(subject),
         locals: Default::default(),
@@ -168,7 +169,7 @@ pub(in crate::program) fn execution_draft<'h>(
         Ok((
             ty as &_,
             value as &_,
-            rebind.resolution()?,
+            rebind.resolution(span)?,
             cloned_parameters,
             staged_parameters,
             constraints,
@@ -229,11 +230,11 @@ pub(in crate::program) fn input_group<'h>(
         source,
         arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
-        definitions: HashMap::new(),
-        captures: HashMap::new(),
+        definitions: BTreeMap::new(),
+        captures: BTreeMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: None,
         locals: Default::default(),
@@ -266,7 +267,7 @@ pub(in crate::program) fn input_group<'h>(
         span,
         kind: E::Builtin(hir::Symbol::intern("Object")),
     });
-    let resolution = rebind.resolution()?;
+    let resolution = rebind.resolution(span)?;
     *fuel = rebind.budget;
     Ok(finish(
         rebind,
@@ -285,8 +286,8 @@ pub(in crate::program) fn input_draft<'h>(
     parameter: &FnParam<'h>,
     group: DefId,
     index: usize,
-    definitions: &HashMap<DefId, DefId>,
-    captures: &HashMap<HirId, InputCapture>,
+    definitions: &BTreeMap<DefId, DefId>,
+    captures: &BTreeMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     let ty = match parameter.ty.kind {
@@ -320,8 +321,8 @@ pub(in crate::program) fn value_draft<'h>(
     span: rustc_span::Span,
     group: DefId,
     index: usize,
-    definitions: &HashMap<DefId, DefId>,
-    captures: &HashMap<HirId, InputCapture>,
+    definitions: &BTreeMap<DefId, DefId>,
+    captures: &BTreeMap<HirId, InputCapture>,
     fuel: &mut usize,
 ) -> Result<ClonedMember<'h>, Error> {
     *fuel = fuel
@@ -331,7 +332,7 @@ pub(in crate::program) fn value_draft<'h>(
         source,
         arena,
         namespace: owner,
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
         definitions: definitions.clone(),
@@ -370,7 +371,7 @@ pub(in crate::program) fn value_draft<'h>(
             span: span,
             kind: E::ConstantObjectEntry(group, index),
         });
-        Ok((ty, value as &_, rebind.resolution()?))
+        Ok((ty, value as &_, rebind.resolution(span)?))
     })();
     *fuel = rebind.budget;
     let (ty, value, resolution) = result?;
@@ -412,7 +413,7 @@ pub(in crate::program) fn subject_draft<'h>(
             kind: ItemKind::Const(ty, value),
         },
         bodies: Vec::new(),
-        bindings: HashMap::new(),
+        bindings: BTreeMap::new(),
         nodes: hir::OwnerNodes::new(),
         attributes: Vec::new(),
         staged_parameters: Vec::new(),

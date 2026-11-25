@@ -630,25 +630,36 @@ impl Checker<'_, '_> {
                         "open closure contexts require environment-parameter elaboration not yet implemented",
                     ));
                 };
-                let mut names = std::collections::HashSet::new();
+                let mut names = BTreeSet::new();
                 let mut environment = Vec::new();
                 for binding in *bindings {
-                    if !names.insert(binding.name.name) {
+                    if !names.insert(binding.name.name.as_str().to_owned()) {
                         return Err(error(
                             binding.name.span,
                             "duplicate closure environment binding",
-                        ));
-                    }
-                    if binding.value.is_some() {
-                        return Err(error(
-                            binding.name.span,
-                            "closure environment sources require dependency/provenance checking not yet implemented",
                         ));
                     }
                     let ty_expr = self.expr(binding.ty, Some(&p(P::Type)))?;
                     environment.push(ty_expr);
                 }
                 let signature = self.expr(body, Some(&p(P::Type)))?;
+                let comptime_body = matches!(
+                    &signature.kind,
+                    K::TypeValue(body_ty) if body_ty.is_comptime_callable()
+                );
+                for (binding, field_ty_expr) in bindings.iter().zip(&environment) {
+                    if let Some(value) = binding.value {
+                        let expected_ty = match &field_ty_expr.kind {
+                            K::TypeValue(ty) => Some(ty),
+                            _ => None,
+                        };
+                        self.check_closure_environment_binding_value(
+                            value,
+                            expected_ty,
+                            comptime_body,
+                        )?;
+                    }
+                }
                 let ty = if environment
                     .iter()
                     .chain(std::iter::once(&signature))
