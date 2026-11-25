@@ -665,7 +665,7 @@ pub(super) fn admitted_direct_program(
                     found |= expr.source == site.source
                         && matches!(
                             (&site.boundary, &expr.kind),
-                            (Boundary::ScopeEnd, K::Block { .. })
+                            (Boundary::ScopeEnd, K::Block { .. } | K::CallPreparation { .. })
                                 | (Boundary::Return, K::Return(_))
                                 | (Boundary::Break, K::Break(_))
                                 | (Boundary::Continue, K::Continue(_))

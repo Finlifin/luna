@@ -40,6 +40,8 @@ pub struct Options {
     pub stable_concat_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
+    pub variadic_collector_protocol: Option<String>,
+    pub extended_variadic_collector_protocol: Option<String>,
     pub index_protocol: Option<String>,
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
@@ -204,6 +206,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut stable_concat_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
+    let mut variadic_collector_protocol = None;
+    let mut extended_variadic_collector_protocol = None;
     let mut index_protocol = None;
     let mut ord_protocol = None;
     let mut eq_protocol = None;
@@ -748,6 +752,37 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--variadic-collector-protocol") => {
+                    if variadic_collector_protocol.is_some() {
+                        return Err(
+                            "--variadic-collector-protocol may only be specified once".into()
+                        );
+                    }
+                    variadic_collector_protocol = Some(
+                        option_value(&mut args, "--variadic-collector-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "VariadicCollector protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--extended-variadic-collector-protocol") => {
+                    if extended_variadic_collector_protocol.is_some() {
+                        return Err(
+                            "--extended-variadic-collector-protocol may only be specified once"
+                                .into(),
+                        );
+                    }
+                    extended_variadic_collector_protocol = Some(
+                        option_value(&mut args, "--extended-variadic-collector-protocol")?
+                            .into_string()
+                            .map_err(|_| {
+                                "ExtendedVariadicCollector protocol selector must be valid UTF-8"
+                            })?,
+                    );
+                    continue;
+                }
                 Some("--index-protocol") => {
                     if index_protocol.is_some() {
                         return Err("--index-protocol may only be specified once".into());
@@ -1067,6 +1102,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         stable_concat_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
+        variadic_collector_protocol,
+        extended_variadic_collector_protocol,
         index_protocol,
         ord_protocol,
         eq_protocol,
@@ -1240,6 +1277,8 @@ mod tests {
                 stable_concat_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
+                variadic_collector_protocol: None,
+                extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
@@ -1287,6 +1326,8 @@ mod tests {
                 stable_concat_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
+                variadic_collector_protocol: None,
+                extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,

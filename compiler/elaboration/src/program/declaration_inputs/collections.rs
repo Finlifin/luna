@@ -104,15 +104,20 @@ impl<'b, 'h> Frame<'b, 'h> {
         }
         while let Some(pending) = self.inputs.next() {
             let domain = self.domain.as_ref().expect("observed collection domain");
-            let expected = if pending.spread {
-                &domain.ty
+            let element_expected = if pending.spread {
+                Some(domain.ty.clone())
+            } else if let Some(element) = checker.list_element_type(&domain.ty) {
+                Some(element.clone())
             } else {
-                checker.list_element_type(&domain.ty).ok_or_else(|| {
-                    error(
+                if domain.pending.is_empty() {
+                    checker.check_variadic_collection_domain(
+                        &domain.ty,
+                        false,
+                        true,
                         pending.input.span,
-                        "variadic input requires a bound meta.List<T>",
-                    )
-                })?
+                    )?;
+                }
+                None
             };
             let contextual = !domain.pending.is_empty()
                 && !pending.spread
@@ -135,11 +140,12 @@ impl<'b, 'h> Frame<'b, 'h> {
             } else {
                 Request::ordinary(
                     pending.input,
-                    domain
-                        .pending
-                        .is_empty()
-                        .then(|| checker.copy_alias_type(expected, self.span))
-                        .transpose()?,
+                    match element_expected {
+                        Some(ref expected) if domain.pending.is_empty() => {
+                            Some(checker.copy_alias_type(expected, self.span)?)
+                        }
+                        _ => None,
+                    },
                 )
             };
             if state == State::Probe {

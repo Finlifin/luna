@@ -51,7 +51,7 @@ pub(super) enum RoutedSource<'h> {
 
 pub(super) struct RoutedCollection<'h> {
     id: hir::HirId,
-    span: Span,
+    pub(super) span: Span,
     fields: std::rc::Rc<[Expr<'h>]>,
 }
 
@@ -256,13 +256,20 @@ impl<'h> RoutedArgument<'h> {
         ty: &Term,
         span: Span,
     ) -> Result<(), Error> {
-        // Collection constructs a tuple VALUE. In particular `...items: Type`
-        // must not turn the synthetic tuple syntax into a type expression.
-        if self.is_collected() && !matches!(checker.structural_type(ty, span)?, Term::Tuple(_)) {
-            return Err(error(
+        if self.is_collected() {
+            checker.check_variadic_collection_domain(
+                ty,
+                false,
+                checker.in_staged_input || checker.in_required_comptime,
                 span,
-                "default variadic collection requires a tuple type",
-            ));
+            )?;
+        } else if self.property_fields().is_some() {
+            checker.check_variadic_collection_domain(
+                ty,
+                true,
+                checker.in_staged_input || checker.in_required_comptime,
+                span,
+            )?;
         }
         Ok(())
     }
@@ -468,10 +475,17 @@ impl Checker<'_, '_> {
                     fields.into_iter().map(C::Known).collect()
                 }
                 _ => {
-                    return Err(error(
+                    self.check_variadic_collection_domain(
+                        ty,
+                        properties.is_some(),
+                        staged,
                         call.span,
-                        "collection domain does not match its input protocol",
-                    ));
+                    )?;
+                    if let Some(properties) = properties {
+                        record_order =
+                            super::extended::layout::property_order(properties, None, call.span)?;
+                    }
+                    vec![C::Unknown; count]
                 }
             },
             C::Record(fields) => record_context(fields.clone())?,
@@ -717,6 +731,38 @@ impl Checker<'_, '_> {
         }
         if let Some(bounds) = offsets {
             bounds.push(ordered.len());
+        }
+        for route in routes {
+            if !route.is_collected() {
+                continue;
+            }
+            let target_param = offset + route.parameter;
+            let Some(slot) = arguments
+                .iter()
+                .position(|argument| argument.parameter == target_param)
+            else {
+                continue;
+            };
+            let (target_ty, staged) =
+                self.call_parameter_collection_target(callee, arguments, target_param, span)?;
+            if !self.is_default_collection_shape(&target_ty, false, span)? {
+                let raw_packet = std::mem::replace(
+                    &mut arguments[slot].value,
+                    n::Expr {
+                        ty: p(P::Void),
+                        source: preparation_anchor(span),
+                        kind: K::Tuple(Vec::new()),
+                    },
+                );
+                arguments[slot].value = self.lower_variadic_collector_packet(
+                    &mut ordered,
+                    raw_packet,
+                    &target_ty,
+                    false,
+                    staged,
+                    span,
+                )?;
+            }
         }
         ordered.extend(after_explicit);
         let call = n::Expr {

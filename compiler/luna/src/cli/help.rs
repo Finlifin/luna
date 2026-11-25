@@ -50,6 +50,7 @@ const BINDINGS: &str = "Compiler binding overrides:
   --range-end-type, --range-pattern-protocol, --stable-range-pattern-protocol,
   --concat-pattern-protocol, --stable-concat-pattern-protocol,
   --literal-into-protocol, --iterator-protocol, --into-iterator-protocol,
+  --variadic-collector-protocol, --extended-variadic-collector-protocol,
   --add-protocol, --sub-protocol, --mul-protocol, --div-protocol,
   --rem-protocol, --neg-protocol, --not-protocol <source-selector>
 Selectors use dotted source paths. Availability depends on the selected

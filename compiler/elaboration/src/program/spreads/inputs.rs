@@ -437,13 +437,16 @@ impl Checker<'_, '_> {
                     let fields = match context {
                         crate::calls::InputContext::Known(ty) => {
                             route.require_collection_type(self, &ty, span)?;
-                            let Term::Tuple(fields) = self.structural_type(&ty, span)? else {
-                                unreachable!()
-                            };
-                            fields
-                                .into_iter()
-                                .map(crate::calls::InputContext::Known)
-                                .collect::<Vec<_>>()
+                            match self.structural_type(&ty, span)? {
+                                Term::Tuple(fields) => fields
+                                    .into_iter()
+                                    .map(crate::calls::InputContext::Known)
+                                    .collect::<Vec<_>>(),
+                                _ => vec![
+                                    crate::calls::InputContext::Unknown;
+                                    route.source_inputs().count()
+                                ],
+                            }
                         }
                         crate::calls::InputContext::Tuple(fields)
                         | crate::calls::InputContext::NormalTuple { fields, .. } => fields,

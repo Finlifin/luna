@@ -1,7 +1,9 @@
 //! Owned aggregate component identities: tuple slots, record fields and tagged
 //! variant payloads. These are program facts, never PTC terms or permissions.
 use super::*;
+
 pub(super) type Component = (AggregateKind, usize);
+
 pub(super) fn record_path(fields: &[(nir::program::FieldOwner, usize)]) -> Vec<Component> {
     fields
         .iter()
@@ -14,11 +16,13 @@ pub(super) struct FieldPath {
     pub root: PlaceId,
     pub fields: Vec<Component>,
 }
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Projection {
     pub(super) root_version: ValueId,
     pub(super) path: FieldPath,
 }
+
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -32,11 +36,13 @@ impl fmt::Display for FieldPath {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for Projection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(projection {} {})", self.root_version, self.path)
     }
 }
+
 pub(super) fn copy_paths(
     paths: &BTreeMap<FieldPath, ValueId>,
     limits: &mut Limits,
@@ -46,6 +52,7 @@ pub(super) fn copy_paths(
     }
     Ok(paths.clone())
 }
+
 impl State {
     pub(super) fn invalidate_paths(
         &mut self,
@@ -71,6 +78,7 @@ impl State {
         }
         Ok(())
     }
+
     pub(super) fn join_paths_and_facts(
         &mut self,
         other: &Self,
@@ -124,11 +132,31 @@ impl State {
         Ok(())
     }
 }
+
 impl Walker<'_> {
     pub(super) fn local_value(&mut self, state: &State, local: LocalId) -> Result<Value, Reason> {
-        self.local_value_at(state, place(local))
+        self.local_value_with_type(state, local, None)
     }
+
+    pub(super) fn local_value_with_type(
+        &mut self,
+        state: &State,
+        local: LocalId,
+        expected_ty: Option<&Term>,
+    ) -> Result<Value, Reason> {
+        self.local_value_at_with_type(state, place(local), expected_ty)
+    }
+
     pub(super) fn local_value_at(&mut self, state: &State, root: PlaceId) -> Result<Value, Reason> {
+        self.local_value_at_with_type(state, root, None)
+    }
+
+    pub(super) fn local_value_at_with_type(
+        &mut self,
+        state: &State,
+        root: PlaceId,
+        expected_ty: Option<&Term>,
+    ) -> Result<Value, Reason> {
         if let Some(value) = state.aggregates.get(&root) {
             if let Some((frame, projection)) = &value.immutable_projection {
                 if *frame == state.frame
@@ -149,6 +177,13 @@ impl Walker<'_> {
             .map(|v| v.snapshot(self.limits, 0))
             .transpose()?
             .unwrap_or_default();
+        if result.nominal_type.is_none()
+            && let Some(ty) = expected_ty
+            && (matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
+                || self.tuple_field_types(ty)?.is_some())
+        {
+            result.nominal_type = Some(std::sync::Arc::new(ty.clone()));
+        }
         if let Some(id) = state.facts.value(root) {
             result.projection = Some(Projection {
                 root_version: id,
@@ -226,6 +261,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     pub(super) fn project_component(
         &mut self,
         state: &mut State,
@@ -275,6 +311,7 @@ impl Walker<'_> {
         result.projection = Some(projection);
         Ok(())
     }
+
     fn fixed_pointer_observation(&mut self, mut expr: &Expr) -> Result<bool, Reason> {
         for _ in 0..128 {
             self.limits.step(1)?;
@@ -289,6 +326,7 @@ impl Walker<'_> {
         }
         Err(Reason::DepthLimit)
     }
+
     /// Register pure local/field reads before short-circuit forks so conditions
     /// on either operand name the same scalar identity in both alternatives.
     /// No calls, writes, checks or other source effects execute here.

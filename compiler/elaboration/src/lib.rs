@@ -38,6 +38,7 @@ pub mod list_patterns;
 pub mod range_patterns;
 
 pub mod literal_conversion;
+pub mod variadic_collectors;
 
 /// Finite by-value storage checks shared by source and generated declarations.
 pub mod representations;

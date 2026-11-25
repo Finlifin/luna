@@ -261,6 +261,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--literal-into-protocol"
                     | "--iterator-protocol"
                     | "--into-iterator-protocol"
+                    | "--variadic-collector-protocol"
+                    | "--extended-variadic-collector-protocol"
                     | "--add-protocol"
                     | "--sub-protocol"
                     | "--mul-protocol"

@@ -10,9 +10,15 @@ pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
 ) -> Result<Option<Child<'h>>, Error> {
     let (block, destination, boundary) = match request {
         Request::Collection(collection, expected) => {
+            let expected =
+                if checker.is_default_collection_shape(&expected, false, collection.span)? {
+                    Some(expected)
+                } else {
+                    None
+                };
             return Ok(Some(Child {
                 expr: arguments::RoutedSource::Collection(collection),
-                destination: Destination::from_expected(Some(expected)),
+                destination: Destination::from_expected(expected),
             }));
         }
         Request::Block(block, destination) => (block, destination, None),

@@ -53,6 +53,7 @@ use clause_inputs::CallableClauseView;
 use checking_attempts::Disposition as CheckingDisposition;
 
 mod cmtt;
+mod collector_lowering;
 mod constants;
 mod declaration_inputs;
 mod declaration_scope;
@@ -322,6 +323,8 @@ pub struct Protocols {
     pub index: Option<DeclarationId>,
     pub iterator: Option<DeclarationId>,
     pub into_iterator: Option<DeclarationId>,
+    pub variadic_collector: Option<DeclarationId>,
+    pub extended_variadic_collector: Option<DeclarationId>,
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
@@ -1551,6 +1554,22 @@ fn elaborate_candidate<'a, 'h>(
     }
     if let Some(id) = checker.protocols.into_iterator {
         checker.validate_into_iterator_protocol(id)?;
+    }
+    if let Some(id) = checker.protocols.variadic_collector {
+        crate::variadic_collectors::protocol(
+            &checker.checked_traits,
+            id,
+            crate::variadic_collectors::CollectorKind::Positional,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.extended_variadic_collector {
+        crate::variadic_collectors::protocol(
+            &checker.checked_traits,
+            id,
+            crate::variadic_collectors::CollectorKind::Extended,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     checker.finish_signature_refinements()?;
     checker.associated_signature_values.clear();
@@ -4506,6 +4525,7 @@ impl Checker<'_, '_> {
             }
             let mut local_sorts = BTreeMap::new();
             self.normal_input_prefixes.entry(owner).or_default();
+            let mut deferred_variadic_checks = Vec::new();
             for (slot, parameter) in sig.clause_params.iter().enumerate() {
                 use hir::clause::ClauseParamKind as Clause;
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
@@ -4555,17 +4575,34 @@ impl Checker<'_, '_> {
                         Clause::Type(_) | Clause::TraitBound(..) => p(P::Type),
                         Clause::Varadic(_, declared) => {
                             let domain = self.type_expr(declared)?;
-                            if self.list_element_type(&domain).is_none() {
-                                return Err(error(
-                                    parameter.span,
-                                    "variadic clause input requires a bound meta.List<T>",
-                                ));
-                            }
                             if slot + 1 != sig.clause_params.len() {
                                 return Err(error(
                                     parameter.span,
                                     "variadic clause input must be the final parameter",
                                 ));
+                            }
+                            if self.list_element_type(&domain).is_none() {
+                                if !self.normal_input_domain_supported(
+                                    &domain,
+                                    &type_parameters[..inherited],
+                                    &local_sorts,
+                                    parameter.span,
+                                )? {
+                                    return Err(error(
+                                        parameter.span,
+                                        "normal-form parameter type is not yet supported",
+                                    ));
+                                }
+                                if local_sorts.keys().any(|id| domain.mentions_rigid(*id)) {
+                                    deferred_variadic_checks.push((domain.clone(), parameter.span));
+                                } else {
+                                    self.check_variadic_collection_domain(
+                                        &domain,
+                                        false,
+                                        true,
+                                        parameter.span,
+                                    )?;
+                                }
                             }
                             domain
                         }
@@ -4668,6 +4705,9 @@ impl Checker<'_, '_> {
                 }
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
+            for (domain, var_span) in deferred_variadic_checks {
+                self.check_variadic_collection_domain(&domain, false, true, var_span)?;
+            }
             if let ItemKind::Effect(_, modifiers) = &item.kind {
                 let is_direct_passing = self
                     .direct_passing_effects
@@ -4916,8 +4956,6 @@ impl Checker<'_, '_> {
                         .iter()
                         .any(|parameter| parameter.sort != Sort::Runtime)
                         || (!sig.modifiers.is_comptime
-                            && !self.self_containers.contains_key(&owner)
-                            && !self.self_types.contains_key(&owner)
                             && !self.type_parameters[&owner].is_empty()))
                     && self.has_staged_body_work(owner)?)
             {

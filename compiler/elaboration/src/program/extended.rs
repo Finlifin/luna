@@ -505,6 +505,26 @@ impl Checker<'_, '_> {
                 value: Box::new(packet),
             },
         });
+        let (target_ty, staged) =
+            self.call_parameter_collection_target(callee, arguments, parameter_index, expr.span)?;
+        if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
+            let raw_packet = std::mem::replace(
+                &mut arguments[slot].value,
+                n::Expr {
+                    ty: p(P::Void),
+                    source: anchor,
+                    kind: K::Tuple(Vec::new()),
+                },
+            );
+            arguments[slot].value = self.lower_variadic_collector_packet(
+                &mut statements,
+                raw_packet,
+                &target_ty,
+                true,
+                staged,
+                expr.span,
+            )?;
+        }
         let diverges = statements.iter().any(|statement| is_never(&statement.ty));
         Ok(n::Expr {
             ty: if diverges {
@@ -642,7 +662,17 @@ impl Checker<'_, '_> {
                         | Term::Bound { .. }
                         | Term::Hole { .. }
                 )
-            ) {
+            ) || ty.as_ref().is_some_and(|ty| {
+                !matches!(shape, Some(Term::Tuple(_)))
+                    && self
+                        .check_variadic_collection_domain(
+                            ty,
+                            true,
+                            self.in_staged_input || self.in_required_comptime,
+                            span,
+                        )
+                        .is_ok()
+            }) {
                 eligible.push((name, index));
             }
         }
@@ -667,7 +697,7 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         let K::CallPreparation {
             mut statements,
-            result: Some(result),
+            result: Some(mut result),
         } = call.kind
         else {
             return Err(error(
@@ -675,23 +705,23 @@ impl Checker<'_, '_> {
                 "property collection requires a completed preparation plan",
             ));
         };
-        let K::Call { arguments, .. } = &result.kind else {
+        let K::Call {
+            callee, arguments, ..
+        } = &mut result.kind
+        else {
             return Err(error(
                 expr.span,
                 "property collection requires a normalized invocation",
             ));
         };
-        let binding = arguments
+        let slot = arguments
             .iter()
-            .find(|argument| argument.parameter == parameter)
-            .and_then(|argument| {
-                if let K::Local(binding) = argument.value.kind {
-                    Some(binding)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| error(expr.span, "property packet preparation is missing"))?;
+            .position(|argument| argument.parameter == parameter)
+            .ok_or_else(|| error(expr.span, "property packet was not routed to its parameter"))?;
+        let binding = match arguments[slot].value.kind {
+            K::Local(binding) => binding,
+            _ => return Err(error(expr.span, "property packet preparation is missing")),
+        };
         let offsets = std::mem::take(&mut self.preparing_inputs.as_mut().unwrap().offsets);
         // The collapsed call has one property input at the first written
         // property's position. Its final step binds the constructed record.
@@ -742,8 +772,28 @@ impl Checker<'_, '_> {
             return Err(error(expr.span, "unexpected remaining property inputs"));
         }
         new_offsets.push(prepared.len());
-        self.preparing_inputs.as_mut().unwrap().offsets = new_offsets;
         prepared.push(packet);
+        let (target_ty, staged) =
+            self.call_parameter_collection_target(callee, arguments, parameter, expr.span)?;
+        if !self.is_default_collection_shape(&target_ty, true, expr.span)? {
+            let raw_packet = std::mem::replace(
+                &mut arguments[slot].value,
+                n::Expr {
+                    ty: p(P::Void),
+                    source: arguments::preparation_anchor(expr.span),
+                    kind: K::Tuple(Vec::new()),
+                },
+            );
+            arguments[slot].value = self.lower_variadic_collector_packet(
+                &mut prepared,
+                raw_packet,
+                &target_ty,
+                true,
+                staged,
+                expr.span,
+            )?;
+        }
+        self.preparing_inputs.as_mut().unwrap().offsets = new_offsets;
         prepared.extend(remaining);
         let diverges = prepared.iter().any(|statement| is_never(&statement.ty));
         Ok(n::Expr {
@@ -826,7 +876,39 @@ impl Checker<'_, '_> {
         // publishing NIR; no packet is constructed along that exit path.
         let packet = self.finish_property_packet(expr.span, types, fields, &order)?;
         if let Some(expected) = expected {
-            self.require(&packet.ty, expected, expr.span)?;
+            if !self.is_default_collection_shape(expected, true, expr.span)? {
+                let staged = self.in_staged_input || self.in_required_comptime;
+                self.check_variadic_collection_domain(expected, true, staged, expr.span)?;
+                let expr_source = source(expr.span);
+                let is_preparing = self.preparing_inputs.as_ref().is_some_and(|plan| {
+                    plan.site.start <= expr_source.start && expr_source.end <= plan.site.end
+                });
+                if !is_preparing {
+                    let mut statements = Vec::new();
+                    let collected = self.lower_variadic_collector_packet(
+                        &mut statements,
+                        packet,
+                        expected,
+                        true,
+                        staged,
+                        expr.span,
+                    )?;
+                    return Ok(if statements.is_empty() {
+                        collected
+                    } else {
+                        n::Expr {
+                            ty: expected.clone(),
+                            source: source(expr.span),
+                            kind: K::CallPreparation {
+                                statements,
+                                result: Some(Box::new(collected)),
+                            },
+                        }
+                    });
+                }
+            } else {
+                self.require(&packet.ty, expected, expr.span)?;
+            }
         }
         Ok(packet)
     }

@@ -477,8 +477,18 @@ impl Completion<'_> {
             &site.routes,
             expr,
         )?;
-        let call = checker.freeze_staged_call_inputs(call, expr)?;
-        environment.finish(checker, call, &site.routes, offset, expr)
+        let has_collected = site.routes.iter().any(|route| route.is_collected());
+        let call = if has_collected {
+            call
+        } else {
+            checker.freeze_staged_call_inputs(call, expr)?
+        };
+        let call = environment.finish(checker, call, &site.routes, offset, expr)?;
+        if has_collected && matches!(call.kind, K::Call { .. }) {
+            checker.freeze_staged_call_inputs(call, expr)
+        } else {
+            Ok(call)
+        }
     }
 }
 

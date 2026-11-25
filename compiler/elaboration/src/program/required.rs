@@ -3033,6 +3033,8 @@ fn scope_for_required(
         protocols_cfg.index,
         protocols_cfg.iterator,
         protocols_cfg.into_iterator,
+        protocols_cfg.variadic_collector,
+        protocols_cfg.extended_variadic_collector,
         protocols_cfg.ordering,
         protocols_cfg.equality,
         protocols_cfg.list_pattern,

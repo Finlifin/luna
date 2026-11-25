@@ -1755,7 +1755,7 @@ impl Emitter<'_> {
         } else {
             Value::unit()
         };
-        if !self.terminated && matches!(expr.kind, K::Block { .. }) {
+        if !self.terminated && matches!(expr.kind, K::Block { .. } | K::CallPreparation { .. }) {
             self.cleanup_boundary(expr.source, iir::cleanup::Boundary::ScopeEnd)?;
         }
         self.locals = saved;

@@ -765,6 +765,10 @@ impl Request {
                 stable_concat_pattern: options.stable_concat_pattern_protocol.as_deref(),
                 iterator: options.iterator_protocol.as_deref(),
                 into_iterator: options.into_iterator_protocol.as_deref(),
+                variadic_collector: options.variadic_collector_protocol.as_deref(),
+                extended_variadic_collector: options
+                    .extended_variadic_collector_protocol
+                    .as_deref(),
                 index: options.index_protocol.as_deref(),
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),

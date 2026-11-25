@@ -14,6 +14,8 @@ pub struct Selectors<'a> {
     pub index: Option<&'a str>,
     pub iterator: Option<&'a str>,
     pub into_iterator: Option<&'a str>,
+    pub variadic_collector: Option<&'a str>,
+    pub extended_variadic_collector: Option<&'a str>,
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
@@ -56,6 +58,8 @@ impl Selectors<'_> {
                 self.index,
                 self.iterator,
                 self.into_iterator,
+                self.variadic_collector,
+                self.extended_variadic_collector,
                 self.ordering,
                 self.equality,
                 self.list_pattern,
@@ -236,6 +240,16 @@ pub(crate) fn resolve_source(
                 "IntoIterator".into(),
                 selectors.into_iterator,
                 &mut result.into_iterator,
+            ),
+            (
+                "VariadicCollector".into(),
+                selectors.variadic_collector,
+                &mut result.variadic_collector,
+            ),
+            (
+                "ExtendedVariadicCollector".into(),
+                selectors.extended_variadic_collector,
+                &mut result.extended_variadic_collector,
             ),
             ("Ord".into(), selectors.ordering, &mut result.ordering),
             ("Eq".into(), selectors.equality, &mut result.equality),
@@ -575,6 +589,8 @@ pub(crate) struct SysrootBindings {
     stable_concat_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
+    variadic_collector: Option<String>,
+    extended_variadic_collector: Option<String>,
     literal_into: Option<String>,
     handle_error: Option<String>,
     arithmetic: [Option<String>; 7],
@@ -674,6 +690,8 @@ impl SysrootBindings {
                 "stable-concat-pattern-protocol" => &mut result.stable_concat_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
+                "variadic-collector-protocol" => &mut result.variadic_collector,
+                "extended-variadic-collector-protocol" => &mut result.extended_variadic_collector,
                 "literal-into-protocol" => &mut result.literal_into,
                 "handle-error-protocol" => &mut result.handle_error,
                 "copy-protocol" => &mut result.copy,
@@ -894,6 +912,20 @@ impl SysrootBindings {
                     .into_iterator
                     .is_none()
                     .then_some(self.into_iterator.as_deref())
+                    .flatten()
+            }),
+            variadic_collector: explicit.variadic_collector.or_else(|| {
+                identities
+                    .variadic_collector
+                    .is_none()
+                    .then_some(self.variadic_collector.as_deref())
+                    .flatten()
+            }),
+            extended_variadic_collector: explicit.extended_variadic_collector.or_else(|| {
+                identities
+                    .extended_variadic_collector
+                    .is_none()
+                    .then_some(self.extended_variadic_collector.as_deref())
                     .flatten()
             }),
             literal_into: explicit.literal_into.or_else(|| {
@@ -1280,6 +1312,8 @@ mod stage_tests {
             stable_concat_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
+            variadic_collector_protocol: None,
+            extended_variadic_collector_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             splice_protocol: None,

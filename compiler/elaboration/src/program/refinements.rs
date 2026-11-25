@@ -216,16 +216,19 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn is_proven_tuple_type(&mut self, ty: &Term, span: Span) -> Result<bool, Error> {
-        if matches!(self.structural_type(ty, span)?, Term::Tuple(_)) {
+        if self.bound_tuple_elements(ty).is_some() || matches!(ty, Term::Tuple(_)) {
             return Ok(true);
         }
-        Ok(matches!(
+        if matches!(
             self.context.prove(
                 crate::ptc::Formula::kind(ty.clone(), nir::TypeKind::Tuple),
                 crate::ptc::Budget::default(),
             ),
             crate::ptc::Outcome::Entailed(_)
-        ))
+        ) {
+            return Ok(true);
+        }
+        Ok(matches!(self.structural_type(ty, span)?, Term::Tuple(_)))
     }
 
     fn instantiate_refinement(

@@ -722,11 +722,7 @@ impl Checker<'_, '_> {
                 // A trait query supplied directly to a staged argument can
                 // depend on the caller even when both signatures are closed.
                 // Route that free function through the existing source instance.
-                if matches!(expression.kind, H::TraitBound(..))
-                    && !sig.modifiers.is_comptime
-                    && !this.self_containers.contains_key(&owner)
-                    && !this.self_types.contains_key(&owner)
-                {
+                if matches!(expression.kind, H::TraitBound(..)) && !sig.modifiers.is_comptime {
                     let inputs = this.expression_declaration_dependencies(owner, expression)?;
                     if this.type_parameters[&owner]
                         .iter()
@@ -1620,10 +1616,7 @@ impl Checker<'_, '_> {
         let mut target_demands = BTreeMap::new();
         let mut needs_instance = BTreeSet::new();
         for owner in owners {
-            if self.open_functions.contains_key(&owner)
-                || self.self_containers.contains_key(&owner)
-                || self.self_types.contains_key(&owner)
-            {
+            if self.open_functions.contains_key(&owner) {
                 continue;
             }
             let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) =
@@ -2002,13 +1995,10 @@ impl Checker<'_, '_> {
                 "shared function templates with deferred interface descriptions are not yet implemented",
             ));
         }
-        if sig.modifiers.is_normal_form_head
-            || self.self_containers.contains_key(&owner)
-            || self.self_types.contains_key(&owner)
-        {
+        if sig.modifiers.is_normal_form_head {
             return Err(error(
                 span,
-                "open signatures with methods or normal-form bodies are not yet implemented",
+                "open signatures with normal-form bodies are not yet implemented",
             ));
         }
         if sig.modifiers.is_pure
@@ -8669,6 +8659,61 @@ impl Checker<'_, '_> {
             ty,
             kind,
         })
+    }
+
+    pub(super) fn specialize_open_trait_method_value(
+        &mut self,
+        owner: OwnerId,
+        clause_arguments: Vec<Term>,
+        span: Span,
+    ) -> Result<(n::Expr, Vec<n::LocalId>), Error> {
+        self.check_open_definition(owner)?;
+        self.check_type_application(owner, &clause_arguments, span)?;
+        let saved = self.alias_substitution.clone();
+        for (binder, argument) in self
+            .declaration_binders(owner)
+            .into_iter()
+            .zip(clause_arguments)
+        {
+            self.alias_substitution
+                .insert(binder.declaration, Arc::new(argument));
+        }
+        let result = (|| {
+            let sig = self.open_fn_or_case_sig(owner, span)?;
+            let definition = self.open_functions[&owner].clone();
+            let mut parameters = Vec::with_capacity(definition.parameters.len());
+            for (sort, annotation) in &definition.parameters {
+                let Annotation::Known(ty) = annotation else {
+                    return Err(error(
+                        span,
+                        "open collector method requires known parameter domain",
+                    ));
+                };
+                let ty = self.specialize_open_clause_type(owner, ty, span)?;
+                parameters.push(Parameter { sort: *sort, ty });
+            }
+            let Annotation::Known(result_ty) = &definition.result else {
+                return Err(error(
+                    span,
+                    "open collector method requires known result domain",
+                ));
+            };
+            let result_ty = self.specialize_open_clause_type(owner, result_ty, span)?;
+            let signature = Term::Function {
+                parameters,
+                result: Box::new(result_ty),
+            };
+            let symbols = vec![None; sig.params.len()];
+            let callee = self.open_instance_value(owner, &symbols, signature, span)?;
+            let bindings = sig
+                .params
+                .iter()
+                .map(|parameter| local(parameter.hir_id))
+                .collect();
+            Ok((callee, bindings))
+        })();
+        self.alias_substitution = saved;
+        result
     }
 
     fn instantiate_open_function(

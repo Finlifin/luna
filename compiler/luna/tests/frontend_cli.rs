@@ -1048,6 +1048,8 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         stable_concat_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
+        variadic_collector_protocol: None,
+        extended_variadic_collector_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,

@@ -148,10 +148,28 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         if self.routed[slot].is_none() && self.interface.is_collector(slot) {
             let ty = domain.ty;
             if checker.list_element_type(&ty).is_none() {
-                return Err(error(
+                checker.check_variadic_collection_domain(&ty, false, true, self.span)?;
+                let empty_ty = checker.tuple_value_type(Vec::new(), self.span)?;
+                let empty_packet = n::Expr {
+                    source: source(self.span),
+                    ty: empty_ty,
+                    kind: K::Tuple(Vec::new()),
+                };
+                let collected = checker.lower_comptime_variadic_nf(empty_packet, &ty, self.span)?;
+                let identity = checker.preserved_input_identity(
+                    &collected,
+                    |id, _| Ok(self.progress.known_bindings.get(&id).cloned()),
                     self.span,
-                    "normal-form variadic collector requires meta.List<T>",
-                ));
+                )?;
+                self.progress.record(
+                    slot,
+                    n::NormalFormArgument::Value(collected),
+                    ty,
+                    identity,
+                    &mut checker.required_steps,
+                    self.span,
+                )?;
+                return Ok(Poll::Continue);
             }
             let identity = checker.checked_collected_list_in(
                 &[],
@@ -369,6 +387,42 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 )
             })
         {
+            if checker.list_element_type(&domain.ty).is_none() {
+                if let [n::NormalFormArgument::ListSpread(spread)] = items.as_slice()
+                    && spread.ty == domain.ty
+                {
+                    return Ok(n::NormalFormArgument::Value(spread.clone()));
+                }
+                let mut elements = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        n::NormalFormArgument::Value(value) => elements.push(value),
+                        n::NormalFormArgument::ListSpread(_) => {
+                            return Err(error(
+                                self.span,
+                                "spread into a non-list VariadicCollector clause input is not supported alongside elements",
+                            ));
+                        }
+                        _ => unreachable!("checked collection input"),
+                    }
+                }
+                let packet_ty = if elements.iter().any(|value| is_never(&value.ty)) {
+                    p(P::Never)
+                } else {
+                    checker.tuple_value_type(
+                        elements.iter().map(|value| value.ty.clone()).collect(),
+                        self.span,
+                    )?
+                };
+                let packet = n::Expr {
+                    source: source(self.span),
+                    ty: packet_ty,
+                    kind: K::Tuple(elements),
+                };
+                return checker
+                    .lower_comptime_variadic_nf(packet, &domain.ty, self.span)
+                    .map(n::NormalFormArgument::Value);
+            }
             let mut collection = clause_inputs::ClauseCollection::default();
             for item in items {
                 match item {

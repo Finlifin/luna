@@ -1700,6 +1700,7 @@ enum Head {
     UnsafeFunction,
     PureFunction,
     Tuple(usize),
+    NormalTuple(DeclarationId, usize),
     Function(Vec<Sort>),
     Closure(usize),
     Nominal(DeclarationId, usize),
@@ -1731,6 +1732,34 @@ fn constructor(term: &Term) -> Option<Head> {
         } => Some(Head::TraitObject(*interface, arguments.len())),
         _ => None,
     }
+}
+
+fn tuple_normal_elements<'a>(
+    context: &Context,
+    term: &'a Term,
+) -> Option<(DeclarationId, &'a [Term])> {
+    let Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments,
+    } = term
+    else {
+        return None;
+    };
+    if !context.is_tuple_head(*head) {
+        return None;
+    }
+    nir::normal_forms::type_list_fields_with_layouts(arguments, &|id| {
+        context.theory.list_inference_heads.contains(&id)
+    })
+    .map(|elements| (*head, elements))
+}
+
+fn constructor_in_context(context: &Context, term: &Term) -> Option<Head> {
+    constructor(term).or_else(|| {
+        tuple_normal_elements(context, term)
+            .map(|(head, elements)| Head::NormalTuple(head, elements.len()))
+    })
 }
 
 /// Constant-work disjointness for admitted outer type constructors. Reuse the
@@ -2205,38 +2234,67 @@ impl Search<'_> {
                     if self.computation_distinct(a, b, &classes, assignment)? {
                         return Ok(None);
                     }
-                    if let (Some(ha), Some(hb)) = (constructor(ta), constructor(tb)) {
+                    if let (Some(ha), Some(hb)) = (
+                        constructor_in_context(self.context, ta),
+                        constructor_in_context(self.context, tb),
+                    ) {
                         if ha != hb {
                             return Ok(None);
                         }
-                        // Nominal argument injectivity needs its own declaration contract.
-                        if !matches!(ha, Head::Nominal(..))
-                            || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
-                        {
-                            // Retained immutable indices are part of a nominal
-                            // type's identity, not program-state predicates.
-                            if let (
-                                Term::Nominal {
-                                    arguments: left, ..
-                                },
-                                Term::Nominal {
-                                    arguments: right, ..
-                                },
-                            ) = (ta, tb)
-                            {
-                                for (left, right) in left.iter().zip(right) {
-                                    if value_indices::distinct(left, right, &mut self.steps)? {
-                                        return Ok(None);
-                                    }
+                        if let (Some((_, elements_a)), Some((_, elements_b))) = (
+                            tuple_normal_elements(self.context, ta),
+                            tuple_normal_elements(self.context, tb),
+                        ) {
+                            for (ea, eb) in elements_a.iter().zip(elements_b) {
+                                if let (Some(&ca), Some(&cb)) =
+                                    (self.terms.ids.get(ea), self.terms.ids.get(eb))
+                                {
+                                    changed |= classes.merge(ca, cb);
                                 }
                             }
-                            for (&ca, &cb) in
-                                self.terms.children[a].iter().zip(&self.terms.children[b])
+                        } else {
+                            // Nominal argument injectivity needs its own declaration contract.
+                            if !matches!(ha, Head::Nominal(..))
+                                || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
                             {
-                                changed |= classes.merge(ca, cb);
+                                // Retained immutable indices are part of a nominal
+                                // type's identity, not program-state predicates.
+                                if let (
+                                    Term::Nominal {
+                                        arguments: left, ..
+                                    },
+                                    Term::Nominal {
+                                        arguments: right, ..
+                                    },
+                                ) = (ta, tb)
+                                {
+                                    for (left, right) in left.iter().zip(right) {
+                                        if value_indices::distinct(left, right, &mut self.steps)? {
+                                            return Ok(None);
+                                        }
+                                    }
+                                }
+                                for (&ca, &cb) in
+                                    self.terms.children[a].iter().zip(&self.terms.children[b])
+                                {
+                                    changed |= classes.merge(ca, cb);
+                                }
                             }
                         }
                     }
+                } else if let (Some((ha, elements_a)), Some((hb, elements_b))) = (
+                    tuple_normal_elements(self.context, ta),
+                    tuple_normal_elements(self.context, tb),
+                ) && ha == hb
+                    && elements_a.len() == elements_b.len()
+                    && elements_a.iter().zip(elements_b).all(|(ea, eb)| {
+                        matches!(
+                            (self.terms.ids.get(ea), self.terms.ids.get(eb)),
+                            (Some(&ca), Some(&cb)) if classes.root(ca) == classes.root(cb)
+                        )
+                    })
+                {
+                    changed |= classes.merge(a, b);
                 } else if same_congruent_head(ta, tb, self.context)
                     && self.terms.children[a]
                         .iter()

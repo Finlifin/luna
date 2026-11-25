@@ -20,11 +20,14 @@ impl Checker<'_, '_> {
             Some((_, Annotation::Pending(_) | Annotation::Suspended { .. }))
         );
         if let Some(ty) = self.locals.get(&key).cloned() {
-            if matches!(self.structural_type(&ty, input.span)?, Term::Tuple(_)) {
+            if self.bound_tuple_elements(&ty).is_some() || matches!(ty, Term::Tuple(_)) {
                 return Ok(false);
             }
             if self.is_proven_tuple_type(&ty, input.span)? {
-                return Ok(true);
+                return Ok(!matches!(
+                    self.structural_type(&ty, input.span),
+                    Ok(Term::Tuple(_))
+                ));
             }
             if is_deferred_annotation {
                 return Err(error(
@@ -54,6 +57,7 @@ impl Checker<'_, '_> {
         }
         Ok(false)
     }
+
     pub(super) fn describe_inline_trait_guard(
         &mut self,
         expr: &Expr<'_>,

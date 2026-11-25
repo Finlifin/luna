@@ -5703,7 +5703,7 @@ impl Walker<'_> {
                 }
             }
             K::Local(local) => {
-                result = self.local_value(state, *local)?;
+                result = self.local_value_with_type(state, *local, Some(&expr.ty))?;
             }
             K::StagedValue(_) => {
                 result = self.unknown_value(&expr.ty)?;

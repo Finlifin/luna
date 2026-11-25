@@ -88,3 +88,24 @@ pub trait Index where Idx {
 pub trait IndexMut :- Index<Idx> where Idx {
     fn index_mut(*self, idx: Idx) -> *Self.as(Index<Idx>).Output;
 }
+
+-- ── Variadic Collectors ────────────────────────────────────────────────────
+pub trait VariadicCollector {
+    assoc Tmp: Type = void;
+
+    fn variadic_init() -> Tmp where S;
+    fn variadic_collect(tmp: *Tmp, args: S) -> Self where S;
+
+    ^attrs.comptime_phase
+    comptime fn comptime_variadic_collect(args: S) -> Self where S;
+}
+
+pub trait ExtendedVariadicCollector {
+    assoc Tmp: Type = void;
+
+    fn extended_variadic_init() -> Tmp where Ps;
+    fn extended_variadic_collect(tmp: *Tmp, properties: Ps) -> Self where Ps;
+
+    ^attrs.comptime_phase
+    comptime fn comptime_extended_variadic_collect(properties: Ps) -> Self where Ps;
+}

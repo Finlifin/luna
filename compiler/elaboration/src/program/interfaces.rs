@@ -229,11 +229,9 @@ impl Checker<'_, '_> {
                 return Ok(program);
             }
             let ty = self
-                .signatures
-                .get(&owner)
-                .or_else(|| self.interface_signatures.get(&owner))
-                .unwrap()
-                .clone();
+                .declared_signature(owner)
+                .ok_or_else(|| error(item.span, "method contract requires a function signature"))?
+                .into_owned();
             let Term::Function { parameters, result } = ty else {
                 unreachable!()
             };
@@ -291,11 +289,11 @@ impl Checker<'_, '_> {
             } else {
                 self.callable_type(
                     owner,
-                    self.signatures
-                        .get(&owner)
-                        .or_else(|| self.interface_signatures.get(&owner))
-                        .unwrap()
-                        .clone(),
+                    self.declared_signature(owner)
+                        .ok_or_else(|| {
+                            error(item.span, "method contract requires a function signature")
+                        })?
+                        .into_owned(),
                 )
                 .into()
             },
@@ -2058,6 +2056,44 @@ impl Checker<'_, '_> {
         self.inherent_method_value(owner, arguments, span)
     }
 
+    pub(super) fn concrete_trait_method_body(
+        &mut self,
+        interface: &n::InterfaceInstance,
+        subject: &Term,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(OwnerId, Vec<Term>)>, Error> {
+        if matches!(
+            self.symbolic_interface_evidence(subject, interface),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+        let resolution = self
+            .resolve_trait_capability(interface, subject, Budget::default())
+            .map_err(|e| error(span, format!("method implementation query failed: {e:?}")))?;
+        let crate::implementation::Selection::Selected(id) = resolution.selection else {
+            return Ok(None);
+        };
+        let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
+            resolution.assessments.get(&id)
+        else {
+            return Ok(None);
+        };
+        let implementation = &self.checked_implementations[self.implementation_positions[&id]];
+        let Some((_, body)) = implementation
+            .methods
+            .iter()
+            .find(|(method, _)| method == name)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .source_declarations
+            .owner(*body)
+            .map(|owner| (owner, evidence.type_arguments.clone())))
+    }
+
     fn inherent_method_value(
         &mut self,
         owner: OwnerId,
@@ -2875,13 +2911,9 @@ impl Checker<'_, '_> {
                     // Ordinary inputs are supplied by calls, not by clause
                     // instantiation. Their obligations are checked below after
                     // input preparation and retained for staged specialization.
-                    let signature = self
-                        .signatures
-                        .get(&owner)
-                        .or_else(|| self.interface_signatures.get(&owner))
-                        .ok_or_else(|| {
-                            error(span, "ordinary capability requires function signature")
-                        })?;
+                    let signature = self.declared_signature(owner).ok_or_else(|| {
+                        error(span, "ordinary capability requires function signature")
+                    })?;
                     let Term::Function { parameters, .. } = signature.callable_signature() else {
                         return Err(error(
                             span,

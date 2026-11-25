@@ -136,19 +136,26 @@ impl Checker<'_, '_> {
         }
         for (slot, value, packet_domain, span, element) in routed {
             let declared = if element {
-                self.list_element_type(&parameters[slot].2)
-                    .ok_or_else(|| error(span, "variadic input requires a bound meta.List<T>"))?
+                if let Some(elem) = self.list_element_type(&parameters[slot].2) {
+                    Some(elem)
+                } else {
+                    None
+                }
             } else {
-                &parameters[slot].2
+                Some(&parameters[slot].2)
             };
-            let domain = declared
-                .instantiate_types(&known_parameters, &known_arguments)
-                .map_err(|failure| error(span, failure.to_string()))?;
-            let inputs = self.term_declaration_inputs(&domain, span)?;
-            let description = if parameters.iter().any(|(id, _, _)| inputs.contains(id)) {
-                D::Unknown
+            let description = if let Some(declared) = declared {
+                let domain = declared
+                    .instantiate_types(&known_parameters, &known_arguments)
+                    .map_err(|failure| error(span, failure.to_string()))?;
+                let inputs = self.term_declaration_inputs(&domain, span)?;
+                if parameters.iter().any(|(id, _, _)| inputs.contains(id)) {
+                    D::Unknown
+                } else {
+                    D::Known(domain)
+                }
             } else {
-                D::Known(domain)
+                D::Unknown
             };
             if let Some(value) = value {
                 self.describe_open_expression(

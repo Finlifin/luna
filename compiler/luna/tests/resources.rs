@@ -1489,6 +1489,8 @@ fn compile_in_with_resources(
             stable_concat_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
+            variadic_collector_protocol: None,
+            extended_variadic_collector_protocol: None,
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
