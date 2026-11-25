@@ -115,7 +115,9 @@ pub enum Operation {
     MemCopyNonOverlapping,
     MemSetBytes,
     MemCompareBytes,
+    MemBorrowStr,
 }
+
 impl Operation {
     /// Stable target-operation names used by host configuration, not source tag identities.
     pub const ALL: &'static [Self] = &[
@@ -180,6 +182,7 @@ impl Operation {
         Self::MemCopyNonOverlapping,
         Self::MemSetBytes,
         Self::MemCompareBytes,
+        Self::MemBorrowStr,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -245,6 +248,7 @@ impl Operation {
             Self::MemCopyNonOverlapping => "mem_copy_nonoverlapping",
             Self::MemSetBytes => "mem_set_bytes",
             Self::MemCompareBytes => "mem_compare_bytes",
+            Self::MemBorrowStr => "mem_borrow_str",
         }
     }
 
@@ -277,12 +281,16 @@ impl Operation {
                 | Self::MemCopyNonOverlapping
                 | Self::MemSetBytes
                 | Self::MemCompareBytes
+                | Self::MemBorrowStr
         )
     }
 
     /// Raw typed reads and writes accept an arbitrary `Type` payload instead of a fixed scalar set.
     pub fn is_polymorphic_memory(self) -> bool {
-        matches!(self, Self::MemRawRead | Self::MemRawWrite)
+        matches!(
+            self,
+            Self::MemRawRead | Self::MemRawWrite | Self::MemBorrowStr
+        )
     }
 
     /// Runtime-only host operations cannot execute at comptime or satisfy pure observations.
@@ -313,6 +321,7 @@ impl Operation {
                 | Self::SignBit
         )
     }
+
     pub fn has_integer_exponent(self) -> bool {
         matches!(self, Self::IntegerPower | Self::ScaleByPowerOfTwo)
     }
@@ -320,6 +329,11 @@ impl Operation {
     pub fn payload_or_scalar<'a>(self, inputs: &'a [Term], output: &'a Term) -> &'a Term {
         if self.is_float_predicate() {
             inputs.first().unwrap_or(output)
+        } else if matches!(self, Self::MemBorrowStr) {
+            match inputs.first() {
+                Some(Term::Pointer(inner)) => inner.as_ref(),
+                _ => output,
+            }
         } else if matches!(self, Self::MemRawWrite) {
             inputs.get(1).unwrap_or(output)
         } else {
@@ -359,12 +373,14 @@ impl Operation {
             use Primitive::*;
             match (self, index) {
                 (Self::MemRawWrite, 1) => scalar.clone(),
+                (Self::MemBorrowStr, 0) => Term::Pointer(Box::new(scalar.clone())),
                 (Self::MemRawRead, 0)
                 | (Self::MemRawWrite, 0)
                 | (Self::MemCopy, 0 | 1 | 2)
                 | (Self::MemCopyNonOverlapping, 0 | 1 | 2)
                 | (Self::MemSetBytes, 0 | 2)
-                | (Self::MemCompareBytes, 0 | 1 | 2) => Term::Primitive(Usize),
+                | (Self::MemCompareBytes, 0 | 1 | 2)
+                | (Self::MemBorrowStr, 1 | 2) => Term::Primitive(Usize),
                 (Self::MemSetBytes, 1) => Term::Primitive(U8),
                 _ => unreachable!("memory operand index validated by arity"),
             }
@@ -374,6 +390,7 @@ impl Operation {
             scalar.clone()
         }
     }
+
     pub fn result_type(self, scalar: &Term) -> Term {
         match self {
             Self::LinuxAlloc => Term::Primitive(Primitive::Usize),
@@ -384,6 +401,7 @@ impl Operation {
             | Self::MemSetBytes => Term::Primitive(Primitive::Void),
             Self::MemRawRead => scalar.clone(),
             Self::MemCompareBytes => Term::Primitive(Primitive::I32),
+            Self::MemBorrowStr => Term::Primitive(Primitive::Str),
             _ if self.is_platform() => Term::Primitive(Primitive::I64),
             _ if self.is_float_predicate() => Term::Primitive(Primitive::Bool),
             _ => scalar.clone(),
@@ -409,6 +427,7 @@ impl Operation {
             | Self::LinuxReadRaw => &[I64],
             Self::LinuxAlloc | Self::MemRawRead => &[Usize],
             Self::MemCompareBytes => &[I32],
+            Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
             | Self::MemRawWrite
             | Self::MemCopy
@@ -473,7 +492,8 @@ impl Operation {
             | Self::MemCopy
             | Self::MemCopyNonOverlapping
             | Self::MemSetBytes
-            | Self::MemCompareBytes => 3,
+            | Self::MemCompareBytes
+            | Self::MemBorrowStr => 3,
             Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite => 2,
             Self::LinuxReadByte | Self::LinuxClose | Self::LinuxUnlink | Self::MemRawRead => 1,
             Self::LinuxGetPid => 0,
@@ -591,6 +611,7 @@ impl fmt::Display for Error {
         }
     }
 }
+
 impl std::error::Error for Error {}
 
 impl Registry {
@@ -600,6 +621,7 @@ impl Registry {
     ) -> Result<Self, &'static str> {
         Self::for_family(family, variant, Operation::FusedMultiplyAdd)
     }
+
     pub fn for_family(
         family: &crate::program::Enum,
         variant: usize,
@@ -614,6 +636,7 @@ impl Registry {
             bindings: BTreeMap::from([(tag, operation)]),
         })
     }
+
     pub fn new(package: &Package, bindings: &[(Tag, Operation)]) -> Result<Self, Error> {
         let mut result = BTreeMap::new();
         for &(tag, operation) in bindings {
@@ -749,12 +772,14 @@ pub struct Checked {
     operation: Operation,
     signature: Signature,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Signature {
     Concrete(Primitive),
     Pending(Term),
     Payload(Term),
 }
+
 fn parameter(ty: &Term) -> bool {
     matches!(
         ty,
@@ -764,6 +789,7 @@ fn parameter(ty: &Term) -> bool {
         }
     )
 }
+
 pub fn concrete_payload(ty: &Term) -> bool {
     ty.sort() == crate::Sort::Type
         && ty.check_scope(&[]).is_ok()
@@ -778,6 +804,7 @@ pub fn concrete_payload(ty: &Term) -> bool {
             )
         })
 }
+
 impl Checked {
     /// Bound ownership transfer of checked evidence, including pending and payload types.
     pub fn charge_copy(
@@ -792,10 +819,12 @@ impl Checked {
         }
         Ok(())
     }
+
     pub fn for_comptime(mut self) -> Self {
         self.comptime = true;
         self
     }
+
     pub fn is_comptime(&self) -> bool {
         self.comptime
     }
@@ -810,6 +839,7 @@ impl Checked {
     ) -> Result<(), &'static str> {
         self.validate_types(tag, inputs.iter().map(|input| &input.ty), output)
     }
+
     /// Revalidate a linear instruction without retaining operand expressions.
     pub fn validate_types<'t>(
         &self,
@@ -826,6 +856,7 @@ impl Checked {
             }
         }
     }
+
     /// Validate against specialized operand/result types by rewriting any
     /// deferred pending or payload type with `transform` first.
     pub fn validate_specialized<E>(
@@ -848,6 +879,7 @@ impl Checked {
     ) -> Result<(), &'static str> {
         self.validate_template_types(tag, inputs.iter().map(|input| &input.ty), output)
     }
+
     fn validate_template_types<'t>(
         &self,
         tag: Tag,
@@ -895,14 +927,17 @@ impl Checked {
     pub fn tag(&self) -> Tag {
         self.tag
     }
+
     pub fn operation(&self) -> Operation {
         self.operation
     }
+
     /// Target-independent width, if one exists. A concrete platform type still
     /// needs an explicit target to obtain its layout.
     pub fn width(&self) -> Option<u32> {
         self.width_for_target(None)
     }
+
     pub fn width_for_target(&self, target: Option<crate::target::TargetData>) -> Option<u32> {
         match &self.signature {
             Signature::Concrete(primitive) => match primitive {
@@ -917,6 +952,7 @@ impl Checked {
             Signature::Pending(_) | Signature::Payload(_) => None,
         }
     }
+
     /// Check layout-specific restrictions without selecting a missing target.
     /// Pending scalar types and target-independent platform bindings remain
     /// deferred. Consumers that need a width must also require `Some`.
@@ -983,6 +1019,7 @@ pub fn checked(expr: &crate::program::Expr) -> Result<&Checked, &'static str> {
     binding.validate(*tag, inputs, &expr.ty)?;
     Ok(binding)
 }
+
 impl fmt::Display for Checked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self.operation {
@@ -1031,6 +1068,7 @@ mod operation_names_tests {
 #[cfg(test)]
 mod pending_dependency_tests {
     use super::*;
+
     #[test]
     fn stored_pending_types_participate_in_dependency_and_copy_checks() {
         let tag = Tag {

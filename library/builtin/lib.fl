@@ -36,10 +36,12 @@ pub use iterator.{
 pub use ops.*;
 pub use option.OptionalOps;
 pub use patterns.{
+    ConcatPatternView,
     ListPatternView,
     ListPatternViewEndless,
     RangeEnd,
     RangePatternView,
+    StableConcatPatternView,
     StableListPatternView,
     StableListPatternViewEndless,
     StableRangePatternView,
@@ -95,10 +97,12 @@ pub mod prelude {
     pub use ops.*;
     pub use option.OptionalOps;
     pub use patterns.{
+        ConcatPatternView,
         ListPatternView,
         ListPatternViewEndless,
         RangeEnd,
         RangePatternView,
+        StableConcatPatternView,
         StableListPatternView,
         StableListPatternViewEndless,
         StableRangePatternView,

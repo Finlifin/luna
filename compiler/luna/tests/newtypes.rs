@@ -231,6 +231,8 @@ fn compile_selected(source: &str, emit: Emit, tuple: bool) -> Result<Artifact, S
         range_end_type: None,
         range_pattern_protocol: None,
         stable_range_pattern_protocol: None,
+        concat_pattern_protocol: None,
+        stable_concat_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         literal_into_protocol: None,

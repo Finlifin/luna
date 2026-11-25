@@ -202,6 +202,36 @@ impl Emitter<'_> {
                 self.label(&done_bb);
                 Ok(self.load(&slot))
             }
+            Operation::MemBorrowStr => {
+                let [_owner, addr, len] = values else {
+                    return Err("host mem_borrow_str requires 3 arguments".into());
+                };
+                let bits = usize_bits(addr)?;
+                if addr.ty != len.ty || result_ty != Ty::String {
+                    return Err("host mem_borrow_str representation mismatch".into());
+                }
+                let ptr = self.instruction(
+                    Ty::Pointer,
+                    format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
+                );
+                let len64 = if bits == 64 {
+                    len.text.clone()
+                } else {
+                    self.instruction(
+                        Ty::Int(64, false),
+                        format!("zext {} {} to i64", len.ty.llvm(), len.text),
+                    )
+                    .text
+                };
+                let s0 = self.instruction(
+                    Ty::String,
+                    format!("insertvalue {{ ptr, i64 }} undef, ptr {}, 0", ptr.text),
+                );
+                Ok(self.instruction(
+                    Ty::String,
+                    format!("insertvalue {{ ptr, i64 }} {}, i64 {}, 1", s0.text, len64),
+                ))
+            }
             _ => Err(format!(
                 "operation `{}` is not a raw memory intrinsic",
                 operation.name()

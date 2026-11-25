@@ -1,6 +1,6 @@
 use bindings.{try_u128_to_usize, usize_representation}
 use numeric.math_intrinsics;
-use primitives.{Type, bool, i32, u128, u8, usize}
+use primitives.{Type, bool, i32, str, u128, u8, usize}
 
 {-
     Low-level raw host memory intrinsics and target-portable checked usize
@@ -16,6 +16,7 @@ pub mod target {
         copy_nonoverlapping,
         set_bytes,
         compare_bytes,
+        borrow_str,
     }
 }
 
@@ -44,6 +45,13 @@ pub unsafe fn compare_bytes(lhs: usize, rhs: usize, count: usize) -> i32 {
         .Memory
         .compare_bytes'intrinsic(lhs, rhs, count)
         .as(i32)
+}
+
+pub unsafe fn borrow_str(owner: *T, addr: usize, len: usize) -> str where T {
+    target
+        .Memory
+        .borrow_str'intrinsic(owner, addr, len)
+        .as(str)
 }
 
 pub pure fn usize_max() -> usize {

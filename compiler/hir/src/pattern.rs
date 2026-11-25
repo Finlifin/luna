@@ -3,7 +3,7 @@
 use rustc_span::Span;
 
 use crate::Expr;
-use crate::common::{BindingMode, Ident, Path};
+use crate::common::{BindingMode, Ident};
 use crate::hir_id::HirId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +63,8 @@ pub enum PatternKind<'hir> {
     ErrorErr(&'hir Pattern<'hir>),
 
     Or(&'hir [Pattern<'hir>]),
+    Concat(&'hir Pattern<'hir>, &'hir Pattern<'hir>),
+    Typed(&'hir Pattern<'hir>, &'hir Expr<'hir>),
     Not(&'hir Pattern<'hir>),
     Ref(&'hir Pattern<'hir>),
     Range(

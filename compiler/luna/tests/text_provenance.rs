@@ -72,7 +72,11 @@ impl Drop for NativeCase {
 
 fn with_sysroot_world<T>(package: &Package, run: impl FnOnce(&World<'_>, &LangItems) -> T) -> T {
     let context = Context::from_package(package).unwrap();
-    let mut index = Index::default();
+    let mut index = Index::for_builtin_packages(
+        package.target,
+        package.builtin_implementation_packages.iter().copied(),
+    );
+    index.set_normal_form_metadata(package.normal_forms.clone());
     for i in package
         .implementations
         .iter()

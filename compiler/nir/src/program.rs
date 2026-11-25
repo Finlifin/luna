@@ -1249,7 +1249,7 @@ impl TextQueryKind {
     }
 
     pub fn is_comptime_only(self) -> bool {
-        matches!(self, Self::Slice | Self::Concat | Self::FromChar)
+        matches!(self, Self::Concat | Self::FromChar)
     }
 
     pub fn validate(self, packet: &Term, result: &Term) -> bool {

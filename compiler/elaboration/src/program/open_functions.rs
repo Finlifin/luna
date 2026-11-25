@@ -1504,7 +1504,10 @@ impl Checker<'_, '_> {
                     pending.extend([*first, *next]);
                     expressions.push(value);
                 }
-                P::Guard(inner, value) => {
+                P::Concat(first, next) => {
+                    pending.extend([*first, *next]);
+                }
+                P::Guard(inner, value) | P::Typed(inner, value) => {
                     pending.push(inner);
                     expressions.push(value);
                 }

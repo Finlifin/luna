@@ -1,3 +1,13 @@
+use bindings.{
+    str_byte_comptime,
+    str_byte_length,
+    str_byte_length_comptime,
+    str_slice,
+    str_slice_comptime,
+}
+use primitives.{Type, bool, str, u64}
+use text_impl.bytes.TextBytes;
+
 {-
     Finite list syntax observes the length before extracting elements in order.
     Extraction returns Element by value; borrowing the receiver does not grant
@@ -122,3 +132,121 @@ pub trait RangePatternView {
     constants.
 -}
 pub trait StableRangePatternView :- RangePatternView {}
+
+{-
+    Sequence concatenation (`++`) pattern view. Supports prefix and suffix
+    splitting on borrowed receivers in both runtime and comptime phases.
+-}
+pub trait ConcatPatternView {
+    assoc Part: Type;
+    assoc Rest: Type = Self;
+
+    fn concat_pattern_view_strip_prefix(*self, part: Part) -> ?Rest;
+    fn concat_pattern_view_strip_suffix(*self, part: Part) -> ?Rest;
+
+    ^attrs.comptime_phase
+    assoc PartComptime: Type;
+    ^attrs.comptime_phase
+    assoc RestComptime: Type = Self;
+
+    ^attrs.comptime_phase
+    comptime fn concat_pattern_view_strip_prefix_comptime(self, part: PartComptime) -> ?RestComptime;
+    ^attrs.comptime_phase
+    comptime fn concat_pattern_view_strip_suffix_comptime(self, part: PartComptime) -> ?RestComptime;
+}
+
+{-
+    Marker protocol guaranteeing that concat prefix/suffix splitting is
+    referentially stable without side effects.
+-}
+pub trait StableConcatPatternView :- ConcatPatternView {}
+
+pure comptime fn comptime_matches_bytes_at(
+    haystack: str,
+    needle: str,
+    start: u64,
+    needle_length: u64,
+) -> bool {
+    let length = str_byte_length_comptime(haystack);
+    if start > length {
+        return false;
+    }
+    if needle_length > length - start {
+        return false;
+    }
+    var pos: u64 = start;
+    var index: u64 = 0;
+    while pos < length and index < needle_length {
+        let actual = str_byte_comptime(haystack, pos) match {
+            value? => value,
+            null => return false,
+        }
+        let expected = str_byte_comptime(needle, index) match {
+            value? => value,
+            null => return false,
+        }
+        if actual != expected {
+            return false;
+        }
+        pos = pos + 1;
+        index = index + 1;
+    }
+    index == needle_length
+}
+
+impl ConcatPatternView for str {
+    assoc Part: Type = str;
+    assoc Rest: Type = str;
+
+    fn concat_pattern_view_strip_prefix(*self, part: str) -> ?str {
+        let s = self.*;
+        if not s.starts_with(part) {
+            return null;
+        }
+        str_slice(s, str_byte_length(part), str_byte_length(s))
+    }
+
+    fn concat_pattern_view_strip_suffix(*self, part: str) -> ?str {
+        let s = self.*;
+        if not s.ends_with(part) {
+            return null;
+        }
+        let total = str_byte_length(s);
+        let plen = str_byte_length(part);
+        if plen > total {
+            return null;
+        }
+        str_slice(s, 0, total - plen)
+    }
+}
+
+impl StableConcatPatternView for str {}
+
+comptime impl ConcatPatternView for str {
+    assoc PartComptime: Type = str;
+    assoc RestComptime: Type = str;
+
+    comptime fn concat_pattern_view_strip_prefix_comptime(self, part: str) -> ?str {
+        let total = str_byte_length_comptime(self);
+        let plen = str_byte_length_comptime(part);
+        if plen > total or not comptime_matches_bytes_at(self, part, 0, plen) {
+            return null;
+        }
+        str_slice_comptime(self, plen, total)
+    }
+
+    comptime fn concat_pattern_view_strip_suffix_comptime(self, part: str) -> ?str {
+        let total = str_byte_length_comptime(self);
+        let plen = str_byte_length_comptime(part);
+        if plen > total {
+            return null;
+        }
+        let start = total - plen;
+        if not comptime_matches_bytes_at(self, part, start, plen) {
+            return null;
+        }
+        str_slice_comptime(self, 0, start)
+    }
+}
+
+comptime impl StableConcatPatternView for str {}

@@ -3027,7 +3027,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.bind_arm_pattern_inner(children[0], first, seen);
                 self.bind_arm_pattern_inner(children[2], next, seen);
             }
+            PatternKind::Concat(lhs, rhs) => {
+                self.bind_arm_pattern_inner(children[0], lhs, seen);
+                self.bind_arm_pattern_inner(children[1], rhs, seen);
+            }
             PatternKind::Guard(pattern, _)
+            | PatternKind::Typed(pattern, _)
             | PatternKind::OptionSome(pattern)
             | PatternKind::ErrorOk(pattern)
             | PatternKind::ErrorErr(pattern)

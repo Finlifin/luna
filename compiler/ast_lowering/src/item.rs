@@ -2893,11 +2893,12 @@ fn check_case_param_duplicate_binders(
                     walk(sub, seen, on_dup);
                 }
             }
-            PK::Then(first, _, next) => {
+            PK::Then(first, _, next) | PK::Concat(first, next) => {
                 walk(first, seen, on_dup);
                 walk(next, seen, on_dup);
             }
             PK::Guard(inner, _)
+            | PK::Typed(inner, _)
             | PK::Projection(inner, _)
             | PK::OptionSome(inner)
             | PK::ErrorOk(inner)

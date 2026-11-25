@@ -1631,7 +1631,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             | Op::IntegerMinimum
             | Op::IntegerMaximum
             | Op::WrappingAbsoluteValue => {}
-            Op::MemRawRead | Op::MemCompareBytes => {
+            Op::MemRawRead | Op::MemCompareBytes | Op::MemBorrowStr => {
                 self.memory = self.memory.join(MemoryEffect::ReadOnly);
             }
             Op::MemRawWrite | Op::MemCopy | Op::MemCopyNonOverlapping | Op::MemSetBytes => {

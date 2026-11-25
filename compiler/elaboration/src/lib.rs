@@ -32,6 +32,7 @@ pub mod key_protocols;
 
 pub mod arithmetic;
 
+pub mod concat_patterns;
 pub mod indexing;
 pub mod list_patterns;
 pub mod range_patterns;

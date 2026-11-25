@@ -392,7 +392,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
             }
 
-            // `a | b` (or-pattern)
+            // `a or b` (or-pattern)
             NodeKind::OrPattern => {
                 let lhs = self.lower_pattern(children[0]);
                 let rhs = self.lower_pattern(children[1]);
@@ -400,6 +400,36 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 Pattern {
                     hir_id: self.next_hir_id(),
                     kind: PatternKind::Or(pats),
+                    span,
+                }
+            }
+
+            // `lhs ++ rhs` (concat pattern)
+            NodeKind::ConcatPattern => {
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let lhs = self.lower_pattern(children[0]);
+                self.bind_arm_pattern(children[0], &lhs);
+                let rhs = self.lower_pattern(children[1]);
+                self.local_exit(scope);
+                let lhs_ref = self.arena.alloc_pattern(lhs);
+                let rhs_ref = self.arena.alloc_pattern(rhs);
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::Concat(lhs_ref, rhs_ref),
+                    span,
+                }
+            }
+
+            // `(pat: Type)` (typed pattern)
+            NodeKind::TypeBoundDeclClause => {
+                let inner = self.lower_pattern(children[0]);
+                let ty = self.lower_expr(ExprContext::PatternConstant, children[1]);
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::Typed(
+                        self.arena.alloc_pattern(inner),
+                        self.arena.alloc_expr(ty),
+                    ),
                     span,
                 }
             }
@@ -836,7 +866,9 @@ fn pattern_output_names(pattern: &Pattern<'_>) -> Vec<hir::common::Ident> {
                 pending.extend(*inner);
             }
             PatternKind::Then(first, _, next) => pending.extend([*first, *next]),
+            PatternKind::Concat(lhs, rhs) => pending.extend([*lhs, *rhs]),
             PatternKind::Guard(inner, _)
+            | PatternKind::Typed(inner, _)
             | PatternKind::OptionSome(inner)
             | PatternKind::ErrorOk(inner)
             | PatternKind::ErrorErr(inner)

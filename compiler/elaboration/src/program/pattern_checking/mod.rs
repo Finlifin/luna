@@ -3,6 +3,7 @@
 use super::*;
 
 mod cases;
+mod concat;
 mod errors;
 mod evidence;
 mod matches;
@@ -350,6 +351,12 @@ impl Checker<'_, '_> {
                     pattern: Box::new(pattern),
                     condition: Box::new(condition),
                 })
+            }
+            HP::Concat(lhs, rhs) => self.concat_pattern(pattern, lhs, rhs, ty),
+            HP::Typed(inner, ty_expr) => {
+                let annotated = self.type_expr(ty_expr)?;
+                self.require(ty, &annotated, pattern.span)?;
+                self.pattern_with_record_head(inner, &annotated, observed, record)
             }
             HP::List(elements, rest) => self.list_pattern(pattern, elements, *rest, ty),
             HP::NormalForm(head, arguments) => {

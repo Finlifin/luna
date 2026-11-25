@@ -2382,6 +2382,14 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_pattern_inner(ctx, e, None, prefix, "", is_mutable);
                 }
             }
+            PatternKind::Concat(left, right) => {
+                self.walk_pattern_inner(ctx, left, None, prefix, "", is_mutable);
+                self.walk_pattern_inner(ctx, right, None, prefix, "", is_mutable);
+            }
+            PatternKind::Typed(inner, ty) => {
+                self.walk_pattern_inner(ctx, inner, nominal_hint, prefix, ty_suffix, is_mutable);
+                self.walk_expr(ctx, ty, false);
+            }
             PatternKind::List(elems, rest) => {
                 for e in *elems {
                     self.walk_pattern_inner(ctx, e, None, prefix, "", is_mutable);

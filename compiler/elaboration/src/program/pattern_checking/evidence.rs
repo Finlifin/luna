@@ -423,7 +423,7 @@ pub(in crate::program) fn pattern_binding_ids(
                     pending.push(inner);
                 }
             }
-            PatternKind::Then(first, _, next) => {
+            PatternKind::Then(first, _, next) | PatternKind::Concat(first, next) => {
                 pending.push(first);
                 pending.push(next);
             }
@@ -437,6 +437,7 @@ pub(in crate::program) fn pattern_binding_ids(
             PatternKind::ErrorOk(pattern)
             | PatternKind::ErrorErr(pattern)
             | PatternKind::Guard(pattern, _)
+            | PatternKind::Typed(pattern, _)
             | PatternKind::OptionSome(pattern) => pending.push(pattern),
             PatternKind::NormalForm(_, arguments) => {
                 pending.extend(arguments.iter().map(|argument| &argument.pattern))
@@ -475,7 +476,7 @@ pub(in crate::program) fn pattern_bindings(
                 }
             }
         }
-        PatternKind::Then(first, _, next) => {
+        PatternKind::Then(first, _, next) | PatternKind::Concat(first, next) => {
             result = pattern_bindings(first)?;
             for (name, id) in pattern_bindings(next)? {
                 if result.insert(name, id).is_some() {
@@ -497,6 +498,7 @@ pub(in crate::program) fn pattern_bindings(
         PatternKind::ErrorOk(pattern)
         | PatternKind::ErrorErr(pattern)
         | PatternKind::Guard(pattern, _)
+        | PatternKind::Typed(pattern, _)
         | PatternKind::OptionSome(pattern) => result = pattern_bindings(pattern)?,
         PatternKind::Binding(_, name, inner) => {
             if let Some(inner) = inner {

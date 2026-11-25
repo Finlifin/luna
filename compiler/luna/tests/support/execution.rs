@@ -109,6 +109,8 @@ pub(crate) fn compile_explicit_source_with_bindings(
             range_end_type: selectors.range_end.map(str::to_owned),
             range_pattern_protocol: selectors.range_pattern.map(str::to_owned),
             stable_range_pattern_protocol: selectors.stable_range_pattern.map(str::to_owned),
+            concat_pattern_protocol: selectors.concat_pattern.map(str::to_owned),
+            stable_concat_pattern_protocol: selectors.stable_concat_pattern.map(str::to_owned),
             iterator_protocol: selectors.iterator.map(str::to_owned),
             into_iterator_protocol: selectors.into_iterator.map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),

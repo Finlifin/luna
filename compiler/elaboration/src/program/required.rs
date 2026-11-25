@@ -3043,6 +3043,8 @@ fn scope_for_required(
         protocols_cfg.range_end,
         protocols_cfg.range_pattern,
         protocols_cfg.stable_range_pattern,
+        protocols_cfg.concat_pattern,
+        protocols_cfg.stable_concat_pattern,
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,

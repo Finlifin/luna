@@ -81,6 +81,7 @@ pub fn get_pattern_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::And => ExprOpInfo::new(10, NodeKind::AndIsPattern),  // and ... is ...
         TokenKind::As => ExprOpInfo::new(20, NodeKind::AsBindPattern),  // as bind
         TokenKind::Or => ExprOpInfo::new(30, NodeKind::OrPattern),      // or
+        TokenKind::PlusPlus => ExprOpInfo::new(35, NodeKind::ConcatPattern), // ++
 
         // propagation postfix (high precedence)
         TokenKind::Question => ExprOpInfo::new(40, NodeKind::OptionSomePattern), // ?

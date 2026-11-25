@@ -996,6 +996,31 @@ impl Parser<'_> {
                 p.mark_parenthesized(first);
                 return Ok(first);
             }
+            if p.eat_token(TokenKind::Colon) {
+                let ty = p.try_expr()?;
+                if ty == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected type expression in typed pattern".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    )
+                    .with_secondary_label(open_span, "this `(` was opened here"));
+                }
+                if !p.eat_token(TokenKind::RParen) {
+                    return Err(ParseError::unexpected_token(
+                        TokenKind::RParen,
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    )
+                    .with_secondary_label(open_span, "this `(` was opened here"));
+                }
+                return Ok(
+                    NodeBuilder::new(NodeKind::TypeBoundDeclClause, p.current_span())
+                        .add_single_child(first)
+                        .add_single_child(ty)
+                        .build(&mut p.ast),
+                );
+            }
             if !p.eat_token(TokenKind::Comma) {
                 return Err(ParseError::unexpected_token(
                     TokenKind::Comma,

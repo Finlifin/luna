@@ -902,6 +902,8 @@ fn all_resolved_protocols_in(
         protocols.range_end,
         protocols.range_pattern,
         protocols.stable_range_pattern,
+        protocols.concat_pattern,
+        protocols.stable_concat_pattern,
         protocols.literal_into,
         protocols.handle_error,
         protocols.splice,

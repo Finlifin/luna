@@ -126,13 +126,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 if !locals.contains_key(root) {
                     return Err("text descriptor address root is unavailable".into());
                 }
-                if may_hold {
-                    path.reverse();
-                    regions.places.insert(
-                        vec![],
-                        Some(BTreeSet::from([(DescriptorRoot::Local(*root), path)])),
-                    );
-                }
+                path.reverse();
+                regions.places.insert(
+                    vec![],
+                    Some(BTreeSet::from([(DescriptorRoot::Local(*root), path)])),
+                );
                 Ok(Some(regions))
             }
             K::ReadPointer(inner) if !may_hold => {
@@ -642,7 +640,17 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 continue;
             }
             let body = self.expr(&arm.body, &mut scope, returned, next)?;
-            if body.is_some() {
+            if let Some(body) = &body {
+                for value in std::iter::once(body)
+                    .chain(bindings.iter().filter_map(|id| scope.get(id)))
+                    .chain(scope.frames.values())
+                {
+                    for (root, _) in value.places.values().flatten().flatten() {
+                        if !locals.contains_storage(root) {
+                            return Err("text descriptor address escapes its local scope".into());
+                        }
+                    }
+                }
                 join_locals(&mut outgoing, &scope, &bindings, self.fuel)?;
             }
             merge(&mut result, body, self.fuel)?;
@@ -860,21 +868,52 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             // local scalar that carries the symbol identity.
             self.record_reads([TextRegionOrigin::Static])?;
         } else if *query == nir::program::TextQueryKind::Byte {
-            let origins = value
+            let origins = value.get(&vec![0]).filter(|origins| !origins.is_empty());
+            let targets = value
+                .places
                 .get(&vec![0])
-                .filter(|origins| !origins.is_empty())
-                .ok_or("text byte read has no backing-region origin")?;
-            charge(self.fuel, origins.len())?;
-            self.record_reads(origins.iter().cloned())?;
-        } else if *query == nir::program::TextQueryKind::Slice {
-            if let Some(origins) = value.get(&vec![0]) {
+                .and_then(Option::as_ref)
+                .filter(|targets| !targets.is_empty());
+            if origins.is_none() && targets.is_none() {
+                return Err("text byte read has no backing-region origin".into());
+            }
+            if let Some(origins) = origins {
                 charge(self.fuel, origins.len())?;
                 self.record_reads(origins.iter().cloned())?;
             }
-            return Ok(Some(Regions::from(BTreeMap::from([(
-                vec![VARIANT_FIELD, 1, 0],
-                BTreeSet::from([TextRegionOrigin::Static]),
-            )]))));
+            if let Some(targets) = targets {
+                charge(self.fuel, targets.len())?;
+                for (root, _) in targets {
+                    if !locals.contains_storage(root) {
+                        return Err("intrinsic text storage is no longer live".into());
+                    }
+                }
+            }
+        } else if *query == nir::program::TextQueryKind::Slice {
+            let mut sliced = Regions::new();
+            if let Some(origins) = value.get(&vec![0])
+                && !origins.is_empty()
+            {
+                charge(self.fuel, origins.len())?;
+                self.record_reads(origins.iter().cloned())?;
+                sliced
+                    .text
+                    .insert(vec![VARIANT_FIELD, 1, 0], origins.clone());
+            }
+            if let Some(Some(targets)) = value.places.get(&vec![0])
+                && !targets.is_empty()
+            {
+                charge(self.fuel, targets.len())?;
+                for (root, _) in targets {
+                    if !locals.contains_storage(root) {
+                        return Err("intrinsic text storage is no longer live".into());
+                    }
+                }
+                sliced
+                    .places
+                    .insert(vec![VARIANT_FIELD, 1, 0], Some(targets.clone()));
+            }
+            return Ok(Some(sliced));
         } else if *query == nir::program::TextQueryKind::Concat {
             for index in [0, 1] {
                 if let Some(origins) = value.get(&vec![index]) {
@@ -1154,7 +1193,13 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                     charge(self.fuel, origins.len())?;
                     self.record_reads(origins.iter().cloned())?;
                     grounded_origins.extend(origins.iter().cloned());
-                } else if leaf.guards.is_empty() {
+                } else if leaf.guards.is_empty()
+                    && regions
+                        .places
+                        .get(&leaf.input_fields)
+                        .and_then(Option::as_ref)
+                        .is_none_or(BTreeSet::is_empty)
+                {
                     return Err("intrinsic text input has no backing-region origin".into());
                 }
             }
@@ -1213,8 +1258,68 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         };
         // Admitted operations do not retain text or mutate caller memory.
         // Platform operations may synchronously read their text inputs.
-        nir::intrinsics::checked(expr).map_err(|e| e.to_string())?;
+        let checked = nir::intrinsics::checked(expr).map_err(|e| e.to_string())?;
+        if checked.operation() == nir::intrinsics::Operation::MemBorrowStr {
+            return self.transfer_borrow_str_intrinsic(inputs, locals, returned, next);
+        }
         self.ground_intrinsic_text_outputs(inputs, &expr.ty, locals, returned, next)
+    }
+
+    fn transfer_borrow_str_intrinsic(
+        &mut self,
+        inputs: &[Expr],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let Some(owner_regions) = self.expr(&inputs[0], locals, returned, next)? else {
+            return Ok(None);
+        };
+        for input in &inputs[1..] {
+            if self.expr(input, locals, returned, next)?.is_none() {
+                return Ok(None);
+            }
+        }
+        charge_regions(&owner_regions, self.fuel)?;
+        if let Some(Some(targets)) = owner_regions.places.get(&vec![])
+            && !targets.is_empty()
+        {
+            charge(self.fuel, targets.len())?;
+            for (root, path) in targets {
+                let storage = locals
+                    .get_storage(root)
+                    .ok_or("intrinsic text storage is no longer live")?;
+                charge_regions(storage, self.fuel)?;
+                let projected = project(storage.clone(), path, self.fuel)?;
+                for origins in projected.text.values() {
+                    if !origins.is_empty() {
+                        charge(self.fuel, origins.len())?;
+                        self.record_reads(origins.iter().cloned())?;
+                    }
+                }
+            }
+            let mut output = Regions::new();
+            output.places.insert(vec![], Some(targets.clone()));
+            return Ok(Some(output));
+        }
+        if owner_regions.places.contains_key(&vec![])
+            && let K::Local(local_id) = inputs[0].kind
+            && let Some(parameter) = self
+                .parameter_ids
+                .iter()
+                .position(|candidate| *candidate == local_id)
+        {
+            let mut output = Regions::new();
+            output.text.insert(
+                vec![],
+                BTreeSet::from([TextRegionOrigin::Parameter {
+                    parameter,
+                    fields: vec![],
+                }]),
+            );
+            return Ok(Some(output));
+        }
+        Err("intrinsic cannot synthesize text view without backing-region provenance".into())
     }
 
     #[inline(never)]
@@ -1277,6 +1382,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             // Text comparison observes characters, not just the view
             // descriptor. Non-text scalar operands have no regions.
             charge_regions(&regions, self.fuel)?;
+            for (root, _) in regions.places.values().flatten().flatten() {
+                if !locals.contains_storage(root) {
+                    return Err("intrinsic text storage is no longer live".into());
+                }
+            }
             for origins in regions.text.into_values() {
                 self.record_reads(origins)?;
             }

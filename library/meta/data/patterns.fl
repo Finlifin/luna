@@ -1,4 +1,6 @@
-use builtin.{Type, usize}
+use List;
+use builtin.{ConcatPatternView, Integer, StableConcatPatternView, Type, usize}
+use numeric.equality.ComptimeEq;
 
 {- List patterns observe comptime values through ordinary value-reference self. -}
 pub pure comptime trait ComptimeListPatternView {
@@ -39,3 +41,43 @@ comptime impl ComptimeListPatternView for List<T> where T {
 }
 
 comptime impl ComptimeStableListPatternView for List<T> where T {}
+
+comptime impl ConcatPatternView for List<T> where T :- ComptimeEq {
+    assoc PartComptime: Type = Self;
+    assoc RestComptime: Type = Self;
+
+    comptime fn concat_pattern_view_strip_prefix_comptime(self, part: List<T>) -> ?List<T> {
+        let plen = part.length();
+        let slen = self.length();
+        if plen > slen {
+            return null;
+        }
+        var index: Integer = 0;
+        while index < plen {
+            if not self[index].as(ComptimeEq).eq(part[index]) {
+                return null;
+            }
+            index = index + 1;
+        }
+        self.slice(plen, slen)
+    }
+
+    comptime fn concat_pattern_view_strip_suffix_comptime(self, part: List<T>) -> ?List<T> {
+        let plen = part.length();
+        let slen = self.length();
+        if plen > slen {
+            return null;
+        }
+        let start = slen - plen;
+        var index: Integer = 0;
+        while index < plen {
+            if not self[start + index].as(ComptimeEq).eq(part[index]) {
+                return null;
+            }
+            index = index + 1;
+        }
+        self.slice(0, start)
+    }
+}
+
+comptime impl StableConcatPatternView for List<T> where T :- ComptimeEq {}

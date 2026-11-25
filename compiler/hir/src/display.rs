@@ -1105,6 +1105,8 @@ impl Display for PatternKind<'_> {
             Self::ErrorOk(pattern) => form!(f, "error-ok", "pattern" => pattern),
             Self::ErrorErr(pattern) => form!(f, "error-err", "pattern" => pattern),
             Self::Or(patterns) => form!(f, "or", "patterns" => List(patterns)),
+            Self::Concat(left, right) => form!(f, "concat", "left" => left, "right" => right),
+            Self::Typed(pattern, ty) => form!(f, "typed", "pattern" => pattern, "type" => ty),
             Self::Not(pattern) => form!(f, "not", "pattern" => pattern),
             Self::Ref(pattern) => form!(f, "ref", "pattern" => pattern),
             Self::Range(start, end, bound) => {

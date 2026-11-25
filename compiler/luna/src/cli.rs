@@ -36,6 +36,8 @@ pub struct Options {
     pub range_end_type: Option<String>,
     pub range_pattern_protocol: Option<String>,
     pub stable_range_pattern_protocol: Option<String>,
+    pub concat_pattern_protocol: Option<String>,
+    pub stable_concat_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub index_protocol: Option<String>,
@@ -198,6 +200,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut range_end_type = None;
     let mut range_pattern_protocol = None;
     let mut stable_range_pattern_protocol = None;
+    let mut concat_pattern_protocol = None;
+    let mut stable_concat_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut index_protocol = None;
@@ -694,6 +698,34 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--concat-pattern-protocol") => {
+                    if concat_pattern_protocol.is_some() {
+                        return Err("--concat-pattern-protocol may only be specified once".into());
+                    }
+                    concat_pattern_protocol = Some(
+                        option_value(&mut args, "--concat-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "ConcatPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--stable-concat-pattern-protocol") => {
+                    if stable_concat_pattern_protocol.is_some() {
+                        return Err(
+                            "--stable-concat-pattern-protocol may only be specified once".into(),
+                        );
+                    }
+                    stable_concat_pattern_protocol = Some(
+                        option_value(&mut args, "--stable-concat-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StableConcatPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -1031,6 +1063,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         range_end_type,
         range_pattern_protocol,
         stable_range_pattern_protocol,
+        concat_pattern_protocol,
+        stable_concat_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         index_protocol,
@@ -1202,6 +1236,8 @@ mod tests {
                 range_end_type: None,
                 range_pattern_protocol: None,
                 stable_range_pattern_protocol: None,
+                concat_pattern_protocol: None,
+                stable_concat_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1247,6 +1283,8 @@ mod tests {
                 range_end_type: None,
                 range_pattern_protocol: None,
                 stable_range_pattern_protocol: None,
+                concat_pattern_protocol: None,
+                stable_concat_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,

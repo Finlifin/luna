@@ -24,6 +24,8 @@ pub struct Selectors<'a> {
     pub range_end: Option<&'a str>,
     pub range_pattern: Option<&'a str>,
     pub stable_range_pattern: Option<&'a str>,
+    pub concat_pattern: Option<&'a str>,
+    pub stable_concat_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -64,6 +66,8 @@ impl Selectors<'_> {
                 self.range_end,
                 self.range_pattern,
                 self.stable_range_pattern,
+                self.concat_pattern,
+                self.stable_concat_pattern,
                 self.literal_into,
                 self.handle_error,
                 self.splice,
@@ -269,6 +273,16 @@ pub(crate) fn resolve_source(
                 "StableRangePatternView".into(),
                 selectors.stable_range_pattern,
                 &mut result.stable_range_pattern,
+            ),
+            (
+                "ConcatPatternView".into(),
+                selectors.concat_pattern,
+                &mut result.concat_pattern,
+            ),
+            (
+                "StableConcatPatternView".into(),
+                selectors.stable_concat_pattern,
+                &mut result.stable_concat_pattern,
             ),
             (
                 "LiteralInto".into(),
@@ -557,6 +571,8 @@ pub(crate) struct SysrootBindings {
     range_end: Option<String>,
     range_pattern: Option<String>,
     stable_range_pattern: Option<String>,
+    concat_pattern: Option<String>,
+    stable_concat_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
@@ -654,6 +670,8 @@ impl SysrootBindings {
                 "range-end-type" => &mut result.range_end,
                 "range-pattern-protocol" => &mut result.range_pattern,
                 "stable-range-pattern-protocol" => &mut result.stable_range_pattern,
+                "concat-pattern-protocol" => &mut result.concat_pattern,
+                "stable-concat-pattern-protocol" => &mut result.stable_concat_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
@@ -848,6 +866,20 @@ impl SysrootBindings {
                     .stable_range_pattern
                     .is_none()
                     .then_some(self.stable_range_pattern.as_deref())
+                    .flatten()
+            }),
+            concat_pattern: explicit.concat_pattern.or_else(|| {
+                identities
+                    .concat_pattern
+                    .is_none()
+                    .then_some(self.concat_pattern.as_deref())
+                    .flatten()
+            }),
+            stable_concat_pattern: explicit.stable_concat_pattern.or_else(|| {
+                identities
+                    .stable_concat_pattern
+                    .is_none()
+                    .then_some(self.stable_concat_pattern.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1244,6 +1276,8 @@ mod stage_tests {
             range_end_type: None,
             range_pattern_protocol: None,
             stable_range_pattern_protocol: None,
+            concat_pattern_protocol: None,
+            stable_concat_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,

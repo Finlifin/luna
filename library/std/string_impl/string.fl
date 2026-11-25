@@ -925,3 +925,66 @@ where
         output.write_byte(34)
     }
 }
+
+impl ConcatPatternView for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
+    assoc Part: Type = str;
+    assoc Rest: Type = str;
+
+    fn concat_pattern_view_strip_prefix(*self, part: str) -> ?str {
+        if not self.starts_with(part) {
+            return null;
+        }
+        let p_len = builtin
+            .compiler
+            .try_u64_to_usize(builtin.compiler.str_byte_length(part)) match {
+            v? => v,
+            null => return null,
+        }
+        let total = self.len();
+        if p_len > total {
+            return null;
+        }
+        let rem = total - p_len;
+        if rem == 0 {
+            return "";
+        }
+        let start_addr = builtin.mem.checked_add_usize(self.as_bytes_addr(), p_len) match {
+            addr? => addr,
+            null => return null,
+        }
+        unsafe { builtin.mem.borrow_str(self, start_addr, rem) }
+    }
+
+    fn concat_pattern_view_strip_suffix(*self, part: str) -> ?str {
+        if not self.ends_with(part) {
+            return null;
+        }
+        let s_len = builtin
+            .compiler
+            .try_u64_to_usize(builtin.compiler.str_byte_length(part)) match {
+            v? => v,
+            null => return null,
+        }
+        let total = self.len();
+        if s_len > total {
+            return null;
+        }
+        let rem = total - s_len;
+        if rem == 0 {
+            return "";
+        }
+        unsafe { builtin.mem.borrow_str(self, self.as_bytes_addr(), rem) }
+    }
+}
+
+impl StableConcatPatternView for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{}

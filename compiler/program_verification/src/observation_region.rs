@@ -254,6 +254,7 @@ pub(super) fn check(
             | K::Unit
             | K::Local(_)
             | K::Function(_)
+            | K::TraitMethod { .. }
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. }
             | K::Field { .. }

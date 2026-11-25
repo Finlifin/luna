@@ -28,6 +28,10 @@ impl<'h> Rebind<'_, 'h> {
             P::Guard(p, e) => P::Guard(self.pattern(p, depth)?, self.expr(e, depth)?),
             P::Tuple(ps) => P::Tuple(self.patterns(ps, depth)?),
             P::Or(ps) => P::Or(self.patterns(ps, depth)?),
+            P::Concat(left, right) => {
+                P::Concat(self.pattern(left, depth)?, self.pattern(right, depth)?)
+            }
+            P::Typed(inner, ty) => P::Typed(self.pattern(inner, depth)?, self.expr(ty, depth)?),
             P::List(ps, rest) => P::List(
                 self.patterns(ps, depth)?,
                 rest.map(|p| self.pattern(p, depth)).transpose()?,
@@ -102,6 +106,7 @@ impl<'h> Rebind<'_, 'h> {
             span: pattern.span,
         }))
     }
+
     fn patterns(&mut self, ps: &[Pattern<'h>], depth: usize) -> Result<&'h [Pattern<'h>], Error> {
         let ps = ps
             .iter()
@@ -109,6 +114,7 @@ impl<'h> Rebind<'_, 'h> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(self.arena.alloc_pattern_slice(ps))
     }
+
     fn pattern_fields(
         &mut self,
         fields: &[FieldPat<'h>],
@@ -126,6 +132,7 @@ impl<'h> Rebind<'_, 'h> {
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(self.arena.alloc_field_pat_slice(fields))
     }
+
     pub(super) fn arm(
         &mut self,
         arm: &PatternArm<'h>,
@@ -139,6 +146,7 @@ impl<'h> Rebind<'_, 'h> {
             span: arm.span,
         })
     }
+
     pub(super) fn arms(
         &mut self,
         arms: &[PatternArm<'h>],

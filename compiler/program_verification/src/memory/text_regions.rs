@@ -1033,6 +1033,7 @@ pub(crate) fn infer_text_regions_with_callbacks_and_context<'a>(
         solving_storage: false,
         next_storage_frame: 0,
         readonly_storage: None,
+        parameter_ids: vec![],
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: BTreeSet::new(),
@@ -1084,6 +1085,7 @@ pub(crate) fn verify_handler_arm_text_regions(
         solving_storage: false,
         next_storage_frame: 0,
         readonly_storage: None,
+        parameter_ids: vec![],
         changed_callables: BTreeSet::new(),
         pending: VecDeque::new(),
         scheduled: BTreeSet::new(),
@@ -1138,6 +1140,23 @@ pub(crate) fn verify_handler_arm_text_regions(
     checked
 }
 
+fn local_place_root(mut expr: &Expr) -> Option<(LocalId, Vec<usize>)> {
+    let mut path = Vec::new();
+    loop {
+        match &expr.kind {
+            K::Local(root) => {
+                path.reverse();
+                return Some((*root, path));
+            }
+            K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
+                path.push(*index);
+                expr = value;
+            }
+            _ => return None,
+        }
+    }
+}
+
 struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
     package: &'a Package,
     source: Option<::materialization::DeclarationSource<'a>>,
@@ -1159,6 +1178,7 @@ struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
     solving_storage: bool,
     next_storage_frame: usize,
     readonly_storage: Option<&'static str>,
+    parameter_ids: Vec<LocalId>,
     changed_callables: BTreeSet<LocalId>,
     pending: VecDeque<SummaryKey>,
     scheduled: BTreeSet<SummaryKey>,
@@ -1282,6 +1302,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                             .unwrap()
                             .extend(origins.iter().cloned());
                     }
+                    for (root, _) in regions.places.values().flatten().flatten() {
+                        if !locals.contains_storage(root) {
+                            return Err("intrinsic text storage is no longer live".into());
+                        }
+                    }
                 }
                 Ok(value.and_then(|value| known_pattern(pattern, value, 0)))
             }
@@ -1394,9 +1419,54 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 charge_regions(regions, self.fuel)?;
                 let saved = locals.insert(*binding, regions.clone());
                 let matched = self.bind_pattern(inner, ty, regions, value, locals, depth + 1);
-                locals.remove(binding);
-                if let Some(saved) = saved {
-                    locals.insert(*binding, saved);
+                if let Some((subj_root, subj_path)) = value.and_then(local_place_root)
+                    && locals.contains_key(&subj_root)
+                {
+                    for (local_id, candidate) in locals.bindings.iter_mut() {
+                        if local_id == binding {
+                            continue;
+                        }
+                        for targets_opt in candidate.places.values_mut() {
+                            let Some(targets) = targets_opt else { continue };
+                            if !targets
+                                .iter()
+                                .any(|(root, _)| *root == DescriptorRoot::Local(*binding))
+                            {
+                                continue;
+                            }
+                            let mut updated = BTreeSet::new();
+                            for (root, path) in std::mem::take(targets) {
+                                if root == DescriptorRoot::Local(*binding) {
+                                    let mut combined = subj_path.clone();
+                                    combined.extend(path);
+                                    updated.insert((DescriptorRoot::Local(subj_root), combined));
+                                } else {
+                                    updated.insert((root, path));
+                                }
+                            }
+                            *targets = updated;
+                        }
+                    }
+                    locals.remove(binding);
+                    if let Some(saved) = saved {
+                        locals.insert(*binding, saved);
+                    }
+                } else {
+                    let referenced = locals.bindings.iter().any(|(local_id, candidate)| {
+                        local_id != binding
+                            && candidate
+                                .places
+                                .values()
+                                .flatten()
+                                .flatten()
+                                .any(|(root, _)| *root == DescriptorRoot::Local(*binding))
+                    });
+                    if saved.is_some() || matched == Ok(Some(false)) || !referenced {
+                        locals.remove(binding);
+                        if let Some(saved) = saved {
+                            locals.insert(*binding, saved);
+                        }
+                    }
                 }
                 matched
             }
@@ -2126,6 +2196,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             }));
         let mut returned = None;
         let caller_loops = std::mem::take(&mut self.loops);
+        let caller_parameters = std::mem::replace(&mut self.parameter_ids, body.parameters.clone());
         let checked = (|| {
             for predicate in &body.preconditions {
                 self.contract(predicate, &locals)?;
@@ -2152,6 +2223,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             }
             Ok::<(), String>(())
         })();
+        self.parameter_ids = caller_parameters;
         self.loops = caller_loops;
         self.exits.pop();
         let reads = self.reads.pop().unwrap();
@@ -2435,6 +2507,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         let changed = std::mem::take(&mut self.changed_callables);
         let loops = std::mem::take(&mut self.loops);
         let readonly = std::mem::replace(&mut self.readonly_storage, key.readonly);
+        let caller_parameters = std::mem::take(&mut self.parameter_ids);
         self.reads.push(BTreeSet::new());
         self.exits.push(Some(ExitRegions {
             bindings: scope.keys().copied().collect(),
@@ -2488,6 +2561,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         })();
         self.exits.pop();
         let reads = self.reads.pop().unwrap();
+        self.parameter_ids = caller_parameters;
         self.readonly_storage = readonly;
         self.local_callables = definitions;
         self.changed_callables = changed;
@@ -4140,6 +4214,7 @@ mod tests {
             solving_storage: false,
             next_storage_frame: 0,
             readonly_storage: None,
+            parameter_ids: vec![],
             changed_callables: BTreeSet::new(),
             pending: VecDeque::new(),
             scheduled: BTreeSet::new(),

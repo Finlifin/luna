@@ -385,6 +385,7 @@ pub enum NodeKind {
     AndIsPattern,                     // a, b, c
     AsBindPattern,                    // a, b
     OrPattern,                        // a, b
+    ConcatPattern,                    // a ++ b
     OptionSomePattern,                // a
     ErrorOkPattern,                   // a
     ErrorPattern,                     // a
@@ -853,6 +854,7 @@ impl NodeKind {
             AndIsPattern,
             AsBindPattern,
             OrPattern,
+            ConcatPattern,
             OptionSomePattern,
             ErrorOkPattern,
             ErrorPattern,
@@ -1093,6 +1095,7 @@ impl NodeKind {
             | ConditionArm
             | CatchArm
             | OrPattern
+            | ConcatPattern
             | IfGuardPattern
             | AsBindPattern
             | RangeFromToPattern

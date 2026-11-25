@@ -1213,6 +1213,20 @@ impl Checker<'_, '_> {
                             continue;
                         }
                         if !self.associated_has_initializer(contract.declaration) {
+                            let own = declaration(self.package, &self.package_identities, owner);
+                            let has_comptime_associated = trait_definition
+                                .associated
+                                .iter()
+                                .any(|member| member.phase == n::TraitPhase::Comptime);
+                            if phase == n::TraitPhase::Comptime
+                                && contract.phase == n::TraitPhase::Runtime
+                                && (has_comptime_associated
+                                    || relationships.iter().any(|(other, canonical)| {
+                                        *other != own && Some(canonical) == relationships.get(&own)
+                                    }))
+                            {
+                                continue;
+                            }
                             return Err(error(
                                 item.span,
                                 format!("missing required associated value `{}`", contract.name),

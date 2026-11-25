@@ -48,11 +48,12 @@ pub(super) fn collect<'h>(
                 pending.extend(patterns.iter().rev());
                 pending.push(head);
             }
-            P::Then(left, _, right) => {
+            P::Then(left, _, right) | P::Concat(left, right) => {
                 pending.push(right);
                 pending.push(left);
             }
             P::Guard(inner, _)
+            | P::Typed(inner, _)
             | P::Projection(inner, _)
             | P::OptionSome(inner)
             | P::ErrorOk(inner)

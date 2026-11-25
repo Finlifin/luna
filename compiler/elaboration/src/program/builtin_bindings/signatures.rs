@@ -8,7 +8,7 @@ pub(super) fn callable(
 ) -> Result<Option<Term>, &'static str> {
     if let Some(query) = text_query(name) {
         let signature = match query {
-            n::TextQueryKind::Slice => Term::ComptimeFunction(Box::new(Term::Function {
+            n::TextQueryKind::Slice => Term::Function {
                 parameters: vec![
                     Parameter {
                         sort: Sort::Runtime,
@@ -24,7 +24,7 @@ pub(super) fn callable(
                     },
                 ],
                 result: Box::new(Term::Optional(Box::new(p(P::Str)))),
-            })),
+            },
             n::TextQueryKind::Concat => Term::ComptimeFunction(Box::new(Term::Function {
                 parameters: vec![
                     Parameter {

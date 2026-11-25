@@ -1152,7 +1152,11 @@ impl<'a, 'h> Reads<'a, 'h> {
                 self.expression(value)?;
                 self.push(Node::Pattern(b))?;
             }
-            Pattern::Guard(inner, guard) => {
+            Pattern::Concat(a, b) => {
+                self.push(Node::Pattern(a))?;
+                self.push(Node::Pattern(b))?;
+            }
+            Pattern::Guard(inner, guard) | Pattern::Typed(inner, guard) => {
                 self.push(Node::Pattern(inner))?;
                 self.expression(guard)?;
             }

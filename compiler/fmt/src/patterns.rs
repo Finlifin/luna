@@ -470,6 +470,38 @@ impl<'a> Formatter<'a> {
                 Doc::concat([sub, Doc::str("!")])
             }
             NodeKind::OrPattern => self.format_or_pattern(node, slot, mode),
+            NodeKind::ConcatPattern => {
+                let lhs_slot = slot.child_slot_from(self.parsed, slot.first, ch[0]);
+                let plus_tok = self
+                    .parsed
+                    .find_depth_zero_token(
+                        lhs_slot.last + 1,
+                        slot.last,
+                        |k| k == TokenKind::PlusPlus,
+                        false,
+                    )
+                    .unwrap_or(lhs_slot.last + 1);
+                let rhs_slot = slot.child_slot_from(self.parsed, plus_tok + 1, ch[1]);
+                let lhs_doc = self.format_pattern_with_mode(ch[0], lhs_slot, mode);
+                let rhs_doc = self.format_pattern_with_mode(ch[1], rhs_slot, mode);
+                Doc::concat([lhs_doc, Doc::str(" ++ "), rhs_doc])
+            }
+            NodeKind::TypeBoundDeclClause => {
+                let pat_slot = slot.child_slot_from(self.parsed, slot.first, ch[0]);
+                let colon_tok = self
+                    .parsed
+                    .find_depth_zero_token(
+                        pat_slot.last + 1,
+                        slot.last,
+                        |k| k == TokenKind::Colon,
+                        false,
+                    )
+                    .unwrap_or(pat_slot.last + 1);
+                let ty_slot = slot.child_slot_from(self.parsed, colon_tok + 1, ch[1]);
+                let pat_doc = self.format_pattern(ch[0], pat_slot);
+                let ty_doc = self.format_expr(ch[1], ty_slot);
+                Doc::concat([pat_doc, Doc::str(": "), ty_doc])
+            }
             NodeKind::AsBindPattern => {
                 let lhs_slot = slot.child_slot_from(self.parsed, slot.first, ch[0]);
                 let lhs_doc = self.format_pattern_with_mode(ch[0], lhs_slot, mode);

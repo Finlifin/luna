@@ -332,6 +332,8 @@ pub struct Protocols {
     pub range_end: Option<DeclarationId>,
     pub range_pattern: Option<DeclarationId>,
     pub stable_range_pattern: Option<DeclarationId>,
+    pub concat_pattern: Option<DeclarationId>,
+    pub stable_concat_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
@@ -1525,6 +1527,18 @@ fn elaborate_candidate<'a, 'h>(
             &checker.checked_traits,
             id,
             checker.protocols.range_pattern,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.concat_pattern {
+        crate::concat_patterns::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.stable_concat_pattern {
+        crate::concat_patterns::stable_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.concat_pattern,
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }

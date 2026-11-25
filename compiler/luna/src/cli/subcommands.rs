@@ -256,6 +256,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--range-end-type"
                     | "--range-pattern-protocol"
                     | "--stable-range-pattern-protocol"
+                    | "--concat-pattern-protocol"
+                    | "--stable-concat-pattern-protocol"
                     | "--literal-into-protocol"
                     | "--iterator-protocol"
                     | "--into-iterator-protocol"
