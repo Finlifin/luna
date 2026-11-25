@@ -14,10 +14,10 @@ item-level blank-line separation, ignoring configured fragment files). Pass
 Only /tmp/luna-dev-002/target is cleaned. Source files, Cargo.lock, and the
 registry/download cache are never cleanup targets. Builds and cleanup share
 one lock; use this entrypoint instead of concurrent direct Cargo commands.
-Builds also cap default concurrency (`CARGO_BUILD_JOBS<=4`,
-`CARGO_PROFILE_{DEV,TEST}_CODEGEN_UNITS<=4`, `RUST_TEST_THREADS<=2`) and
-verify `MemAvailable` headroom (>= 3 GiB by default) before starting Cargo to
-avoid host OOM exhaustion.
+Builds allow up to 100% CPU (`CARGO_BUILD_JOBS`, `CODEGEN_UNITS`, and
+memory-bounded `RUST_TEST_THREADS`), while enforcing a 90% host RAM ceiling
+both pre-launch and via a live runtime watchdog that terminates the Cargo
+process group if `MemAvailable` drops below the reserve threshold.
 
 After an observed storage failure, retain a soft cache cap at 75% of the
 pre-cleanup target footprint (64 MiB minimum, never above the current cap).
@@ -35,6 +35,7 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -45,10 +46,10 @@ TARGET = Path("/tmp/luna-dev-002/target")
 MAX_CACHE = 4 * 1024**3
 MIN_CACHE = 64 * 1024**2
 MIN_FREE = 2 * 1024**3
-MAX_DEFAULT_BUILD_JOBS = 4
-MAX_DEFAULT_TEST_THREADS = 2
-MAX_DEFAULT_CODEGEN_UNITS = 4
-MIN_AVAILABLE_MEM = 3 * 1024**3
+DEFAULT_MAX_MEM_PERCENT = 90
+MIN_AVAILABLE_MEM_FLOOR = 1024**3
+TEST_THREAD_MEM_BYTES = 2 * 1024**3
+MEMORY_POLL_INTERVAL = 0.25
 MEMINFO_PATH = Path("/proc/meminfo")
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
 SPACE_ERRORS = ("quota exceeded", "no space left on device", "os error 122", "os error 28")
@@ -147,18 +148,20 @@ def available_memory_bytes() -> int | None:
 
 
 def default_build_jobs() -> int:
-    cpu_cap = max(1, os.cpu_count() or 1)
-    total_bytes = total_memory_bytes()
-    mem_cap = max(1, total_bytes // (6 * 1024**3)) if total_bytes is not None else MAX_DEFAULT_BUILD_JOBS
-    return min(MAX_DEFAULT_BUILD_JOBS, cpu_cap, mem_cap)
+    return max(1, os.cpu_count() or 1)
 
 
 def default_test_threads() -> int:
-    return min(MAX_DEFAULT_TEST_THREADS, default_build_jobs())
+    cpu_cap = default_build_jobs()
+    total_bytes = total_memory_bytes()
+    if total_bytes is None:
+        return cpu_cap
+    mem_cap = max(1, total_bytes // TEST_THREAD_MEM_BYTES)
+    return min(cpu_cap, mem_cap)
 
 
 def default_codegen_units() -> int:
-    return min(MAX_DEFAULT_CODEGEN_UNITS, max(1, default_build_jobs()))
+    return min(256, max(16, default_build_jobs()))
 
 
 def manifest_root(default_root: Path, arguments: list[str]) -> Path:
@@ -276,7 +279,22 @@ class Runner:
                     return value * 1024**2
             except ValueError:
                 pass
-        return MIN_AVAILABLE_MEM
+        max_percent = float(DEFAULT_MAX_MEM_PERCENT)
+        pct_raw = self.env.get("LUNA_MAX_MEM_PERCENT", "").strip()
+        if pct_raw:
+            try:
+                parsed = float(pct_raw)
+                if 1.0 <= parsed <= 100.0:
+                    max_percent = parsed
+            except ValueError:
+                pass
+        if max_percent >= 100.0:
+            return 0
+        total_bytes = total_memory_bytes()
+        if total_bytes is not None:
+            reserve = int(round(total_bytes * (100.0 - max_percent) / 100.0))
+            return max(MIN_AVAILABLE_MEM_FLOOR, reserve)
+        return MIN_AVAILABLE_MEM_FLOOR
 
     def check_memory_headroom(self) -> bool:
         min_mem = self.min_available_memory()
@@ -418,11 +436,48 @@ class Runner:
         if self.pressure():
             self.clean(full=True)
 
+    def _terminate_process_group(self, pid: int, finished: threading.Event) -> None:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+        if finished.wait(1.5):
+            return
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
     def execute(self, command: list[str]) -> tuple[int, bool]:
-        process = subprocess.Popen(command, cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            command,
+            cwd=self.root,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
         assert process.stdout is not None and process.stderr is not None
         quota_failure = threading.Event()
+        memory_aborted = threading.Event()
+        finished = threading.Event()
         forwarding_errors = []
+        min_mem = self.min_available_memory()
+
+        def watch_memory() -> None:
+            while not finished.wait(MEMORY_POLL_INTERVAL):
+                avail = available_memory_bytes()
+                if avail is not None and avail < min_mem:
+                    memory_aborted.set()
+                    diagnostic(
+                        f"cargo-cache: aborting cargo because available RAM dropped to "
+                        f"{avail // (1024**2)} MiB (< {min_mem // (1024**2)} MiB minimum)"
+                    )
+                    self._terminate_process_group(process.pid, finished)
+                    return
+
         # Stream all evidence to the caller's log; retain no unbounded transcript.
         # Preserve stdout/stderr separation, particularly for `run -- --emit nir`.
         def pump(source, destination, label):
@@ -451,11 +506,20 @@ class Runner:
                    threading.Thread(target=pump, args=(process.stderr, sys.stderr.buffer, 'stderr'))]
         for reader in readers:
             reader.start()
+        watchdog = None
+        if min_mem > 0:
+            watchdog = threading.Thread(target=watch_memory, daemon=True)
+            watchdog.start()
         status = process.wait()
+        finished.set()
+        if watchdog is not None:
+            watchdog.join(timeout=2.0)
         for reader in readers:
             reader.join()
         process.stdout.close()
         process.stderr.close()
+        if memory_aborted.is_set():
+            return (137 if status == 0 else status), False
         if forwarding_errors:
             label, error = next(
                 (item for item in forwarding_errors if item[1].errno in SPACE_ERRNOS),

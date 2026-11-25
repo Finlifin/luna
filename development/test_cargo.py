@@ -83,15 +83,21 @@ class CargoCacheTests(unittest.TestCase):
         with patch.object(cargo, "total_memory_bytes", return_value=30 * 1024**3), patch.object(
             cargo.os, "cpu_count", return_value=32
         ):
-            self.assertEqual(cargo.default_build_jobs(), 4)
-            self.assertEqual(cargo.default_test_threads(), 2)
-            self.assertEqual(cargo.default_codegen_units(), 4)
+            self.assertEqual(cargo.default_build_jobs(), 32)
+            self.assertEqual(cargo.default_test_threads(), 15)
+            self.assertEqual(cargo.default_codegen_units(), 32)
+            with patch.dict(os.environ, {}, clear=True):
+                runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+                self.assertEqual(runner.min_available_memory(), 3 * 1024**3)
+            with patch.dict(os.environ, {"LUNA_MAX_MEM_PERCENT": "100"}, clear=True):
+                runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+                self.assertEqual(runner.min_available_memory(), 0)
         with patch.object(cargo, "total_memory_bytes", return_value=12 * 1024**3), patch.object(
             cargo.os, "cpu_count", return_value=32
         ):
-            self.assertEqual(cargo.default_build_jobs(), 2)
-            self.assertEqual(cargo.default_test_threads(), 2)
-            self.assertEqual(cargo.default_codegen_units(), 2)
+            self.assertEqual(cargo.default_build_jobs(), 32)
+            self.assertEqual(cargo.default_test_threads(), 6)
+            self.assertEqual(cargo.default_codegen_units(), 32)
         explicit = cargo.cargo_arguments(["test", "-j", "4", "-p", "luna"], Path("/tmp/test-target"))
         self.assertEqual(explicit[1:4], ["test", "-j", "4"])
         with patch.dict(os.environ, {}, clear=True):
@@ -156,6 +162,26 @@ class CargoCacheTests(unittest.TestCase):
                 status = runner.run(["--no-fmt", "check", "-p", "example"])
                 self.assertEqual(status, 0)
                 runner.execute.assert_called_once()
+
+    def test_memory_watchdog_aborts_running_child_when_ram_drops_below_headroom(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                cargo, "MEMORY_POLL_INTERVAL", 0.02
+            ), patch.object(
+                cargo, "total_memory_bytes", return_value=30 * 1024**3
+            ), patch.object(
+                cargo, "available_memory_bytes", return_value=1024 * 1024**2
+            ):
+                runner = cargo.Runner(Path(temporary), Path(temporary) / "target")
+                stdout, stderr = io.BytesIO(), io.BytesIO()
+                diag = io.StringIO()
+                with patch.object(cargo.sys, "stdout", Mock(buffer=stdout)), patch.object(
+                    cargo.sys, "stderr", Mock(buffer=stderr, write=diag.write, flush=diag.flush)
+                ):
+                    status, quota = runner.execute([sys.executable, "-c", "import time; time.sleep(10)"])
+                self.assertNotEqual(status, 0)
+                self.assertFalse(quota)
+                self.assertIn("aborting cargo", diag.getvalue())
 
     def test_cleanup_is_scoped_to_managed_target(self):
         runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))

@@ -129,14 +129,14 @@ Limitations:
 
 开发过程中适时格式化已修改的 Rust 文件；阶段性整理或用户要求时执行全 workspace 格式化。通过 `python3 -B development/command.py --timeout 120 -- cargo fmt --all` 运行全量格式化，追加 `-- --check` 检查格式。格式化不启动构建，不必因此重复全量测试。
 
-Cargo 构建与测试统一使用 `python3 -B development/cargo.py <test|check|build|run> ...`，不再直接启动使用旧调试配置的 Cargo 命令。入口固定复用 `/tmp/luna-dev-002/target`，自动添加 `--locked --offline`、按主机内存限制编译与测试并发度（默认上限 `CARGO_BUILD_JOBS<=4`、`CARGO_PROFILE_{DEV,TEST}_CODEGEN_UNITS<=4`、`RUST_TEST_THREADS<=2`）、禁用 incremental 和 dev/test debuginfo，并在启动前检查可用内存、在构建前后控制缓存大小。用户已授权自动 `cargo clean`：优先清理 elaboration/luna 产物，必要时清理该 target 全部可重建产物；不为此重复请求确认。配额错误由仍在沙箱内的构建入口就地清理并最多重试一次，不能等到沙箱无法启动才清理。入口使用共享维护锁，不与直接 Cargo 命令并发执行。源码、Cargo.lock、registry 下载缓存和工作区已有修改不属于清理对象。
+Cargo 构建与测试统一使用 `python3 -B development/cargo.py <test|check|build|run> ...`，不再直接启动使用旧调试配置的 Cargo 命令。入口固定复用 `/tmp/luna-dev-002/target`，自动添加 `--locked --offline`、允许编译用满 100% CPU（`CARGO_BUILD_JOBS = CPU 核数`、`CARGO_PROFILE_{DEV,TEST}_CODEGEN_UNITS = min(256, max(16, 核数))`，并将并行测试线程按每线程 2 GiB 上限约束）、禁用 incremental 和 dev/test debuginfo，并在启动前与运行期持续检查可用内存（默认 90% 内存上限）以及在构建前后控制缓存大小。用户已授权自动 `cargo clean`：优先清理 elaboration/luna 产物，必要时清理该 target 全部可重建产物；不为此重复请求确认。配额错误由仍在沙箱内的构建入口就地清理并最多重试一次，不能等到沙箱无法启动才清理。入口使用共享维护锁，不与直接 Cargo 命令并发执行。源码、Cargo.lock、registry 下载缓存和工作区已有修改不属于清理对象。
 
 ### 资源与并发限制（防内存耗尽死机）
 
-- **严禁直接执行裸 `cargo build/check/test/run`**：所有 Cargo 构建与测试必须统一走 `python3 -B development/cargo.py`（或调用它的 `development/check.py`），通过共享排他锁 `/tmp/luna-dev-002/cargo-maintenance.lock` 保证全机同一时刻最多运行 **1 个** Cargo 编译或测试任务；禁止同一代理或多个终端/worktree 并发拉起多个 Cargo 进程，禁止不同 worktree 各自维护独立的 `target/` 全量编译目录。
-- **按内存上限限制编译与测试并发度**：不得按 CPU 核心数拉满并发。`development/cargo.py` 默认根据主机内存限制并发度（当前 30 GiB 内存主机默认 `CARGO_BUILD_JOBS <= 4`、`CARGO_PROFILE_{DEV,TEST}_CODEGEN_UNITS <= 4`、`RUST_TEST_THREADS <= 2`）；即使显式覆写也不得超过安全上限（默认 `jobs <= 4`、`test-threads <= 4`），避免 `rustc`/LLVM 链接与 `luna` 集成测试并发占满内存。若确需直接执行已有测试二进制，也必须显式传入 `--test-threads=2`（且不超过 4）。
-- **启动前内存水位保护**：`development/cargo.py` 在启动构建/测试前检查系统可用内存（`MemAvailable`），低于安全阈值（默认 3 GiB）时拒绝启动并报错退出，避免把宿主机推入 OOM 假死而只能断电。
-- **限制并行多代理 / `/swarm` 活跃规模**：同机并行活跃的写入/编译型 worker **不超过 2 个**；超出配额的任务须排队分波执行，且所有 worker 的构建/测试统一经主仓 `development/cargo.py` 串行执行，优先只跑受影响的 `-p <crate>` 与目标 `--test <name>`，禁止盲目全量 `--all-targets` 或多 worktree 同时全量检查。
+- **100% CPU 串行用满、90% 内存熔断上限**：单个 Cargo 构建/测试允许用满 **100% CPU**（32 核主机默认 `CARGO_BUILD_JOBS=32`、`CODEGEN_UNITS=32`、`RUST_TEST_THREADS=15`），但系统总内存占用严禁超过 **90%**（默认至少保留 10% `MemAvailable`，30 GiB 主机即保留约 3 GiB，可用 `LUNA_MAX_MEM_PERCENT` / `LUNA_MIN_AVAILABLE_MEM_MIB` 调整）。
+- **严禁直接执行裸 `cargo build/check/test/run`**：所有 Cargo 构建与测试必须统一走 `python3 -B development/cargo.py`（或调用它的 `development/check.py`），通过共享排他锁 `/tmp/luna-dev-002/cargo-maintenance.lock` 保证全机同一时刻最多运行 **1 个** Cargo 编译或测试任务；禁止同一代理或多个终端/worktree 并发拉起多个 Cargo 进程，避免多个并行全核构建叠爆内存，也禁止不同 worktree 各自维护独立的 `target/` 全量编译目录。若确需直接运行已有测试二进制，也须限制 `--test-threads`（不超过 `总内存 GiB / 2`）。
+- **启动前与运行期双重内存水位保护**：`development/cargo.py` 在启动构建/测试前检查系统可用内存，且运行期每 0.25s 监控 `MemAvailable`；一旦跌破保留阈值（即内存使用超过 90% 上限），立即终止整个 Cargo 进程组并报错退出，防止把宿主机推入 OOM 假死。
+- **`/swarm` 多 worktree 串行轮流使用构建缓存**：各 worktree 可并行做只读排查与文件编辑，但同一时刻仅允许 **1 个 worktree** 持有 `development/cargo.py` 构建/测试轮次直至其阶段完成，避免多个 worktree 交替触发 `source root changed` 反复清空重建 `/tmp/luna-dev-002/target`；优先只跑受影响的 `-p <crate>` 与目标 `--test <name>`。
 - **清理残留重型进程**：单次构建或测试必须带超时（如 `development/check.py --timeout ...`），及时终止卡死的 `rustc`/`luna` 测试进程，不遗留僵尸后台任务持续占用内存。
 
 无人值守时优先通过 `python3 -B development/check.py --timeout 900 -- test ...` 调用上述 cargo.py；已有二进制复现使用 `development/reproduce.py`，可选批量回溯使用 `development/backtrace.py`，证据读取使用 `development/report.py`。入口关闭标准输入，设置超时并保存日志。可选回溯遇到 ptrace 限制时保存 unavailable 后继续独立工作，不为可选诊断反复等待用户；脚本不提供权限绕过，真正必需的受限操作仍遵守环境授权规则。详见 development/README.md。
