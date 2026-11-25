@@ -363,7 +363,16 @@ impl Checker<'_, '_> {
                 let Term::Pointer(subject) = &pointer.ty else {
                     unreachable!()
                 };
-                let candidate_shape = self.structural_type(subject, field.span)?;
+                let resolved_subject = if subject
+                    .structural_terms()
+                    .any(|term| matches!(term, Term::AssociatedTypeCall(_)))
+                {
+                    Some(self.resolve_ptc_associated_calls(subject, field.span)?)
+                } else {
+                    None
+                };
+                let candidate_subject = resolved_subject.as_ref().unwrap_or(subject);
+                let candidate_shape = self.structural_type(candidate_subject, field.span)?;
                 self.ensure_nominal_type(&candidate_shape, field.span)?;
                 let has_field = match &candidate_shape {
                     Term::Record(entries) => {
@@ -529,7 +538,16 @@ impl Checker<'_, '_> {
                 let Term::Pointer(subject) = &pointer.ty else {
                     unreachable!()
                 };
-                let candidate_shape = self.structural_type(subject, field.span)?;
+                let resolved_subject = if subject
+                    .structural_terms()
+                    .any(|term| matches!(term, Term::AssociatedTypeCall(_)))
+                {
+                    Some(self.resolve_ptc_associated_calls(subject, field.span)?)
+                } else {
+                    None
+                };
+                let candidate_subject = resolved_subject.as_ref().unwrap_or(subject);
+                let candidate_shape = self.structural_type(candidate_subject, field.span)?;
                 self.ensure_nominal_type(&candidate_shape, field.span)?;
                 let has_field = match &candidate_shape {
                     Term::Record(entries) => {

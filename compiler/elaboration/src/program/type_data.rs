@@ -520,6 +520,9 @@ impl Checker<'_, '_> {
                 return Ok(CompletedType::Identity(p(P::BitVec(width))));
             }
         }
+        if let Some(result) = self.associated_type_call_data(expr, head, args)? {
+            return Ok(result);
+        }
         let H::ResolvedDef { def_id, .. } = head.kind else {
             if self.collecting_named_types() {
                 return self.computed_annotation_type(expr);
@@ -603,7 +606,9 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        if !crate::associated::is_type_call_contract(&assoc_expr.ty, args.len()) {
+        if !crate::associated::is_type_call_contract(&assoc_expr.ty, args.len())
+            || matches!(expr.kind, H::NFApplication(..)) != assoc_expr.ty.is_normal_form_callable()
+        {
             return Ok(None);
         }
         let Term::Function { parameters, .. } = assoc_expr.ty.callable_signature().clone() else {
@@ -668,6 +673,11 @@ impl Checker<'_, '_> {
             })
             .map_err(|failure| error(expr.span, failure.to_string()))?;
         if open {
+            if let Term::AssociatedTypeCall(ref call) = term
+                && let Some(resolved) = self.try_constant_associated_call_term(call, expr.span)?
+            {
+                return Ok(Some(CompletedType::Identity(resolved)));
+            }
             return Ok(Some(CompletedType::Identity(term)));
         }
         self.observe_call_type(&term, expr)

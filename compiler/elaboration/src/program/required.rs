@@ -3061,6 +3061,7 @@ fn scope_for_required(
         protocols_cfg.iterator,
         protocols_cfg.into_iterator,
         protocols_cfg.variadic_collector,
+        protocols_cfg.try_variadic_collector,
         protocols_cfg.extended_variadic_collector,
         protocols_cfg.ordering,
         protocols_cfg.equality,

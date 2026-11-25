@@ -944,9 +944,7 @@ impl Checker<'_, '_> {
                     let returns_type = contract.ty.is_comptime_callable()
                         && matches!(
                             contract.ty.callable_signature(),
-                            Term::Function { parameters, result }
-                                if parameters.iter().all(|param| param.sort == Sort::Runtime)
-                                    && **result == p(P::Type)
+                            Term::Function { result, .. } if **result == p(P::Type)
                         );
                     if !returns_type {
                         return Err(error(
@@ -1440,6 +1438,82 @@ impl Checker<'_, '_> {
         Ok(equations)
     }
 
+    fn extract_constant_closure<'a>(expr: &'a n::Expr) -> Option<(&'a [n::LocalId], &'a n::Expr)> {
+        match &expr.kind {
+            K::Closure {
+                parameters, body, ..
+            } => Some((parameters.as_slice(), body.as_ref())),
+            K::Block {
+                statements,
+                result: Some(inner),
+            } if statements.is_empty() => Self::extract_constant_closure(inner),
+            K::Call {
+                callee, arguments, ..
+            } if arguments.is_empty() => {
+                let K::Closure {
+                    parameters, body, ..
+                } = &callee.kind
+                else {
+                    return None;
+                };
+                if !parameters.is_empty() {
+                    return None;
+                }
+                let K::Block {
+                    statements,
+                    result: Some(ret),
+                } = &body.kind
+                else {
+                    return None;
+                };
+                let K::Local(target) = ret.kind else {
+                    return None;
+                };
+                statements.iter().rev().find_map(|stmt| match &stmt.kind {
+                    K::Let { binding, value } if *binding == target => {
+                        Self::extract_constant_closure(value)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn constant_closure_ignores_param(&self, callee: &n::Expr, slot: usize) -> bool {
+        let Some((closure_params, body)) = Self::extract_constant_closure(callee) else {
+            return false;
+        };
+        let Some(param_id) = closure_params.get(slot) else {
+            return false;
+        };
+        let param_decl = self
+            .callable_type_inputs
+            .get(param_id)
+            .and_then(|entry| entry.as_ref().map(|staged| staged.declaration));
+        let mut fuel = 10_000usize;
+        let mut used = false;
+        let visited = nir::visit::expression(body, &mut fuel, |expr, _| {
+            if matches!(expr.kind, K::Local(id) if id == *param_id) {
+                used = true;
+            } else if let Some(decl) = param_decl {
+                if expr.ty.structural_terms().any(|term| {
+                    matches!(term, Term::Rigid { declaration, .. } if *declaration == decl)
+                }) {
+                    used = true;
+                } else if let K::TypeValue(ty) | K::ComptimeValue(ty) = &expr.kind
+                    && ty.structural_terms().any(|term| {
+                        matches!(term, Term::Rigid { declaration, .. } if *declaration == decl)
+                    })
+                {
+                    used = true;
+                }
+            }
+            Ok(())
+        });
+        visited.is_ok() && !used
+    }
+
     fn try_constant_associated_type_call(
         &mut self,
         callee: n::Expr,
@@ -1456,7 +1530,6 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         const ABSTRACT_CALL_ARG_PACKAGE: u64 = u64::MAX - 10;
-        let mut inserted_locals = Vec::new();
         let mut expr_args = Vec::with_capacity(call_arguments.len());
         for (slot, (arg, param)) in call_arguments.iter().zip(&parameters).enumerate() {
             let value = if arg.check_scope(&[]).is_ok()
@@ -1473,39 +1546,14 @@ impl Checker<'_, '_> {
                     ty: param.ty.clone(),
                     kind,
                 }
-            } else {
-                let id = n::LocalId {
-                    owner: u32::MAX - 2,
-                    index: slot as u32,
-                };
-                let declaration = DeclarationId {
-                    package: ABSTRACT_CALL_ARG_PACKAGE,
-                    local: slot as u32,
-                };
-                let prev = self.callable_type_inputs.insert(
-                    id,
-                    Some(super::function_types::StagedParameter {
-                        declaration,
-                        domain: param.ty.clone(),
-                    }),
-                );
-                inserted_locals.push((id, prev));
-                let kind = if param.ty == p(P::Type) {
-                    K::TypeValue(Term::Rigid {
-                        declaration,
-                        sort: Sort::Type,
-                    })
-                } else {
-                    K::ComptimeValue(Term::Rigid {
-                        declaration,
-                        sort: Sort::of_comptime_domain(&param.ty),
-                    })
-                };
+            } else if param.ty == p(P::Type) && self.constant_closure_ignores_param(&callee, slot) {
                 n::Expr {
                     source: source(span),
                     ty: param.ty.clone(),
-                    kind,
+                    kind: K::TypeValue(p(P::Void)),
                 }
+            } else {
+                return Ok(None);
             };
             expr_args.push(n::CallArgument {
                 passing: n::ArgumentPassing::Value,
@@ -1522,26 +1570,42 @@ impl Checker<'_, '_> {
             span,
             kind: H::Unit,
         };
-        let call_expr = n::Expr {
-            source: source(span),
-            ty: p(P::Type),
-            kind: K::Call {
-                callee: Box::new(callee),
-                arguments: expr_args,
-                env_arguments: Vec::new(),
-                parameter_bindings: Vec::new(),
-            },
+        let call_expr = if callee.ty.is_normal_form_callable() {
+            let input_ids = (0..expr_args.len())
+                .map(|slot| DeclarationId {
+                    package: u64::MAX - 11,
+                    local: slot as u32,
+                })
+                .collect();
+            let arguments = expr_args
+                .into_iter()
+                .map(|arg| n::NormalFormArgument::Value(arg.value))
+                .collect();
+            n::Expr {
+                source: source(span),
+                ty: p(P::Type),
+                kind: K::ApplyNormalForm {
+                    callee: std::sync::Arc::new(callee),
+                    input_ids,
+                    arguments,
+                    plan: None,
+                },
+            }
+        } else {
+            n::Expr {
+                source: source(span),
+                ty: p(P::Type),
+                kind: K::Call {
+                    callee: Box::new(callee),
+                    arguments: expr_args,
+                    env_arguments: Vec::new(),
+                    parameter_bindings: Vec::new(),
+                },
+            }
         };
         let evaluated = self.with_staged_input(true, |this| {
             this.required_normal_input(&dummy, call_expr, Vec::new())
         });
-        for (id, prev) in inserted_locals.into_iter().rev() {
-            if let Some(prev) = prev {
-                self.callable_type_inputs.insert(id, prev);
-            } else {
-                self.callable_type_inputs.remove(&id);
-            }
-        }
         let Ok((comptime_interpretor::Value::Type(resolved), _)) = evaluated else {
             return Ok(None);
         };
@@ -1555,6 +1619,73 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         Ok(Some(resolved))
+    }
+
+    /// Evaluate an associated Type call when the implementation target is closed
+    /// and its body ignores any remaining rigid/bound call arguments.
+    pub(in crate::program) fn try_constant_associated_call_term(
+        &mut self,
+        call: &nir::AssociatedTypeCall,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        if !self.interfaces_ready {
+            return Ok(None);
+        }
+        let closed_head = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            for input in std::iter::once(&call.subject).chain(&call.arguments) {
+                if input.check_scope(&[]).is_err()
+                    || nir::type_computations::has_rigid_parameters_bounded(input, fuel)?
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
+        if !closed_head {
+            return Ok(None);
+        }
+        let interface = n::InterfaceInstance {
+            declaration: call.origin.interface,
+            arguments: call.arguments.clone(),
+        };
+        if matches!(
+            self.symbolic_interface_evidence(&call.subject, &interface),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+        let resolution = self
+            .resolve_trait_capability(&interface, &call.subject, Budget::default())
+            .map_err(|message| error(span, message))?;
+        let crate::implementation::Selection::Selected(selected) = resolution.selection else {
+            return Ok(None);
+        };
+        let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
+            resolution.assessments.get(&selected)
+        else {
+            return Ok(None);
+        };
+        let slot = *self
+            .implementation_positions
+            .get(&selected)
+            .ok_or_else(|| error(span, "unknown associated implementation"))?;
+        let implementation = &self.checked_implementations[slot];
+        let type_params = implementation.type_parameters.clone();
+        let param_types = implementation.parameter_types.clone();
+        let evidence_args = evidence.type_arguments.clone();
+        let callee = self.prepared_associated_value(selected, call.origin.member, span)?;
+        let callee = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            callee.instantiate_declaration_parameters_bounded(
+                &type_params,
+                &param_types,
+                &evidence_args,
+                &[],
+                fuel,
+            )
+        })
+        .map_err(|e| error(span, e.to_string()))?;
+        self.try_constant_associated_type_call(callee, &call.call_arguments, span)
     }
 }
 

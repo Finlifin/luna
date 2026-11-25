@@ -71,6 +71,8 @@ impl Checker<'_, '_> {
                                 if sig.modifiers.is_comptime
                         )
                     }));
+        let is_nf_callable =
+            !tactic && matches!(expected_signature, Some(Term::NormalFormFunction(..)));
         let contextual = match expected_signature.map(Term::callable_signature) {
             Some(Term::Function { parameters, result }) => Some((parameters, result)),
             Some(_) => {
@@ -172,8 +174,13 @@ impl Checker<'_, '_> {
                     })?
                 };
                 self.locals.insert(local(parameter.hir_id), ty.clone());
+                let param_sort = if is_nf_callable {
+                    Sort::of_comptime_domain(&ty)
+                } else {
+                    Sort::Runtime
+                };
                 parameter_types.push(Parameter {
-                    sort: Sort::Runtime,
+                    sort: param_sort,
                     ty: ty
                         .abstract_parameters(&[])
                         .map_err(|e| error(parameter.span, e.to_string()))?,
@@ -228,16 +235,21 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let signature = Term::Function {
+            let base_signature = Term::Function {
                 parameters: parameter_types,
                 result: Box::new(
                     result
                         .abstract_parameters(&[])
                         .map_err(|e| error(expr.span, e.to_string()))?,
                 ),
-            }
-            .with_comptime_phase(comptime)
-            .with_pure_qualifier(expected_signature.is_some_and(Term::is_pure_callable));
+            };
+            let signature = if is_nf_callable {
+                Term::NormalFormFunction(Box::new(base_signature), None)
+            } else {
+                base_signature
+                    .with_comptime_phase(comptime)
+                    .with_pure_qualifier(expected_signature.is_some_and(Term::is_pure_callable))
+            };
             let build_closure_ty = |captures: &[n::Capture], signature: &Term| {
                 if captures.is_empty() {
                     signature.clone()

@@ -417,6 +417,7 @@ pub struct Protocols {
     pub iterator: Option<DeclarationId>,
     pub into_iterator: Option<DeclarationId>,
     pub variadic_collector: Option<DeclarationId>,
+    pub try_variadic_collector: Option<DeclarationId>,
     pub extended_variadic_collector: Option<DeclarationId>,
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
@@ -1029,6 +1030,7 @@ fn elaborate_in_mode(
         inline_match_input: None,
         in_unselected_inline: false,
         dependent_result_instantiation: false,
+        dependent_signature_instantiation: false,
         quote_holes: BTreeSet::new(),
         code_construction_depth: 0,
         expansion_sources: Vec::new(),
@@ -1744,6 +1746,14 @@ fn elaborate_candidate<'a, 'h>(
             &checker.checked_traits,
             id,
             crate::variadic_collectors::CollectorKind::Positional,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.try_variadic_collector {
+        crate::variadic_collectors::protocol(
+            &checker.checked_traits,
+            id,
+            crate::variadic_collectors::CollectorKind::TryPositional,
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
@@ -4070,6 +4080,7 @@ struct Checker<'a, 'h> {
     inline_match_input: Option<(hir::HirId, n::Expr, Term)>,
     in_unselected_inline: bool,
     dependent_result_instantiation: bool,
+    dependent_signature_instantiation: bool,
     quote_holes: BTreeSet<n::LocalId>,
     code_construction_depth: usize,
     expansion_sources: Vec<n::ExpansionSource>,
@@ -4801,6 +4812,7 @@ impl Checker<'_, '_> {
                                     ));
                                 }
                                 if self.protocols.variadic_collector.is_none()
+                                    && self.protocols.try_variadic_collector.is_none()
                                     && !self.is_default_collection_shape(
                                         &domain,
                                         false,
@@ -4813,12 +4825,16 @@ impl Checker<'_, '_> {
                                     ));
                                 }
                                 if local_sorts.keys().any(|id| domain.mentions_rigid(*id)) {
-                                    deferred_variadic_checks.push((domain.clone(), parameter.span));
+                                    deferred_variadic_checks.push((
+                                        domain.clone(),
+                                        sig.modifiers.is_comptime,
+                                        parameter.span,
+                                    ));
                                 } else {
                                     self.check_variadic_collection_domain(
                                         &domain,
                                         false,
-                                        true,
+                                        sig.modifiers.is_comptime,
                                         parameter.span,
                                     )?;
                                 }
@@ -4924,8 +4940,8 @@ impl Checker<'_, '_> {
                 }
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
-            for (domain, var_span) in deferred_variadic_checks {
-                self.check_variadic_collection_domain(&domain, false, true, var_span)?;
+            for (domain, comptime, var_span) in deferred_variadic_checks {
+                self.check_variadic_collection_domain(&domain, false, comptime, var_span)?;
             }
             if let ItemKind::Effect(_, modifiers) = &item.kind {
                 let is_direct_passing = self
@@ -5192,7 +5208,14 @@ impl Checker<'_, '_> {
                     matches!(
                         term,
                         Term::AssociatedTypeCall(call)
-                            if call.call_arguments.iter().any(|arg| arg.check_scope(&[]).is_err())
+                            if call.call_arguments.iter().any(|arg| {
+                                arg.check_scope(&[]).is_err()
+                                    || nir::type_computations::has_rigid_parameters_bounded(
+                                        arg,
+                                        &mut 10_000,
+                                    )
+                                    .unwrap_or(true)
+                            })
                     )
                 })
             };
@@ -5205,12 +5228,15 @@ impl Checker<'_, '_> {
             let staged_body = !sig.modifiers.is_normal_form_head
                 && (!is_method || matches!(item.kind, ItemKind::Fn(..)))
                 && (result_has_bound_type_call
-                    || ((parameters
+                    || (((parameters
                         .iter()
                         .any(|parameter| parameter.sort != Sort::Runtime)
                         || (!sig.modifiers.is_comptime
                             && !self.type_parameters[&owner].is_empty()))
-                        && self.has_staged_body_work(owner)?));
+                        && self.has_staged_body_work(owner)?)
+                        || (sig.modifiers.is_comptime
+                            && !self.type_parameters[&owner].is_empty()
+                            && self.has_open_tuple_iteration(owner)?)));
             if result_annotation.needs_instance()
                 || annotations
                     .iter()

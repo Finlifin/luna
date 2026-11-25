@@ -54,6 +54,7 @@ pub struct Options {
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub variadic_collector_protocol: Option<String>,
+    pub try_variadic_collector_protocol: Option<String>,
     pub extended_variadic_collector_protocol: Option<String>,
     pub index_protocol: Option<String>,
     pub index_mut_protocol: Option<String>,
@@ -249,6 +250,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut variadic_collector_protocol = None;
+    let mut try_variadic_collector_protocol = None;
     let mut extended_variadic_collector_protocol = None;
     let mut index_protocol = None;
     let mut index_mut_protocol = None;
@@ -907,6 +909,21 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--try-variadic-collector-protocol") => {
+                    if try_variadic_collector_protocol.is_some() {
+                        return Err(
+                            "--try-variadic-collector-protocol may only be specified once".into(),
+                        );
+                    }
+                    try_variadic_collector_protocol = Some(
+                        option_value(&mut args, "--try-variadic-collector-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "TryVariadicCollector protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--extended-variadic-collector-protocol") => {
                     if extended_variadic_collector_protocol.is_some() {
                         return Err(
@@ -1499,6 +1516,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         iterator_protocol,
         into_iterator_protocol,
         variadic_collector_protocol,
+        try_variadic_collector_protocol,
         extended_variadic_collector_protocol,
         index_protocol,
         index_mut_protocol,
@@ -1705,6 +1723,7 @@ mod tests {
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,
+                try_variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
                 implies_protocol: None,
@@ -1783,6 +1802,7 @@ mod tests {
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 variadic_collector_protocol: None,
+                try_variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
                 implies_protocol: None,

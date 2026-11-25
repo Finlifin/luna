@@ -1059,6 +1059,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         iterator_protocol: None,
         into_iterator_protocol: None,
         variadic_collector_protocol: None,
+        try_variadic_collector_protocol: None,
         extended_variadic_collector_protocol: None,
         literal_into_protocol: None,
         implies_protocol: None,
@@ -2252,7 +2253,7 @@ fn associated_values_keep_identity_types_defaults_and_parameter_scopes() {
         trait Source where T {
             assoc Element: T;
             assoc enabled: bool = true;
-            assoc choose<flag: bool>: bool = flag;
+            assoc choose: for<flag: bool> bool = |flag: bool| -> bool { flag };
             fn read(value: Element) -> Element;
         }
         struct Box {}
@@ -2265,7 +2266,7 @@ fn associated_values_keep_identity_types_defaults_and_parameter_scopes() {
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(associated ").count(), 5, "{dump}");
-    assert!(dump.contains("resolved-fn-param"), "{dump}");
+    assert!(dump.contains("ty-nf-fn"), "{dump}");
     assert!(dump.contains("(fn-declaration "), "{dump}");
     assert!(!sandbox.run(&["input.fl", "--emit", "nir"]).status.success());
 }
@@ -2275,8 +2276,9 @@ fn associated_declarations_reject_duplicate_members_and_parameter_leaks() {
     let sandbox = Sandbox::new();
     for source in [
         "trait Source { assoc enabled: bool; assoc enabled: bool; }",
-        "trait Source { assoc choose<flag: bool, flag: bool>: bool = flag; }",
-        "trait Source { assoc choose<flag: bool>: bool = flag; assoc bad: bool = flag; }",
+        "trait Source { assoc choose: for<flag: bool, flag: bool> bool; }",
+        "trait Source { assoc choose: for<flag: bool> bool; assoc bad: bool = flag; }",
+        "trait Source { assoc choose<flag: bool>: bool = flag; }",
     ] {
         sandbox.write("input.fl", source);
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);

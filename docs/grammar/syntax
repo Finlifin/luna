@@ -215,7 +215,7 @@ pointer_type -> *expr
 fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*) (-> expr)?
     | pure comptime fn<parameter_type*> (-> expr)?
 refinement_type -> refines { expr } expr
-for_type -> for<parameter*> expr
+for_type -> for<parameter_type*> expr
 lift_type -> lift expr
 contextual_expr_type -> < runtime_binding* |- expr >
 contextual_pattern_type -> < expr -| runtime_binding* >
@@ -374,7 +374,7 @@ typealias_def -> typealias id(<parameter*>)? = expr
 -- 无主体的签名声明以分号结束；函数类别与所在上下文决定其合法性。
 trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
 -- 父 trait 的 expr 同样接受 A + B + C；复用表达式组合，不限于单一 trait。
-assoc_decl -> assoc id(<parameter*>)?: expr (= expr)? clauses?
+assoc_decl -> assoc id: expr (= expr)? clauses?
 impl_def -> comptime? impl expr clauses? { (definition | statement)* }
 impl_trait_def -> comptime? impl expr for expr clauses? { (assoc_decl | definition | statement)* }
 derive_def -> comptime? derive expr for expr clauses?

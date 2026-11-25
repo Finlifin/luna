@@ -964,3 +964,35 @@ where
         slice.space_apply(index)
     }
 }
+
+impl TryVariadicCollector for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
+    assoc Err: Type = AllocErr;
+
+    fn try_variadic_init() -> Tmp<S> where S {
+        ()
+    }
+
+    fn try_variadic_collect(_tmp: *Tmp<S>, args: S) -> !AllocErr Self where S {
+        inline if Type.predicates.is_tuple(S) {
+            var out = Vec<T, .A = A, .allocator = alloc>.new();
+            inline for (_idx, elem) in args'tuple_indexed {
+                inline if elem'type == T {
+                    out.push(elem)!;
+                } else {
+                    assumes false;
+                }
+            }
+            out
+        } else {
+            assumes false;
+            Vec<T, .A = A, .allocator = alloc>.new()
+        }
+    }
+}

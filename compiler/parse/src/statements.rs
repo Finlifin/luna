@@ -11,6 +11,7 @@ impl Parser<'_> {
             // when it is the final expression of a block.
             if p.peek(&[TokenKind::Fn, TokenKind::LParen])
                 || p.peek(&[TokenKind::Comptime, TokenKind::Fn, TokenKind::LParen])
+                || p.peek(&[TokenKind::For, TokenKind::Lt])
             {
                 return p.try_expr_statement();
             }

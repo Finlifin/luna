@@ -1770,6 +1770,15 @@ impl Checker<'_, '_> {
                     Term::Pointer(inner) => inner.as_ref(),
                     ty => ty,
                 };
+                let resolved_subject = if subject
+                    .structural_terms()
+                    .any(|term| matches!(term, Term::AssociatedTypeCall(_)))
+                {
+                    Some(self.resolve_ptc_associated_calls(subject, field.span)?)
+                } else {
+                    None
+                };
+                let subject = resolved_subject.as_ref().unwrap_or(subject);
                 let candidate_shape = self.structural_type(subject, field.span)?;
                 self.ensure_nominal_type(&candidate_shape, field.span)?;
                 let has_direct_field = match &candidate_shape {

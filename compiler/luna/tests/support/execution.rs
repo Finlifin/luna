@@ -132,6 +132,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             iterator_protocol: selectors.iterator.map(str::to_owned),
             into_iterator_protocol: selectors.into_iterator.map(str::to_owned),
             variadic_collector_protocol: selectors.variadic_collector.map(str::to_owned),
+            try_variadic_collector_protocol: selectors.try_variadic_collector.map(str::to_owned),
             extended_variadic_collector_protocol: selectors
                 .extended_variadic_collector
                 .map(str::to_owned),

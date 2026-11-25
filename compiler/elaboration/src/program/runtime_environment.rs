@@ -338,6 +338,33 @@ impl Checker<'_, '_> {
         result
     }
 
+    pub(super) fn attach_call_environment(
+        &mut self,
+        statements: &mut Vec<n::Expr>,
+        call: &mut n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        let K::Call { callee, .. } = &call.kind else {
+            return Ok(());
+        };
+        let env_inputs = self.call_environment_inputs(callee, span)?;
+        if env_inputs.is_empty() {
+            return Ok(());
+        }
+        let site = Expr {
+            hir_id: hir::HirId::new(
+                self.signature_owner.unwrap_or(OwnerId::INVALID),
+                hir::ItemLocalId::new(0),
+            ),
+            span,
+            kind: H::Unit,
+        };
+        let env = self.acquire_call_inputs(call, env_inputs, BTreeMap::new(), 0, &[], &site)?;
+        statements.extend(env.before_arguments.0);
+        statements.extend(env.after_explicit);
+        Ok(())
+    }
+
     fn acquire_call_inputs(
         &mut self,
         call: &mut n::Expr,

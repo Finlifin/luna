@@ -79,6 +79,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         iterator_protocol: None,
         into_iterator_protocol: None,
         variadic_collector_protocol: None,
+        try_variadic_collector_protocol: None,
         extended_variadic_collector_protocol: None,
         literal_into_protocol: None,
         implies_protocol: None,

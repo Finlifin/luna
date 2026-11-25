@@ -267,20 +267,11 @@ impl<'h> RoutedArgument<'h> {
         ty: &Term,
         span: Span,
     ) -> Result<(), Error> {
+        let staged = !checker.runtime_value_context();
         if self.is_collected() {
-            checker.check_variadic_collection_domain(
-                ty,
-                false,
-                checker.in_staged_input || checker.in_required_comptime,
-                span,
-            )?;
+            checker.check_variadic_collection_domain(ty, false, staged, span)?;
         } else if self.property_fields().is_some() {
-            checker.check_variadic_collection_domain(
-                ty,
-                true,
-                checker.in_staged_input || checker.in_required_comptime,
-                span,
-            )?;
+            checker.check_variadic_collection_domain(ty, true, staged, span)?;
         }
         Ok(())
     }
@@ -795,7 +786,9 @@ impl Checker<'_, '_> {
         if let Some(bounds) = offsets {
             bounds.push(ordered.len());
         }
-        if self.protocols.variadic_collector.is_some() {
+        if self.protocols.variadic_collector.is_some()
+            || self.protocols.try_variadic_collector.is_some()
+        {
             for route in routes {
                 if !route.is_collected() {
                     continue;

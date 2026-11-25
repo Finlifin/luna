@@ -1155,6 +1155,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
             }
             NodeKind::FnType => self.lower_fn_type_expr(node, span),
+            NodeKind::ForType => self.lower_for_type_expr(children[0], children[1], span),
             NodeKind::Arrow => self.lower_arrow_type_expr(children[0], children[1], span),
             NodeKind::ExprStatement => self.lower_expr(ctx, children[0]),
             NodeKind::InlineStatement => {
@@ -3229,29 +3230,35 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         result
     }
 
-    fn lower_fn_type_telescope(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
-        // FnType: flags_u32, N (modifier_flags, parameter_types)
-        let Some((NodeKind::FnType, _, children)) = self.ast.get_node(node) else {
-            unreachable!(
-                "not a function type node or invalid function type node: no such node index {:?}",
-                node
-            );
+    fn lower_for_type_expr(
+        &mut self,
+        body_node: NodeIndex,
+        params_multi: NodeIndex,
+        span: Span,
+    ) -> Expr<'hir> {
+        let rib = self.local_enter(RibKind::Block);
+        let params_slice = self.lower_ty_params_slice(params_multi, span);
+        let input = Expr {
+            hir_id: self.next_hir_id(),
+            kind: ExprKind::TyNFFn(params_slice),
+            span,
         };
-
-        let flags = children[0]; // raw u32 bitmask
-        let normal_form = flags & ast::FN_MOD_NORMAL_FORM != 0;
-        let supported = if normal_form {
-            ast::FN_MOD_NORMAL_FORM | ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME
-        } else {
-            ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE | ast::FN_MOD_PURE | ast::FN_MOD_INLINE
-        };
-        if flags & !supported != 0 {
-            self.package
-                .pending_semantics
-                .push((span, "function type modifiers".into()));
+        let output = self.lower_expr(ExprContext::Type, body_node);
+        self.local_exit(rib);
+        let input_ref = self.arena.alloc_expr(input);
+        let output_ref = self.arena.alloc_expr(output);
+        Expr {
+            hir_id: self.next_hir_id(),
+            kind: ExprKind::TyFnArrow(input_ref, output_ref),
+            span,
         }
-        let params_multi = children[1];
+    }
 
+    fn lower_ty_params_slice(
+        &mut self,
+        params_multi: NodeIndex,
+        span: Span,
+    ) -> &'hir [TyParam<'hir>] {
         let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 
         // Result types are separate TyFnArrow nodes. Preserve each input's
@@ -3319,7 +3326,31 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             })
             .collect();
 
-        let params_slice = self.arena.alloc_ty_param_slice(ty_params);
+        self.arena.alloc_ty_param_slice(ty_params)
+    }
+
+    fn lower_fn_type_telescope(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
+        // FnType: flags_u32, N (modifier_flags, parameter_types)
+        let Some((NodeKind::FnType, _, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "not a function type node or invalid function type node: no such node index {:?}",
+                node
+            );
+        };
+
+        let flags = children[0]; // raw u32 bitmask
+        let normal_form = flags & ast::FN_MOD_NORMAL_FORM != 0;
+        let supported = if normal_form {
+            ast::FN_MOD_NORMAL_FORM | ast::FN_MOD_PURE | ast::FN_MOD_COMPTIME
+        } else {
+            ast::FN_MOD_COMPTIME | ast::FN_MOD_UNSAFE | ast::FN_MOD_PURE | ast::FN_MOD_INLINE
+        };
+        if flags & !supported != 0 {
+            self.package
+                .pending_semantics
+                .push((span, "function type modifiers".into()));
+        }
+        let params_slice = self.lower_ty_params_slice(children[1], span);
         Expr {
             hir_id: self.next_hir_id(),
             kind: if normal_form {

@@ -144,16 +144,16 @@ const MINIMAL_OPS_HEADER: &str = r#"
     impl Copy for void {}
     impl Copy for Type {}
     pub trait VariadicCollector {
-        assoc Tmp: Type = void;
-        fn variadic_init() -> Tmp where S;
-        fn variadic_collect(tmp: *Tmp, args: S) -> Self where S;
+        assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
+        fn variadic_init() -> Tmp<S> where S;
+        fn variadic_collect(tmp: *Tmp<S>, args: S) -> Self where S;
         ^attrs.comptime_phase
         comptime fn comptime_variadic_collect(args: S) -> Self where S;
     }
     pub trait ExtendedVariadicCollector {
-        assoc Tmp: Type = void;
-        fn extended_variadic_init() -> Tmp where Ps;
-        fn extended_variadic_collect(tmp: *Tmp, properties: Ps) -> Self where Ps;
+        assoc Tmp: for<Ps: Type> Type = |_ps: Type| -> Type { void };
+        fn extended_variadic_init() -> Tmp<Ps> where Ps;
+        fn extended_variadic_collect(tmp: *Tmp<Ps>, properties: Ps) -> Self where Ps;
         ^attrs.comptime_phase
         comptime fn comptime_extended_variadic_collect(properties: Ps) -> Self where Ps;
     }
@@ -801,7 +801,7 @@ fn multi_arg_indexing_and_space_apply_respect_tmp_drop_and_no_silent_fallback() 
             mask_sum: bool,
         }}
         impl VariadicCollector for CoordPacket {{
-            assoc Tmp: Type = CoordTmp;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ CoordTmp }};
 
             fn variadic_init() -> CoordTmp where _S {{
                 CoordTmp {{ a: 0, b: 0 }}
@@ -948,7 +948,7 @@ fn multi_arg_indexing_and_space_apply_respect_tmp_drop_and_no_silent_fallback() 
         }}
         struct NamedCoords {{ row: u32, col: u32 }}
         impl ExtendedVariadicCollector for NamedCoords {{
-            assoc Tmp: Type = NamedTmp;
+            assoc Tmp: for<Ps: Type> Type = |_ps: Type| -> Type {{ NamedTmp }};
             fn extended_variadic_init() -> NamedTmp where _Ps {{
                 NamedTmp {{ row: 0, col: 0 }}
             }}
@@ -994,7 +994,7 @@ fn multi_arg_indexing_and_space_apply_respect_tmp_drop_and_no_silent_fallback() 
         trait Flagged {{}}
         struct EmptyPacket {{}}
         impl VariadicCollector for EmptyPacket {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
             fn variadic_init() -> void where _S {{}}
             fn variadic_collect(_tmp: *void, _args: S) -> EmptyPacket where S {{ EmptyPacket {{}} }}
         }}
@@ -1028,7 +1028,7 @@ fn multi_arg_indexing_and_space_apply_respect_tmp_drop_and_no_silent_fallback() 
         impl Right for u32 {{}}
         struct EmptyPacket {{}}
         impl VariadicCollector for EmptyPacket {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
             fn variadic_init() -> void where _S {{}}
             fn variadic_collect(_tmp: *void, _args: S) -> EmptyPacket where S {{ EmptyPacket {{}} }}
         }}

@@ -662,6 +662,23 @@ impl Checker<'_, '_> {
         }))
     }
 
+    pub(super) fn has_open_tuple_iteration(&mut self, owner: OwnerId) -> Result<bool, Error> {
+        let Some(ItemKind::Fn(_, body) | ItemKind::Case(_, body)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
+            return Ok(false);
+        };
+        let Some(body) = self.package.body(*body) else {
+            return Ok(false);
+        };
+        self.scan_callable_requirements(body.value, |_, expression| {
+            Ok(matches!(
+                expression.kind,
+                H::TakeTupleEnumerate(_) | H::TakeTupleIndexed(_)
+            ))
+        })
+    }
+
     pub(super) fn has_staged_body_work(&mut self, owner: OwnerId) -> Result<bool, Error> {
         let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) =
             self.package.item(owner).map(|item| &item.kind)
@@ -2217,7 +2234,7 @@ impl Checker<'_, '_> {
                 if let Some(facts) = this.check_suspended_annotation(annotation, sig, &mut locals)? {
                     suspended_facts.insert(slot, facts);
                 }
-                let description = annotation.description();
+                let mut description = annotation.description();
                 if let TyParamKind::Optional(_, _, default) = parameter.ty.kind {
                     let mut default_locals = locals.clone();
                     // A supplier owns its abstract staged operands. They are
@@ -2309,6 +2326,9 @@ impl Checker<'_, '_> {
                     }
                 }
                 if let D::Known(ty) = &description {
+                    let ty = this.resolve_ptc_associated_calls(ty, parameter.span)?;
+                    description = D::Known(ty.clone());
+                    let ty = &ty;
                     let binding = local(parameter.hir_id);
                     this.locals.insert(binding, ty.clone());
                     if let Some(ty_expr) = match parameter.ty.kind {
@@ -2396,7 +2416,14 @@ impl Checker<'_, '_> {
                         matches!(
                             term,
                             Term::AssociatedTypeCall(call)
-                                if call.call_arguments.iter().any(|arg| arg.check_scope(&[]).is_err())
+                                if call.call_arguments.iter().any(|arg| {
+                                    arg.check_scope(&[]).is_err()
+                                        || nir::type_computations::has_rigid_parameters_bounded(
+                                            arg,
+                                            &mut 10_000,
+                                        )
+                                        .unwrap_or(true)
+                                })
                         )
                     }) =>
                 {
@@ -3793,6 +3820,7 @@ impl Checker<'_, '_> {
                         },
                     ));
                 };
+                let ty = self.resolve_ptc_associated_calls(&ty, value.span)?;
                 if matches!(expr.kind, H::Deref(_))
                     && let Term::Pointer(pointee) = &ty
                     && !self
@@ -4073,6 +4101,7 @@ impl Checker<'_, '_> {
                     // identity, not merely its Type domain.
                     return self.describe_known_region(expr, expected);
                 }
+                let ty = self.resolve_ptc_associated_calls(&ty, receiver.span)?;
                 self.with_staged_input(staged, |this| {
                     this.with_open_operand(ty, receiver.span, |this, placeholder| {
                         let probe = Expr {
@@ -7038,6 +7067,135 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    pub(super) fn resolve_ptc_associated_calls(
+        &mut self,
+        ty: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        self.resolve_ptc_associated_calls_inner(ty, span, 0)
+    }
+
+    fn resolve_ptc_associated_calls_inner(
+        &mut self,
+        ty: &Term,
+        span: Span,
+        depth: usize,
+    ) -> Result<Term, Error> {
+        if depth >= 64
+            || !ty
+                .structural_terms()
+                .any(|term| matches!(term, Term::AssociatedTypeCall(_)))
+        {
+            return Ok(ty.clone());
+        }
+        let narrow_term = |this: &Self, term: &Term| -> Term {
+            if matches!(term, Term::Rigid { .. } | Term::Bound { .. })
+                && let (Ok(Some((resolved, _))), _) =
+                    this.context.structural_view_with_heads_metered(
+                        term,
+                        crate::ptc::Budget::default(),
+                        |head| Some(head) == this.protocols.tuple,
+                    )
+            {
+                resolved
+            } else {
+                term.clone()
+            }
+        };
+        match ty {
+            Term::AssociatedTypeCall(call) => {
+                let subject = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.subject),
+                    span,
+                    depth + 1,
+                )?;
+                let arguments = call
+                    .arguments
+                    .iter()
+                    .map(|arg| {
+                        self.resolve_ptc_associated_calls_inner(
+                            &narrow_term(self, arg),
+                            span,
+                            depth + 1,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let call_arguments = call
+                    .call_arguments
+                    .iter()
+                    .map(|arg| {
+                        self.resolve_ptc_associated_calls_inner(
+                            &narrow_term(self, arg),
+                            span,
+                            depth + 1,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let rewritten = nir::AssociatedTypeCall {
+                    origin: call.origin.clone(),
+                    arguments,
+                    subject,
+                    call_arguments,
+                };
+                let all_closed = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    for input in std::iter::once(&rewritten.subject)
+                        .chain(&rewritten.arguments)
+                        .chain(&rewritten.call_arguments)
+                    {
+                        if input.check_scope(&[]).is_err()
+                            || nir::type_computations::has_rigid_parameters_bounded(input, fuel)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })
+                .map_err(|failure| error(span, failure.to_string()))?;
+                let term = Term::AssociatedTypeCall(Box::new(rewritten.clone()));
+                if all_closed && self.interfaces_ready {
+                    let dummy = Expr {
+                        hir_id: hir::HirId::new(
+                            self.signature_owner.unwrap_or(OwnerId::INVALID),
+                            hir::ItemLocalId::new(0),
+                        ),
+                        span,
+                        kind: H::Unit,
+                    };
+                    let resolved = self.observe_call_type(&term, &dummy)?;
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                if let Some(resolved) = self.try_constant_associated_call_term(&rewritten, span)? {
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                Ok(term)
+            }
+            Term::Pointer(inner) => Ok(Term::Pointer(Box::new(
+                self.resolve_ptc_associated_calls_inner(inner, span, depth + 1)?,
+            ))),
+            Term::Optional(inner) => Ok(Term::Optional(Box::new(
+                self.resolve_ptc_associated_calls_inner(inner, span, depth + 1)?,
+            ))),
+            Term::Tuple(elems) => Ok(Term::Tuple(
+                elems
+                    .iter()
+                    .map(|elem| self.resolve_ptc_associated_calls_inner(elem, span, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Term::ErrorResult { errors, result } => Ok(Term::ErrorResult {
+                errors: errors
+                    .iter()
+                    .map(|err| self.resolve_ptc_associated_calls_inner(err, span, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?,
+                result: Box::new(self.resolve_ptc_associated_calls_inner(
+                    result,
+                    span,
+                    depth + 1,
+                )?),
+            }),
+            _ => Ok(ty.clone()),
+        }
+    }
+
     pub(super) fn specialize_open_clause_type(
         &self,
         owner: OwnerId,
@@ -9149,6 +9307,7 @@ impl Checker<'_, '_> {
                     ));
                 };
                 let ty = self.specialize_open_clause_type(owner, ty, span)?;
+                let ty = self.resolve_ptc_associated_calls(&ty, span)?;
                 parameters.push(Parameter { sort: *sort, ty });
             }
             let Annotation::Known(result_ty) = &definition.result else {
@@ -9158,6 +9317,7 @@ impl Checker<'_, '_> {
                 ));
             };
             let result_ty = self.specialize_open_clause_type(owner, result_ty, span)?;
+            let result_ty = self.resolve_ptc_associated_calls(&result_ty, span)?;
             let signature = Term::Function {
                 parameters,
                 result: Box::new(result_ty),
@@ -9424,6 +9584,18 @@ impl Checker<'_, '_> {
                                     )
                                 })
                     )
+                });
+            this.dependent_signature_instantiation = this.dependent_result_instantiation
+                || this.open_functions.get(&owner).is_some_and(|definition| {
+                    definition.parameters.iter().any(|(_, annotation)| {
+                        matches!(
+                            annotation,
+                            Annotation::Known(ty)
+                                if ty.structural_terms().any(|term| {
+                                    matches!(term, Term::AssociatedTypeCall(_))
+                                })
+                        )
+                    })
                 });
             let body = this.function_body(owner, body.value, result)?;
             let decreases = this.program_decreases(owner)?;

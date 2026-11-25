@@ -65,13 +65,13 @@ fn slot_address(base: usize, index: usize) -> usize where T {
 fn discard_collector_arg(value: T) where T {}
 
 impl VariadicCollector for SliceBounds {
-    assoc Tmp: Type = void;
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
 
-    fn variadic_init() -> void where _S {
+    fn variadic_init() -> Tmp<S> where S {
         ()
     }
 
-    fn variadic_collect(_tmp: *void, args: S) -> SliceBounds where S {
+    fn variadic_collect(_tmp: *Tmp<S>, args: S) -> SliceBounds where S {
         inline if S == Tuple<usize, usize> {
             let pair: Tuple<usize, usize> = args;
             let (start, end) = pair;

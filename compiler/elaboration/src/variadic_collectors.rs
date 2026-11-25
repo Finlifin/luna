@@ -1,10 +1,13 @@
-//! Validate source-selected positional and extended variadic collector protocols.
+//! Validate source-selected positional, fallible, and extended variadic collector protocols.
 use nir::program::{Trait, TraitPhase};
-use nir::{AssociatedTypeOrigin, DeclarationId, Parameter, Primitive, Sort, Term};
+use nir::{
+    AssociatedTypeCall, AssociatedTypeOrigin, DeclarationId, Parameter, Primitive, Sort, Term,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectorKind {
     Positional,
+    TryPositional,
     Extended,
 }
 
@@ -16,6 +19,12 @@ impl CollectorKind {
                 "variadic_init",
                 "variadic_collect",
                 "comptime_variadic_collect",
+            ),
+            Self::TryPositional => (
+                "TryVariadicCollector",
+                "try_variadic_init",
+                "try_variadic_collect",
+                "comptime_try_variadic_collect",
             ),
             Self::Extended => (
                 "ExtendedVariadicCollector",
@@ -31,6 +40,7 @@ impl CollectorKind {
 pub struct Protocol {
     pub interface: DeclarationId,
     pub tmp: DeclarationId,
+    pub err: Option<DeclarationId>,
     pub init: &'static str,
     pub collect: &'static str,
     pub comptime_collect: &'static str,
@@ -63,26 +73,75 @@ pub fn protocol(
     let [tmp] = tmps.as_slice() else {
         return Err(format!("{label} requires one associated Tmp"));
     };
-    if tmp.ty != Term::Primitive(Primitive::Type) || tmp.phase != TraitPhase::Runtime {
+    let expected_tmp_ty = Term::NormalFormFunction(
+        Box::new(Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        }),
+        None,
+    );
+    if tmp.ty != expected_tmp_ty || tmp.phase != TraitPhase::Runtime {
         return Err(format!(
-            "{label} Tmp must be a runtime Type-valued associated type"
+            "{label} Tmp must have type for<S: Type> Type in runtime phase"
         ));
     }
+
+    let err = if kind == CollectorKind::TryPositional {
+        let errs = interface
+            .associated
+            .iter()
+            .filter(|item| item.name == "Err")
+            .collect::<Vec<_>>();
+        let [err] = errs.as_slice() else {
+            return Err(format!("{label} requires one associated Err"));
+        };
+        if err.ty != Term::Primitive(Primitive::Type) || err.phase != TraitPhase::Runtime {
+            return Err(format!(
+                "{label} Err must be a runtime Type-valued associated type"
+            ));
+        }
+        Some(err.declaration)
+    } else {
+        None
+    };
 
     let subject = Term::Rigid {
         declaration: interface.self_parameter,
         sort: Sort::Type,
     };
-    let tmp_type = Term::AssociatedType {
-        origin: Box::new(AssociatedTypeOrigin {
-            interface: id,
-            member: tmp.declaration,
-        }),
-        arguments: vec![],
-        subject: Box::new(subject.clone()),
+    let tmp_type = |param: DeclarationId| {
+        Term::AssociatedTypeCall(Box::new(AssociatedTypeCall {
+            origin: AssociatedTypeOrigin {
+                interface: id,
+                member: tmp.declaration,
+            },
+            arguments: vec![],
+            subject: subject.clone(),
+            call_arguments: vec![Term::Rigid {
+                declaration: param,
+                sort: Sort::Type,
+            }],
+        }))
+    };
+    let result_type = match err {
+        Some(err_decl) => Term::ErrorResult {
+            errors: vec![Term::AssociatedType {
+                origin: Box::new(AssociatedTypeOrigin {
+                    interface: id,
+                    member: err_decl,
+                }),
+                arguments: vec![],
+                subject: Box::new(subject.clone()),
+            }],
+            result: Box::new(subject.clone()),
+        },
+        None => subject.clone(),
     };
 
-    // Runtime phase: `fn variadic_init() -> Tmp where S`
+    // Runtime phase: `fn variadic_init() -> Tmp<S> where S`
     let inits = interface
         .methods
         .iter()
@@ -91,9 +150,14 @@ pub fn protocol(
     let [init] = inits.as_slice() else {
         return Err(format!("{label} requires one {init_name} method"));
     };
+    let Some(&init_s) = init.type_parameters.first() else {
+        return Err(format!(
+            "{label} requires runtime fn {init_name}() -> Tmp<S> where S"
+        ));
+    };
     let expected_init = Term::Function {
         parameters: vec![],
-        result: Box::new(tmp_type.clone()),
+        result: Box::new(tmp_type(init_s)),
     };
     if init.phase != TraitPhase::Runtime
         || init.signature.is_comptime_callable()
@@ -106,11 +170,11 @@ pub fn protocol(
         || init.signature.callable_signature() != Ok(&expected_init)
     {
         return Err(format!(
-            "{label} requires runtime fn {init_name}() -> Tmp where S"
+            "{label} requires runtime fn {init_name}() -> Tmp<S> where S"
         ));
     }
 
-    // Runtime phase: `fn variadic_collect(tmp: *Tmp, args: S) -> Self where S`
+    // Runtime phase: `fn variadic_collect(tmp: *Tmp<S>, args: S) -> Self (or !Err Self) where S`
     let collects = interface
         .methods
         .iter()
@@ -121,14 +185,14 @@ pub fn protocol(
     };
     let Some(&collect_s) = collect.type_parameters.first() else {
         return Err(format!(
-            "{label} requires runtime fn {collect_name}(tmp: *Tmp, args: S) -> Self where S"
+            "{label} requires runtime fn {collect_name}(tmp: *Tmp<S>, args: S) where S"
         ));
     };
     let expected_collect = Term::Function {
         parameters: vec![
             Parameter {
                 sort: Sort::Runtime,
-                ty: Term::Pointer(Box::new(tmp_type)),
+                ty: Term::Pointer(Box::new(tmp_type(collect_s))),
             },
             Parameter {
                 sort: Sort::Runtime,
@@ -138,7 +202,7 @@ pub fn protocol(
                 },
             },
         ],
-        result: Box::new(subject.clone()),
+        result: Box::new(result_type.clone()),
     };
     if collect.phase != TraitPhase::Runtime
         || collect.signature.is_comptime_callable()
@@ -151,11 +215,11 @@ pub fn protocol(
         || collect.signature.callable_signature() != Ok(&expected_collect)
     {
         return Err(format!(
-            "{label} requires runtime fn {collect_name}(tmp: *Tmp, args: S) -> Self where S"
+            "{label} requires runtime fn {collect_name}(tmp: *Tmp<S>, args: S) where S"
         ));
     }
 
-    // Comptime phase: `^attrs.comptime_phase comptime fn comptime_variadic_collect(args: S) -> Self where S`
+    // Comptime phase: `^attrs.comptime_phase comptime fn comptime_variadic_collect(args: S) -> Self (or !Err Self) where S`
     let comptime_collects = interface
         .methods
         .iter()
@@ -168,7 +232,7 @@ pub fn protocol(
     };
     let Some(&comptime_s) = comptime_collect.type_parameters.first() else {
         return Err(format!(
-            "{label} requires ^attrs.comptime_phase comptime fn {comptime_collect_name}(args: S) -> Self where S"
+            "{label} requires ^attrs.comptime_phase comptime fn {comptime_collect_name}(args: S) where S"
         ));
     };
     let expected_comptime = Term::Function {
@@ -179,7 +243,7 @@ pub fn protocol(
                 sort: Sort::Type,
             },
         }],
-        result: Box::new(subject),
+        result: Box::new(result_type),
     };
     if comptime_collect.phase != TraitPhase::Comptime
         || !comptime_collect.signature.is_comptime_callable()
@@ -192,13 +256,14 @@ pub fn protocol(
         || comptime_collect.signature.callable_signature() != Ok(&expected_comptime)
     {
         return Err(format!(
-            "{label} requires ^attrs.comptime_phase comptime fn {comptime_collect_name}(args: S) -> Self where S"
+            "{label} requires ^attrs.comptime_phase comptime fn {comptime_collect_name}(args: S) where S"
         ));
     }
 
     Ok(Protocol {
         interface: id,
         tmp: tmp.declaration,
+        err,
         init: init_name,
         collect: collect_name,
         comptime_collect: comptime_collect_name,

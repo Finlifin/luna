@@ -3,8 +3,13 @@ use super::*;
 use input_collection::{Plan, Progress, Target};
 use nir::program::NormalFormArgument as Argument;
 
+pub(super) enum TargetHead {
+    Normal(DeclarationId),
+    Closure(Arc<Closure>, Vec<Option<Value>>),
+}
+
 pub(super) struct Source<'a> {
-    head: DeclarationId,
+    target: TargetHead,
     result: Term,
     signature_result: Option<Term>,
     domains: Domains<'a>,
@@ -67,11 +72,16 @@ pub(super) type Frame<'a> = input_collection::Frame<Source<'a>>;
 
 impl fmt::Display for Source<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(normal-input-source (head {}) {})",
-            self.head, self.bindings
-        )
+        match &self.target {
+            TargetHead::Normal(head) => {
+                write!(f, "(normal-input-source (head {head}) {})", self.bindings)
+            }
+            TargetHead::Closure(closure, _) => write!(
+                f,
+                "(normal-input-source (closure {}) {})",
+                closure.ty, self.bindings
+            ),
+        }
     }
 }
 
@@ -93,8 +103,8 @@ impl<'a> Frame<'a> {
     ) -> Result<Self, Error> {
         let view = plan.view();
         let source = view.source;
-        let (head, public_inputs, signature_result) = match (view.target, selected) {
-            (Target::Normal(head), None) => (head, None, None),
+        let (target, public_inputs, signature_result) = match (view.target, selected) {
+            (Target::Normal(head), None) => (TargetHead::Normal(head), None, None),
             (
                 Target::Selected {
                     signature,
@@ -104,9 +114,6 @@ impl<'a> Frame<'a> {
                 Some(value),
             ) => {
                 vm.check_value_type(&value, signature, Some(callee_source))?;
-                let Value::Function(head) = value else {
-                    return Err(vm.failure(ErrorKind::Type, Some(callee_source)));
-                };
                 let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
                 let before = fuel;
                 let opened = nir::normal_forms::open_signature(signature, input_ids, &mut fuel);
@@ -120,15 +127,26 @@ impl<'a> Frame<'a> {
                         Some(source),
                     )
                 })?;
-                (head, Some(opened), Some(opened_result))
+                let target = match value {
+                    Value::Function(head) => TargetHead::Normal(head),
+                    Value::Closure(closure) => {
+                        TargetHead::Closure(closure, vec![None; view.arguments.len()])
+                    }
+                    _ => return Err(vm.failure(ErrorKind::Type, Some(callee_source))),
+                };
+                (target, Some(opened), Some(opened_result))
             }
             _ => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
         let locals = plan.admit_scope(vm, environment)?;
-        let metadata = vm
-            .normal_forms
-            .get(&head)
-            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+        let metadata = match &target {
+            TargetHead::Normal(head) => Some(
+                vm.normal_forms
+                    .get(head)
+                    .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?,
+            ),
+            TargetHead::Closure(..) => None,
+        };
         let mut signature_result = signature_result;
         let count = view.arguments.len();
         let diverges = plan.inputs_diverge();
@@ -139,63 +157,70 @@ impl<'a> Frame<'a> {
             if view.ty.sort() != nir::Sort::Type {
                 return Err(vm.failure(ErrorKind::Type, Some(source)));
             }
-            if *view.ty != Term::Primitive(Primitive::Type)
-                && (!matches!(metadata.role, nir::normal_forms::Role::Opaque)
-                    || (public_inputs.is_none() && vm.functions.declaration(&head).is_none()))
-            {
-                return Err(vm.failure(ErrorKind::Type, Some(source)));
-            }
-            if public_inputs.is_none()
-                && let Some(function) = vm.functions.declaration(&head)
-                && let Term::Function { result, .. } = &function.signature
-                && result.check_scope(&[]).is_ok()
-            {
-                let mut referenced = BTreeSet::new();
-                let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let checked = nir::type_computations::rigid_declarations_bounded(
-                    result,
-                    &mut fuel,
-                    &mut referenced,
-                );
-                let copied = match checked {
-                    Ok(()) => {
-                        nir::copy_budget::clone_term(result, &mut fuel).map_err(|limit| match limit
-                        {
-                            nir::copy_budget::CopyBudgetExhausted::Steps => {
-                                nir::type_computations::Error::Budget
-                            }
-                            nir::copy_budget::CopyBudgetExhausted::Depth => {
-                                nir::type_computations::Error::Budget
-                            }
-                        })
-                    }
-                    Err(reason) => Err(reason),
+            if let Some(metadata) = metadata {
+                let head = match &target {
+                    TargetHead::Normal(head) => *head,
+                    TargetHead::Closure(..) => unreachable!(),
                 };
-                vm.budget.steps -= (before - fuel) as u64;
-                let expected_result = copied.map_err(|reason| {
-                    vm.failure(
-                        match reason {
-                            nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
-                            _ => ErrorKind::Type,
-                        },
-                        Some(source),
-                    )
-                })?;
-                if metadata
-                    .parameters
-                    .iter()
-                    .all(|parameter| !referenced.contains(&parameter.declaration))
+                if *view.ty != Term::Primitive(Primitive::Type)
+                    && (!matches!(metadata.role, nir::normal_forms::Role::Opaque)
+                        || (public_inputs.is_none() && vm.functions.declaration(&head).is_none()))
                 {
-                    if *view.ty != expected_result {
-                        return Err(vm.failure(ErrorKind::Type, Some(source)));
+                    return Err(vm.failure(ErrorKind::Type, Some(source)));
+                }
+                if public_inputs.is_none()
+                    && let Some(function) = vm.functions.declaration(&head)
+                    && let Term::Function { result, .. } = &function.signature
+                    && result.check_scope(&[]).is_ok()
+                {
+                    let mut referenced = BTreeSet::new();
+                    let mut fuel = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let checked = nir::type_computations::rigid_declarations_bounded(
+                        result,
+                        &mut fuel,
+                        &mut referenced,
+                    );
+                    let copied = match checked {
+                        Ok(()) => {
+                            nir::copy_budget::clone_term(result, &mut fuel).map_err(|limit| {
+                                match limit {
+                                    nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                        nir::type_computations::Error::Budget
+                                    }
+                                    nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                        nir::type_computations::Error::Budget
+                                    }
+                                }
+                            })
+                        }
+                        Err(reason) => Err(reason),
+                    };
+                    vm.budget.steps -= (before - fuel) as u64;
+                    let expected_result = copied.map_err(|reason| {
+                        vm.failure(
+                            match reason {
+                                nir::type_computations::Error::Budget => ErrorKind::StepsExhausted,
+                                _ => ErrorKind::Type,
+                            },
+                            Some(source),
+                        )
+                    })?;
+                    if metadata
+                        .parameters
+                        .iter()
+                        .all(|parameter| !referenced.contains(&parameter.declaration))
+                    {
+                        if *view.ty != expected_result {
+                            return Err(vm.failure(ErrorKind::Type, Some(source)));
+                        }
+                    } else {
+                        signature_result = Some(expected_result);
                     }
-                } else {
-                    signature_result = Some(expected_result);
                 }
             }
         }
-        if metadata.parameters.len() != count
+        if metadata.is_some_and(|meta| meta.parameters.len() != count)
             || public_inputs
                 .as_ref()
                 .is_some_and(|inputs| inputs.len() != count)
@@ -203,15 +228,16 @@ impl<'a> Frame<'a> {
             return Err(vm.failure(ErrorKind::Type, Some(source)));
         }
         vm.integer_operation(Some(source), |budget| budget.consume(count))?;
-        let domains = match public_inputs {
-            Some(inputs) => Domains::Callable(inputs),
-            None => Domains::Declaration(&metadata.parameters),
+        let domains = match (public_inputs, metadata) {
+            (Some(inputs), _) => Domains::Callable(inputs),
+            (None, Some(metadata)) => Domains::Declaration(&metadata.parameters),
+            (None, None) => return Err(vm.failure(ErrorKind::Type, Some(source))),
         };
         let bindings = input_bindings::Bindings::structural(
             (0..count).map(|i| domains.parameter(i).unwrap().0.declaration),
         );
         Ok(Self::from_source(Source {
-            head,
+            target,
             result: view.ty.clone(),
             signature_result,
             domains,
@@ -260,6 +286,11 @@ impl input_collection::Source for Source<'_> {
 
     fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
         let source = self.input(slot).source();
+        if let TargetHead::Closure(_, ref mut args) = self.target
+            && let Some(entry) = args.get_mut(slot)
+        {
+            *entry = Some(value.clone());
+        }
         self.domains
             .bind(vm, &mut self.bindings, slot, value, source)
     }
@@ -277,15 +308,32 @@ impl input_collection::Source for Source<'_> {
         }
         let bindings =
             std::mem::replace(&mut self.bindings, input_bindings::Bindings::structural([]));
-        let arguments = bindings
-            .finish_normal()
-            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
-        Ok(Progress::Complete(Flow::Value(vm.complete_normal_data(
-            self.head,
-            arguments,
-            &self.result,
-            source,
-        )?)))
+        match &mut self.target {
+            TargetHead::Normal(head) => {
+                let arguments = bindings
+                    .finish_normal()
+                    .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+                Ok(Progress::Complete(Flow::Value(vm.complete_normal_data(
+                    *head,
+                    arguments,
+                    &self.result,
+                    source,
+                )?)))
+            }
+            TargetHead::Closure(closure, args) => {
+                let values = args
+                    .iter_mut()
+                    .map(|slot| {
+                        slot.take()
+                            .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value =
+                    vm.invoke_value_scoped(Value::Closure(closure.clone()), values, None)?;
+                vm.check_value_type(&value, &self.result, Some(source))?;
+                Ok(Progress::Complete(Flow::Value(value)))
+            }
+        }
     }
 
     fn cleanup(&self, environment: &mut Environment) {

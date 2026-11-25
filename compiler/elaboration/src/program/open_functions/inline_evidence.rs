@@ -171,8 +171,16 @@ impl Checker<'_, '_> {
             (D::Known(t), _) if is_never(t) => no,
             (_, D::Known(t)) if is_never(t) => yes,
             (D::Known(a), D::Known(b)) => {
-                self.require_expression(a, b, expr.span)?;
-                yes
+                if matches!(expected, None | Some(D::Unknown)) {
+                    if self.require_expression(a, b, expr.span).is_ok() {
+                        yes
+                    } else {
+                        D::Unknown
+                    }
+                } else {
+                    self.require_expression(a, b, expr.span)?;
+                    yes
+                }
             }
             _ => D::Unknown,
         };

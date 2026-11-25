@@ -896,6 +896,7 @@ fn all_resolved_protocols_in(
         protocols.iterator,
         protocols.into_iterator,
         protocols.variadic_collector,
+        protocols.try_variadic_collector,
         protocols.extended_variadic_collector,
         protocols.ordering,
         protocols.equality,

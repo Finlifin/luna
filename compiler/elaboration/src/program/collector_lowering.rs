@@ -1,7 +1,14 @@
 //! Collect variadic positional tuples and named property records through
-//! user-implemented `VariadicCollector` and `ExtendedVariadicCollector` traits.
+//! user-implemented `VariadicCollector`, `TryVariadicCollector`, and
+//! `ExtendedVariadicCollector` traits.
 use super::*;
 use crate::ptc::Budget;
+
+#[derive(Clone, Copy)]
+struct CollectorSelection {
+    protocol: DeclarationId,
+    fallible: bool,
+}
 
 impl Checker<'_, '_> {
     pub(super) fn is_default_collection_shape(
@@ -18,41 +25,19 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn check_variadic_collection_domain(
+    fn probe_collector_protocol(
         &self,
         ty: &Term,
-        extended: bool,
-        staged: bool,
+        protocol: DeclarationId,
+        required_phase: n::TraitPhase,
         span: Span,
-    ) -> Result<(), Error> {
-        if self.is_default_collection_shape(ty, extended, span)? {
-            return Ok(());
-        }
-        let Some(protocol) = (if extended {
-            self.protocols.extended_variadic_collector
-        } else {
-            self.protocols.variadic_collector
-        }) else {
-            return Err(error(
-                span,
-                if extended {
-                    "property collection requires a record type"
-                } else {
-                    "default variadic collection requires a tuple type"
-                },
-            ));
-        };
+    ) -> Result<Option<Result<(), String>>, Error> {
         let interface = n::InterfaceInstance {
             declaration: protocol,
             arguments: vec![],
         };
-        let required_phase = if staged {
-            n::TraitPhase::Comptime
-        } else {
-            n::TraitPhase::Runtime
-        };
         let incomplete = match self.symbolic_interface_evidence(ty, &interface) {
-            Ok(true) => return Ok(()),
+            Ok(true) => return Ok(Some(Ok(()))),
             Ok(false) => None,
             Err(e @ nir::NominalAdmissionError::Unresolved(_)) => Some(e),
             Err(e) => return Err(error(span, e.to_string())),
@@ -70,42 +55,130 @@ impl Checker<'_, '_> {
                 let implementation =
                     &self.checked_implementations[self.implementation_positions[&impl_id]];
                 if !implementation.phases.contains(required_phase) {
-                    return Err(error(
-                        span,
-                        format!("selected implementation lacks {required_phase} trait phase"),
-                    ));
+                    return Ok(Some(Err(format!(
+                        "selected implementation lacks {required_phase} trait phase"
+                    ))));
                 }
-                Ok(())
+                Ok(Some(Ok(())))
             }
             crate::implementation::Selection::NoApplicableCandidate => {
                 if let Some(given_error) = incomplete {
-                    return Err(error(span, given_error.to_string()));
+                    return Ok(Some(Err(given_error.to_string())));
                 }
-                Err(error(
-                    span,
-                    if extended {
-                        "property collection requires a record type or ExtendedVariadicCollector implementation"
-                    } else {
-                        "variadic collection requires a tuple type or VariadicCollector implementation"
-                    },
-                ))
+                Ok(None)
             }
             other => {
                 if let Some(given_error) = incomplete {
-                    return Err(error(span, given_error.to_string()));
+                    return Ok(Some(Err(given_error.to_string())));
                 }
-                Err(error(
-                    span,
-                    format!("variadic collector capability is not established: {other}"),
-                ))
+                Ok(Some(Err(format!(
+                    "variadic collector capability is not established: {other}"
+                ))))
             }
         }
     }
 
-    pub(super) fn resolve_collector_tmp_type(
+    fn select_collector_protocol(
         &self,
+        ty: &Term,
+        extended: bool,
+        staged: bool,
+        allow_try: bool,
+        span: Span,
+    ) -> Result<CollectorSelection, Error> {
+        let required_phase = if staged {
+            n::TraitPhase::Comptime
+        } else {
+            n::TraitPhase::Runtime
+        };
+        if extended {
+            let Some(protocol) = self.protocols.extended_variadic_collector else {
+                return Err(error(span, "property collection requires a record type"));
+            };
+            return match self.probe_collector_protocol(ty, protocol, required_phase, span)? {
+                Some(Ok(())) => Ok(CollectorSelection {
+                    protocol,
+                    fallible: false,
+                }),
+                Some(Err(msg)) => Err(error(span, msg)),
+                None => Err(error(
+                    span,
+                    "property collection requires a record type or ExtendedVariadicCollector implementation",
+                )),
+            };
+        }
+
+        let infallible = self
+            .protocols
+            .variadic_collector
+            .map(|id| {
+                self.probe_collector_protocol(ty, id, required_phase, span)
+                    .map(|res| (id, res))
+            })
+            .transpose()?;
+        let fallible = if allow_try {
+            self.protocols
+                .try_variadic_collector
+                .map(|id| {
+                    self.probe_collector_protocol(ty, id, required_phase, span)
+                        .map(|res| (id, res))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        match (infallible, fallible) {
+            (Some((inf_id, Some(Ok(())))), Some((_, Some(Ok(()))))) => Err(error(
+                span,
+                format!(
+                    "ambiguous variadic collector for `{ty}`: implements both VariadicCollector and TryVariadicCollector (matched {inf_id})"
+                ),
+            )),
+            (Some((_, Some(Err(msg)))), _) | (_, Some((_, Some(Err(msg))))) => {
+                Err(error(span, msg))
+            }
+            (Some((id, Some(Ok(())))), _) => Ok(CollectorSelection {
+                protocol: id,
+                fallible: false,
+            }),
+            (_, Some((id, Some(Ok(()))))) => Ok(CollectorSelection {
+                protocol: id,
+                fallible: true,
+            }),
+            (None, None) => Err(error(
+                span,
+                "default variadic collection requires a tuple type",
+            )),
+            _ => Err(error(
+                span,
+                if allow_try {
+                    "variadic collection requires a tuple type, VariadicCollector, or TryVariadicCollector implementation"
+                } else {
+                    "variadic collection requires a tuple type or VariadicCollector implementation"
+                },
+            )),
+        }
+    }
+
+    pub(super) fn check_variadic_collection_domain(
+        &self,
+        ty: &Term,
+        extended: bool,
+        staged: bool,
+        span: Span,
+    ) -> Result<(), Error> {
+        if self.is_default_collection_shape(ty, extended, span)? {
+            return Ok(());
+        }
+        self.select_collector_protocol(ty, extended, staged, !extended, span)?;
+        Ok(())
+    }
+
+    pub(super) fn resolve_collector_tmp_type(
+        &mut self,
         protocol: DeclarationId,
         target_ty: &Term,
+        packet_ty: &Term,
         span: Span,
     ) -> Result<Term, Error> {
         let trait_contract = self
@@ -117,10 +190,46 @@ impl Checker<'_, '_> {
             .iter()
             .find(|item| item.name == "Tmp")
             .ok_or_else(|| error(span, "variadic collector lacks associated Tmp"))?;
+        let projected = Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
+            origin: nir::AssociatedTypeOrigin {
+                interface: protocol,
+                member: tmp_member.declaration,
+            },
+            arguments: vec![],
+            subject: target_ty.clone(),
+            call_arguments: vec![packet_ty.clone()],
+        }));
+        let dummy = Expr {
+            hir_id: hir::HirId::new(
+                self.signature_owner.unwrap_or(OwnerId::INVALID),
+                hir::ItemLocalId::new(0),
+            ),
+            span,
+            kind: H::Unit,
+        };
+        let resolved = self.observe_call_type(&projected, &dummy)?;
+        Ok(self.structural_type(&resolved, span).unwrap_or(resolved))
+    }
+
+    fn resolve_collector_err_type(
+        &self,
+        protocol: DeclarationId,
+        target_ty: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let trait_contract = self
+            .checked_traits
+            .by_id(protocol)
+            .ok_or_else(|| error(span, "try variadic collector trait contract is unavailable"))?;
+        let err_member = trait_contract
+            .associated
+            .iter()
+            .find(|item| item.name == "Err")
+            .ok_or_else(|| error(span, "try variadic collector lacks associated Err"))?;
         let projected = Term::AssociatedType {
             origin: Box::new(nir::AssociatedTypeOrigin {
                 interface: protocol,
-                member: tmp_member.declaration,
+                member: err_member.declaration,
             }),
             arguments: vec![],
             subject: Box::new(target_ty.clone()),
@@ -147,6 +256,7 @@ impl Checker<'_, '_> {
         packet_ty: &Term,
         arguments: Vec<n::Expr>,
         result_ty: Term,
+        statements: Option<&mut Vec<n::Expr>>,
         span: Span,
     ) -> Result<n::Expr, Error> {
         let interface = n::InterfaceInstance {
@@ -207,12 +317,6 @@ impl Checker<'_, '_> {
             }
             (callee, parameter_bindings)
         };
-        if !self.call_environment_inputs(&callee, span)?.is_empty() {
-            return Err(error(
-                span,
-                format!("{method_name} cannot yet require an implicit runtime environment"),
-            ));
-        }
         let arguments = arguments
             .into_iter()
             .enumerate()
@@ -223,7 +327,10 @@ impl Checker<'_, '_> {
                 is_default: false,
             })
             .collect();
-        let call_source = if matches!(method_name, "variadic_init" | "extended_variadic_init") {
+        let call_source = if matches!(
+            method_name,
+            "variadic_init" | "extended_variadic_init" | "try_variadic_init"
+        ) {
             n::SourceRange {
                 start: span.lo().0,
                 end: span.lo().0,
@@ -234,7 +341,7 @@ impl Checker<'_, '_> {
                 end: span.hi().0,
             }
         };
-        Ok(n::Expr {
+        let mut call = n::Expr {
             source: call_source,
             ty: result_ty,
             kind: K::Call {
@@ -243,15 +350,27 @@ impl Checker<'_, '_> {
                 parameter_bindings,
                 env_arguments: vec![],
             },
-        })
+        };
+        if let Some(statements) = statements {
+            self.attach_call_environment(statements, &mut call, span)?;
+        } else if let K::Call { ref callee, .. } = call.kind
+            && !self.call_environment_inputs(callee, span)?.is_empty()
+        {
+            return Err(error(
+                span,
+                format!("{method_name} cannot yet require an implicit runtime environment"),
+            ));
+        }
+        Ok(call)
     }
 
     /// Lower a raw tuple or anonymous-record packet into `target_ty` via
-    /// `VariadicCollector` or `ExtendedVariadicCollector`.
+    /// `VariadicCollector`, `TryVariadicCollector`, or `ExtendedVariadicCollector`.
     ///
     /// Runtime calls allocate a mutable caller-frame `tmp` binding inside
     /// `statements` so `tmp` stays pinned for the duration of the enclosing
-    /// `CallPreparation` and is dropped at `Boundary::ScopeEnd`.
+    /// `CallPreparation` and is dropped at `Boundary::ScopeEnd` (including
+    /// reverse-order cleanup on `TryVariadicCollector` error propagation).
     pub(super) fn lower_variadic_collector_packet(
         &mut self,
         statements: &mut Vec<n::Expr>,
@@ -266,19 +385,22 @@ impl Checker<'_, '_> {
             return Ok(packet);
         }
         let staged = staged || self.in_required_comptime || self.in_staged_input;
-        self.check_variadic_collection_domain(&target_ty, extended, staged, span)?;
-        let protocol = (if extended {
-            self.protocols.extended_variadic_collector
-        } else {
-            self.protocols.variadic_collector
-        })
-        .ok_or_else(|| error(span, "variadic collector protocol binding is unavailable"))?;
-
+        let selection =
+            self.select_collector_protocol(&target_ty, extended, staged, !extended, span)?;
+        let protocol = selection.protocol;
         let packet_ty = packet.ty.clone();
+        let collect_result_ty = if selection.fallible {
+            let err_ty = self.resolve_collector_err_type(protocol, &target_ty, span)?;
+            Term::error_result(vec![err_ty], target_ty.clone())
+        } else {
+            target_ty.clone()
+        };
 
         if staged {
             let method_name = if extended {
                 "comptime_extended_variadic_collect"
+            } else if selection.fallible {
+                "comptime_try_variadic_collect"
             } else {
                 "comptime_variadic_collect"
             };
@@ -288,13 +410,19 @@ impl Checker<'_, '_> {
                 &target_ty,
                 &packet_ty,
                 vec![packet],
-                target_ty.clone(),
+                collect_result_ty,
+                None,
                 span,
             )?;
+            let collected = if selection.fallible {
+                self.propagate_error_expr(call, Some(&target_ty), span)?
+            } else {
+                call
+            };
             let collector_binding = self.spread_binding(span)?;
             let anchor = arguments::preparation_anchor(span);
             statements.push(n::Expr {
-                ty: if is_never(&call.ty) {
+                ty: if is_never(&collected.ty) {
                     p(P::Never)
                 } else {
                     p(P::Void)
@@ -302,7 +430,7 @@ impl Checker<'_, '_> {
                 source: anchor,
                 kind: K::Let {
                     binding: collector_binding,
-                    value: Box::new(call),
+                    value: Box::new(collected),
                 },
             });
             return Ok(n::Expr {
@@ -343,10 +471,12 @@ impl Checker<'_, '_> {
 
         let (init_name, collect_name) = if extended {
             ("extended_variadic_init", "extended_variadic_collect")
+        } else if selection.fallible {
+            ("try_variadic_init", "try_variadic_collect")
         } else {
             ("variadic_init", "variadic_collect")
         };
-        let tmp_ty = self.resolve_collector_tmp_type(protocol, &target_ty, span)?;
+        let tmp_ty = self.resolve_collector_tmp_type(protocol, &target_ty, &packet_ty, span)?;
         let init_call = self.synthesize_collector_method_call(
             protocol,
             init_name,
@@ -354,6 +484,7 @@ impl Checker<'_, '_> {
             &packet_ty,
             vec![],
             tmp_ty.clone(),
+            Some(statements),
             span,
         )?;
         let tmp_binding = self.spread_binding(span)?;
@@ -386,12 +517,22 @@ impl Checker<'_, '_> {
             &target_ty,
             &packet_ty,
             vec![tmp_ref, packet_local],
-            target_ty.clone(),
+            collect_result_ty,
+            Some(statements),
             span,
         )?;
+        let collected = if selection.fallible {
+            let mut propagated = self.propagate_error_expr(collect_call, Some(&target_ty), span)?;
+            // Error-propagation match inside call preparation must keep a
+            // distinct cleanup source from the enclosing call expression.
+            propagated.source = self.error_generated_source(span)?;
+            propagated
+        } else {
+            collect_call
+        };
         let collector_binding = self.spread_binding(span)?;
         statements.push(n::Expr {
-            ty: if is_never(&collect_call.ty) {
+            ty: if is_never(&collected.ty) {
                 p(P::Never)
             } else {
                 p(P::Void)
@@ -399,7 +540,7 @@ impl Checker<'_, '_> {
             source: anchor,
             kind: K::Let {
                 binding: collector_binding,
-                value: Box::new(collect_call),
+                value: Box::new(collected),
             },
         });
         Ok(n::Expr {
@@ -418,19 +559,16 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let target_ty = self.copy_alias_type(target_ty, span)?;
-        self.check_variadic_collection_domain(&target_ty, false, true, span)?;
-        let protocol = self
-            .protocols
-            .variadic_collector
-            .ok_or_else(|| error(span, "VariadicCollector protocol binding is unavailable"))?;
+        let selection = self.select_collector_protocol(&target_ty, false, true, false, span)?;
         let packet_ty = packet.ty.clone();
         self.synthesize_collector_method_call(
-            protocol,
+            selection.protocol,
             "comptime_variadic_collect",
             &target_ty.clone(),
             &packet_ty,
             vec![packet],
             target_ty,
+            None,
             span,
         )
     }

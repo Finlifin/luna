@@ -125,6 +125,7 @@ pub(crate) struct ReferenceSession {
     fuel: u64,
     budget: elaboration::ptc::Budget,
 }
+
 impl ReferenceSession {
     pub(crate) fn new(package: std::borrow::Cow<'_, Package>, fuel: u64) -> Result<Self, String> {
         if fuel == 0 {
@@ -203,6 +204,28 @@ pub fn interpret_with_protocols(
         fuel,
         false,
     )
+}
+
+pub fn interpret_with_protocols_events(
+    package: &Package,
+    entry: &str,
+    copy_protocol: &str,
+    drop_protocol: &str,
+    fuel: u64,
+) -> Result<(Value, Vec<String>), String> {
+    if fuel == 0 {
+        return Err("execution fuel must be positive".into());
+    }
+    let (package, declaration) =
+        crate::invocation::prepare_runtime_entry(package, entry, None, fuel)?;
+    CheckedSession::new(
+        package,
+        crate::resources::Selection::Name(copy_protocol),
+        crate::resources::Selection::Name(drop_protocol),
+        fuel,
+        false,
+    )?
+    .invoke_with_events(declaration, entry)
 }
 
 pub fn interpret_with_protocols_in_package(
@@ -319,6 +342,15 @@ impl CheckedSession {
         declaration: nir::DeclarationId,
         entry: &str,
     ) -> Result<Value, String> {
+        self.invoke_with_events(declaration, entry)
+            .map(|(value, _)| value)
+    }
+
+    pub(crate) fn invoke_with_events(
+        &self,
+        declaration: nir::DeclarationId,
+        entry: &str,
+    ) -> Result<(Value, Vec<String>), String> {
         let package = self.protocols.package();
         let protocols = &self.protocols;
         let budget = self.budget;
@@ -390,7 +422,7 @@ impl CheckedSession {
             *copy_failure.borrow_mut() = evidence.err();
             allowed
         };
-        Interpreter::from_iir(
+        let mut vm = Interpreter::from_iir(
             &executable.graph,
             Budget {
                 steps: self.fuel,
@@ -403,14 +435,27 @@ impl CheckedSession {
         .with_effect_values(&effect_values)
         .map_err(|error| format!("cannot install effect value delivery: {error}"))?
         .with_cleanup_schedule(&executable.schedule)
-        .map_err(|e| format!("cannot install runtime cleanup: {e}"))?
-        .invoke_instance(&executable.entry, vec![])
-        .map_err(|e| {
+        .map_err(|e| format!("cannot install runtime cleanup: {e}"))?;
+        let value = vm.invoke_instance(&executable.entry, vec![]).map_err(|e| {
             let mut message = format!("runtime reference execution of '{entry}' failed: {e}");
             if let Some(reason) = copy_failure.borrow().as_ref() {
                 message.push_str(&format!("; pointer Copy evidence: {reason}"));
             }
             message
-        })
+        })?;
+        let names = vm
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                comptime_interpretor::Event::EnterFunction(id) => executable
+                    .graph
+                    .functions
+                    .iter()
+                    .find(|f| f.key.declaration == *id)
+                    .map(|f| f.function.name.clone()),
+                _ => None,
+            })
+            .collect();
+        Ok((value, names))
     }
 }

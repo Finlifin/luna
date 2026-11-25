@@ -162,7 +162,7 @@ fn runtime_variadic_collector_keeps_tmp_pinned_and_drops_after_call_in_vm_and_ll
         impl Copy for PinSlice {{}}
 
         impl VariadicCollector for PinSlice {{
-            assoc Tmp: Type = StackBuf;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ StackBuf }};
 
             fn variadic_init() -> StackBuf where _S {{
                 StackBuf {{ first: 0, second: 0, sentinel: 99 }}
@@ -216,7 +216,7 @@ fn runtime_variadic_collector_keeps_tmp_pinned_and_drops_after_call_in_vm_and_ll
         impl Copy for PinSlice {{}}
 
         impl VariadicCollector for PinSlice {{
-            assoc Tmp: Type = StackBuf;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ StackBuf }};
 
             fn variadic_init() -> StackBuf where _S {{
                 StackBuf {{ first: 0, second: 0, sentinel: 99 }}
@@ -297,7 +297,7 @@ fn two_phase_variadic_collector_supports_runtime_comptime_empty_and_rejects_wron
         impl Copy for DualBag {{}}
 
         impl VariadicCollector for DualBag {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
 
             fn variadic_init() -> void where _S {{}}
 
@@ -329,7 +329,7 @@ fn two_phase_variadic_collector_supports_runtime_comptime_empty_and_rejects_wron
         struct EmptyBag {{ empty: bool }}
         impl Copy for EmptyBag {{}}
         impl VariadicCollector for EmptyBag {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
             fn variadic_init() -> void where _S {{}}
             fn variadic_collect(_tmp: *void, _args: S) -> EmptyBag where S {{
                 inline if S == Tuple<> {{
@@ -375,7 +375,7 @@ fn two_phase_variadic_collector_supports_runtime_comptime_empty_and_rejects_wron
         "{}
         struct RtOnly {{ v: u32 }}
         impl VariadicCollector for RtOnly {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
             fn variadic_init() -> void where _S {{}}
             fn variadic_collect(_tmp: *void, _args: _S) -> RtOnly where _S {{ RtOnly {{ v: 1 }} }}
         }}
@@ -437,7 +437,7 @@ fn extended_variadic_collector_supports_named_properties_tmp_drop_and_comptime_p
         typealias PropShape = PROP_SAMPLE'type;
 
         impl ExtendedVariadicCollector for PropConfigRt {{
-            assoc Tmp: Type = PropBuf;
+            assoc Tmp: for<Ps: Type> Type = |_ps: Type| -> Type {{ PropBuf }};
 
             fn extended_variadic_init() -> PropBuf where _Ps {{
                 PropBuf {{ port: 0, sentinel: 77 }}
@@ -522,7 +522,7 @@ fn generic_variadic_collector_constraints_work_via_where_clause() {
         struct BoxedList {{ len: u32 }}
         impl Copy for BoxedList {{}}
         impl VariadicCollector for BoxedList {{
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {{ void }};
             fn variadic_init() -> void where _S {{}}
             fn variadic_collect(_tmp: *void, args: S) -> BoxedList where S {{
                 inline if S == Tuple<u32, u32> {{
@@ -572,7 +572,7 @@ fn sysroot_prelude_exports_variadic_collectors_and_runs_with_default_bindings() 
         impl Copy for SysCollector {}
 
         impl VariadicCollector for SysCollector {
-            assoc Tmp: Type = void;
+            assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
 
             fn variadic_init() -> void where _S {}
 

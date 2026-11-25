@@ -1033,7 +1033,7 @@ impl Parser<'_> {
         })
     }
 
-    // assoc id(<parameter*>)?: expr (= default)? clauses?
+    // assoc id: expr (= default)? clauses?
     pub fn try_assoc_decl(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Assoc.as_ref(), |p| {
             p.eat_tokens(1); // consume 'assoc'
@@ -1045,12 +1045,6 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
-
-            // Optional type parameters: <param*>
-            let params = p.try_multi_with_bracket(
-                &[Rule::comma("parameter", |p| p.try_param())],
-                (TokenKind::Lt, TokenKind::Gt),
-            )?;
 
             // : type
             if !p.eat_token(TokenKind::Colon) {
@@ -1088,7 +1082,7 @@ impl Parser<'_> {
 
             Ok(NodeBuilder::new(NodeKind::AssocDecl, p.current_span())
                 .add_single_child(id)
-                .add_multiple_children(params)
+                .add_multiple_children(Vec::new())
                 .add_single_child(type_expr)
                 .add_single_child(default_expr)
                 .add_multiple_children(clauses)

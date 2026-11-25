@@ -324,6 +324,9 @@ impl Parser<'_> {
                 }
                 TokenKind::Dot => p.try_prefix_range_expr_or_symbol(option),
                 TokenKind::Pipe => p.try_lambda(option),
+                TokenKind::For if p.peek(&[TokenKind::For, TokenKind::Lt]) => {
+                    p.try_for_prefix(option)
+                }
                 TokenKind::Forall => p.try_forall_prefix(option),
                 TokenKind::Exists => p.try_bool_exists(option),
                 TokenKind::Hash => p.try_effect_qualified_type(option),
@@ -815,6 +818,30 @@ impl Parser<'_> {
             // Build as (a, b, N): return_type, body, then params
             Ok(NodeBuilder::new(NodeKind::Lambda, p.current_span())
                 .add_single_child(return_type)
+                .add_single_child(body)
+                .add_multiple_children(params)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// Parse `for<parameter*> type_expr` -> ForType (a, N) (body_expr, params).
+    /// Syntactic sugar for `pure comptime fn<parameter*> -> type_expr`.
+    fn try_for_prefix(&mut self, option: ExprOption) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::For], |p| {
+            p.eat_tokens(1); // consume 'for'
+            let params = p.try_multi_with_bracket(
+                &[Rule::comma("for type parameter", |p| p.try_param_type())],
+                (TokenKind::Lt, TokenKind::Gt),
+            )?;
+            let body = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
+            if body == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected result type expression after `for<...>`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::ForType, p.current_span())
                 .add_single_child(body)
                 .add_multiple_children(params)
                 .build(&mut p.ast))

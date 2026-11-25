@@ -357,17 +357,19 @@ fn loop_backedge_barrier_blocks_stale_capture_before_mutation_and_allows_sound_l
 
 #[test]
 fn parameterized_and_abstract_associated_values_and_parent_cycles() {
-    // Parameterized `assoc`, trait defaults, impl overrides, value & turbofish invocation,
-    // type-returning parameterized `assoc`, and abstract trait associated values.
+    // Associated `pure comptime fn` and `for<...>` members, trait defaults, impl overrides,
+    // value & angle-bracket invocation, type-returning `for<...> Type`, and abstract trait associated values.
     let valid_assoc = r#"
         trait Scale {
             assoc factor: usize = 3;
-            assoc scale<n: usize>: usize = if n < 100 and Self.as(Scale).factor < 100 {
-                n * Self.as(Scale).factor
-            } else {
-                0
+            assoc scale: pure comptime fn(usize) -> usize = |n: usize| -> usize {
+                if n < 100 and Self.as(Scale).factor < 100 {
+                    n * Self.as(Scale).factor
+                } else {
+                    0
+                }
             };
-            assoc pick<flag: bool>: Type = if flag { u8 } else { bool };
+            assoc pick: for<flag: bool> Type = |flag: bool| -> Type { if flag { u8 } else { bool } };
             fn tagged_default(self) -> usize {
                 let a = Self.as(Scale).factor;
                 let b = factor;
@@ -399,7 +401,9 @@ fn parameterized_and_abstract_associated_values_and_parent_cycles() {
         struct TripleUser {}
         impl Scale for TripleUser {
             assoc factor: usize = 5;
-            assoc scale<m: usize>: usize = if m < 100 { m * 3 } else { 0 };
+            assoc scale: pure comptime fn(usize) -> usize = |m: usize| -> usize {
+                if m < 100 { m * 3 } else { 0 }
+            };
         }
 
         fn run() -> bool {
@@ -407,12 +411,12 @@ fn parameterized_and_abstract_associated_values_and_parent_cycles() {
             let u2 = DefaultUser {};
             let u3 = DefaultUser {};
             let a = DefaultUser.as(Scale).scale(4);
-            let b = DefaultUser.as(Scale).scale<4>;
+            let b = DefaultUser.as(Scale).scale(4);
             let c = TripleUser.as(Scale).scale(4);
             let d = u1.as(Scale).tagged_default();
             let e = u2.as(Tagged<4>).read_tag();
             let f = u3.as(DerivedTag).derived_read();
-            const g = DefaultUser.as(Scale).pick(true) == u8
+            const g = DefaultUser.as(Scale).pick<true> == u8
                 and DefaultUser.as(Scale).pick<false> == bool;
             a == 12 and b == 12 and c == 12 and d == 6 and e == 8 and f == 5 and g
         }
@@ -426,17 +430,17 @@ fn parameterized_and_abstract_associated_values_and_parent_cycles() {
         assert_eq!(output.stdout, b"(bool true)\n");
     }
 
-    // Mismatched parameterized `assoc` signature in an `impl` is rejected.
+    // Mismatched `assoc` function signature in an `impl` is rejected.
     let bad_override = r#"
         trait Scale {
-            assoc scale<n: usize>: usize = n * 2;
+            assoc scale: for<n: usize> usize = |n: usize| -> usize { n * 2 };
         }
         struct S {}
         impl Scale for S {
-            assoc scale<n: bool>: usize = 1;
+            assoc scale: for<n: bool> usize = |_n: bool| -> usize { 1 };
         }
         fn run() -> usize {
-            S.as(Scale).scale(true)
+            S.as(Scale).scale<true>
         }
     "#;
     let err = support::compile(bad_override).unwrap_err();
@@ -445,17 +449,15 @@ fn parameterized_and_abstract_associated_values_and_parent_cycles() {
         "expected mismatched assoc type error, got: {err}"
     );
 
-    // Unsupported `where` type/clause parameters on associated value declarations are rejected.
-    for bad_clause_params in [
-        "trait Bad { assoc item<n: usize>: usize = 1 where T; }",
-        "trait Bad { assoc item: usize = 1 where T; }",
-    ] {
-        let err = support::compile(bad_clause_params).unwrap_err();
-        assert!(
-            err.contains("where type/clause parameters"),
-            "expected explicit clause-param rejection for `{bad_clause_params}`, got: {err}"
-        );
-    }
+    // Removed legacy `assoc id<param>: ...` syntax is rejected by parser, and `where` clause params are rejected.
+    let bad_legacy =
+        support::compile("trait Bad { assoc item<n: usize>: usize = 1; }").unwrap_err();
+    assert!(!bad_legacy.is_empty());
+    let err = support::compile("trait Bad { assoc item: usize = 1 where T; }").unwrap_err();
+    assert!(
+        err.contains("where type/clause parameters"),
+        "expected explicit clause-param rejection, got: {err}"
+    );
 
     // Genuinely acyclic parameterized parent DAGs (`PSub :- PMid<T> + PBase<u8> where T`, `PMid :- PBase<U> where U`)
     // succeed, while direct and indirect instantiated cycles (`CycleA :- CycleB<U> where U`, `CycleB :- CycleA<u8> where V`,

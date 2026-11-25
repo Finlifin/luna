@@ -729,7 +729,7 @@ impl Checker<'_, '_> {
                     kind,
                 }));
             }
-            H::TyModifiedFn(..) => {
+            H::TyModifiedFn(..) | H::TyNFFn(..) => {
                 if let Some(expected) = expected {
                     self.require_expression(&p(P::Type), expected, expr.span)?;
                 }
@@ -799,6 +799,16 @@ impl Checker<'_, '_> {
                     source: source(expr.span),
                     ty,
                     kind,
+                }));
+            }
+            H::TyFnArrow(input, _) if matches!(input.kind, H::TyNFFn(..) | H::TyModifiedFn(..)) => {
+                if let Some(expected) = expected {
+                    self.require_expression(&p(P::Type), expected, expr.span)?;
+                }
+                return Ok(Some(n::Expr {
+                    source: source(expr.span),
+                    ty: p(P::Type),
+                    kind: K::TypeValue(self.type_expr(expr)?),
                 }));
             }
             H::TyFnArrow(input, output) => {

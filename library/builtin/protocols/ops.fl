@@ -101,23 +101,34 @@ pub trait RemAssign where .Rhs: Type = Self {
 
 -- ── Variadic Collectors ────────────────────────────────────────────────────
 pub trait VariadicCollector {
-    assoc Tmp: Type = void;
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
 
-    fn variadic_init() -> Tmp where S;
-    fn variadic_collect(tmp: *Tmp, args: S) -> Self where S;
+    fn variadic_init() -> Tmp<S> where S;
+    fn variadic_collect(tmp: *Tmp<S>, args: S) -> Self where S;
 
     ^attrs.comptime_phase
     comptime fn comptime_variadic_collect(args: S) -> Self where S;
 }
 
 pub trait ExtendedVariadicCollector {
-    assoc Tmp: Type = void;
+    assoc Tmp: for<Ps: Type> Type = |_ps: Type| -> Type { void };
 
-    fn extended_variadic_init() -> Tmp where Ps;
-    fn extended_variadic_collect(tmp: *Tmp, properties: Ps) -> Self where Ps;
+    fn extended_variadic_init() -> Tmp<Ps> where Ps;
+    fn extended_variadic_collect(tmp: *Tmp<Ps>, properties: Ps) -> Self where Ps;
 
     ^attrs.comptime_phase
     comptime fn comptime_extended_variadic_collect(properties: Ps) -> Self where Ps;
+}
+
+pub trait TryVariadicCollector {
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type { void };
+    assoc Err: Type;
+
+    fn try_variadic_init() -> Tmp<S> where S;
+    fn try_variadic_collect(tmp: *Tmp<S>, args: S) -> !Err Self where S;
+
+    ^attrs.comptime_phase
+    comptime fn comptime_try_variadic_collect(args: S) -> !Err Self where S;
 }
 
 -- ── Deref / DerefMut / Reference ──────────────────────────────────────────

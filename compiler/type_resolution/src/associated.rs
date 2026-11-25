@@ -272,7 +272,6 @@ pub fn is_type_call_contract(member_ty: &Term, arg_count: usize) -> bool {
             member_ty.callable_signature(),
             Term::Function { parameters, result }
                 if parameters.len() == arg_count
-                    && parameters.iter().all(|p| p.sort == nir::Sort::Runtime)
                     && **result == Term::Primitive(Primitive::Type)
         )
 }
@@ -326,27 +325,53 @@ pub fn associated_call_expression(
             member: call.origin.member,
         },
     };
-    let arguments = call
+    let arg_exprs: Vec<nir::program::Expr> = call
         .call_arguments
         .iter()
         .zip(parameters)
-        .enumerate()
-        .map(|(parameter, (arg, param))| {
+        .map(|(arg, param)| {
             let kind = if param.ty == Term::Primitive(Primitive::Type) {
                 ExprKind::TypeValue(arg.clone())
             } else {
                 ExprKind::ComptimeValue(arg.clone())
             };
-            nir::program::CallArgument {
-                passing: nir::program::ArgumentPassing::Value,
-                parameter,
-                is_default: false,
-                value: nir::program::Expr {
-                    source,
-                    ty: param.ty.clone(),
-                    kind,
-                },
+            nir::program::Expr {
+                source,
+                ty: param.ty.clone(),
+                kind,
             }
+        })
+        .collect();
+    if member_ty.is_normal_form_callable() {
+        let input_ids = (0..arg_exprs.len())
+            .map(|slot| nir::DeclarationId {
+                package: u64::MAX - 11,
+                local: slot as u32,
+            })
+            .collect();
+        let arguments = arg_exprs
+            .into_iter()
+            .map(nir::program::NormalFormArgument::Value)
+            .collect();
+        return Ok(nir::program::Expr {
+            source,
+            ty: Term::Primitive(Primitive::Type),
+            kind: ExprKind::ApplyNormalForm {
+                callee: std::sync::Arc::new(callee),
+                input_ids,
+                arguments,
+                plan: None,
+            },
+        });
+    }
+    let arguments = arg_exprs
+        .into_iter()
+        .enumerate()
+        .map(|(parameter, value)| nir::program::CallArgument {
+            passing: nir::program::ArgumentPassing::Value,
+            parameter,
+            is_default: false,
+            value,
         })
         .collect();
     Ok(nir::program::Expr {

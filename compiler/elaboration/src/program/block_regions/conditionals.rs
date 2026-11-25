@@ -172,9 +172,10 @@ impl<'h> Frame<'h> {
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
     ) -> Result<Step<'h>, Error> {
-        let H::If(condition, yes, no) = self.source.kind else {
+        let H::If(source_condition, yes, no) = self.source.kind else {
             unreachable!("validated conditional")
         };
+        let condition = source_condition;
         if matches!(self.state, State::Inferring(..)) {
             return self.advance_search(checker, returned);
         }
@@ -214,6 +215,35 @@ impl<'h> Frame<'h> {
                     );
                     self.state = State::Inferring(condition, search);
                     return self.advance_search(checker, None);
+                }
+                if let Some(else_expr) = no
+                    && self.selection == Some(usize::from(true))
+                    && checker.dependent_signature_instantiation
+                    && checker.is_type_assumption(source_condition)
+                {
+                    let dead_yes = CheckedBlock::Ordinary(n::Expr {
+                        ty: p(P::Never),
+                        source: source(yes.span),
+                        kind: K::Unit,
+                    });
+                    let destination = if checker.dependent_result_instantiation {
+                        Destination::ordinary(
+                            checker,
+                            OrdinaryTail {
+                                expected: None,
+                                partial: None,
+                                input: None,
+                            },
+                            else_expr.span,
+                        )?
+                    } else {
+                        self.destination.clone()
+                    };
+                    self.enter_branch(checker, &condition, false, Some(else_expr.hir_id))?;
+                    let destination =
+                        self.simplify_branch_destination(checker, destination, else_expr.span)?;
+                    self.state = State::Else(condition, dead_yes, destination.clone());
+                    return Ok(Step::Child(Request::expression(else_expr, destination)));
                 }
                 self.enter_branch(checker, &condition, true, yes.expr.map(|tail| tail.hir_id))?;
                 let destination = match &self.destination {
@@ -260,6 +290,26 @@ impl<'h> Frame<'h> {
                         &Destination::statement(),
                     );
                 };
+                if self.selection == Some(usize::from(false))
+                    && checker.dependent_signature_instantiation
+                    && checker.is_type_assumption(source_condition)
+                {
+                    self.join_selected_exits(&condition, value.selected_exit(), false);
+                    let dead_no = n::Expr {
+                        ty: p(P::Never),
+                        source: source(no.span),
+                        kind: K::Unit,
+                    };
+                    let yes = value.ordinary(self.source.span)?;
+                    let destination = self.destination.clone();
+                    return self.finish_ordinary(
+                        checker,
+                        condition,
+                        yes,
+                        Some(dead_no),
+                        &destination,
+                    );
+                }
                 let destination = if self.selection == Some(usize::from(false))
                     && checker.dependent_result_instantiation
                 {

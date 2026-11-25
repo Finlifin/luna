@@ -288,6 +288,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--iterator-protocol"
                     | "--into-iterator-protocol"
                     | "--variadic-collector-protocol"
+                    | "--try-variadic-collector-protocol"
                     | "--extended-variadic-collector-protocol"
                     | "--add-protocol"
                     | "--sub-protocol"

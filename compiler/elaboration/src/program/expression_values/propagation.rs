@@ -29,111 +29,8 @@ impl Checker<'_, '_> {
                 );
             }
             H::ErrorPropagate(input) => {
-                if self.control.result.is_none()
-                    && !matches!(
-                        self.control.return_observations,
-                        Some(ReturnObservations::Infer(_))
-                    )
-                {
-                    return Err(context_error(
-                        expr.span,
-                        "error propagation requires a function result context",
-                    ));
-                }
-                let target = if self.in_unselected_inline && self.dependent_result_instantiation {
-                    None
-                } else {
-                    self.control.result.clone()
-                };
                 let input = self.expr(input, None)?;
-                if is_never(&input.ty) {
-                    return Ok(input);
-                }
-                let input_ty = self.simplify_deferred_error_result(&input.ty, expr.span)?;
-                let Term::ErrorResult {
-                    errors,
-                    result: payload,
-                } = &input_ty
-                else {
-                    return Err(error(
-                        expr.span,
-                        "error propagation requires an error-qualified operand",
-                    ));
-                };
-                if let Some(expected) = expected {
-                    self.require(payload, expected, expr.span)?;
-                }
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(errors.len() as u64)
-                    .ok_or_else(|| error(expr.span, "error propagation budget exhausted"))?;
-                let payload = (**payload).clone();
-                let labels = errors.clone();
-                let binding = self.spread_binding(expr.span)?;
-                let mut arms = vec![n::MatchArm {
-                    pattern: n::Pattern::ErrorResult {
-                        label: None,
-                        inner: Box::new(n::Pattern::Binding {
-                            binding,
-                            inner: Box::new(n::Pattern::Wild),
-                        }),
-                    },
-                    guard: None,
-                    body: n::Expr {
-                        source: self.error_generated_source(expr.span)?,
-                        ty: payload.clone(),
-                        kind: K::Local(binding),
-                    },
-                }];
-                for label in labels {
-                    let binding = self.spread_binding(expr.span)?;
-                    let value = n::Expr {
-                        source: self.error_generated_source(expr.span)?,
-                        ty: label.clone(),
-                        kind: K::Local(binding),
-                    };
-                    let provisional = Term::error_result(vec![label.clone()], p(P::Never));
-                    let failure = self.convert_error_value(
-                        value,
-                        target.as_ref().unwrap_or(&provisional),
-                        nir::error_results::Conversion::Failure,
-                        expr.span,
-                    )?;
-                    let return_source = self.error_generated_source(expr.span)?;
-                    if target.is_none() {
-                        self.control
-                            .pending_error_returns
-                            .insert((return_source.start, return_source.end), label.clone());
-                    }
-                    arms.push(n::MatchArm {
-                        pattern: n::Pattern::ErrorResult {
-                            label: Some(label),
-                            inner: Box::new(n::Pattern::Binding {
-                                binding,
-                                inner: Box::new(n::Pattern::Wild),
-                            }),
-                        },
-                        guard: None,
-                        body: n::Expr {
-                            source: return_source,
-                            ty: p(P::Never),
-                            kind: K::Return(Some(Box::new(failure))),
-                        },
-                    });
-                }
-                if let (Some(observations), Some(target)) =
-                    (&mut self.control.return_observations, target)
-                {
-                    observations.push(target);
-                }
-                return Ok(n::Expr {
-                    source: source(expr.span),
-                    ty: payload,
-                    kind: K::Match {
-                        value: Box::new(input),
-                        arms,
-                    },
-                });
+                return self.propagate_error_expr(input, expected, expr.span);
             }
             H::OptionPropagate(input) => {
                 let result = self.control.result.clone();
@@ -242,5 +139,116 @@ impl Checker<'_, '_> {
             _ => unreachable!("value expression category was checked by the dispatcher"),
         };
         self.finish_value_expression(expr, expected, ty, kind)
+    }
+
+    pub(in crate::program) fn propagate_error_expr(
+        &mut self,
+        input: n::Expr,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if self.control.result.is_none()
+            && !matches!(
+                self.control.return_observations,
+                Some(ReturnObservations::Infer(_))
+            )
+        {
+            return Err(context_error(
+                span,
+                "error propagation requires a function result context",
+            ));
+        }
+        let target = if self.in_unselected_inline && self.dependent_result_instantiation {
+            None
+        } else {
+            self.control.result.clone()
+        };
+        if is_never(&input.ty) {
+            return Ok(input);
+        }
+        let input_ty = self.simplify_deferred_error_result(&input.ty, span)?;
+        let Term::ErrorResult {
+            errors,
+            result: payload,
+        } = &input_ty
+        else {
+            return Err(error(
+                span,
+                "error propagation requires an error-qualified operand",
+            ));
+        };
+        if let Some(expected) = expected {
+            self.require(payload, expected, span)?;
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(errors.len() as u64)
+            .ok_or_else(|| error(span, "error propagation budget exhausted"))?;
+        let payload = (**payload).clone();
+        let labels = errors.clone();
+        let binding = self.spread_binding(span)?;
+        let mut arms = vec![n::MatchArm {
+            pattern: n::Pattern::ErrorResult {
+                label: None,
+                inner: Box::new(n::Pattern::Binding {
+                    binding,
+                    inner: Box::new(n::Pattern::Wild),
+                }),
+            },
+            guard: None,
+            body: n::Expr {
+                source: self.error_generated_source(span)?,
+                ty: payload.clone(),
+                kind: K::Local(binding),
+            },
+        }];
+        for label in labels {
+            let binding = self.spread_binding(span)?;
+            let value = n::Expr {
+                source: self.error_generated_source(span)?,
+                ty: label.clone(),
+                kind: K::Local(binding),
+            };
+            let provisional = Term::error_result(vec![label.clone()], p(P::Never));
+            let failure = self.convert_error_value(
+                value,
+                target.as_ref().unwrap_or(&provisional),
+                nir::error_results::Conversion::Failure,
+                span,
+            )?;
+            let return_source = self.error_generated_source(span)?;
+            if target.is_none() {
+                self.control
+                    .pending_error_returns
+                    .insert((return_source.start, return_source.end), label.clone());
+            }
+            arms.push(n::MatchArm {
+                pattern: n::Pattern::ErrorResult {
+                    label: Some(label),
+                    inner: Box::new(n::Pattern::Binding {
+                        binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    }),
+                },
+                guard: None,
+                body: n::Expr {
+                    source: return_source,
+                    ty: p(P::Never),
+                    kind: K::Return(Some(Box::new(failure))),
+                },
+            });
+        }
+        if let (Some(observations), Some(target)) = (&mut self.control.return_observations, target)
+        {
+            observations.push(target);
+        }
+        Ok(n::Expr {
+            source: source(span),
+            ty: payload,
+            kind: K::Match {
+                value: Box::new(input),
+                arms,
+            },
+        })
     }
 }

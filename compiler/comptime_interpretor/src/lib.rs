@@ -3641,6 +3641,7 @@ impl<'a> Interpreter<'a> {
             Term::Closure { environment, .. } => environment,
             Term::Function { .. }
             | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
             | Term::PureFunction(_) => &[],
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),

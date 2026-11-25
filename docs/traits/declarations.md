@@ -10,11 +10,14 @@ Trait 声明告诉调用者可以依赖什么。方法描述操作，关联项�
 
 ~~~text
 trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
-assoc_decl -> assoc id(<parameter*>)?: expr (= default)? clauses?
+assoc_decl -> assoc id: expr (= default)? clauses?
 impl_trait_def -> comptime? impl expr for expr clauses? { (assoc_decl | definition | statement)* }
 trait_bound_decl_clause -> id :- expr
 normal_form_head_application -> expr<argument*>
+for_type -> for<parameter_type*> expr
 ~~~
+
+`assoc` 只有 `assoc id: type_expr (= default_expr)? clauses?` 这一种声明形式（不存在 `assoc id<parameter*>: expr`）。需要按参数计算类型或值的关联项，应将 `type_expr` 声明为纯编译时函数类型或 `for<parameter*> type_expr`。其中 `for<parameter*> type_expr` 是 `pure comptime fn<parameter*> -> type_expr` 的语法糖，可用于签名、类型位置、表达式位置及关联项（例如 `assoc Tmp: for<S: Type> Type`）。
 
 Trait 内的方法可以只有签名，末尾使用分号；带默认主体的方法采用普通函数定义。属性和执行阶段见[两相](../comptime/the-comptime-phases-of-traits.md)。
 

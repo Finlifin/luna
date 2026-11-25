@@ -18,6 +18,7 @@ pub struct Selectors<'a> {
     pub iterator: Option<&'a str>,
     pub into_iterator: Option<&'a str>,
     pub variadic_collector: Option<&'a str>,
+    pub try_variadic_collector: Option<&'a str>,
     pub extended_variadic_collector: Option<&'a str>,
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
@@ -91,6 +92,7 @@ impl Selectors<'_> {
                 self.iterator,
                 self.into_iterator,
                 self.variadic_collector,
+                self.try_variadic_collector,
                 self.extended_variadic_collector,
                 self.ordering,
                 self.equality,
@@ -354,6 +356,11 @@ pub(crate) fn resolve_source(
                 "VariadicCollector".into(),
                 selectors.variadic_collector,
                 &mut result.variadic_collector,
+            ),
+            (
+                "TryVariadicCollector".into(),
+                selectors.try_variadic_collector,
+                &mut result.try_variadic_collector,
             ),
             (
                 "ExtendedVariadicCollector".into(),
@@ -847,6 +854,7 @@ pub(crate) struct SysrootBindings {
     iterator: Option<String>,
     into_iterator: Option<String>,
     variadic_collector: Option<String>,
+    try_variadic_collector: Option<String>,
     extended_variadic_collector: Option<String>,
     literal_into: Option<String>,
     implies: Option<String>,
@@ -977,6 +985,7 @@ impl SysrootBindings {
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "variadic-collector-protocol" => &mut result.variadic_collector,
+                "try-variadic-collector-protocol" => &mut result.try_variadic_collector,
                 "extended-variadic-collector-protocol" => &mut result.extended_variadic_collector,
                 "literal-into-protocol" => &mut result.literal_into,
                 "implies-protocol" => &mut result.implies,
@@ -1356,6 +1365,13 @@ impl SysrootBindings {
                     .variadic_collector
                     .is_none()
                     .then_some(self.variadic_collector.as_deref())
+                    .flatten()
+            }),
+            try_variadic_collector: explicit.try_variadic_collector.or_else(|| {
+                identities
+                    .try_variadic_collector
+                    .is_none()
+                    .then_some(self.try_variadic_collector.as_deref())
                     .flatten()
             }),
             extended_variadic_collector: explicit.extended_variadic_collector.or_else(|| {
@@ -1866,6 +1882,7 @@ mod stage_tests {
             iterator_protocol: None,
             into_iterator_protocol: None,
             variadic_collector_protocol: None,
+            try_variadic_collector_protocol: None,
             extended_variadic_collector_protocol: None,
             literal_into_protocol: None,
             implies_protocol: None,

@@ -49,7 +49,11 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                 self.associated_projection(base, name.name.as_str(), callee.span, callee.hir_id)?
                 && assoc.ty.is_comptime_callable()
             {
-                let call = self.finish_call(expr, assoc, args, Vec::new(), expected, None)?;
+                let call = if assoc.ty.is_normal_form_callable() {
+                    self.dynamic_normal_form_application(expr, callee, assoc, args, expected)?
+                } else {
+                    self.finish_call(expr, assoc, args, Vec::new(), expected, None)?
+                };
                 return Ok(block_regions::ExplicitInstance::Ready(call));
             }
         }
@@ -69,7 +73,11 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         ) {
             let assoc = self.lexical_associated_value(owner, callee.span)?;
             if assoc.ty.is_comptime_callable() {
-                let call = self.finish_call(expr, assoc, args, Vec::new(), expected, None)?;
+                let call = if assoc.ty.is_normal_form_callable() {
+                    self.dynamic_normal_form_application(expr, callee, assoc, args, expected)?
+                } else {
+                    self.finish_call(expr, assoc, args, Vec::new(), expected, None)?
+                };
                 return Ok(block_regions::ExplicitInstance::Ready(call));
             }
         }

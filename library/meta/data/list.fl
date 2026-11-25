@@ -607,3 +607,21 @@ impl List<T> where T {
         }
     }
 }
+
+comptime impl VariadicCollector for List<T> where T {
+    comptime fn comptime_variadic_collect(args: S) -> List<T> where S {
+        var out: List<T> = [];
+        inline if Type.predicates.is_tuple(S) {
+            inline for (_idx, elem) in args'tuple_indexed {
+                inline if elem'type == T {
+                    out.append(elem);
+                } else {
+                    assumes false;
+                }
+            }
+        } else {
+            assumes false;
+        }
+        out
+    }
+}
