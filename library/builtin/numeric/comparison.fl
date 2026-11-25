@@ -3,31 +3,39 @@ use primitives.*;
 -- Equality and total ordering, independent of formatting and allocation.
 
 -- ── Equality ───────────────────────────────────────────────────────────────
-pub trait Eq {
-    fn eq(self, other: Self) -> bool;
-    fn ne(self, other: Self) -> bool = not self.eq(other);
+pub trait Eq
+where
+    .Rhs: Type = Self,
+{
+    fn eq(*self, other: *Rhs) -> bool;
+
+    fn ne(*self, other: *Rhs) -> bool = not self.*.as(Eq<.Rhs = Rhs>).eq(other);
 }
 
 -- ── Order ───────────────────────────────────────────────────────────────
 pub trait Ord :- Eq {
-    fn cmp(self, other: Self) -> Order;
-    fn lt(self, other: Self) -> bool =
-        self.cmp(other) match {
+    fn cmp(*self, other: *Self) -> Order;
+
+    fn lt(*self, other: *Self) -> bool =
+        self.*.as(Ord).cmp(other) match {
             .less => true,
             _ => false,
         }
-    fn le(self, other: Self) -> bool =
-        self.cmp(other) match {
+
+    fn le(*self, other: *Self) -> bool =
+        self.*.as(Ord).cmp(other) match {
             .greater => false,
             _ => true,
         }
-    fn gt(self, other: Self) -> bool =
-        self.cmp(other) match {
+
+    fn gt(*self, other: *Self) -> bool =
+        self.*.as(Ord).cmp(other) match {
             .greater => true,
             _ => false,
         }
-    fn ge(self, other: Self) -> bool =
-        self.cmp(other) match {
+
+    fn ge(*self, other: *Self) -> bool =
+        self.*.as(Ord).cmp(other) match {
             .less => false,
             _ => true,
         }
@@ -39,179 +47,438 @@ pub enum Order {
     greater,
 }
 
+-- ── Total Order (IEEE 754 totalOrder & explicit wrapper) ────────────────────
+pub trait TotalOrd {
+    fn total_cmp(*self, other: *Self) -> Order;
+
+    fn total_lt(*self, other: *Self) -> bool =
+        self.*.as(TotalOrd).total_cmp(other) match {
+            .less => true,
+            _ => false,
+        }
+
+    fn total_le(*self, other: *Self) -> bool =
+        self.*.as(TotalOrd).total_cmp(other) match {
+            .greater => false,
+            _ => true,
+        }
+
+    fn total_gt(*self, other: *Self) -> bool =
+        self.*.as(TotalOrd).total_cmp(other) match {
+            .greater => true,
+            _ => false,
+        }
+
+    fn total_ge(*self, other: *Self) -> bool =
+        self.*.as(TotalOrd).total_cmp(other) match {
+            .less => false,
+            _ => true,
+        }
+}
+
+pure fn order_u16(left: u16, right: u16) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+pure fn order_u32(left: u32, right: u32) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+pure fn order_u64(left: u64, right: u64) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+-- IEEE 754 totalOrder unsigned bit-keys:
+-- -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN.
+pub pure fn float16_total_key(value: f16) -> u16 {
+    let raw = value'bitvec.as(u16);
+    let bits = raw'bitvec;
+    let sign = bits[15..16].as(u8) != 0;
+    if sign {
+        (not bits).as(u16)
+    } else {
+        let mask: u16 = 32768;
+        (bits or mask'bitvec).as(u16)
+    }
+}
+
+pub pure fn bfloat16_total_key(value: bf16) -> u16 {
+    let raw = value'bitvec.as(u16);
+    let bits = raw'bitvec;
+    let sign = bits[15..16].as(u8) != 0;
+    if sign {
+        (not bits).as(u16)
+    } else {
+        let mask: u16 = 32768;
+        (bits or mask'bitvec).as(u16)
+    }
+}
+
+pub pure fn float32_total_key(value: f32) -> u32 {
+    let raw = value'bitvec.as(u32);
+    let bits = raw'bitvec;
+    let sign = bits[31..32].as(u8) != 0;
+    if sign {
+        (not bits).as(u32)
+    } else {
+        let mask: u32 = 2147483648;
+        (bits or mask'bitvec).as(u32)
+    }
+}
+
+pub pure fn float64_total_key(value: f64) -> u64 {
+    let raw = value'bitvec.as(u64);
+    let bits = raw'bitvec;
+    let sign = bits[63..64].as(u8) != 0;
+    if sign {
+        (not bits).as(u64)
+    } else {
+        let mask: u64 = 9223372036854775808;
+        (bits or mask'bitvec).as(u64)
+    }
+}
+
+impl TotalOrd for f16 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        order_u16(float16_total_key(self.*), float16_total_key(other.*))
+    }
+}
+
+impl TotalOrd for bf16 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        order_u16(bfloat16_total_key(self.*), bfloat16_total_key(other.*))
+    }
+}
+
+impl TotalOrd for f32 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        order_u32(float32_total_key(self.*), float32_total_key(other.*))
+    }
+}
+
+impl TotalOrd for f64 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        order_u64(float64_total_key(self.*), float64_total_key(other.*))
+    }
+}
+
+{-
+    Explicit total-order wrapper for IEEE 754 floating-point values.
+    Equality and ordering follow IEEE 754 totalOrder bit-keys consistently
+    across runtime and comptime.
+-}
+pub struct TotalFloat
+where
+    F: Type,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    value: F,
+}
+
+impl TotalFloat<F>
+where
+    F: Type,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    pub fn new(value: F) -> Self {
+        TotalFloat<F> { value: value }
+    }
+
+    pub fn into_inner(self) -> F {
+        self.value
+    }
+
+    pub fn get(*self) -> F {
+        self.value.*
+    }
+
+    pub pure comptime fn comptime_new(value: F) -> Self {
+        TotalFloat<F> { value: value }
+    }
+
+    pub pure comptime fn comptime_into_inner(self) -> F {
+        self.value
+    }
+}
+
+impl TotalOrd for TotalFloat<F>
+where
+    F: Type,
+    requires F :- TotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.value.as(TotalOrd).total_cmp(other.value)
+    }
+}
+
+impl Eq for TotalFloat<F>
+where
+    F: Type,
+    requires F :- TotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    fn eq(*self, other: *Self) -> bool {
+        self.value.as(TotalOrd).total_cmp(other.value) matches .equal
+    }
+}
+
+impl Ord for TotalFloat<F>
+where
+    F: Type,
+    requires F :- TotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    fn cmp(*self, other: *Self) -> Order {
+        self.value.as(TotalOrd).total_cmp(other.value)
+    }
+}
+
 impl Eq for u8 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for u8 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for u8 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for u16 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for u16 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for u16 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for u32 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for u32 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for u32 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for u64 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for u64 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for u64 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for u128 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for u128 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for u128 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for i8 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for i8 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for i8 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for i16 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for i16 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for i16 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for i32 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for i32 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for i32 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for i64 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for i64 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for i64 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for i128 {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for i128 {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
@@ -219,84 +486,114 @@ impl Ord for i128 {
     }
 }
 
--- false precedes true. Floating types need a separate partial-order contract.
+impl TotalOrd for i128 {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
+    }
+}
+
+-- false precedes true. Floating types use TotalOrd / TotalFloat for total ordering.
 impl Eq for bool {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for bool {
-    fn cmp(self, other: Self) -> Order {
-        if self == other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* == other.* {
             .equal
-        } else if self {
+        } else if self.* {
             .greater
         } else {
             .less
         }
+    }
+}
+
+impl TotalOrd for bool {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 -- Character order follows Unicode scalar values, independent of locale.
 impl Eq for char {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for char {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for char {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 -- Symbol equality compares names, not backing storage addresses.
 impl Eq for Symbol {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Eq for usize {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for usize {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for usize {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
 impl Eq for isize {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }
 
 impl Ord for isize {
-    fn cmp(self, other: Self) -> Order {
-        if self < other {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.* < other.* {
             .less
-        } else if self == other {
+        } else if self.* == other.* {
             .equal
         } else {
             .greater
         }
+    }
+}
+
+impl TotalOrd for isize {
+    fn total_cmp(*self, other: *Self) -> Order {
+        self.cmp(other)
     }
 }
 
@@ -305,7 +602,7 @@ impl Ord for isize {
     zero bytes. It neither compares storage identities nor normalizes Unicode.
 -}
 impl Eq for str {
-    fn eq(self, other: Self) -> bool {
-        self == other
+    fn eq(*self, other: *Self) -> bool {
+        self.* == other.*
     }
 }

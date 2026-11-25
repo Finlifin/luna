@@ -5,7 +5,7 @@
 concat!(
     "mod attrs {\n", include!("attrs_source.rs"), "\n}\n",
     "mod primitives {\n", include_str!("../../../../library/builtin/primitives.fl"),
-    "\n} mod comparison {\n", include_str!("../../../../library/builtin/numeric/comparison.fl"), "\n} mod builtin {pub use primitives.*; pub use comparison.Order;\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
+    "\n} mod comparison {\n", include_str!("../../../../library/builtin/numeric/comparison.fl"), "\n} mod builtin {pub use primitives.*; pub use comparison.{Order, TotalFloat, TotalOrd};\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
     "mod types {mod bindings {\n", include_str!("../../../../library/meta/types/bindings.fl"),

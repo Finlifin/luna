@@ -1186,35 +1186,19 @@ impl Checker<'_, '_> {
         } else if self.native_equality_shape(&shape) {
             self.equality_expression(observed, value, &shape, span)?
         } else {
-            let protocol = self.protocols.equality.ok_or_else(|| {
-                error(
-                    span,
-                    "equality protocol for this type is not implemented without an Eq binding",
-                )
-            })?;
-            let callee = self
-                .selected_method(
-                    observed.ty.clone(),
-                    Some(n::InterfaceInstance {
-                        declaration: protocol,
-                        arguments: vec![],
-                    }),
-                    "eq",
-                    span,
-                )?
-                .ok_or_else(|| error(span, "Eq protocol has no selected comparison method"))?;
+            let protocol = self.selected_comparison_protocol(false, &observed.ty, span)?;
             let site = Expr {
                 hir_id: site_hir_id,
                 span,
                 kind: H::Unit,
             };
-            self.finish_call(
+            self.finish_comparison_protocol_call(
                 &site,
-                callee,
-                &[],
-                vec![observed, value],
+                protocol,
+                "eq",
+                observed,
+                value,
                 Some(&p(P::Bool)),
-                None,
             )?
         };
         // Equality matching is an observation, not inversion of a constructor

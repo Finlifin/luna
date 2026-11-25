@@ -16,6 +16,7 @@ pub(super) fn is_comparison(expr: &Expr<'_>) -> bool {
 
 pub(super) struct Frame<'h> {
     source: Expr<'h>,
+    op: BinOp,
     destination: Destination,
     progress: Option<peers::Progress<'h, 'h>>,
     attempt: Option<checking_attempts::Attempt>,
@@ -48,6 +49,7 @@ impl<'h> Frame<'h> {
         let progress = peers::Progress::new(checker, [left, right], None, fallback.as_ref(), None)?;
         Ok(Self {
             source: source.clone(),
+            op,
             destination,
             progress: Some(progress),
             attempt: None,
@@ -73,13 +75,36 @@ impl<'h> Frame<'h> {
             };
             progress.accept(value)?;
         }
+        let peer_ty = progress.peer_type(1).cloned();
         if let Some(request) = progress.next()? {
+            // For heterogeneous equality protocols (`Eq where .Rhs = ...`), avoid forcing
+            // RHS to equal LHS's type when multiple or distinct Rhs impls exist (e.g. String == str).
+            let overridden_rhs = if matches!(self.op, BinOp::Eq | BinOp::Ne)
+                && request.slot == 1
+                && let Some(left_ty) = peer_ty.as_ref()
+                && let Ok(left_shape) = checker.structural_type(left_ty, request.input.span)
+                && !checker.native_equality_shape(&left_shape)
+                && let Ok(protocol) =
+                    checker.selected_comparison_protocol(false, left_ty, request.input.span)
+                && checker
+                    .checked_traits
+                    .by_id(protocol)
+                    .is_some_and(|trait_decl| trait_decl.type_parameters.len() == 1)
+            {
+                Some(checker.protocol_argument_context(left_ty, protocol, request.input.span)?)
+            } else {
+                None
+            };
+            let expected = match &overridden_rhs {
+                Some(custom) => custom.as_ref(),
+                None => request.expected,
+            };
             // Capture the destination before entering the attempt. Allocation
             // failure cannot leave a half-entered numeric-default boundary.
             let destination = Destination::ordinary(
                 checker,
                 OrdinaryTail {
-                    expected: request.expected,
+                    expected,
                     partial: None,
                     input: None,
                 },

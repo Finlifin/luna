@@ -23,7 +23,7 @@ fn source() -> String {
         comptime fn compare()->bool {{
             true.as(ComptimeEq).eq(true) and true.as(ComptimeEq).ne(false)
         }}
-        fn compare_runtime()->bool {{true.as(Eq).eq(true) and true.as(Eq).ne(false)}}
+        fn compare_runtime()->bool {{let a = true; let b = false; a.as(Eq).eq(a.ref) and a.as(Eq).ne(b.ref)}}
         "#,
         support::with_attrs(include!("support/comparison_source.rs"))
     )

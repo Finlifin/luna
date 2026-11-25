@@ -248,6 +248,8 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--index-protocol"
                     | "--ord-protocol"
                     | "--eq-protocol"
+                    | "--comptime-ord-protocol"
+                    | "--comptime-eq-protocol"
                     | "--list-pattern-protocol"
                     | "--comptime-list-pattern-protocol"
                     | "--stable-list-pattern-protocol"

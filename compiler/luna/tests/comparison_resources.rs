@@ -12,15 +12,15 @@ fn source(body: &str) -> String {
             assumes not self.dropped.*.*;
             self.dropped.*.* = true;
         }}}}
-        impl comparison.Eq for Watch {{fn eq(self,other:Self)->bool {{
-            assumes not self.dropped.* and not other.dropped.* and not self.called.*;
-            self.called.* = true;
-            self.value == other.value
+        impl comparison.Eq for Watch {{fn eq(*self,other:*Self)->bool {{
+            assumes not self.dropped.*.* and not other.dropped.*.* and not self.called.*.*;
+            self.called.*.* = true;
+            self.value.* == other.value.*
         }}}}
-        impl comparison.Ord for Watch {{fn cmp(self,other:Self)->comparison.Order {{
-            assumes not self.dropped.* and not other.dropped.* and not self.called.*;
-            self.called.* = true;
-            if self.value == other.value {{.equal}} else if self.value {{.greater}} else {{.less}}
+        impl comparison.Ord for Watch {{fn cmp(*self,other:*Self)->comparison.Order {{
+            assumes not self.dropped.*.* and not other.dropped.*.* and not self.called.*.*;
+            self.called.*.* = true;
+            if self.value.* == other.value.* {{.equal}} else if self.value.* {{.greater}} else {{.less}}
         }}}}
         {body}",
         support::with_attrs(include!("support/comparison_source.rs"))
@@ -117,18 +117,42 @@ fn diverging_comparison_arguments_retire_only_evaluated_owners() {
 }
 
 #[test]
-fn comparison_does_not_make_affine_operands_copyable() {
-    for op in ["==", "!=", "<", "<=", ">", ">="] {
-        let body = format!(
+fn comparisons_borrow_locals_without_making_affine_operands_copyable() {
+    for (op, expected) in [
+        ("==", false),
+        ("!=", true),
+        ("<", false),
+        ("<=", false),
+        (">", true),
+        (">=", true),
+    ] {
+        let borrow_body = format!(
+            "fn run()->bool {{var left=false;var right=false;var called=false;
+            do {{
+                let a=Watch {{value:true,dropped:left.ref,called:called.ref}};
+                let b=Watch {{value:false,dropped:right.ref,called:called.ref}};
+                let first=a {op} b;
+                assumes called and not left and not right;
+                called=false;
+                let second=a {op} b;
+                assumes first == {expected} and second == {expected} and called and not left and not right;
+            }};
+            called and left and right
+        }} fn verify() {{let valid=run();assumes valid;}}"
+        );
+        verify(&compile(&source(&borrow_body)), op);
+
+        let move_body = format!(
             "fn run()->bool {{var left=false;var right=false;var called=false;
             let a=Watch {{value:true,dropped:left.ref,called:called.ref}};
             let b=Watch {{value:false,dropped:right.ref,called:called.ref}};
-            let first=a {op} b;
-            let second=a {op} b;
-            first or second
+            let _=a {op} b;
+            let moved=a;
+            let second=a;
+            moved.value and second.value
         }}"
         );
-        let package = compile(&source(&body));
+        let package = compile(&source(&move_body));
         let error = luna::execution::interpret_with_protocols(
             &package,
             "run",
@@ -145,14 +169,14 @@ fn comparison_does_not_make_affine_operands_copyable() {
 #[test]
 fn borrowed_comparison_preserves_owners_and_returned_resource() {
     let body = "
-        impl comparison.Eq for *Watch {fn eq(self,other:Self)->bool {
-            assumes not self.dropped.*.* and not other.dropped.*.*;
-            self.value.* == other.value.*
+        impl comparison.Eq for *Watch {fn eq(*self,other:*Self)->bool {
+            assumes not self.*.dropped.* and not other.*.dropped.*;
+            self.*.value == other.*.value
         }}
-        impl comparison.Ord for *Watch {fn cmp(self,other:Self)->comparison.Order {
-            assumes not self.dropped.*.* and not other.dropped.*.*;
-            if self.value.* == other.value.* {.equal}
-            else if self.value.* {.greater} else {.less}
+        impl comparison.Ord for *Watch {fn cmp(*self,other:*Self)->comparison.Order {
+            assumes not self.*.dropped.* and not other.*.dropped.*;
+            if self.*.value == other.*.value {.equal}
+            else if self.*.value {.greater} else {.less}
         }}
         fn precedes(a:T,b:T)->bool where T :- comparison.Ord {a < b}
         fn choose(a:T,b:T)->T where T, requires *T :- comparison.Ord {

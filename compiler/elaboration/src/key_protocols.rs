@@ -11,6 +11,7 @@ use nir::program::{
 };
 use nir::{DeclarationId, Parameter, Primitive, Sort, Term};
 use std::fmt;
+
 mod work;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub enum Operation {
     Eq,
     Hash,
 }
+
 impl Operation {
     fn name(self) -> &'static str {
         match self {
@@ -25,6 +27,7 @@ impl Operation {
             Self::Hash => "hash",
         }
     }
+
     fn arity(self) -> usize {
         match self {
             Self::Eq => 2,
@@ -32,6 +35,7 @@ impl Operation {
         }
     }
 }
+
 impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
@@ -52,6 +56,7 @@ pub struct Selected {
     /// Retain the complete resolution, including its captured assumption scope.
     pub selection: capabilities::Resolution,
 }
+
 impl fmt::Display for Selected {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -140,7 +145,14 @@ pub fn select_metered(
     {
         return Err("comptime key protocol package and world disagree".into());
     }
-    if !interface.type_parameters.is_empty() {
+    let has_rhs_type_param = operation == Operation::Eq
+        && interface.type_parameters.len() == 1
+        && (interface.parameter_types.is_empty()
+            || matches!(
+                interface.parameter_types.as_slice(),
+                [Term::Primitive(Primitive::Type)]
+            ));
+    if !interface.type_parameters.is_empty() && !has_rhs_type_param {
         return Err("comptime key protocol has explicit type parameters".into());
     }
     // The selected trait identity supplies the phase-specific protocol. Method
@@ -180,13 +192,32 @@ pub fn select_metered(
         declaration: interface.self_parameter,
         sort: Sort::Type,
     };
-    let expected = vec![
-        Parameter {
+    let expected = match operation {
+        Operation::Eq => {
+            let rhs_type = if let [rhs_param] = interface.type_parameters.as_slice() {
+                Term::Rigid {
+                    declaration: *rhs_param,
+                    sort: Sort::Type,
+                }
+            } else {
+                self_type.clone()
+            };
+            vec![
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: self_type,
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: rhs_type,
+                },
+            ]
+        }
+        Operation::Hash => vec![Parameter {
             sort: Sort::Runtime,
-            ty: self_type
-        };
-        operation.arity()
-    ];
+            ty: self_type,
+        }],
+    };
     let valid_result = match operation {
         Operation::Eq => result.as_ref() == &Term::Primitive(Primitive::Bool),
         Operation::Hash => {
@@ -201,12 +232,30 @@ pub fn select_metered(
     {
         return Err("invalid comptime key protocol receiver, parameters or result".into());
     }
-    let binders = [nir::DeclarationParameter {
-        declaration: interface.self_parameter,
-        sort: Sort::Type,
-    }];
+    let (binders, inputs) = if let [rhs_param] = interface.type_parameters.as_slice() {
+        (
+            vec![
+                nir::DeclarationParameter {
+                    declaration: interface.self_parameter,
+                    sort: Sort::Type,
+                },
+                nir::DeclarationParameter {
+                    declaration: *rhs_param,
+                    sort: Sort::Type,
+                },
+            ],
+            vec![subject.clone(), subject.clone()],
+        )
+    } else {
+        (
+            vec![nir::DeclarationParameter {
+                declaration: interface.self_parameter,
+                sort: Sort::Type,
+            }],
+            vec![subject.clone()],
+        )
+    };
     work::charge_term(subject, budget)?;
-    let inputs = [subject.clone()];
     work::spend(
         budget,
         member
@@ -265,7 +314,15 @@ pub fn select_metered(
             return Err("comptime key protocol type requirement is not established".into());
         }
     }
-    let selection = world.resolve_instance_metered(&protocol.into(), subject, budget)?;
+    let interface_instance = nir::program::InterfaceInstance {
+        declaration: protocol,
+        arguments: if interface.type_parameters.is_empty() {
+            vec![]
+        } else {
+            vec![subject.clone()]
+        },
+    };
+    let selection = world.resolve_instance_metered(&interface_instance, subject, budget)?;
     let Selection::Selected(implementation) = selection.types.selection else {
         return Err(format!(
             "comptime key implementation is not concrete: {}",
@@ -345,7 +402,10 @@ pub fn select_metered(
         return Err("comptime key method body is duplicated".into());
     }
     let arguments = if member.default == Some(body) {
-        vec![work::term(subject, &[], &[], budget)?]
+        inputs
+            .iter()
+            .map(|ty| work::term(ty, &[], &[], budget))
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         work::spend(budget, evidence.type_arguments.len())?;
         evidence

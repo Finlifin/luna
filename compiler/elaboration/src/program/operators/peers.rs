@@ -136,6 +136,13 @@ impl<'b, 'h> Progress<'b, 'h> {
         Ok(())
     }
 
+    pub(in crate::program) fn peer_type(&self, slot: usize) -> Option<&Term> {
+        self.values[1 - slot]
+            .as_ref()
+            .filter(|value| !is_never(&value.ty))
+            .map(|value| &value.ty)
+    }
+
     pub(in crate::program) fn finish(self) -> Result<(n::Expr, n::Expr), Error> {
         match (self.phase, self.waiting, self.values) {
             (Phase::Complete, None, [Some(left), Some(right)]) => Ok((left, right)),

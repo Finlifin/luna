@@ -4,6 +4,19 @@ use super::*;
 
 pub(in crate::program) mod peers;
 
+pub(super) fn is_local_place_expr(expr: &n::Expr) -> bool {
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            K::Local(_) => return true,
+            K::Field { value, .. } | K::AnonymousField { value, .. } => {
+                current = value;
+            }
+            _ => return false,
+        }
+    }
+}
+
 pub(super) fn builtin_signed_integer_suffix(suffix: &str) -> Option<P> {
     match suffix {
         "i8" => Some(P::I8),
@@ -559,6 +572,216 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn selected_comparison_protocol(
+        &self,
+        ordering: bool,
+        subject: &Term,
+        span: Span,
+    ) -> Result<DeclarationId, Error> {
+        use crate::ptc::{Budget, Formula, Outcome};
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        let (ct_opt, rt_opt, missing_msg) = if ordering {
+            (
+                self.protocols.comptime_ordering,
+                self.protocols.ordering,
+                "ordering protocol for this type is not implemented without an Ord binding",
+            )
+        } else {
+            (
+                self.protocols.comptime_equality,
+                self.protocols.equality,
+                "equality protocol for this type is not implemented without an Eq binding",
+            )
+        };
+        if comptime && let Some(ct_proto) = ct_opt {
+            let scope = self.call_inference_domains();
+            let frames = if scope.is_empty() {
+                vec![]
+            } else {
+                vec![scope.iter().map(|p| p.0).collect()]
+            };
+            let has_assumption = crate::capabilities::capability_sources_with_layouts(
+                &self.checked_traits,
+                &self.capability_assumptions(),
+                Budget::default(),
+                &frames,
+                self.implementation_index.parameter_domains(),
+                Some(self.implementation_index.nominal_layouts()),
+            )
+            .map_err(|reason| error(span, reason))?
+            .into_iter()
+            .any(|capability| {
+                capability.interface == ct_proto
+                    && (capability.subject == *subject
+                        || matches!(
+                            self.context.prove(
+                                Formula::equal(capability.subject, subject.clone()),
+                                Budget::default(),
+                            ),
+                            Outcome::Entailed(_)
+                        ))
+            });
+            let has_impl = if has_assumption {
+                true
+            } else if let Some(interface) = self.checked_traits.by_id(ct_proto) {
+                let wildcards = interface
+                    .type_parameters
+                    .iter()
+                    .map(|declaration| Term::Rigid {
+                        declaration: *declaration,
+                        sort: Sort::Type,
+                    })
+                    .collect::<Vec<_>>();
+                !self
+                    .implementation_index
+                    .candidates(Some(ct_proto), &wildcards, subject, Budget::default())
+                    .map_err(|reason| {
+                        error(
+                            span,
+                            format!("comparison candidate query failed: {reason:?}"),
+                        )
+                    })?
+                    .declarations()
+                    .is_empty()
+            } else {
+                false
+            };
+            if has_impl || rt_opt.is_none() {
+                return Ok(ct_proto);
+            }
+        }
+        rt_opt.ok_or_else(|| error(span, missing_msg))
+    }
+
+    pub(super) fn borrow_operand_for_pointer_arg(
+        &mut self,
+        value: n::Expr,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if is_never(&value.ty) {
+            return Ok(value);
+        }
+        if let K::ReadPointer(pointer) = value.kind {
+            return Ok(*pointer);
+        }
+        if is_local_place_expr(&value) {
+            return Ok(n::Expr {
+                source: source(span),
+                ty: Term::Pointer(Box::new(value.ty.clone())),
+                kind: K::AddressOf(Box::new(value)),
+            });
+        }
+        let ty = value.ty.clone();
+        let val_source = value.source;
+        let binding = self.spread_binding(span)?;
+        statements.push(n::Expr {
+            ty: p(P::Void),
+            source: val_source,
+            kind: K::Let {
+                binding,
+                value: Box::new(value),
+            },
+        });
+        Ok(n::Expr {
+            source: source(span),
+            ty: Term::Pointer(Box::new(ty.clone())),
+            kind: K::AddressOf(Box::new(n::Expr {
+                source: val_source,
+                ty,
+                kind: K::Local(binding),
+            })),
+        })
+    }
+
+    pub(super) fn finish_comparison_protocol_call(
+        &mut self,
+        site: &Expr<'_>,
+        protocol: DeclarationId,
+        method: &str,
+        left: n::Expr,
+        right: n::Expr,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let param_count = self
+            .checked_traits
+            .by_id(protocol)
+            .map_or(0, |t| t.type_parameters.len());
+        let interface_arguments = if param_count == 1 {
+            let rhs_ty = if is_never(&right.ty) {
+                self.protocol_argument_context(&left.ty, protocol, site.span)?
+                    .unwrap_or_else(|| left.ty.clone())
+            } else {
+                right.ty.clone()
+            };
+            vec![rhs_ty]
+        } else {
+            vec![]
+        };
+        let callee = self
+            .selected_method(
+                left.ty.clone(),
+                Some(n::InterfaceInstance {
+                    declaration: protocol,
+                    arguments: interface_arguments,
+                }),
+                method,
+                site.span,
+            )?
+            .ok_or_else(|| {
+                error(
+                    site.span,
+                    format!("comparison protocol `{protocol}` has no selected `{method}` method"),
+                )
+            })?;
+        let expects_pointers = matches!(
+            callee.ty.callable_signature(),
+            Term::Function { parameters, .. }
+                if parameters.len() == 2
+                    && matches!(parameters[0].ty, Term::Pointer(_))
+                    && matches!(parameters[1].ty, Term::Pointer(_))
+        );
+        let result = if expects_pointers {
+            let mut statements = Vec::new();
+            let left_arg = self.borrow_operand_for_pointer_arg(left, &mut statements, site.span)?;
+            let right_arg =
+                self.borrow_operand_for_pointer_arg(right, &mut statements, site.span)?;
+            let call = self.finish_call(
+                site,
+                callee,
+                &[],
+                vec![left_arg, right_arg],
+                Some(&p(P::Bool)),
+                None,
+            )?;
+            if statements.is_empty() {
+                call
+            } else {
+                n::Expr {
+                    ty: call.ty.clone(),
+                    source: source(site.span),
+                    kind: K::Block {
+                        statements,
+                        result: Some(Box::new(call)),
+                    },
+                }
+            }
+        } else {
+            self.finish_call(
+                site,
+                callee,
+                &[],
+                vec![left, right],
+                Some(&p(P::Bool)),
+                None,
+            )?
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&result.ty, expected, site.span)?;
+        }
+        Ok(result)
+    }
+
     #[inline(never)]
     pub(super) fn finish_comparison_expression(
         &mut self,
@@ -581,28 +804,10 @@ impl Checker<'_, '_> {
                 }
                 let ty = self.structural_type(&a.ty, expr.span)?;
                 if !self.native_equality_shape(&ty) {
-                    let protocol = self.protocols.equality.ok_or_else(|| error(expr.span,
-                        "equality protocol for this type is not implemented without an Eq binding"))?;
+                    let protocol = self.selected_comparison_protocol(false, &a.ty, expr.span)?;
                     let method = if *op == BinOp::Eq { "eq" } else { "ne" };
-                    let callee = self
-                        .selected_method(
-                            a.ty.clone(),
-                            Some(n::InterfaceInstance {
-                                declaration: protocol,
-                                arguments: vec![],
-                            }),
-                            method,
-                            expr.span,
-                        )?
-                        .ok_or_else(|| {
-                            error(expr.span, "Eq protocol has no selected comparison method")
-                        })?;
-                    let result =
-                        self.finish_call(expr, callee, &[], vec![a, b], Some(&p(P::Bool)), None)?;
-                    if let Some(expected) = expected {
-                        self.require_expression(&result.ty, expected, expr.span)?;
-                    }
-                    return Ok(result);
+                    return self
+                        .finish_comparison_protocol_call(expr, protocol, method, a, b, expected);
                 }
                 let mut result = self.equality_expression(a, b, &ty, expr.span)?;
                 // With a nonreturning RHS, equality still carries the left
@@ -653,40 +858,17 @@ impl Checker<'_, '_> {
                     if !matches!(shape, Term::Primitive(primitive) if matches!(primitive, P::Char | P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Usize | P::Isize | P::Never) || self.integer_layout(primitive).is_some())
                         && !self.proved_ordered_scalar_family(&shape)
                     {
-                        let protocol = self.protocols.ordering.ok_or_else(|| {
-                            error(expr.span, "ordering protocol for this type is not implemented without an Ord binding")
-                        })?;
+                        let protocol =
+                            self.selected_comparison_protocol(true, &left.ty, expr.span)?;
                         let method = match op {
                             BinOp::Lt => "lt",
                             BinOp::Le => "le",
                             BinOp::Gt => "gt",
                             _ => "ge",
                         };
-                        let callee = self
-                            .selected_method(
-                                left.ty.clone(),
-                                Some(n::InterfaceInstance {
-                                    declaration: protocol,
-                                    arguments: vec![],
-                                }),
-                                method,
-                                expr.span,
-                            )?
-                            .ok_or_else(|| {
-                                error(expr.span, "Ord protocol has no selected comparison method")
-                            })?;
-                        let result = self.finish_call(
-                            expr,
-                            callee,
-                            &[],
-                            vec![left, right],
-                            Some(&p(P::Bool)),
-                            None,
-                        )?;
-                        if let Some(expected) = expected {
-                            self.require_expression(&result.ty, expected, expr.span)?;
-                        }
-                        return Ok(result);
+                        return self.finish_comparison_protocol_call(
+                            expr, protocol, method, left, right, expected,
+                        );
                     }
                     // IEEE unordered operands prohibit deriving > from not <=.
                     // Keep source operand order for every comparison direction.
@@ -846,23 +1028,20 @@ impl Checker<'_, '_> {
             let [rhs] = implementation.interface_arguments.as_slice() else {
                 return Ok(None);
             };
+            let binders = implementation
+                .parameter_binders()
+                .map_err(|e| error(span, e.to_string()))?;
             let signature = Term::Function {
                 parameters: vec![Parameter {
                     sort: Sort::Runtime,
-                    ty: implementation
-                        .subject
-                        .abstract_parameters(&[])
-                        .map_err(|e| error(span, e.to_string()))?,
+                    ty: implementation.subject.clone(),
                 }],
-                result: Box::new(
-                    rhs.abstract_parameters(&[])
-                        .map_err(|e| error(span, e.to_string()))?,
-                ),
+                result: Box::new(rhs.clone()),
             }
-            .abstract_types(&implementation.type_parameters)
+            .abstract_parameters(&binders)
             .map_err(|e| error(span, e.to_string()))?;
             let scheme = crate::calls::Scheme {
-                parameter_sorts: vec![],
+                parameter_sorts: binders.iter().map(|p| p.sort).collect(),
                 type_parameters: implementation.type_parameters.len(),
                 signature,
             };

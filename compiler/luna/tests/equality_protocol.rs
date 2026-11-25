@@ -17,7 +17,7 @@ fn compile(source: &str, equality: Option<&str>) -> Result<nir::program::Package
 fn actual_eq_defaults_support_nominal_and_generic_operators() {
     let source=format!("mod comparison {{\n{}\n}} mod resources {{\n{}\n}}
         struct Key {{value:.u32'builtin}}
-        impl comparison.Eq for Key {{fn eq(self,other:Self)->bool {{self.value==other.value}}}}
+        impl comparison.Eq for Key {{fn eq(*self,other:*Self)->bool {{self.value.* == other.value.*}}}}
         fn same(a:T,b:T)->bool where T :- comparison.Eq {{a==b}}
         fn distinct(a:T,b:T)->bool where T :- comparison.Eq {{a!=b}}
         fn run()->bool {{same(Key {{value:7}},Key {{value:7}}) and distinct(Key {{value:7}},Key {{value:9}})
@@ -57,11 +57,11 @@ fn actual_eq_defaults_support_nominal_and_generic_operators() {
 
 #[test]
 fn equality_preserves_operand_order_and_calls_overridden_ne() {
-    let source="trait Compare {fn eq(self,other:Self)->bool;fn ne(self,other:Self)->bool;}
+    let source="trait Compare {fn eq(*self,other:*Self)->bool;fn ne(*self,other:*Self)->bool;}
         struct Key {value:bool,called:*bool}
         impl Compare for Key {
-            fn eq(self,other:Self)->bool {self.value==other.value}
-            fn ne(self,other:Self)->bool {self.called.* = true;self.value!=other.value}
+            fn eq(*self,other:*Self)->bool {self.value.* == other.value.*}
+            fn ne(*self,other:*Self)->bool {self.called.*.* = true;self.value.* != other.value.*}
         }
         fn run()->bool {
             var phase:.u8'builtin=0;var called=false;
@@ -82,7 +82,7 @@ fn equality_preserves_operand_order_and_calls_overridden_ne() {
 
 #[test]
 fn equality_binding_does_not_override_type_identity_or_scalar_equality() {
-    let source = "trait Compare {fn eq(self,other:Self)->bool;fn ne(self,other:Self)->bool;}
+    let source = "trait Compare {fn eq(*self,other:*Self)->bool;fn ne(*self,other:*Self)->bool;}
         pure comptime fn Identity<T>->.Type'builtin {T}
         comptime fn identity_is_opaque()->bool {Identity<.u32'builtin> != .u32'builtin}
         comptime fn reflexive()->bool {Identity<.u32'builtin> == Identity<.u32'builtin>}
@@ -103,8 +103,8 @@ fn equality_binding_does_not_override_type_identity_or_scalar_equality() {
 #[test]
 fn equality_rejects_missing_implementation_and_wrong_result() {
     for source in [
-        "trait Compare {fn eq(self,other:Self)->bool;} struct Key {} fn run()->bool {Key {}==Key {}}",
-        "trait Compare {fn eq(self,other:Self)->.u8'builtin;} struct Key {} impl Compare for Key {fn eq(self,other:Self)->.u8'builtin {1}} fn run()->bool {Key {}==Key {}}",
+        "trait Compare {fn eq(*self,other:*Self)->bool;} struct Key {} fn run()->bool {Key {}==Key {}}",
+        "trait Compare {fn eq(*self,other:*Self)->.u8'builtin;} struct Key {} impl Compare for Key {fn eq(*self,other:*Self)->.u8'builtin {1}} fn run()->bool {Key {}==Key {}}",
     ] {
         assert!(compile(source, Some("input.Compare")).is_err());
     }

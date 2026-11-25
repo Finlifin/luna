@@ -57,7 +57,7 @@ pub use newtypes.*;
 pub use object.*;
 pub use ops_impl.ComptimeImplies;
 pub use optional.ComptimeOptionalOps;
-pub use ordering.ComptimeOrd;
+pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
 pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
 pub use set.Set;
 pub use structs.*;
@@ -128,7 +128,7 @@ pub mod prelude {
     pub use hashing.ComptimeHash;
     pub use ops_impl.ComptimeImplies;
     pub use optional.ComptimeOptionalOps;
-    pub use ordering.ComptimeOrd;
+    pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
     pub use text.ComptimeTextBytes;
 }

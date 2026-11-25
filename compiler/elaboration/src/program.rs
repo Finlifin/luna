@@ -417,6 +417,8 @@ pub struct Protocols {
     pub extended_variadic_collector: Option<DeclarationId>,
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
+    pub comptime_ordering: Option<DeclarationId>,
+    pub comptime_equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
     pub comptime_list_pattern: Option<DeclarationId>,
     pub stable_list_pattern: Option<DeclarationId>,

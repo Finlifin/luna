@@ -26,15 +26,15 @@ impl Clone for AllocErr {
 impl Copy for AllocErr {}
 
 impl Eq for AllocErr {
-    fn eq(self, other: Self) -> bool {
-        self match {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
             .OutOfMemory =>
-                other match {
+                other.* match {
                     .OutOfMemory => true,
                     .InvalidLayout => false,
                 },
             .InvalidLayout =>
-                other match {
+                other.* match {
                     .OutOfMemory => false,
                     .InvalidLayout => true,
                 },
@@ -68,15 +68,15 @@ impl Clone for ReallocErr {
 impl Copy for ReallocErr {}
 
 impl Eq for ReallocErr {
-    fn eq(self, other: Self) -> bool {
-        self match {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
             .OutOfMemory =>
-                other match {
+                other.* match {
                     .OutOfMemory => true,
                     .InvalidLayout => false,
                 },
             .InvalidLayout =>
-                other match {
+                other.* match {
                     .OutOfMemory => false,
                     .InvalidLayout => true,
                 },

@@ -278,10 +278,10 @@ fn vec_operations_growth_mutation_and_clone_work_natively() {
             var clone_eq = v.ref.try_clone()!;
             v.ref.truncate(4);
             clone_eq.ref.truncate(4);
-            let eq_same = v.ref.try_clone()!.as(Eq).eq(clone_eq);
+            let eq_same = v.ref.as(Eq).eq(clone_eq.ref);
             var diff = v.ref.try_clone()!;
             diff.ref.set(0, 888);
-            let ne_diff = not v.ref.try_clone()!.as(Eq).eq(diff);
+            let ne_diff = not v.ref.as(Eq).eq(diff.ref);
 
             var sum: u32 = 0;
             let sum_ptr = sum.ref;
@@ -756,10 +756,10 @@ fn string_utf8_validation_mutation_search_and_protocols_work_natively() {
             let s_clone = s.ref.try_clone()!;
             let s_less = String.from_str("Aé中")!;
             let s_greater = String.from_str("B")!;
-            let eq_ok = s.ref.try_clone()!.as(Eq).eq(s_clone);
-            let ord_lt = s.ref.try_clone()!.as(Ord).cmp(s_greater) match { .less => true, _ => false };
-            let ord_gt = s.ref.try_clone()!.as(Ord).cmp(s_less) match { .greater => true, _ => false };
-            let ord_eq = s.ref.try_clone()!.as(Ord).cmp(s.ref.try_clone()!) match { .equal => true, _ => false };
+            let eq_ok = s.ref.as(Eq).eq(s_clone.ref);
+            let ord_lt = s.ref.as(Ord).cmp(s_greater.ref) match { .less => true, _ => false };
+            let ord_gt = s.ref.as(Ord).cmp(s_less.ref) match { .greater => true, _ => false };
+            let ord_eq = s.ref.as(Ord).cmp(s.ref) match { .equal => true, _ => false };
             let abc = String.from_str("abc")!;
             let hash_ok = s.as(Hash).hash() == "Aé中😀".as(Hash).hash()
                 and abc.as(Hash).hash() == "abc".as(Hash).hash();

@@ -300,23 +300,23 @@ impl Clone for Duration {
 impl Copy for Duration {}
 
 impl Eq for Duration {
-    fn eq(self, other: Self) -> bool {
-        self.raw_secs == other.raw_secs and self.raw_nanos == other.raw_nanos
+    fn eq(*self, other: *Self) -> bool {
+        self.raw_secs.* == other.raw_secs.* and self.raw_nanos.* == other.raw_nanos.*
     }
 }
 
 impl Ord for Duration {
-    fn cmp(self, other: Self) -> Order {
-        if self.raw_secs < other.raw_secs {
+    fn cmp(*self, other: *Self) -> Order {
+        if self.raw_secs.* < other.raw_secs.* {
             return .less;
         }
-        if self.raw_secs > other.raw_secs {
+        if self.raw_secs.* > other.raw_secs.* {
             return .greater;
         }
-        if self.raw_nanos < other.raw_nanos {
+        if self.raw_nanos.* < other.raw_nanos.* {
             return .less;
         }
-        if self.raw_nanos > other.raw_nanos {
+        if self.raw_nanos.* > other.raw_nanos.* {
             return .greater;
         }
         .equal

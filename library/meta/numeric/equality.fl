@@ -23,9 +23,12 @@ use builtin.{
     prefers this interface in comptime contexts; cache consumers bind it
     explicitly and still validate equality after hash collisions.
 -}
-pub pure comptime trait ComptimeEq {
-    comptime fn eq(self, other: Self) -> bool;
-    comptime fn ne(self, other: Self) -> bool = not self.eq(other);
+pub pure comptime trait ComptimeEq
+where
+    .Rhs: Type = Self,
+{
+    comptime fn eq(self, other: Rhs) -> bool;
+    comptime fn ne(self, other: Rhs) -> bool = not self.as(ComptimeEq<.Rhs = Rhs>).eq(other);
 }
 
 comptime impl ComptimeEq for u8 {

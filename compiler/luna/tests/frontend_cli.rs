@@ -1036,6 +1036,8 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
+        comptime_ord_protocol: None,
+        comptime_eq_protocol: None,
         list_pattern_protocol: None,
         comptime_list_pattern_protocol: None,
         stable_list_pattern_protocol: None,
@@ -4405,25 +4407,28 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
     }
     sandbox.write_exact("input.fl","
         struct Key {value:u8}
-        impl Eq for Key {fn eq(self,other:Self)->bool {self.value == other.value}}
-        impl Ord for Key {fn cmp(self,other:Self)->Order {
-            if self.value < other.value {.less} else if self.value == other.value {.equal} else {.greater}
+        impl Eq for Key {fn eq(*self,other:*Self)->bool {self.value.* == other.value.*}}
+        impl Ord for Key {fn cmp(*self,other:*Self)->Order {
+            if self.value.* < other.value.* {.less} else if self.value.* == other.value.* {.equal} else {.greater}
         }}
         impl Hash for Key {fn hash(self)->u64 {7}}
         fn run()->bool {
-            Key {value:1}.as(Ord).lt(Key {value:2}) and
-            not Key {value:2}.as(Ord).lt(Key {value:2}) and
-            not Key {value:3}.as(Ord).lt(Key {value:2}) and
-            Key {value:1}.as(Ord).le(Key {value:2}) and
-            Key {value:2}.as(Ord).le(Key {value:2}) and
-            not Key {value:3}.as(Ord).le(Key {value:2}) and
-            not Key {value:1}.as(Ord).gt(Key {value:2}) and
-            not Key {value:2}.as(Ord).gt(Key {value:2}) and
-            Key {value:3}.as(Ord).gt(Key {value:2}) and
-            not Key {value:1}.as(Ord).ge(Key {value:2}) and
-            Key {value:2}.as(Ord).ge(Key {value:2}) and
-            Key {value:3}.as(Ord).ge(Key {value:2}) and
-            Key {value:1}.as(Hash).hash() == 7}");
+            let k1 = Key {value:1};
+            let k2 = Key {value:2};
+            let k3 = Key {value:3};
+            k1.as(Ord).lt(k2.ref) and
+            not k2.as(Ord).lt(k2.ref) and
+            not k3.as(Ord).lt(k2.ref) and
+            k1.as(Ord).le(k2.ref) and
+            k2.as(Ord).le(k2.ref) and
+            not k3.as(Ord).le(k2.ref) and
+            not k1.as(Ord).gt(k2.ref) and
+            not k2.as(Ord).gt(k2.ref) and
+            k3.as(Ord).gt(k2.ref) and
+            not k1.as(Ord).ge(k2.ref) and
+            k2.as(Ord).ge(k2.ref) and
+            k3.as(Ord).ge(k2.ref) and
+            k1.as(Hash).hash() == 7}");
     let output = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
@@ -4487,9 +4492,9 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         "(bool true)"
     );
     sandbox.write_exact("input.fl", "struct Flag {value:bool}
-        impl builtin.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
-        impl builtin.Ord for Flag {fn cmp(self,other:Self)->builtin.Order {
-            if not self.value and other.value {.less} else if self.value==other.value {.equal} else {.greater}
+        impl builtin.Eq for Flag {fn eq(*self,other:*Self)->bool {self.value.* == other.value.*}}
+        impl builtin.Ord for Flag {fn cmp(*self,other:*Self)->builtin.Order {
+            if not self.value.* and other.value.* {.less} else if self.value.* == other.value.* {.equal} else {.greater}
         }}
         fn run()->bool {Flag {value:false} < Flag {value:true} and Flag {value:true}==Flag {value:true} and Flag {value:false}!=Flag {value:true}}");
     assert_eq!(
@@ -9452,13 +9457,15 @@ fn sysroot_host_intrinsic_defaults_build_real_math_and_allow_explicit_override()
         "input.fl",
         "use builtin.math.Eq as Same;
         struct Flag {value:bool}
-        impl math.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
-        impl math.Ord for Flag {fn cmp(self,other:Self)->math.Order {
-            if self.value==other.value {.equal} else if self.value {.greater} else {.less}
+        impl math.Eq for Flag {fn eq(*self,other:*Self)->bool {self.value.* == other.value.*}}
+        impl math.Ord for Flag {fn cmp(*self,other:*Self)->math.Order {
+            if self.value.* == other.value.* {.equal} else if self.value.* {.greater} else {.less}
         }}
         fn run()->bool {
-            Flag {value:false}.as(Eq).eq(Flag {value:false})
-            and Flag {value:true}.as(Same).eq(Flag {value:true})
+            let f0 = Flag {value:false};
+            let f1 = Flag {value:true};
+            f0.as(Eq).eq(f0.ref)
+            and f1.as(Same).eq(f1.ref)
             and Flag {value:false} < Flag {value:true}
         }",
     );

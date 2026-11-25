@@ -35,6 +35,8 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         index_protocol: None,
         ord_protocol: None,
         eq_protocol: None,
+        comptime_ord_protocol: None,
+        comptime_eq_protocol: None,
         list_pattern_protocol: None,
         comptime_list_pattern_protocol: None,
         stable_list_pattern_protocol: None,

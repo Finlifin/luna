@@ -13,7 +13,9 @@ fn source(body: &str) -> String {
             "../../../library/builtin/numeric/comparison.fl"
         )),
         include!("support/resources_source.rs"),
-        include_str!("../../../library/builtin/protocols/conversion.fl"),
+        support::with_attrs(include_str!(
+            "../../../library/builtin/protocols/conversion.fl"
+        )),
         support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
         include_str!("../../../library/meta/numeric/equality.fl"),
         include_str!("../../../library/meta/text_impl/bindings.fl"),
@@ -158,7 +160,22 @@ fn character_bit_reads_do_not_authorize_reconstruction_or_writeback() {
     let package = support::compile(&source(
         "fn read(value:char)->u64 {value'bitvec.as(u64)} fn verify() {let value=read('🦀');assumes value == 129408;}",
     ));
-    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    let protocol = |name: &str| {
+        package
+            .traits
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let ir = luna::host::llvm_ir_with_protocols(
+        &package,
+        "verify",
+        1_000_000,
+        protocol("Copy"),
+        protocol("Drop"),
+    )
+    .unwrap();
     luna::host::Toolchain::default()
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
@@ -326,7 +343,22 @@ fn target_sized_hashes_execute_on_the_native_target() {
         Some(nir::target::TargetData::new(target.pointer_bits).unwrap()),
     )
     .unwrap();
-    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    let protocol = |name: &str| {
+        package
+            .traits
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let ir = luna::host::llvm_ir_with_protocols(
+        &package,
+        "verify",
+        1_000_000,
+        protocol("Copy"),
+        protocol("Drop"),
+    )
+    .unwrap();
     for optimization in [
         luna::host::OptimizationLevel::O0,
         luna::host::OptimizationLevel::O3,
@@ -359,7 +391,22 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
             luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
             Value::UnsignedInteger(expected.into())
         );
-        let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+        let protocol = |name: &str| {
+            package
+                .traits
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .declaration
+        };
+        let ir = luna::host::llvm_ir_with_protocols(
+            &package,
+            "verify",
+            1_000_000,
+            protocol("Copy"),
+            protocol("Drop"),
+        )
+        .unwrap();
         for optimization in [
             luna::host::OptimizationLevel::O0,
             luna::host::OptimizationLevel::O3,
@@ -373,24 +420,47 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
         }
     }
     let body = r#"fn run()->bool {
-        "é".as(Eq).eq("é") and "é".as(Eq).ne("é")
-        and "a\0b".as(Eq).ne("a\0c") and "".as(Eq).ne("a")
+        let pre = "é";
+        let decomp = "é";
+        let a0b = "a\0b";
+        let a0c = "a\0c";
+        let empty = "";
+        let a = "a";
+        pre.as(Eq).eq(pre.ref) and pre.as(Eq).ne(decomp.ref)
+        and a0b.as(Eq).ne(a0c.ref) and empty.as(Eq).ne(a.ref)
     }"#;
-    let staged = body
-        .replace("fn run", "comptime fn staged")
-        .replace(".as(Eq)", ".as(ComptimeEq)");
+    let staged = r#"comptime fn staged()->bool {
+        "é".as(ComptimeEq).eq("é") and "é".as(ComptimeEq).ne("é")
+        and "a\0b".as(ComptimeEq).ne("a\0c") and "".as(ComptimeEq).ne("a")
+    }"#;
     let package = support::compile(&source(&format!(
         "{body}{staged} fn verify() {{let valid=run();assumes valid;}}"
     )));
     assert_eq!(
-        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 1_000_000)
+            .unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
         luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
         Value::Bool(true)
     );
-    let ir = luna::host::llvm_ir(&package, "verify", 1_000_000).unwrap();
+    let protocol = |name: &str| {
+        package
+            .traits
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let ir = luna::host::llvm_ir_with_protocols(
+        &package,
+        "verify",
+        1_000_000,
+        protocol("Copy"),
+        protocol("Drop"),
+    )
+    .unwrap();
     luna::host::Toolchain::default()
         .execute_test(&ir, std::time::Duration::from_secs(5))
         .unwrap();
@@ -555,11 +625,12 @@ fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
 #[test]
 fn same_named_methods_select_the_execution_phase_without_source_prefixes() {
     let package = support::compile(&source(
-        "fn run()->bool {let value:u64=9;value.hash() == 9 and value.eq(value) and value.ne(8)}
+        "fn run()->bool {let value:u64=9;let eight:u64=8;value.hash() == 9 and value.eq(value.ref) and value.ne(eight.ref)}
          comptime fn staged()->bool {let value:u64=9;value.hash() == 9 and value.eq(value) and value.ne(8)}",
     ));
     assert_eq!(
-        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 1_000_000)
+            .unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -716,14 +787,25 @@ fn integer_key_protocol_recovers_from_budget_exhaustion_without_target_data() {
 fn runtime_qualified_equality_requires_payload_evidence() {
     for domain in ["?Key", "!Key bool", "!bool Key"] {
         let input = source(&format!(
-            "mod qualified_equality {{ {} }}
+            "mod native_resources {{ use primitives.{{f16, bf16}}; {} }}
+             mod qualified_equality {{ {} }}
              struct Key {{value:bool}}
-             fn invalid(left:{domain},right:{domain})->bool {{left.as(Eq).eq(right)}}",
+             fn invalid(left:{domain},right:{domain})->bool {{left.as(Eq).eq(right.ref)}}",
+            include_str!("../../../library/builtin/protocols/native_resources.fl")
+                .replace("use primitives.{f16, bf16}\n", ""),
             include_str!("../../../library/builtin/types/equality.fl")
         ));
-        let failure = support::compile_with_protocols(&input, &Default::default())
-            .err()
-            .expect("missing runtime payload Eq must reject the call");
+        let failure = support::compile_with_source_bindings(
+            &input,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input.resources.Copy"),
+                drop: Some("input.resources.Drop"),
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("missing runtime payload Eq must reject the call");
         assert!(
             failure.contains("trait") || failure.contains("method"),
             "{failure}"

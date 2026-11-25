@@ -647,12 +647,11 @@ where
                 if stored_hash == target_hash {
                     let k_slot = key_addr<K>(addr, tl, idx);
                     var existing = unsafe { builtin.mem.raw_read<K>(k_slot) }
-                    let existing_copy = existing.as(Clone).clone();
+                    let matched = existing.ref.as(Eq).eq(key);
                     unsafe {
                         builtin.mem.raw_write<K>(k_slot, existing);
                     }
-                    let probe_copy = key.*.as(Clone).clone();
-                    if existing_copy.as(Eq).eq(probe_copy) {
+                    if matched {
                         return idx;
                     }
                 }
@@ -698,12 +697,11 @@ where
                 if stored_hash == target_hash {
                     let k_slot = key_addr<K>(addr, tl, idx);
                     var existing = unsafe { builtin.mem.raw_read<K>(k_slot) }
-                    let existing_copy = existing.as(Clone).clone();
+                    let matched = existing.ref.as(Eq).eq(key);
                     unsafe {
                         builtin.mem.raw_write<K>(k_slot, existing);
                     }
-                    let probe_copy = key.*.as(Clone).clone();
-                    if existing_copy.as(Eq).eq(probe_copy) {
+                    if matched {
                         return InsertProbe { found: true, slot: idx };
                     }
                 }

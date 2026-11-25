@@ -2,8 +2,13 @@ use builtin.{
     Integer,
     Order,
     Symbol,
+    TotalFloat,
+    bf16,
     bool,
     char,
+    f16,
+    f32,
+    f64,
     i128,
     i16,
     i32,
@@ -30,22 +35,22 @@ use text_impl.bindings;
 pub pure comptime trait ComptimeOrd :- ComptimeEq {
     comptime fn cmp(self, other: Self) -> Order;
     comptime fn lt(self, other: Self) -> bool =
-        self.cmp(other) match {
+        self.as(ComptimeOrd).cmp(other) match {
             .less => true,
             _ => false,
         }
     comptime fn le(self, other: Self) -> bool =
-        self.cmp(other) match {
+        self.as(ComptimeOrd).cmp(other) match {
             .greater => false,
             _ => true,
         }
     comptime fn gt(self, other: Self) -> bool =
-        self.cmp(other) match {
+        self.as(ComptimeOrd).cmp(other) match {
             .greater => true,
             _ => false,
         }
     comptime fn ge(self, other: Self) -> bool =
-        self.cmp(other) match {
+        self.as(ComptimeOrd).cmp(other) match {
             .less => false,
             _ => true,
         }
@@ -296,5 +301,168 @@ comptime impl ComptimeOrd for Symbol {
             bindings.symbol_byte_length,
             bindings.symbol_byte,
         )
+    }
+}
+
+pub pure comptime trait ComptimeTotalOrd {
+    pure comptime fn total_cmp(self, other: Self) -> Order;
+
+    pure comptime fn total_lt(self, other: Self) -> bool =
+        self.as(ComptimeTotalOrd).total_cmp(other) match {
+            .less => true,
+            _ => false,
+        }
+
+    pure comptime fn total_le(self, other: Self) -> bool =
+        self.as(ComptimeTotalOrd).total_cmp(other) match {
+            .greater => false,
+            _ => true,
+        }
+
+    pure comptime fn total_gt(self, other: Self) -> bool =
+        self.as(ComptimeTotalOrd).total_cmp(other) match {
+            .greater => true,
+            _ => false,
+        }
+
+    pure comptime fn total_ge(self, other: Self) -> bool =
+        self.as(ComptimeTotalOrd).total_cmp(other) match {
+            .less => false,
+            _ => true,
+        }
+}
+
+pure comptime fn ct_order_u16(left: u16, right: u16) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+pure comptime fn ct_order_u32(left: u32, right: u32) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+pure comptime fn ct_order_u64(left: u64, right: u64) -> Order {
+    if left < right {
+        .less
+    } else if left == right {
+        .equal
+    } else {
+        .greater
+    }
+}
+
+pure comptime fn ct_float16_total_key(value: f16) -> u16 {
+    let raw = value'bitvec.as(u16);
+    let bits = raw'bitvec;
+    let sign = bits[15..16].as(u8) != 0;
+    if sign {
+        (not bits).as(u16)
+    } else {
+        let mask: u16 = 32768;
+        (bits or mask'bitvec).as(u16)
+    }
+}
+
+pure comptime fn ct_bfloat16_total_key(value: bf16) -> u16 {
+    let raw = value'bitvec.as(u16);
+    let bits = raw'bitvec;
+    let sign = bits[15..16].as(u8) != 0;
+    if sign {
+        (not bits).as(u16)
+    } else {
+        let mask: u16 = 32768;
+        (bits or mask'bitvec).as(u16)
+    }
+}
+
+pure comptime fn ct_float32_total_key(value: f32) -> u32 {
+    let raw = value'bitvec.as(u32);
+    let bits = raw'bitvec;
+    let sign = bits[31..32].as(u8) != 0;
+    if sign {
+        (not bits).as(u32)
+    } else {
+        let mask: u32 = 2147483648;
+        (bits or mask'bitvec).as(u32)
+    }
+}
+
+pure comptime fn ct_float64_total_key(value: f64) -> u64 {
+    let raw = value'bitvec.as(u64);
+    let bits = raw'bitvec;
+    let sign = bits[63..64].as(u8) != 0;
+    if sign {
+        (not bits).as(u64)
+    } else {
+        let mask: u64 = 9223372036854775808;
+        (bits or mask'bitvec).as(u64)
+    }
+}
+
+comptime impl ComptimeTotalOrd for f16 {
+    pure comptime fn total_cmp(self, other: Self) -> Order {
+        ct_order_u16(ct_float16_total_key(self), ct_float16_total_key(other))
+    }
+}
+
+comptime impl ComptimeTotalOrd for bf16 {
+    pure comptime fn total_cmp(self, other: Self) -> Order {
+        ct_order_u16(ct_bfloat16_total_key(self), ct_bfloat16_total_key(other))
+    }
+}
+
+comptime impl ComptimeTotalOrd for f32 {
+    pure comptime fn total_cmp(self, other: Self) -> Order {
+        ct_order_u32(ct_float32_total_key(self), ct_float32_total_key(other))
+    }
+}
+
+comptime impl ComptimeTotalOrd for f64 {
+    pure comptime fn total_cmp(self, other: Self) -> Order {
+        ct_order_u64(ct_float64_total_key(self), ct_float64_total_key(other))
+    }
+}
+
+comptime impl ComptimeTotalOrd for TotalFloat<F>
+where
+    F: builtin.Type,
+    requires F :- ComptimeTotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    pure comptime fn total_cmp(self, other: Self) -> Order {
+        self.comptime_into_inner().as(ComptimeTotalOrd).total_cmp(other.comptime_into_inner())
+    }
+}
+
+comptime impl ComptimeEq for TotalFloat<F>
+where
+    F: builtin.Type,
+    requires F :- ComptimeTotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    pure comptime fn eq(self, other: Self) -> bool {
+        self.comptime_into_inner().as(ComptimeTotalOrd).total_cmp(other.comptime_into_inner()) matches .equal
+    }
+}
+
+comptime impl ComptimeOrd for TotalFloat<F>
+where
+    F: builtin.Type,
+    requires F :- ComptimeTotalOrd,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    pure comptime fn cmp(self, other: Self) -> Order {
+        self.comptime_into_inner().as(ComptimeTotalOrd).total_cmp(other.comptime_into_inner())
     }
 }

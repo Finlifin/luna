@@ -485,15 +485,15 @@ fn std_mem_layout_and_builtin_display_ord_work_natively() {
             let err_small: !u8 u32 = error 1;
             let err_big: !u8 u32 = error 5;
 
-            none_val.as(Ord).lt(one)
-                and one.as(Ord).lt(two)
-                and (two.as(Ord).cmp(two) matches .equal)
-                and nested_none.as(Ord).lt(nested_inner_none)
-                and nested_inner_none.as(Ord).lt(nested_some)
-                and ok_small.as(Ord).lt(ok_big)
-                and ok_big.as(Ord).lt(err_small)
-                and err_small.as(Ord).lt(err_big)
-                and (err_small.as(Ord).cmp(err_small) matches .equal)
+            none_val.as(Ord).lt(one.ref)
+                and one.as(Ord).lt(two.ref)
+                and (two.as(Ord).cmp(two.ref) matches .equal)
+                and nested_none.as(Ord).lt(nested_inner_none.ref)
+                and nested_inner_none.as(Ord).lt(nested_some.ref)
+                and ok_small.as(Ord).lt(ok_big.ref)
+                and ok_big.as(Ord).lt(err_small.ref)
+                and err_small.as(Ord).lt(err_big.ref)
+                and (err_small.as(Ord).cmp(err_small.ref) matches .equal)
         }
 
         fn check_fmt() -> !std.io.IoErr bool {

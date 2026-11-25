@@ -14,7 +14,7 @@ use bindings.{
 -- Fundamental protocols exposed through ordinary trait declarations.
 
 -- Comparison protocols can be loaded without formatting/owned strings.
-pub use comparison.{Eq, Ord, Order}
+pub use comparison.{Eq, Ord, Order, TotalFloat, TotalOrd}
 
 -- Resource protocols live separately from formatting and owned strings.
 pub use resources.{Clone, Copy, Drop, Once}
@@ -106,6 +106,52 @@ impl Hash for char {
         self'bitvec.as(u64)
     }
 }
+
+impl Hash for TotalFloat<primitives.f16> {
+    fn hash(self) -> u64 {
+        self.value'bitvec.as(u64)
+    }
+}
+
+impl Hash for TotalFloat<primitives.bf16> {
+    fn hash(self) -> u64 {
+        self.value'bitvec.as(u64)
+    }
+}
+
+impl Hash for TotalFloat<primitives.f32> {
+    fn hash(self) -> u64 {
+        self.value'bitvec.as(u64)
+    }
+}
+
+impl Hash for TotalFloat<primitives.f64> {
+    fn hash(self) -> u64 {
+        self.value'bitvec.as(u64)
+    }
+}
+
+impl Clone for TotalFloat<F>
+where
+    F,
+    requires F == primitives.f16
+        or F == primitives.bf16
+        or F == primitives.f32
+        or F == primitives.f64,
+{
+    fn clone(*self) -> Self {
+        TotalFloat<F>.new(self.get())
+    }
+}
+
+impl Copy for TotalFloat<F>
+where
+    F,
+    requires F == primitives.f16
+        or F == primitives.bf16
+        or F == primitives.f32
+        or F == primitives.f64,
+{}
 
 {-
     Text hashes use FNV-1a over UTF-8 bytes, never backing storage addresses.

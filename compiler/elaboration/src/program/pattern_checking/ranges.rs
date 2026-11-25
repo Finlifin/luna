@@ -249,12 +249,14 @@ impl Checker<'_, '_> {
             }
         }
 
-        let ordering_protocol = self.protocols.ordering.ok_or_else(|| {
-            error(
-                pattern.span,
-                "range pattern ordering protocol for this type is not implemented",
-            )
-        })?;
+        let ordering_protocol = self
+            .selected_comparison_protocol(true, ty, pattern.span)
+            .map_err(|_| {
+                error(
+                    pattern.span,
+                    "range pattern ordering protocol for this type is not implemented",
+                )
+            })?;
         self.native_or_ord_range_pattern(
             pattern,
             lower,
@@ -574,29 +576,13 @@ impl Checker<'_, '_> {
             };
             let check = if let Some(protocol) = ordering_protocol {
                 let method = if exclusive { "lt" } else { "le" };
-                let callee = self
-                    .selected_method(
-                        left.ty.clone(),
-                        Some(n::InterfaceInstance {
-                            declaration: protocol,
-                            arguments: vec![],
-                        }),
-                        method,
-                        endpoint_hir.span,
-                    )?
-                    .ok_or_else(|| {
-                        error(
-                            endpoint_hir.span,
-                            "Ord protocol has no selected comparison method",
-                        )
-                    })?;
-                self.finish_call(
+                self.finish_comparison_protocol_call(
                     endpoint_hir,
-                    callee,
-                    &[],
-                    vec![left, right],
+                    protocol,
+                    method,
+                    left,
+                    right,
                     Some(&p(P::Bool)),
-                    None,
                 )?
             } else {
                 let kind = if *shape == p(P::Integer) {

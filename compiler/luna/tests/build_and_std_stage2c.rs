@@ -371,11 +371,16 @@ fn std_time_duration_and_std_process_run_natively() {
             if d != d_cloned or d == ZERO {
                 return 15;
             }
-            let cmp_eq = d.as(Ord).cmp(d_cloned) matches .equal;
-            let cmp_sec_lt = Duration.from_secs(1).as(Ord).cmp(Duration.from_secs(2)) matches .less;
-            let cmp_sec_gt = Duration.from_secs(3).as(Ord).cmp(Duration.from_secs(2)) matches .greater;
-            let cmp_ns_lt = Duration.from_nanos(100).as(Ord).cmp(Duration.from_nanos(200)) matches .less;
-            let cmp_ns_gt = Duration.from_nanos(200).as(Ord).cmp(Duration.from_nanos(100)) matches .greater;
+            let d1 = Duration.from_secs(1);
+            let d2 = Duration.from_secs(2);
+            let d3 = Duration.from_secs(3);
+            let n100 = Duration.from_nanos(100);
+            let n200 = Duration.from_nanos(200);
+            let cmp_eq = d.as(Ord).cmp(d_cloned.ref) matches .equal;
+            let cmp_sec_lt = d1.as(Ord).cmp(d2.ref) matches .less;
+            let cmp_sec_gt = d3.as(Ord).cmp(d2.ref) matches .greater;
+            let cmp_ns_lt = n100.as(Ord).cmp(n200.ref) matches .less;
+            let cmp_ns_gt = n200.as(Ord).cmp(n100.ref) matches .greater;
             if not cmp_eq or not cmp_sec_lt or not cmp_sec_gt or not cmp_ns_lt or not cmp_ns_gt {
                 return 16;
             }
@@ -569,8 +574,8 @@ fn std_collections_debug_impls_preserve_once_elements_and_custom_allocators() {
         }
 
         impl Eq for KeyTag {
-            fn eq(self, other: Self) -> bool {
-                self.id == other.id
+            fn eq(*self, other: *Self) -> bool {
+                self.id.* == other.id.*
             }
         }
 

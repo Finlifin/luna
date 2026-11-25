@@ -290,16 +290,16 @@ fn range_pattern_view_takes_priority_over_ord_and_ord_fallback_works() {
         }
 
         impl Eq for TaggedScore {
-            fn eq(self, other: Self) -> bool {
-                self.score == other.score and self.override_band == other.override_band
+            fn eq(*self, other: *Self) -> bool {
+                self.score.* == other.score.* and self.override_band.* == other.override_band.*
             }
         }
 
         impl Ord for TaggedScore {
-            fn cmp(self, other: Self) -> Order {
-                if self.score < other.score {
+            fn cmp(*self, other: *Self) -> Order {
+                if self.score.* < other.score.* {
                     .less
-                } else if self.score > other.score {
+                } else if self.score.* > other.score.* {
                     .greater
                 } else {
                     .equal
@@ -347,20 +347,20 @@ fn range_pattern_view_takes_priority_over_ord_and_ord_fallback_works() {
         impl Copy for OrderedPair {}
 
         impl Eq for OrderedPair {
-            fn eq(self, other: Self) -> bool {
-                self.hi == other.hi and self.lo == other.lo
+            fn eq(*self, other: *Self) -> bool {
+                self.hi.* == other.hi.* and self.lo.* == other.lo.*
             }
         }
 
         impl Ord for OrderedPair {
-            fn cmp(self, other: Self) -> Order {
-                if self.hi < other.hi {
+            fn cmp(*self, other: *Self) -> Order {
+                if self.hi.* < other.hi.* {
                     .less
-                } else if self.hi > other.hi {
+                } else if self.hi.* > other.hi.* {
                     .greater
-                } else if self.lo < other.lo {
+                } else if self.lo.* < other.lo.* {
                     .less
-                } else if self.lo > other.lo {
+                } else if self.lo.* > other.lo.* {
                     .greater
                 } else {
                     .equal

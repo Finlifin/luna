@@ -425,25 +425,15 @@ pub trait Iterator {
     inline fn min(self) -> ?Item
     where
         requires Item :- Ord,
-        requires Item :- Copy,
     {
-        self.min_by(|a, b| {
-            let left: Item = a.*;
-            let right: Item = b.*;
-            left.as(Ord).cmp(right)
-        })
+        self.min_by(|a, b| a.as(Ord).cmp(b))
     }
 
     inline fn max(self) -> ?Item
     where
         requires Item :- Ord,
-        requires Item :- Copy,
     {
-        self.max_by(|a, b| {
-            let left: Item = a.*;
-            let right: Item = b.*;
-            left.as(Ord).cmp(right)
-        })
+        self.max_by(|a, b| a.as(Ord).cmp(b))
     }
 }
 

@@ -247,7 +247,7 @@ fn vec_deque_ring_wrap_custom_allocator_zst_and_early_break_drop() {
             }
             -- Expected order: [50, 15, 20, 30, 40, 5]
             var cloned = dq.ref.try_clone()!;
-            let cloned_eq = dq.ref.try_clone()!.as(Eq).eq(cloned.ref.try_clone()!);
+            let cloned_eq = dq.ref.as(Eq).eq(cloned.ref);
             if not cloned_eq {
                 return false;
             }

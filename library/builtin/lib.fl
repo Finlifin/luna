@@ -83,7 +83,7 @@ pub mod text {
 }
 
 pub mod math {
-    pub use comparison.{Eq, Ord, Order}
+    pub use comparison.{Eq, Ord, Order, TotalFloat, TotalOrd}
     pub use math_intrinsics.*;
 }
 

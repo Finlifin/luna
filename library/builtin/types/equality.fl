@@ -1,35 +1,44 @@
 use comparison.Eq;
 use primitives.bool;
+use traits.Copy;
 
-{- Runtime comparison consumes wrappers through ordinary affine matching. -}
-impl Eq for ?T where T :- Eq {
-    fn eq(self, other: Self) -> bool =
-        self match {
+{-
+    Runtime comparison borrows wrappers via `*self` / `*Self`. Tagged-union
+    pointer projection (`*?T -> ?*T` / `*!E T -> !*E *T`) does not exist yet
+    in NIR/IIR/backend, so `T :- Copy + Eq` (and `E :- Copy + Eq`) is kept to
+    read payloads out and borrow those local copies.
+-}
+impl Eq for ?T
+where
+    T :- Copy + Eq,
+{
+    fn eq(*self, other: *Self) -> bool =
+        self.* match {
             left? =>
-                other match {
-                    right? => left.as(Eq).eq(right),
+                other.* match {
+                    right? => left.ref.as(Eq).eq(right.ref),
                     null => false,
                 },
-            null => other matches null,
+            null => other.* matches null,
         }
 }
 
 impl Eq for !E T
 where
-    T :- Eq,
-    E :- Eq,
+    T :- Copy + Eq,
+    E :- Copy + Eq,
 {
-    fn eq(self, other: Self) -> bool =
-        self match {
+    fn eq(*self, other: *Self) -> bool =
+        self.* match {
             left! =>
-                other match {
-                    right! => left.as(Eq).eq(right),
+                other.* match {
+                    right! => left.ref.as(Eq).eq(right.ref),
                     error _ => false,
                 },
             error left =>
-                other match {
+                other.* match {
                     _! => false,
-                    error right => left.as(Eq).eq(right),
+                    error right => left.ref.as(Eq).eq(right.ref),
                 },
         }
 }

@@ -194,7 +194,7 @@ impl ConcatPatternView for Slice<T> where T :- Copy + Eq {
                 v? => v,
                 null => return null,
             }
-            if not a.as(Eq).eq(b) {
+            if not a.ref.as(Eq).eq(b.ref) {
                 return null;
             }
             i = i + 1;
@@ -220,7 +220,7 @@ impl ConcatPatternView for Slice<T> where T :- Copy + Eq {
                 v? => v,
                 null => return null,
             }
-            if not a.as(Eq).eq(b) {
+            if not a.ref.as(Eq).eq(b.ref) {
                 return null;
             }
             pos = pos + 1;
@@ -233,19 +233,22 @@ impl ConcatPatternView for Slice<T> where T :- Copy + Eq {
 impl StableConcatPatternView for Slice<T> where T :- Copy + Eq {}
 
 impl Eq for Slice<T> where T :- Copy + Eq {
-    fn eq(self, other: Self) -> bool {
-        let len_a = self.raw_len;
-        let len_b = other.raw_len;
+    fn eq(*self, other: *Self) -> bool {
+        let len_a = self.raw_len.*;
+        let len_b = other.raw_len.*;
         if len_a != len_b {
             return false;
         }
-        let addr_a = self.raw_addr;
-        let addr_b = other.raw_addr;
+        let addr_a = self.raw_addr.*;
+        let addr_b = other.raw_addr.*;
+        if addr_a != 0 and addr_a == addr_b {
+            return true;
+        }
         var i: usize = 0;
         while i < len_a {
             let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_a, i)) }
             let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_b, i)) }
-            if not left.as(Eq).eq(right) {
+            if not left.ref.as(Eq).eq(right.ref) {
                 return false;
             }
             i = i + 1;

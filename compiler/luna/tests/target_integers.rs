@@ -1,7 +1,9 @@
 #[path = "support/library.rs"]
 mod library;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 use luna::frontend::{self, Artifact};
 use nir::target::TargetData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -528,13 +530,13 @@ fn repository_platform_comparison_protocols_follow_the_selected_target() {
                 let high:.isize'builtin={signed_max};
                 let zero:.usize'builtin=0;
                 let maximum:.usize'builtin={unsigned_max};
-                let signed = low.as(Ord).lt(high) and high.as(Ord).gt(low); assumes signed;
-                let equal = high.as(Eq).eq(high) and low.as(Ord).le(low); assumes equal;
-                let unsigned = zero.as(Ord).lt(maximum) and maximum.as(Ord).ge(zero); assumes unsigned;
-                let different = maximum.as(Eq).ne(zero); assumes different;
-                let less = low.as(Ord).cmp(high) matches .less; assumes less;
-                let greater = maximum.as(Ord).cmp(zero) matches .greater; assumes greater;
-                let same = maximum.as(Ord).cmp(maximum) matches .equal; assumes same;
+                let signed = low.as(Ord).lt(high.ref) and high.as(Ord).gt(low.ref); assumes signed;
+                let equal = high.as(Eq).eq(high.ref) and low.as(Ord).le(low.ref); assumes equal;
+                let unsigned = zero.as(Ord).lt(maximum.ref) and maximum.as(Ord).ge(zero.ref); assumes unsigned;
+                let different = maximum.as(Eq).ne(zero.ref); assumes different;
+                let less = low.as(Ord).cmp(high.ref) matches .less; assumes less;
+                let greater = maximum.as(Ord).cmp(zero.ref) matches .greater; assumes greater;
+                let same = maximum.as(Ord).cmp(maximum.ref) matches .equal; assumes same;
             }}",
             library::with_attrs(include!("support/comparison_source.rs")),
             include_str!("../../../library/builtin/protocols/resources.fl"));

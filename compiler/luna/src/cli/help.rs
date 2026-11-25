@@ -44,7 +44,8 @@ No positional source path is accepted.
 const BINDINGS: &str = "Compiler binding overrides:
   --copy-protocol <trait>, --drop-protocol <trait>
   --splice-protocol, --meta-list-type, --tuple-type, --index-protocol,
-  --ord-protocol, --eq-protocol, --list-pattern-protocol,
+  --ord-protocol, --eq-protocol, --comptime-ord-protocol,
+  --comptime-eq-protocol, --list-pattern-protocol,
   --comptime-list-pattern-protocol, --stable-list-pattern-protocol,
   --list-pattern-endless-protocol, --stable-list-pattern-endless-protocol,
   --range-end-type, --range-pattern-protocol, --stable-range-pattern-protocol,

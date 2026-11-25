@@ -17,10 +17,10 @@ fn compile(source: &str, ordering: Option<&str>) -> Result<nir::program::Package
 fn real_ord_defaults_drive_nominal_and_generic_operators() {
     let source = format!("mod comparison {{\n{}\n}}
         struct Rank {{value:.i32'builtin}}
-        impl comparison.Eq for Rank {{fn eq(self,other:Self)->bool {{self.value==other.value}}}}
+        impl comparison.Eq for Rank {{fn eq(*self,other:*Self)->bool {{self.value.* == other.value.*}}}}
         impl comparison.Ord for Rank {{
-            fn cmp(self,other:Self)->comparison.Order {{
-                if self.value < other.value {{.less}} else if self.value == other.value {{.equal}} else {{.greater}}
+            fn cmp(*self,other:*Self)->comparison.Order {{
+                if self.value.* < other.value.* {{.less}} else if self.value.* == other.value.* {{.equal}} else {{.greater}}
             }}
         }}
         fn before(a:T,b:T)->bool where T :- comparison.Ord {{a < b}}
@@ -70,9 +70,9 @@ fn real_ord_defaults_drive_nominal_and_generic_operators() {
 
 #[test]
 fn ordering_calls_preserve_left_right_order_and_divergence() {
-    let source="trait Compare {fn lt(self,other:Self)->bool;}
+    let source="trait Compare {fn lt(*self,other:*Self)->bool;}
         struct Rank {value:.i32'builtin}
-        impl Compare for Rank {fn lt(self,other:Self)->bool {self.value < other.value}}
+        impl Compare for Rank {fn lt(*self,other:*Self)->bool {self.value.* < other.value.*}}
         fn run()->bool {
             var phase:.u8'builtin=0;
             let ordered=do {assumes phase==0;phase=1;Rank {value:1}} < do {assumes phase==1;phase=2;Rank {value:2}};
@@ -92,8 +92,8 @@ fn ordering_calls_preserve_left_right_order_and_divergence() {
 #[test]
 fn ordering_does_not_use_unbound_or_wrong_result_protocols() {
     for source in [
-        "trait Compare {fn lt(self,other:Self)->.u8'builtin;} struct Rank {} impl Compare for Rank {fn lt(self,other:Self)->.u8'builtin {1}} fn run()->bool {Rank {} < Rank {}}",
-        "trait Compare {fn lt(self,other:Self)->bool;} struct Rank {} fn run()->bool {Rank {} < Rank {}}",
+        "trait Compare {fn lt(*self,other:*Self)->.u8'builtin;} struct Rank {} impl Compare for Rank {fn lt(*self,other:*Self)->.u8'builtin {1}} fn run()->bool {Rank {} < Rank {}}",
+        "trait Compare {fn lt(*self,other:*Self)->bool;} struct Rank {} fn run()->bool {Rank {} < Rank {}}",
     ] {
         assert!(compile(source, Some("input.Compare")).is_err());
     }

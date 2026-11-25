@@ -665,6 +665,8 @@ pub(crate) fn source_protocols(
         index: options.index_protocol.as_deref(),
         ordering: options.ord_protocol.as_deref(),
         equality: options.eq_protocol.as_deref(),
+        comptime_ordering: options.comptime_ord_protocol.as_deref(),
+        comptime_equality: options.comptime_eq_protocol.as_deref(),
         literal_into: options.literal_into_protocol.as_deref(),
         implies: options.implies_protocol.as_deref(),
         comptime_implies: options.comptime_implies_protocol.as_deref(),

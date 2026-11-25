@@ -18,6 +18,8 @@ pub struct Selectors<'a> {
     pub extended_variadic_collector: Option<&'a str>,
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
+    pub comptime_ordering: Option<&'a str>,
+    pub comptime_equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
     pub comptime_list_pattern: Option<&'a str>,
     pub stable_list_pattern: Option<&'a str>,
@@ -75,6 +77,8 @@ impl Selectors<'_> {
                 self.extended_variadic_collector,
                 self.ordering,
                 self.equality,
+                self.comptime_ordering,
+                self.comptime_equality,
                 self.list_pattern,
                 self.comptime_list_pattern,
                 self.stable_list_pattern,
@@ -279,6 +283,16 @@ pub(crate) fn resolve_source(
             ),
             ("Ord".into(), selectors.ordering, &mut result.ordering),
             ("Eq".into(), selectors.equality, &mut result.equality),
+            (
+                "ComptimeOrd".into(),
+                selectors.comptime_ordering,
+                &mut result.comptime_ordering,
+            ),
+            (
+                "ComptimeEq".into(),
+                selectors.comptime_equality,
+                &mut result.comptime_equality,
+            ),
             (
                 "ListPatternView".into(),
                 selectors.list_pattern,
@@ -700,6 +714,8 @@ pub(crate) struct SysrootBindings {
     index: Option<String>,
     ordering: Option<String>,
     equality: Option<String>,
+    comptime_ordering: Option<String>,
+    comptime_equality: Option<String>,
     list_pattern: Option<String>,
     comptime_list_pattern: Option<String>,
     stable_list_pattern: Option<String>,
@@ -814,6 +830,8 @@ impl SysrootBindings {
                 "index-protocol" => &mut result.index,
                 "ord-protocol" => &mut result.ordering,
                 "eq-protocol" => &mut result.equality,
+                "comptime-ord-protocol" => &mut result.comptime_ordering,
+                "comptime-eq-protocol" => &mut result.comptime_equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
                 "comptime-list-pattern-protocol" => &mut result.comptime_list_pattern,
                 "stable-list-pattern-protocol" => &mut result.stable_list_pattern,
@@ -977,6 +995,20 @@ impl SysrootBindings {
                     .equality
                     .is_none()
                     .then_some(self.equality.as_deref())
+                    .flatten()
+            }),
+            comptime_ordering: explicit.comptime_ordering.or_else(|| {
+                identities
+                    .comptime_ordering
+                    .is_none()
+                    .then_some(self.comptime_ordering.as_deref())
+                    .flatten()
+            }),
+            comptime_equality: explicit.comptime_equality.or_else(|| {
+                identities
+                    .comptime_equality
+                    .is_none()
+                    .then_some(self.comptime_equality.as_deref())
                     .flatten()
             }),
             list_pattern: explicit.list_pattern.or_else(|| {
@@ -1540,6 +1572,8 @@ mod stage_tests {
             index_protocol: None,
             ord_protocol: None,
             eq_protocol: None,
+            comptime_ord_protocol: None,
+            comptime_eq_protocol: None,
             list_pattern_protocol: None,
             comptime_list_pattern_protocol: None,
             stable_list_pattern_protocol: None,

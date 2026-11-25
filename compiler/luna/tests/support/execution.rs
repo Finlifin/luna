@@ -99,6 +99,8 @@ pub(crate) fn compile_explicit_source_with_bindings(
             index_protocol: selectors.index.map(str::to_owned),
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
+            comptime_ord_protocol: selectors.comptime_ordering.map(str::to_owned),
+            comptime_eq_protocol: selectors.comptime_equality.map(str::to_owned),
             list_pattern_protocol: selectors.list_pattern.map(str::to_owned),
             comptime_list_pattern_protocol: selectors.comptime_list_pattern.map(str::to_owned),
             stable_list_pattern_protocol: selectors.stable_list_pattern.map(str::to_owned),

@@ -1,19 +1,26 @@
 use comparison.{Ord, Order}
+use traits.Copy;
 
 {-
     Absence precedes presence. Compare payloads only when both outer layers are
     present, retaining nested optional layers and the payload's own ordering.
+    Tagged-union pointer projection (`*?T -> ?*T` / `*!E T -> !*E *T`) does
+    not exist yet in NIR/IIR/backend, so `T :- Copy + Ord` (and `E :- Copy + Ord`)
+    is kept to read payloads out and borrow those local copies.
 -}
-impl Ord for ?T where T :- Ord {
-    fn cmp(self, other: Self) -> Order =
-        self match {
+impl Ord for ?T
+where
+    T :- Copy + Ord,
+{
+    fn cmp(*self, other: *Self) -> Order =
+        self.* match {
             left? =>
-                other match {
-                    right? => left.as(Ord).cmp(right),
+                other.* match {
+                    right? => left.ref.as(Ord).cmp(right.ref),
                     null => .greater,
                 },
             null =>
-                other match {
+                other.* match {
                     _? => .less,
                     null => .equal,
                 },
@@ -27,20 +34,20 @@ impl Ord for ?T where T :- Ord {
 -}
 impl Ord for !E T
 where
-    T :- Ord,
-    E :- Ord,
+    T :- Copy + Ord,
+    E :- Copy + Ord,
 {
-    fn cmp(self, other: Self) -> Order =
-        self match {
+    fn cmp(*self, other: *Self) -> Order =
+        self.* match {
             left! =>
-                other match {
-                    right! => left.as(Ord).cmp(right),
+                other.* match {
+                    right! => left.ref.as(Ord).cmp(right.ref),
                     error _ => .less,
                 },
             error left =>
-                other match {
+                other.* match {
                     _! => .greater,
-                    error right => left.as(Ord).cmp(right),
+                    error right => left.ref.as(Ord).cmp(right.ref),
                 },
         }
 }

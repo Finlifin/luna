@@ -896,6 +896,8 @@ fn all_resolved_protocols_in(
         protocols.extended_variadic_collector,
         protocols.ordering,
         protocols.equality,
+        protocols.comptime_ordering,
+        protocols.comptime_equality,
         protocols.list_pattern,
         protocols.comptime_list_pattern,
         protocols.stable_list_pattern,

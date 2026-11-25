@@ -19,22 +19,22 @@ impl Clone for IoErr {
 impl Copy for IoErr {}
 
 impl Eq for IoErr {
-    fn eq(self, other: Self) -> bool {
-        self match {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
             .Os(left) =>
-                other match {
+                other.* match {
                     .Os(right) => left == right,
                     .WriteZero => false,
                     .UnexpectedEof => false,
                 },
             .WriteZero =>
-                other match {
+                other.* match {
                     .Os(_) => false,
                     .WriteZero => true,
                     .UnexpectedEof => false,
                 },
             .UnexpectedEof =>
-                other match {
+                other.* match {
                     .Os(_) => false,
                     .WriteZero => false,
                     .UnexpectedEof => true,

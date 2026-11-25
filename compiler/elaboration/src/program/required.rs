@@ -3037,6 +3037,8 @@ fn scope_for_required(
         protocols_cfg.extended_variadic_collector,
         protocols_cfg.ordering,
         protocols_cfg.equality,
+        protocols_cfg.comptime_ordering,
+        protocols_cfg.comptime_equality,
         protocols_cfg.list_pattern,
         protocols_cfg.comptime_list_pattern,
         protocols_cfg.stable_list_pattern,

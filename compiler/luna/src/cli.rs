@@ -50,6 +50,8 @@ pub struct Options {
     pub index_protocol: Option<String>,
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
+    pub comptime_ord_protocol: Option<String>,
+    pub comptime_eq_protocol: Option<String>,
     pub literal_into_protocol: Option<String>,
     pub implies_protocol: Option<String>,
     pub comptime_implies_protocol: Option<String>,
@@ -229,6 +231,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut index_protocol = None;
     let mut ord_protocol = None;
     let mut eq_protocol = None;
+    let mut comptime_ord_protocol = None;
+    let mut comptime_eq_protocol = None;
     let mut literal_into_protocol = None;
     let mut implies_protocol = None;
     let mut comptime_implies_protocol = None;
@@ -907,6 +911,28 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--comptime-ord-protocol") => {
+                    if comptime_ord_protocol.is_some() {
+                        return Err("--comptime-ord-protocol may only be specified once".into());
+                    }
+                    comptime_ord_protocol = Some(
+                        option_value(&mut args, "--comptime-ord-protocol")?
+                            .into_string()
+                            .map_err(|_| "ComptimeOrd protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--comptime-eq-protocol") => {
+                    if comptime_eq_protocol.is_some() {
+                        return Err("--comptime-eq-protocol may only be specified once".into());
+                    }
+                    comptime_eq_protocol = Some(
+                        option_value(&mut args, "--comptime-eq-protocol")?
+                            .into_string()
+                            .map_err(|_| "ComptimeEq protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--literal-into-protocol") => {
                     if literal_into_protocol.is_some() {
                         return Err("--literal-into-protocol may only be specified once".into());
@@ -1291,6 +1317,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         index_protocol,
         ord_protocol,
         eq_protocol,
+        comptime_ord_protocol,
+        comptime_eq_protocol,
         literal_into_protocol,
         implies_protocol,
         comptime_implies_protocol,
@@ -1457,6 +1485,8 @@ mod tests {
                 index_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
+                comptime_ord_protocol: None,
+                comptime_eq_protocol: None,
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
                 stable_list_pattern_protocol: None,
@@ -1519,6 +1549,8 @@ mod tests {
                 index_protocol: None,
                 ord_protocol: None,
                 eq_protocol: None,
+                comptime_ord_protocol: None,
+                comptime_eq_protocol: None,
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
                 stable_list_pattern_protocol: None,

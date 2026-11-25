@@ -621,7 +621,7 @@ where
         var i: usize = 0;
         while i < len {
             let item = unsafe { builtin.mem.raw_read<T>(slot_address<T>(base, i)) }
-            if item.as(Eq).eq(needle) {
+            if item.ref.as(Eq).eq(needle.ref) {
                 return true;
             }
             i = i + 1;
@@ -752,27 +752,34 @@ where
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    fn eq(self, other: Self) -> bool {
-        var left_iter = self.into_iter();
-        var right_iter = other.into_iter();
-        let len = left_iter.raw_len;
-        if len != right_iter.raw_len {
+    fn eq(*self, other: *Self) -> bool {
+        let len = self.raw_len.*;
+        if len != other.raw_len.* {
             return false;
         }
-        let addr_a = left_iter.raw_addr;
-        let addr_b = right_iter.raw_addr;
-        while true {
-            let i = left_iter.raw_head;
-            if i >= len {
-                break;
+        if len == 0 {
+            return true;
+        }
+        let addr_a = self.raw_addr.*;
+        let addr_b = other.raw_addr.*;
+        if addr_a != 0 and addr_a == addr_b {
+            return true;
+        }
+        var i: usize = 0;
+        while i < len {
+            let slot_a = slot_address<T>(addr_a, i);
+            let slot_b = slot_address<T>(addr_b, i);
+            var left = unsafe { builtin.mem.raw_read<T>(slot_a) }
+            var right = unsafe { builtin.mem.raw_read<T>(slot_b) }
+            let same = left.ref.as(Eq).eq(right.ref);
+            unsafe {
+                builtin.mem.raw_write<T>(slot_a, left);
+                builtin.mem.raw_write<T>(slot_b, right);
             }
-            left_iter.raw_head = i + 1;
-            right_iter.raw_head = i + 1;
-            let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_a, i)) }
-            let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_b, i)) }
-            if not left.as(Eq).eq(right) {
+            if not same {
                 return false;
             }
+            i = i + 1;
         }
         true
     }

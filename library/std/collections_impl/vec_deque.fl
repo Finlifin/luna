@@ -660,42 +660,48 @@ where
     requires A :- Allocator,
     quote alloc: lift *A,
 {
-    fn eq(self, other: Self) -> bool {
-        var left_iter = self.into_iter();
-        var right_iter = other.into_iter();
-        if left_iter.raw_len != right_iter.raw_len {
+    fn eq(*self, other: *Self) -> bool {
+        let len = self.raw_len.*;
+        if len != other.raw_len.* {
             return false;
         }
-        let left_addr = left_iter.raw_addr;
-        let right_addr = right_iter.raw_addr;
-        let left_cap = left_iter.raw_cap;
-        let right_cap = right_iter.raw_cap;
-        while true {
-            let cur_len = left_iter.raw_len;
-            if cur_len == 0 {
-                break;
-            }
-            let l_head = left_iter.raw_head;
-            let r_head = right_iter.raw_head;
-            let l_slot = if left_cap > 0 and l_head < left_cap {
-                l_head
+        if len == 0 {
+            return true;
+        }
+        let left_addr = self.raw_addr.*;
+        let right_addr = other.raw_addr.*;
+        if left_addr != 0 and left_addr == right_addr {
+            return true;
+        }
+        let left_head = self.raw_head.*;
+        let right_head = other.raw_head.*;
+        let left_cap = self.raw_cap.*;
+        let right_cap = other.raw_cap.*;
+        var i: usize = 0;
+        while i < len {
+            let l_slot = if left_cap > 0 and i < left_cap {
+                ring_index(left_head, i, left_cap)
             } else {
                 0
             }
-            let r_slot = if right_cap > 0 and r_head < right_cap {
-                r_head
+            let r_slot = if right_cap > 0 and i < right_cap {
+                ring_index(right_head, i, right_cap)
             } else {
                 0
             }
-            left_iter.raw_head = ring_inc(l_slot, left_cap);
-            right_iter.raw_head = ring_inc(r_slot, right_cap);
-            left_iter.raw_len = cur_len - 1;
-            right_iter.raw_len = cur_len - 1;
-            let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(left_addr, l_slot)) }
-            let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(right_addr, r_slot)) }
-            if not left.as(Eq).eq(right) {
+            let slot_a = slot_address<T>(left_addr, l_slot);
+            let slot_b = slot_address<T>(right_addr, r_slot);
+            var left = unsafe { builtin.mem.raw_read<T>(slot_a) }
+            var right = unsafe { builtin.mem.raw_read<T>(slot_b) }
+            let same = left.ref.as(Eq).eq(right.ref);
+            unsafe {
+                builtin.mem.raw_write<T>(slot_a, left);
+                builtin.mem.raw_write<T>(slot_b, right);
+            }
+            if not same {
                 return false;
             }
+            i = i + 1;
         }
         true
     }

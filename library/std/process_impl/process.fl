@@ -47,8 +47,8 @@ impl Clone for ExitCode {
 impl Copy for ExitCode {}
 
 impl Eq for ExitCode {
-    fn eq(self, other: Self) -> bool {
-        self.raw_code == other.raw_code
+    fn eq(*self, other: *Self) -> bool {
+        self.raw_code.* == other.raw_code.*
     }
 }
 

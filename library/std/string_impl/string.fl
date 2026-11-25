@@ -22,8 +22,8 @@ impl Clone for Utf8Err {
 impl Copy for Utf8Err {}
 
 impl Eq for Utf8Err {
-    fn eq(self, other: Self) -> bool {
-        self.valid_up_to_offset == other.valid_up_to_offset
+    fn eq(*self, other: *Self) -> bool {
+        self.valid_up_to_offset.* == other.valid_up_to_offset.*
     }
 }
 
@@ -892,10 +892,19 @@ where
     requires A :- Allocator,
     quote a: lift *A,
 {
-    fn eq(self, other: Self) -> bool {
-        var left = self;
-        var right = other;
-        left.ref.equals(right.ref)
+    fn eq(*self, other: *Self) -> bool {
+        self.equals(other)
+    }
+}
+
+impl Eq<.Rhs = str> for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
+    fn eq(*self, other: *str) -> bool {
+        self.equals_str(other.*)
     }
 }
 
@@ -905,10 +914,8 @@ where
     requires A :- Allocator,
     quote a: lift *A,
 {
-    fn cmp(self, other: Self) -> Order {
-        var left = self;
-        var right = other;
-        left.ref.cmp_ref(right.ref)
+    fn cmp(*self, other: *Self) -> Order {
+        self.cmp_ref(other)
     }
 }
 

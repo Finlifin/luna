@@ -151,6 +151,8 @@ fn compile_with_sysroot_mode(
         } else {
             "builtin.numeric.comparison.Eq"
         }),
+        comptime_ordering: Some("meta.numeric.ordering.ComptimeOrd"),
+        comptime_equality: Some("meta.numeric.equality.ComptimeEq"),
         iterator: Some("builtin.protocols.iterator.Iterator"),
         into_iterator: Some("builtin.protocols.iterator.IntoIterator"),
         list_pattern: Some("builtin.protocols.patterns.ListPatternView"),
@@ -549,9 +551,17 @@ fn half_float_ranges_negation_domains_and_custom_eq_ord() {
             }
         }
 
+        impl builtin.Clone for CodeId {
+            fn clone(*self) -> Self {
+                self.*
+            }
+        }
+
+        impl builtin.Copy for CodeId {}
+
         impl builtin.math.Eq for CodeId {
-            fn eq(self, other: Self) -> bool {
-                self.as(i32) == other.as(i32)
+            fn eq(*self, other: *Self) -> bool {
+                self.*.as(i32) == other.*.as(i32)
             }
         }
 
@@ -576,17 +586,25 @@ fn half_float_ranges_negation_domains_and_custom_eq_ord() {
             pub const TARGET: Meter = Meter { raw: 10 };
         }
 
+        impl builtin.Clone for Meter {
+            fn clone(*self) -> Self {
+                Meter { raw: self.raw.* }
+            }
+        }
+
+        impl builtin.Copy for Meter {}
+
         impl builtin.math.Eq for Meter {
-            fn eq(self, other: Self) -> bool {
-                self.raw == other.raw
+            fn eq(*self, other: *Self) -> bool {
+                self.raw.* == other.raw.*
             }
         }
 
         impl builtin.math.Ord for Meter {
-            fn cmp(self, other: Self) -> builtin.math.Order {
-                if self.raw < other.raw {
+            fn cmp(*self, other: *Self) -> builtin.math.Order {
+                if self.raw.* < other.raw.* {
                     builtin.math.Order.less
-                } else if self.raw > other.raw {
+                } else if self.raw.* > other.raw.* {
                     builtin.math.Order.greater
                 } else {
                     builtin.math.Order.equal
@@ -716,7 +734,15 @@ fn half_float_ranges_negation_domains_and_custom_eq_ord() {
 
     assert_parity(&package, "run", vec![], Value::Bool(true));
     assert_eq!(
-        luna::execution::interpret(&package, "run_runtime", 1_000_000).unwrap(),
+        luna::execution::interpret_with_protocols_in_package(
+            &package,
+            100,
+            "run_runtime",
+            "Copy",
+            "Drop",
+            1_000_000,
+        )
+        .unwrap(),
         Value::Bool(true)
     );
 }
