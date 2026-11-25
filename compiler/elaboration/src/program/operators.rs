@@ -1075,6 +1075,11 @@ impl Checker<'_, '_> {
             ));
         }
         for id in candidates.declarations() {
+            if self.implementation_index.head(*id).is_some_and(|head| {
+                head.is_subject_excluded(subject, &self.context, Budget::default())
+            }) {
+                continue;
+            }
             let implementation = self
                 .checked_implementations
                 .iter()

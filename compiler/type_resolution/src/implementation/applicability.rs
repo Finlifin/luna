@@ -155,6 +155,61 @@ impl ImplementationHead {
         result
     }
 
+    fn refute_subject_against_shape(
+        &self,
+        subject: &Term,
+        shape: &Term,
+        eligibility_proof: Option<&Proof>,
+        context: &Context,
+        budget: &mut Budget,
+    ) -> Option<Proof> {
+        let outer_disjoint = context.distinct_outer_types(&self.subject, shape);
+        let symbolic_alternatives = eligibility_proof
+            .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
+            && eligible_shape(context, &self.subject);
+        if outer_disjoint || symbolic_alternatives {
+            if let Some(candidate_subject) =
+                self.freshen_subject_for_refutation(subject, context, budget)
+            {
+                if let Outcome::Entailed(proof) = context.prove_metered(
+                    Formula::equal(candidate_subject, subject.clone()).negate(),
+                    budget,
+                ) {
+                    return Some(proof);
+                }
+            }
+        }
+        None
+    }
+
+    /// Return whether this head's subject is provably disjoint from `subject`
+    /// regardless of any interface type arguments.
+    pub fn is_subject_excluded(&self, subject: &Term, context: &Context, budget: Budget) -> bool {
+        let mut budget = budget;
+        if self.type_parameters.is_empty() {
+            return self
+                .refute_closed_subject_metered(subject, context, &mut budget)
+                .is_some();
+        }
+        if subject.check_scope(context.scope()).is_err() || self.subject.check_scope(&[]).is_err() {
+            return false;
+        }
+        let mut head_budget = budget;
+        let Ok((shape, eligibility_proof)) =
+            eligibility::subject_view(context, subject, budget, &mut head_budget)
+        else {
+            return false;
+        };
+        self.refute_subject_against_shape(
+            subject,
+            &shape,
+            eligibility_proof.as_ref(),
+            context,
+            &mut head_budget,
+        )
+        .is_some()
+    }
+
     fn freshen_subject_for_refutation(
         &self,
         subject: &Term,
@@ -1010,22 +1065,14 @@ impl ImplementationHead {
         // `subject`, without granting injectivity or disjointness to opaque
         // normal-form heads. Freshen head parameters when they collide with
         // caller rigid identifiers so refutation quantifies over the head.
-        let outer_disjoint = context.distinct_outer_types(&self.subject, &shape);
-        let symbolic_alternatives = eligibility_proof
-            .as_ref()
-            .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
-            && eligible_shape(context, &self.subject);
-        if outer_disjoint || symbolic_alternatives {
-            if let Some(candidate_subject) =
-                self.freshen_subject_for_refutation(subject, context, &mut head_budget)
-            {
-                if let Outcome::Entailed(proof) = context.prove_metered(
-                    Formula::equal(candidate_subject, subject.clone()).negate(),
-                    &mut head_budget,
-                ) {
-                    return Err(TypeAssessment::Excluded(proof));
-                }
-            }
+        if let Some(proof) = self.refute_subject_against_shape(
+            subject,
+            &shape,
+            eligibility_proof.as_ref(),
+            context,
+            &mut head_budget,
+        ) {
+            return Err(TypeAssessment::Excluded(proof));
         }
         let parameters = self
             .parameter_binders()

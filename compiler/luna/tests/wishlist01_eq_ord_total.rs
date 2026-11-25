@@ -560,3 +560,63 @@ fn total_ord_and_total_float_order_nan_and_signed_zero_consistently() {
     "#;
     assert!(support::compile(bad).is_err());
 }
+
+#[test]
+fn optional_and_error_eq_preserve_rhs_expected_context() {
+    let source = r#"
+        enum MyErr {
+            Boom,
+        }
+
+        impl Copy for MyErr {}
+        impl Clone for MyErr {
+            fn clone(*self) -> Self { self.* }
+        }
+        impl Eq for MyErr {
+            fn eq(*self, other: *Self) -> bool {
+                (self.*, other.*) match {
+                    (.Boom, .Boom) => true,
+                }
+            }
+        }
+
+        fn generic_opt_is_null(x: ?T) -> bool where T :- Copy + Eq {
+            x == null and not (x != null)
+        }
+
+        fn concrete_opt_null(x: ?i32) -> bool {
+            x != null and not (x == null)
+        }
+
+        fn concrete_err_literal(x: !MyErr i32, y: !MyErr i32) -> bool {
+            (x == 7) and (y != 7) and (y == error .Boom)
+        }
+
+        comptime fn ct_opt_null(x: ?i32) -> bool {
+            x != null and not (x == null)
+        }
+
+        comptime fn ct_check_opt() -> bool {
+            ct_opt_null(5) and not ct_opt_null(null)
+        }
+
+        fn run() -> bool {
+            let none_i32: ?i32 = null;
+            let some_i32: ?i32 = 5;
+            let a = generic_opt_is_null(none_i32) and not generic_opt_is_null(some_i32);
+            let b = concrete_opt_null(5) and not concrete_opt_null(null);
+            let c = concrete_err_literal(7, error .Boom);
+            let d = ct_check_opt();
+            a and b and c and d
+        }
+    "#;
+    assert_eq!(
+        support::invoke(source, "ct_check_opt").unwrap(),
+        Value::Bool(true)
+    );
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}

@@ -77,7 +77,58 @@ pub(crate) fn run(source: &str) -> Value {
 pub(crate) fn run_with_inputs(source: &str, entry: &str, inputs: Vec<Value>) -> Value {
     let package = compile(source).unwrap();
     let graph = luna::instantiation::instantiate(&package, entry, 10_000_000).unwrap();
-    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    let copy_protocol = package
+        .traits
+        .iter()
+        .find(|t| t.declaration.package != 0 && t.name == "Copy")
+        .map(|t| t.declaration);
+    let drop_protocol = package
+        .traits
+        .iter()
+        .find(|t| t.declaration.package != 0 && t.name == "Drop")
+        .map(|t| t.declaration);
+    let snapshot =
+        elaboration::materialization::DeclarationSnapshot::new(std::sync::Arc::new(package));
+    let budget = elaboration::ptc::Budget {
+        steps: 10_000_000,
+        ..Default::default()
+    };
+    let declarations = snapshot.closed(&mut { budget }).unwrap();
+    let world = declarations.capabilities();
+    let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
+        elaboration::materialization::check_world_predicate(
+            &world,
+            predicate,
+            elaboration::ptc::Budget::default(),
+            remaining,
+        )
+    };
+    let pointer_copy = |ty: &nir::Term, remaining: &mut u64| {
+        let (Some(copy), Some(drop)) = (copy_protocol, drop_protocol) else {
+            return false;
+        };
+        let mut proof_fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let before = proof_fuel;
+        let allowed = elaboration::verification::copy::acquire(
+            snapshot.package(),
+            &world,
+            copy,
+            drop,
+            ty,
+            elaboration::ptc::Budget {
+                steps: budget.steps.min(proof_fuel),
+                ..budget
+            },
+            &mut proof_fuel,
+        )
+        .is_ok();
+        *remaining = remaining.saturating_sub((before - proof_fuel) as u64);
+        allowed
+    };
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default())
+        .unwrap()
+        .with_budgeted_type_solver(&solver)
+        .with_budgeted_pointer_copy_permission(&pointer_copy);
     vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }
 
