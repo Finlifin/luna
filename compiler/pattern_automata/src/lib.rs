@@ -20,7 +20,7 @@ pub use compile::{
 pub use decision::{
     Binding, DagBuilder, DagNode, DecisionDag, LenInterval, NodeId, Place, PlaceStep, SwitchKind,
 };
-pub use eval::{EnumValuePayload, MatchOutcome, Value, eval_dag, eval_linear};
+pub use eval::{EnumValuePayload, EvalError, MatchOutcome, Value, eval_dag, eval_linear};
 pub use pattern::{
     BitSegmentPattern, BitVecPattern, CharInterval, CompileBudget, CompileError, EnumType,
     ErrorRowType, ErrorTag, FiniteInt, IntInterval, IntLit, IntType, LowerPoint, MatchArm, Pattern,

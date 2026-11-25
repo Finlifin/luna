@@ -276,6 +276,7 @@ impl Ordinary {
         destination: &Destination,
         value: n::Expr,
         mut checked: Vec<n::MatchArm>,
+        arm_spans: &[Span],
     ) -> Result<n::Expr, Error> {
         let span = source_expr.span;
         // Synthetic arms may share a source span, but must not share a cleanup
@@ -303,7 +304,7 @@ impl Ordinary {
             }
         }
         let patterns: Vec<_> = checked.iter().map(|arm| &arm.pattern).collect();
-        checker.require_match_coverage(&patterns, &value.ty, span)?;
+        checker.require_match_coverage(&patterns, &value.ty, span, arm_spans, !self.suppressed)?;
         let result = if self.subject.is_some() {
             let index = self
                 .selected

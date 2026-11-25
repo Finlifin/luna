@@ -344,8 +344,44 @@ impl ColPattern {
 fn is_pattern_wild(pat: &Pattern) -> bool {
     match pat {
         Pattern::Wild => true,
-        Pattern::Or(alts) => alts.first().is_some_and(is_pattern_wild),
+        Pattern::Bind { .. } => false,
+        Pattern::Or(alts) => {
+            !alts.is_empty() && !pattern_has_any_bindings(pat) && alts.iter().any(is_pattern_wild)
+        }
         _ => false,
+    }
+}
+
+fn pattern_has_any_bindings(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Wild
+        | Pattern::Bool(_)
+        | Pattern::Char(_)
+        | Pattern::CharRange { .. }
+        | Pattern::Int(_)
+        | Pattern::IntRange { .. }
+        | Pattern::OptionalNull => false,
+        Pattern::Bind { .. } => true,
+        Pattern::OptionalPresent(inner)
+        | Pattern::ErrorOk(inner)
+        | Pattern::ErrorErr { inner, .. } => pattern_has_any_bindings(inner),
+        Pattern::EnumVariant { payload, .. } => match payload {
+            VariantPayloadPattern::Unit => false,
+            VariantPayloadPattern::Tuple(pats) => pats.iter().any(pattern_has_any_bindings),
+            VariantPayloadPattern::Record(fields) => fields.values().any(pattern_has_any_bindings),
+        },
+        Pattern::Tuple(pats) | Pattern::Or(pats) => pats.iter().any(pattern_has_any_bindings),
+        Pattern::Record(fields) => fields.values().any(pattern_has_any_bindings),
+        Pattern::List { prefix, rest } => {
+            prefix.iter().any(pattern_has_any_bindings)
+                || rest.as_deref().is_some_and(pattern_has_any_bindings)
+        }
+        Pattern::BitVec(bv) => bv.segments.iter().any(|seg| match seg {
+            crate::pattern::BitSegmentPattern::Fixed { .. } => false,
+            crate::pattern::BitSegmentPattern::Typed { pattern, .. } => {
+                pattern_has_any_bindings(pattern)
+            }
+        }),
     }
 }
 
@@ -1115,40 +1151,40 @@ impl Compiler {
         place: Place,
         elem_ty: TypeDesc,
     ) -> Result<NodeId, CompileError> {
-        let mut normalized_rows = Vec::with_capacity(rows.len());
-        for mut row in rows {
-            let pat =
-                match std::mem::replace(&mut row.pats[col_idx], ColPattern::Pattern(Pattern::Wild))
-                {
-                    ColPattern::Pattern(p) => p,
-                    ColPattern::BitSlice(_) => unreachable!(),
-                };
-            row.pats[col_idx] = ColPattern::Pattern(normalize_list_pattern(pat)?);
-            normalized_rows.push(row);
-        }
+        // Expand top-level `Or` and peel outer `Bind`s before normalizing list patterns so
+        // alternatives like `([1] as xs) or ([2] as xs)` preserve bindings across branches.
+        let expanded = expand_or_at_col(&cols, rows, col_idx);
 
-        let expanded = expand_or_at_col(&cols, normalized_rows, col_idx);
+        let mut normalized_rows = Vec::with_capacity(expanded.len());
+        for row in expanded {
+            normalize_list_row(row, col_idx, &place, &mut normalized_rows)?;
+        }
 
         #[derive(Clone)]
         enum ListShape {
             Wild,
-            Exact(Vec<Pattern>),
+            Exact {
+                prefix: Vec<Pattern>,
+                rest_binds: Vec<(String, usize)>,
+            },
             AtLeast {
                 prefix: Vec<Pattern>,
-                rest_binds: Vec<String>,
+                rest_binds: Vec<(String, usize)>,
             },
         }
 
         let mut breakpoints = BTreeSet::new();
         breakpoints.insert(0usize);
-        let mut shapes: Vec<(Row, ListShape)> = Vec::with_capacity(expanded.len());
+        let mut shapes: Vec<(Row, ListShape)> = Vec::with_capacity(normalized_rows.len());
 
-        for row in expanded {
+        for norm in normalized_rows {
+            let row = norm.row;
+            let rest_binds = norm.rest_binds;
             let shape = match &row.pats[col_idx] {
                 ColPattern::Pattern(Pattern::Wild) => ListShape::Wild,
                 ColPattern::Pattern(Pattern::List { prefix, rest }) => {
                     if let Some(rest_pat) = rest {
-                        let rest_binds = extract_irrefutable_binds(rest_pat)?;
+                        debug_assert!(matches!(rest_pat.as_ref(), Pattern::Wild));
                         breakpoints.insert(prefix.len());
                         ListShape::AtLeast {
                             prefix: prefix.clone(),
@@ -1157,7 +1193,10 @@ impl Compiler {
                     } else {
                         breakpoints.insert(prefix.len());
                         breakpoints.insert(prefix.len() + 1);
-                        ListShape::Exact(prefix.clone())
+                        ListShape::Exact {
+                            prefix: prefix.clone(),
+                            rest_binds,
+                        }
                     }
                 }
                 ColPattern::Pattern(other) => {
@@ -1192,7 +1231,7 @@ impl Compiler {
             for (row, shape) in &shapes {
                 match shape {
                     ListShape::Wild => active_rows.push((row.clone(), shape)),
-                    ListShape::Exact(prefix) if is_exact && prefix.len() == start => {
+                    ListShape::Exact { prefix, .. } if is_exact && prefix.len() == start => {
                         active_rows.push((row.clone(), shape));
                     }
                     ListShape::AtLeast { prefix, .. } if prefix.len() <= start => {
@@ -1219,14 +1258,20 @@ impl Compiler {
                     ListShape::Wild => {
                         vec![ColPattern::Pattern(Pattern::Wild); required_elems]
                     }
-                    ListShape::Exact(prefix) => {
+                    ListShape::Exact { prefix, rest_binds } => {
+                        for (bind_name, offset) in rest_binds {
+                            row.bindings.push(Binding {
+                                name: bind_name.clone(),
+                                place: place.list_rest(*offset),
+                            });
+                        }
                         prefix.iter().cloned().map(ColPattern::Pattern).collect()
                     }
                     ListShape::AtLeast { prefix, rest_binds } => {
-                        for bind_name in rest_binds {
+                        for (bind_name, offset) in rest_binds {
                             row.bindings.push(Binding {
                                 name: bind_name.clone(),
-                                place: place.list_rest(prefix.len()),
+                                place: place.list_rest(*offset),
                             });
                         }
                         let mut pats: Vec<ColPattern> =
@@ -1494,10 +1539,21 @@ fn peel_outer_bindings_in_place(pat: &mut Pattern, place: &Place, bindings: &mut
 
 fn simplify_trivial_or_in_place(pat: &mut Pattern) {
     if let Pattern::Or(alts) = pat {
+        for alt in alts.iter_mut() {
+            simplify_trivial_or_in_place(alt);
+        }
+        let mut flattened = Vec::with_capacity(alts.len());
+        for alt in alts.drain(..) {
+            match alt {
+                Pattern::Or(inner) => flattened.extend(inner),
+                other => flattened.push(other),
+            }
+        }
+        *alts = flattened;
         if alts.len() == 1 {
             *pat = alts.remove(0);
             simplify_trivial_or_in_place(pat);
-        } else if alts.first().is_some_and(is_pattern_wild) {
+        } else if !alts.iter().any(pattern_has_any_bindings) && alts.iter().any(is_pattern_wild) {
             *pat = Pattern::Wild;
         }
     }
@@ -1636,49 +1692,129 @@ fn extract_char_intervals(pat: &Pattern) -> Result<Option<Vec<CharInterval>>, Co
     }
 }
 
-fn normalize_list_pattern(pat: Pattern) -> Result<Pattern, CompileError> {
+struct NormalizedListRow {
+    row: Row,
+    rest_binds: Vec<(String, usize)>,
+}
+
+fn normalize_list_row(
+    mut row: Row,
+    col_idx: usize,
+    place: &Place,
+    out: &mut Vec<NormalizedListRow>,
+) -> Result<(), CompileError> {
+    let pat = match std::mem::replace(&mut row.pats[col_idx], ColPattern::Pattern(Pattern::Wild)) {
+        ColPattern::Pattern(p) => p,
+        ColPattern::BitSlice(_) => unreachable!(),
+    };
+    normalize_list_pattern_step(pat, row, col_idx, place, Vec::new(), out)
+}
+
+fn normalize_list_pattern_step(
+    pat: Pattern,
+    mut row: Row,
+    col_idx: usize,
+    place: &Place,
+    mut rest_binds: Vec<(String, usize)>,
+    out: &mut Vec<NormalizedListRow>,
+) -> Result<(), CompileError> {
     match pat {
-        Pattern::Wild => Ok(Pattern::Wild),
+        Pattern::Wild => {
+            row.pats[col_idx] = ColPattern::Pattern(Pattern::Wild);
+            out.push(NormalizedListRow { row, rest_binds });
+            Ok(())
+        }
+        Pattern::Bind { name, subpattern } => {
+            row.bindings.push(Binding {
+                name,
+                place: place.clone(),
+            });
+            normalize_list_pattern_step(*subpattern, row, col_idx, place, rest_binds, out)
+        }
         Pattern::Or(alts) => {
-            let normalized: Vec<Pattern> = alts
-                .into_iter()
-                .map(normalize_list_pattern)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Pattern::Or(normalized))
+            for alt in alts {
+                normalize_list_pattern_step(
+                    alt,
+                    row.clone(),
+                    col_idx,
+                    place,
+                    rest_binds.clone(),
+                    out,
+                )?;
+            }
+            Ok(())
         }
         Pattern::List { mut prefix, rest } => {
             let Some(rest_box) = rest else {
-                return Ok(Pattern::List { prefix, rest: None });
+                row.pats[col_idx] = ColPattern::Pattern(Pattern::List { prefix, rest: None });
+                out.push(NormalizedListRow { row, rest_binds });
+                return Ok(());
             };
             match *rest_box {
-                Pattern::Wild => Ok(Pattern::List {
-                    prefix,
-                    rest: Some(Box::new(Pattern::Wild)),
-                }),
-                Pattern::Bind { name, subpattern } if is_pattern_wild(&subpattern) => {
-                    Ok(Pattern::List {
+                Pattern::Wild => {
+                    row.pats[col_idx] = ColPattern::Pattern(Pattern::List {
                         prefix,
-                        rest: Some(Box::new(Pattern::var(name))),
-                    })
+                        rest: Some(Box::new(Pattern::Wild)),
+                    });
+                    out.push(NormalizedListRow { row, rest_binds });
+                    Ok(())
+                }
+                Pattern::Bind { name, subpattern } => {
+                    rest_binds.push((name, prefix.len()));
+                    let next_rest = if is_pattern_wild(&subpattern) {
+                        Pattern::Wild
+                    } else {
+                        *subpattern
+                    };
+                    normalize_list_pattern_step(
+                        Pattern::List {
+                            prefix,
+                            rest: Some(Box::new(next_rest)),
+                        },
+                        row,
+                        col_idx,
+                        place,
+                        rest_binds,
+                        out,
+                    )
                 }
                 Pattern::List {
                     prefix: p2,
                     rest: r2,
                 } => {
                     prefix.extend(p2);
-                    normalize_list_pattern(Pattern::List { prefix, rest: r2 })
+                    normalize_list_pattern_step(
+                        Pattern::List { prefix, rest: r2 },
+                        row,
+                        col_idx,
+                        place,
+                        rest_binds,
+                        out,
+                    )
                 }
                 Pattern::Or(alts) => {
-                    let expanded: Vec<Pattern> = alts
-                        .into_iter()
-                        .map(|alt| {
-                            normalize_list_pattern(Pattern::List {
+                    if is_pattern_wild(&Pattern::Or(alts.clone())) {
+                        row.pats[col_idx] = ColPattern::Pattern(Pattern::List {
+                            prefix,
+                            rest: Some(Box::new(Pattern::Wild)),
+                        });
+                        out.push(NormalizedListRow { row, rest_binds });
+                        return Ok(());
+                    }
+                    for alt in alts {
+                        normalize_list_pattern_step(
+                            Pattern::List {
                                 prefix: prefix.clone(),
                                 rest: Some(Box::new(alt)),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Pattern::Or(expanded))
+                            },
+                            row.clone(),
+                            col_idx,
+                            place,
+                            rest_binds.clone(),
+                            out,
+                        )?;
+                    }
+                    Ok(())
                 }
                 other => Err(CompileError::TypeMismatch {
                     expected: "wild or identifier rest pattern".to_string(),
@@ -1688,21 +1824,6 @@ fn normalize_list_pattern(pat: Pattern) -> Result<Pattern, CompileError> {
         }
         other => Err(CompileError::TypeMismatch {
             expected: "list".to_string(),
-            found: other.to_string(),
-        }),
-    }
-}
-
-fn extract_irrefutable_binds(pat: &Pattern) -> Result<Vec<String>, CompileError> {
-    match pat {
-        Pattern::Wild => Ok(Vec::new()),
-        Pattern::Bind { name, subpattern } => {
-            let mut names = extract_irrefutable_binds(subpattern)?;
-            names.push(name.clone());
-            Ok(names)
-        }
-        other => Err(CompileError::TypeMismatch {
-            expected: "irrefutable rest binding".to_string(),
             found: other.to_string(),
         }),
     }

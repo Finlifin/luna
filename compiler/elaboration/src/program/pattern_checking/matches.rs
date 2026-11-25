@@ -68,11 +68,44 @@ impl crate::automata::AutomataEnv for Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
+    fn report_unreachable_match_arms(
+        &mut self,
+        outcome: &crate::automata::AutomataOutcome,
+        ty: &Term,
+        match_span: Span,
+        arm_spans: &[Span],
+        report_unreachable: bool,
+    ) {
+        if !report_unreachable
+            || is_never(ty)
+            || outcome.plan.unreachable_arms.is_empty()
+            || outcome.plan.dag.reachable_arms().is_empty()
+        {
+            return;
+        }
+        for &arm_idx in &outcome.plan.unreachable_arms {
+            let arm_span = arm_spans.get(arm_idx).copied().unwrap_or(match_span);
+            let arm_source = source(arm_span);
+            if self
+                .warned_unreachable_match_arms
+                .insert((self.active_body_declaration, arm_source))
+            {
+                self.warnings.push(Warning {
+                    code: Some("W_UNREACHABLE_MATCH_ARM"),
+                    source: arm_source,
+                    message: format!("unreachable match arm (arm {})", arm_idx + 1),
+                });
+            }
+        }
+    }
+
     pub(in crate::program) fn require_match_coverage(
         &mut self,
         patterns: &[&n::Pattern],
         ty: &Term,
         span: Span,
+        arm_spans: &[Span],
+        report_unreachable: bool,
     ) -> Result<(), Error> {
         let site = source(span);
         let outcome = crate::automata::compile_match_plan(self, patterns, ty, site);
@@ -85,11 +118,29 @@ impl Checker<'_, '_> {
                 outcome.plan.clone(),
             );
             if outcome.plan.is_exhaustive {
+                self.report_unreachable_match_arms(
+                    outcome,
+                    ty,
+                    span,
+                    arm_spans,
+                    report_unreachable,
+                );
                 return Ok(());
             }
         }
-        match self.patterns_exhaustive(patterns, ty) {
-            crate::coverage::Coverage::Exhaustive => Ok(()),
+        match self.legacy_patterns_exhaustive(patterns, ty) {
+            crate::coverage::Coverage::Exhaustive => {
+                if let Some(ref outcome) = outcome {
+                    self.report_unreachable_match_arms(
+                        outcome,
+                        ty,
+                        span,
+                        arm_spans,
+                        report_unreachable,
+                    );
+                }
+                Ok(())
+            }
             crate::coverage::Coverage::Unknown => Err(error(
                 span,
                 "match exhaustiveness could not be proved within supported analysis and budget; add an unguarded fallback pattern",

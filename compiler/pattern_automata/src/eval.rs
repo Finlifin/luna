@@ -163,6 +163,100 @@ impl fmt::Display for Value {
     }
 }
 
+/// Structured error returned when evaluating a [`DecisionDag`] against an incompatible [`Value`]
+/// or malformed DAG structure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvalError {
+    InvalidNodeId {
+        id: usize,
+        node_count: usize,
+    },
+    IndexOutOfBounds {
+        context: &'static str,
+        index: usize,
+        len: usize,
+    },
+    MissingRecordField {
+        field: String,
+    },
+    InvalidBitSlice {
+        lo: u32,
+        hi: u32,
+        width: u32,
+    },
+    InvalidBitSliceConversion {
+        lo: u32,
+        hi: u32,
+    },
+    InvalidPlaceProjection {
+        step: String,
+        value: String,
+    },
+    UnexpectedSwitchValue {
+        expected: &'static str,
+        found: String,
+    },
+    MissingSwitchCase {
+        kind: &'static str,
+        detail: String,
+    },
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidNodeId { id, node_count } => write!(
+                f,
+                "(eval-error invalid-node-id (id {id}) (node-count {node_count}))"
+            ),
+            Self::IndexOutOfBounds {
+                context,
+                index,
+                len,
+            } => write!(
+                f,
+                "(eval-error index-out-of-bounds (context {context}) (index {index}) (len {len}))"
+            ),
+            Self::MissingRecordField { field } => {
+                f.write_str("(eval-error missing-record-field ")?;
+                sexpr::write_quoted_str(f, field)?;
+                f.write_str(")")
+            }
+            Self::InvalidBitSlice { lo, hi, width } => write!(
+                f,
+                "(eval-error invalid-bit-slice (lo {lo}) (hi {hi}) (width {width}))"
+            ),
+            Self::InvalidBitSliceConversion { lo, hi } => write!(
+                f,
+                "(eval-error invalid-bit-slice-conversion (lo {lo}) (hi {hi}))"
+            ),
+            Self::InvalidPlaceProjection { step, value } => {
+                f.write_str("(eval-error invalid-place-projection (step ")?;
+                sexpr::write_quoted_str(f, step)?;
+                f.write_str(") (value ")?;
+                sexpr::write_quoted_str(f, value)?;
+                f.write_str("))")
+            }
+            Self::UnexpectedSwitchValue { expected, found } => {
+                f.write_str("(eval-error unexpected-switch-value (expected ")?;
+                sexpr::write_quoted_str(f, expected)?;
+                f.write_str(") (found ")?;
+                sexpr::write_quoted_str(f, found)?;
+                f.write_str("))")
+            }
+            Self::MissingSwitchCase { kind, detail } => {
+                f.write_str("(eval-error missing-switch-case (kind ")?;
+                sexpr::write_quoted_str(f, kind)?;
+                f.write_str(") (detail ")?;
+                sexpr::write_quoted_str(f, detail)?;
+                f.write_str("))")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EvalError {}
+
 /// Successful match outcome yielding the matched `arm_index` and exported bindings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchOutcome {
@@ -329,7 +423,9 @@ fn match_into(pattern: &Pattern, value: &Value, out: &mut BTreeMap<String, Value
                 let mut hi = bv.width();
                 for seg in &bv_pat.segments {
                     let w = seg.width();
-                    let lo = hi - w;
+                    let Some(lo) = hi.checked_sub(w) else {
+                        return false;
+                    };
                     let slice = bv.slice(lo, hi);
                     hi = lo;
                     match seg {
@@ -369,7 +465,11 @@ fn match_into(pattern: &Pattern, value: &Value, out: &mut BTreeMap<String, Value
 }
 
 /// Compiled decision-DAG executor matching [`eval_linear`] across all patterns and guards.
-pub fn eval_dag<F>(dag: &DecisionDag, value: &Value, mut guard: F) -> Option<MatchOutcome>
+pub fn eval_dag<F>(
+    dag: &DecisionDag,
+    value: &Value,
+    mut guard: F,
+) -> Result<Option<MatchOutcome>, EvalError>
 where
     F: FnMut(usize, &BTreeMap<String, Value>) -> bool,
 {
@@ -377,18 +477,22 @@ where
     let mut arm_env: BTreeMap<usize, BTreeMap<String, Value>> = BTreeMap::new();
 
     loop {
-        match dag.node(current) {
-            DagNode::Fail => return None,
+        let node = dag.nodes.get(current.0).ok_or(EvalError::InvalidNodeId {
+            id: current.0,
+            node_count: dag.nodes.len(),
+        })?;
+        match node {
+            DagNode::Fail => return Ok(None),
             DagNode::Leaf {
                 arm_index,
                 bindings,
             } => {
                 let mut final_bindings = arm_env.remove(arm_index).unwrap_or_default();
-                eval_bindings_into(value, bindings, &mut final_bindings);
-                return Some(MatchOutcome {
+                eval_bindings_into(value, bindings, &mut final_bindings)?;
+                return Ok(Some(MatchOutcome {
                     arm_index: *arm_index,
                     bindings: final_bindings,
-                });
+                }));
             }
             DagNode::Bind {
                 arm_index,
@@ -396,7 +500,7 @@ where
                 next,
             } => {
                 let entry = arm_env.entry(*arm_index).or_default();
-                eval_bindings_into(value, bindings, entry);
+                eval_bindings_into(value, bindings, entry)?;
                 current = *next;
             }
             DagNode::GuardCheck {
@@ -406,7 +510,7 @@ where
                 on_fail,
             } => {
                 let mut guard_bindings = arm_env.get(guard_id).cloned().unwrap_or_default();
-                eval_bindings_into(value, bindings, &mut guard_bindings);
+                eval_bindings_into(value, bindings, &mut guard_bindings)?;
                 if guard(*guard_id, &guard_bindings) {
                     current = *on_pass;
                 } else {
@@ -415,28 +519,44 @@ where
                 }
             }
             DagNode::Switch { place, kind } => {
-                let target = project_place(value, place);
-                current = select_switch_target(&target, kind);
+                let target = project_place(value, place)?;
+                current = select_switch_target(&target, kind)?;
             }
         }
     }
 }
 
-fn eval_bindings_into(root: &Value, bindings: &[Binding], out: &mut BTreeMap<String, Value>) {
+fn eval_bindings_into(
+    root: &Value,
+    bindings: &[Binding],
+    out: &mut BTreeMap<String, Value>,
+) -> Result<(), EvalError> {
     for binding in bindings {
-        let val = project_place(root, &binding.place);
+        let val = project_place(root, &binding.place)?;
         out.insert(binding.name.clone(), val);
     }
+    Ok(())
 }
 
-fn project_place(root: &Value, place: &Place) -> Value {
+fn project_place(root: &Value, place: &Place) -> Result<Value, EvalError> {
     let mut cur = root.clone();
     for step in &place.steps {
         cur = match (cur, step) {
-            (Value::Tuple(mut elems), PlaceStep::TupleField(idx)) => elems.swap_remove(*idx),
-            (Value::Record(mut fields), PlaceStep::RecordField(name)) => {
-                fields.remove(name).expect("validated record field exists")
+            (Value::Tuple(mut elems), PlaceStep::TupleField(idx)) => {
+                if *idx >= elems.len() {
+                    return Err(EvalError::IndexOutOfBounds {
+                        context: "tuple-field",
+                        index: *idx,
+                        len: elems.len(),
+                    });
+                }
+                elems.swap_remove(*idx)
             }
+            (Value::Record(mut fields), PlaceStep::RecordField(name)) => fields
+                .remove(name)
+                .ok_or_else(|| EvalError::MissingRecordField {
+                    field: name.clone(),
+                })?,
             (Value::OptionalPresent(inner), PlaceStep::OptionalInner) => *inner,
             (Value::ErrorOk(inner), PlaceStep::ErrorOkInner) => *inner,
             (Value::ErrorErr { inner, .. }, PlaceStep::ErrorErrInner) => *inner,
@@ -446,7 +566,16 @@ fn project_place(root: &Value, place: &Place) -> Value {
                     ..
                 },
                 PlaceStep::VariantTupleField { index, .. },
-            ) => elems.swap_remove(*index),
+            ) => {
+                if *index >= elems.len() {
+                    return Err(EvalError::IndexOutOfBounds {
+                        context: "variant-tuple-field",
+                        index: *index,
+                        len: elems.len(),
+                    });
+                }
+                elems.swap_remove(*index)
+            }
             (
                 Value::Enum {
                     payload: EnumValuePayload::Record(mut fields),
@@ -455,55 +584,107 @@ fn project_place(root: &Value, place: &Place) -> Value {
                 PlaceStep::VariantRecordField { field, .. },
             ) => fields
                 .remove(field)
-                .expect("validated variant record field exists"),
-            (Value::List(mut elems), PlaceStep::ListElem(idx)) => elems.swap_remove(*idx),
-            (Value::List(elems), PlaceStep::ListRest(from)) => Value::List(elems[*from..].to_vec()),
-            (Value::BitVec(bv), PlaceStep::BitSlice { lo, hi, ty }) => {
-                let slice = bv.slice(*lo, *hi);
-                slice_to_value(&slice, ty).expect("validated bit-slice type conversion")
+                .ok_or_else(|| EvalError::MissingRecordField {
+                    field: field.clone(),
+                })?,
+            (Value::List(mut elems), PlaceStep::ListElem(idx)) => {
+                if *idx >= elems.len() {
+                    return Err(EvalError::IndexOutOfBounds {
+                        context: "list-elem",
+                        index: *idx,
+                        len: elems.len(),
+                    });
+                }
+                elems.swap_remove(*idx)
             }
-            (val, step) => panic!("invalid place projection {step} on value {val}"),
+            (Value::List(elems), PlaceStep::ListRest(from)) => {
+                let rest = elems.get(*from..).ok_or(EvalError::IndexOutOfBounds {
+                    context: "list-rest",
+                    index: *from,
+                    len: elems.len(),
+                })?;
+                Value::List(rest.to_vec())
+            }
+            (Value::BitVec(bv), PlaceStep::BitSlice { lo, hi, ty }) => {
+                if *lo > *hi || *hi > bv.width() {
+                    return Err(EvalError::InvalidBitSlice {
+                        lo: *lo,
+                        hi: *hi,
+                        width: bv.width(),
+                    });
+                }
+                let slice = bv.slice(*lo, *hi);
+                slice_to_value(&slice, ty)
+                    .ok_or(EvalError::InvalidBitSliceConversion { lo: *lo, hi: *hi })?
+            }
+            (val, step) => {
+                return Err(EvalError::InvalidPlaceProjection {
+                    step: step.to_string(),
+                    value: val.to_string(),
+                });
+            }
         };
     }
-    cur
+    Ok(cur)
 }
 
-fn select_switch_target(target: &Value, kind: &SwitchKind) -> crate::decision::NodeId {
+fn select_switch_target(
+    target: &Value,
+    kind: &SwitchKind,
+) -> Result<crate::decision::NodeId, EvalError> {
     match kind {
         SwitchKind::Bool { on_false, on_true } => match target {
-            Value::Bool(false) => *on_false,
-            Value::Bool(true) => *on_true,
-            other => panic!("expected bool value in Bool switch, got {other}"),
+            Value::Bool(false) => Ok(*on_false),
+            Value::Bool(true) => Ok(*on_true),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "bool",
+                found: other.to_string(),
+            }),
         },
         SwitchKind::Optional {
             on_null,
             on_present,
         } => match target {
-            Value::OptionalNull => *on_null,
-            Value::OptionalPresent(_) => *on_present,
-            other => panic!("expected optional value in Optional switch, got {other}"),
+            Value::OptionalNull => Ok(*on_null),
+            Value::OptionalPresent(_) => Ok(*on_present),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "optional",
+                found: other.to_string(),
+            }),
         },
         SwitchKind::Error {
             on_ok,
             cases,
             default_err,
         } => match target {
-            Value::ErrorOk(_) => *on_ok,
-            Value::ErrorErr { tag, .. } => cases
-                .get(tag)
-                .copied()
-                .or(*default_err)
-                .expect("open/closed error tag covered by switch"),
-            other => panic!("expected error value in Error switch, got {other}"),
+            Value::ErrorOk(_) => Ok(*on_ok),
+            Value::ErrorErr { tag, .. } => {
+                cases.get(tag).copied().or(*default_err).ok_or_else(|| {
+                    EvalError::MissingSwitchCase {
+                        kind: "error",
+                        detail: tag.to_string(),
+                    }
+                })
+            }
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "error",
+                found: other.to_string(),
+            }),
         },
-        SwitchKind::Enum { cases, default } => match target {
-            Value::Enum { tag, .. } => cases
-                .get(tag)
-                .copied()
-                .or(*default)
-                .expect("enum variant covered by switch"),
-            other => panic!("expected enum value in Enum switch, got {other}"),
-        },
+        SwitchKind::Enum { cases, default } => {
+            match target {
+                Value::Enum { tag, .. } => cases.get(tag).copied().or(*default).ok_or_else(|| {
+                    EvalError::MissingSwitchCase {
+                        kind: "enum",
+                        detail: tag.to_string(),
+                    }
+                }),
+                other => Err(EvalError::UnexpectedSwitchValue {
+                    expected: "enum",
+                    found: other.to_string(),
+                }),
+            }
+        }
         SwitchKind::Int { cases, default } => match target {
             Value::Int(lit) => {
                 let val = lit.to_finite();
@@ -513,23 +694,35 @@ fn select_switch_target(target: &Value, kind: &SwitchKind) -> crate::decision::N
                     crate::pattern::UpperPoint::PosInf => false,
                 });
                 if idx < cases.len() && cases[idx].0.contains_finite(val) {
-                    cases[idx].1
+                    Ok(cases[idx].1)
                 } else {
-                    default.expect("uncovered integer value handled by default branch")
+                    default.ok_or_else(|| EvalError::MissingSwitchCase {
+                        kind: "int",
+                        detail: lit.to_string(),
+                    })
                 }
             }
-            other => panic!("expected int value in Int switch, got {other}"),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "int",
+                found: other.to_string(),
+            }),
         },
         SwitchKind::Char { cases, default } => match target {
             Value::Char(ch) => {
                 let idx = cases.partition_point(|(iv, _)| iv.hi < *ch);
                 if idx < cases.len() && cases[idx].0.contains(*ch) {
-                    cases[idx].1
+                    Ok(cases[idx].1)
                 } else {
-                    default.expect("uncovered char value handled by default branch")
+                    default.ok_or_else(|| EvalError::MissingSwitchCase {
+                        kind: "char",
+                        detail: ch.to_string(),
+                    })
                 }
             }
-            other => panic!("expected char value in Char switch, got {other}"),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "char",
+                found: other.to_string(),
+            }),
         },
         SwitchKind::ListLen { cases, default } => match target {
             Value::List(elems) => {
@@ -537,12 +730,18 @@ fn select_switch_target(target: &Value, kind: &SwitchKind) -> crate::decision::N
                 let idx =
                     cases.partition_point(|(iv, _)| iv.max_inclusive.is_some_and(|max| max < len));
                 if idx < cases.len() && cases[idx].0.contains(len) {
-                    cases[idx].1
+                    Ok(cases[idx].1)
                 } else {
-                    default.expect("uncovered list length handled by default branch")
+                    default.ok_or_else(|| EvalError::MissingSwitchCase {
+                        kind: "list-len",
+                        detail: len.to_string(),
+                    })
                 }
             }
-            other => panic!("expected list value in ListLen switch, got {other}"),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "list",
+                found: other.to_string(),
+            }),
         },
         SwitchKind::BitSlice {
             lo,
@@ -551,15 +750,28 @@ fn select_switch_target(target: &Value, kind: &SwitchKind) -> crate::decision::N
             default,
         } => match target {
             Value::BitVec(bv) => {
+                if *lo > *hi || *hi > bv.width() {
+                    return Err(EvalError::InvalidBitSlice {
+                        lo: *lo,
+                        hi: *hi,
+                        width: bv.width(),
+                    });
+                }
                 let slice = bv.slice(*lo, *hi);
                 let idx = cases.partition_point(|(iv, _)| iv.hi < slice);
                 if idx < cases.len() && cases[idx].0.contains(&slice) {
-                    cases[idx].1
+                    Ok(cases[idx].1)
                 } else {
-                    default.expect("uncovered bit slice handled by default branch")
+                    default.ok_or_else(|| EvalError::MissingSwitchCase {
+                        kind: "bit-slice",
+                        detail: slice.to_string(),
+                    })
                 }
             }
-            other => panic!("expected BitVec value in BitSlice switch, got {other}"),
+            other => Err(EvalError::UnexpectedSwitchValue {
+                expected: "bitvec",
+                found: other.to_string(),
+            }),
         },
     }
 }

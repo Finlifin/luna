@@ -52,9 +52,14 @@ pub(crate) fn emit_elaboration_warnings(
                 rustc_span::BytePos(warning.source.start),
                 rustc_span::BytePos(warning.source.end),
             );
+            let label = match warning.code {
+                Some("W_PACKED_BIT_WIDTH") => "bit-packed width exceeds 256 bits",
+                Some("W_UNREACHABLE_MATCH_ARM") => "unreachable match arm",
+                _ => warning.message.as_str(),
+            };
             diagnostic::DiagnosticBuilder::warning(formatted)
                 .with_primary_span(span)
-                .with_warning_label(span, "bit-packed width exceeds 256 bits".to_string())
+                .with_warning_label(span, label.to_string())
                 .emit(diag_ctx);
         } else {
             match warning.code {

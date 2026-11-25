@@ -1,7 +1,8 @@
 use pattern_automata::{
     BitInterval, BitSegmentPattern, BitValue, BitVecPattern, CompileBudget, CompileError,
-    CompileOutput, EnumType, ErrorRowType, ErrorTag, IntLit, IntType, MatchArm, MatchOutcome,
-    MissingWitness, Pattern, PatternMatrix, RangeBound, TypeDesc, Value, VariantPayloadType,
+    CompileOutput, DagBuilder, DagNode, DecisionDag, EnumType, ErrorRowType, ErrorTag, EvalError,
+    FiniteInt, IntLit, IntType, MatchArm, MatchOutcome, MissingWitness, NodeId, Pattern,
+    PatternMatrix, Place, RangeBound, SwitchKind, TypeDesc, Value, VariantPayloadType,
     VariantSchema, VariantTag, compile, compile_with_budget, eval_dag, eval_linear,
 };
 use std::collections::BTreeMap;
@@ -60,7 +61,8 @@ fn assert_differential_with_trace<F>(
             let pass = oracle(arm_idx, binds);
             dag_trace.push((arm_idx, binds.clone(), pass));
             pass
-        });
+        })
+        .unwrap();
 
         assert_eq!(
             dag_res, linear_res,
@@ -1235,7 +1237,7 @@ fn deterministic_lisp_sexpr_display_and_escaping() {
         (weird_name.to_string(), Value::Char('\n')),
         ("k".to_string(), Value::Bool(true)),
     ]));
-    let outcome = eval_dag(&out.dag, &val, |_, _| true).unwrap();
+    let outcome = eval_dag(&out.dag, &val, |_, _| true).unwrap().unwrap();
     assert_balanced_sexpr_no_newlines(&val.to_string());
     assert_balanced_sexpr_no_newlines(&outcome.to_string());
     assert_eq!(
@@ -1618,6 +1620,7 @@ fn differential_fuzz_random_matrices_and_bitvec_splits() {
                     eval_dag(&out.dag, val, |arm_idx, binds| {
                         ((arm_idx + binds.len() + seed_idx) % 2) == 0
                     })
+                    .unwrap()
                     .is_some()
                         || arms.iter().any(|a| a.has_guard),
                     "exhaustive match missed {val}"
@@ -1722,4 +1725,209 @@ impl BoolExt for bool {
     fn into_val(self) -> Value {
         Value::Bool(self)
     }
+}
+
+#[test]
+fn list_or_with_bind_and_non_wild_bind_preserves_bindings() {
+    let list_ty = TypeDesc::List(Box::new(TypeDesc::Int(IntType::SignedBits(64))));
+
+    // `([1] as xs) or ([2] as xs)`
+    let or_bind_arms = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::Or(vec![
+                Pattern::bind_as(
+                    "xs",
+                    Pattern::List {
+                        prefix: vec![Pattern::signed(1)],
+                        rest: None,
+                    },
+                ),
+                Pattern::bind_as(
+                    "xs",
+                    Pattern::List {
+                        prefix: vec![Pattern::signed(2)],
+                        rest: None,
+                    },
+                ),
+            ]),
+        )
+        .unwrap(),
+        MatchArm::unguarded(1, Pattern::Wild).unwrap(),
+    ];
+    let out = compile(&PatternMatrix::new(list_ty.clone(), or_bind_arms.clone()).unwrap()).unwrap();
+    assert!(out.is_exhaustive);
+    assert!(out.unreachable_arms.is_empty());
+    let samples = vec![
+        Value::List(vec![]),
+        Value::List(vec![Value::signed(1)]),
+        Value::List(vec![Value::signed(2)]),
+        Value::List(vec![Value::signed(3)]),
+        Value::List(vec![Value::signed(1), Value::signed(2)]),
+    ];
+    assert_differential_with_trace(&out, &or_bind_arms, &samples, |_, _| true);
+
+    // `(_ as xs) or ([1] as xs)` and `([1] as xs) or (_ as xs)`: Bind wrapping Wild or non-wild
+    // inside Or must preserve `xs` binding and must not be collapsed into bare `Pattern::Wild`.
+    for arms in [
+        vec![
+            MatchArm::unguarded(
+                0,
+                Pattern::Or(vec![
+                    Pattern::bind_as("xs", Pattern::Wild),
+                    Pattern::bind_as(
+                        "xs",
+                        Pattern::List {
+                            prefix: vec![Pattern::signed(1)],
+                            rest: None,
+                        },
+                    ),
+                ]),
+            )
+            .unwrap(),
+        ],
+        vec![
+            MatchArm::unguarded(
+                0,
+                Pattern::Or(vec![
+                    Pattern::bind_as(
+                        "xs",
+                        Pattern::List {
+                            prefix: vec![Pattern::signed(1)],
+                            rest: None,
+                        },
+                    ),
+                    Pattern::bind_as("xs", Pattern::Wild),
+                ]),
+            )
+            .unwrap(),
+        ],
+    ] {
+        let matrix = PatternMatrix::new(list_ty.clone(), arms.clone()).unwrap();
+        let compiled = compile(&matrix).unwrap();
+        assert!(compiled.is_exhaustive);
+        assert_differential_with_trace(&compiled, &arms, &samples, |_, _| true);
+        for val in &samples {
+            let outcome = eval_dag(&compiled.dag, val, |_, _| true)
+                .unwrap()
+                .expect("exhaustive match");
+            assert_eq!(outcome.bindings.get("xs"), Some(val));
+        }
+    }
+
+    // Nested rest patterns with `Bind` and `Or`:
+    // `[1, ...(([2] as tail) or ([3] as tail))]` and `[1, ...((_ as a) as b)]`
+    let rest_arms = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::List {
+                prefix: vec![Pattern::signed(1)],
+                rest: Some(Box::new(Pattern::Or(vec![
+                    Pattern::bind_as(
+                        "tail",
+                        Pattern::List {
+                            prefix: vec![Pattern::signed(2)],
+                            rest: None,
+                        },
+                    ),
+                    Pattern::bind_as(
+                        "tail",
+                        Pattern::List {
+                            prefix: vec![Pattern::signed(3)],
+                            rest: None,
+                        },
+                    ),
+                ]))),
+            },
+        )
+        .unwrap(),
+        MatchArm::unguarded(
+            1,
+            Pattern::List {
+                prefix: vec![Pattern::signed(1)],
+                rest: Some(Box::new(Pattern::bind_as(
+                    "tail",
+                    Pattern::List {
+                        prefix: vec![Pattern::signed(4)],
+                        rest: None,
+                    },
+                ))),
+            },
+        )
+        .unwrap(),
+        MatchArm::unguarded(2, Pattern::bind_as("tail", Pattern::Wild)).unwrap(),
+    ];
+    let rest_out = compile(&PatternMatrix::new(list_ty, rest_arms.clone()).unwrap()).unwrap();
+    assert!(rest_out.is_exhaustive);
+    let rest_samples = vec![
+        Value::List(vec![]),
+        Value::List(vec![Value::signed(1)]),
+        Value::List(vec![Value::signed(1), Value::signed(2)]),
+        Value::List(vec![Value::signed(1), Value::signed(3)]),
+        Value::List(vec![Value::signed(1), Value::signed(4)]),
+        Value::List(vec![Value::signed(1), Value::signed(5)]),
+        Value::List(vec![Value::signed(1), Value::signed(2), Value::signed(3)]),
+    ];
+    assert_differential_with_trace(&rest_out, &rest_arms, &rest_samples, |_, _| true);
+}
+
+#[test]
+fn finite_int_out_of_range_and_eval_dag_errors_do_not_panic() {
+    // 1. Out-of-128-bit FiniteInt returns None cleanly instead of panicking.
+    let above_u128_max = FiniteInt::from_u128(u128::MAX).add_one();
+    assert_eq!(above_u128_max.to_int_lit(false), None);
+    assert_eq!(above_u128_max.to_int_lit(true), None);
+
+    let below_i128_min = FiniteInt::from_i128(i128::MIN).sub_one();
+    assert_eq!(below_i128_min.to_int_lit(true), None);
+    assert_eq!(below_i128_min.to_int_lit(false), None);
+
+    // 2. Compiled DAG evaluated against mismatched runtime values returns structured EvalError.
+    let bool_arms = vec![
+        MatchArm::unguarded(0, Pattern::Bool(true)).unwrap(),
+        MatchArm::unguarded(1, Pattern::Bool(false)).unwrap(),
+    ];
+    let bool_out = compile(&PatternMatrix::new(TypeDesc::Bool, bool_arms).unwrap()).unwrap();
+    let err = eval_dag(&bool_out.dag, &Value::signed(1), |_, _| true).unwrap_err();
+    assert!(matches!(err, EvalError::UnexpectedSwitchValue { .. }));
+    assert_balanced_sexpr_no_newlines(&err.to_string());
+
+    // 3. Invalid place projection and missing record field return structured EvalError.
+    let rec_ty = TypeDesc::Record(BTreeMap::from([("x".to_string(), TypeDesc::Bool)]));
+    let rec_arms = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::Record(BTreeMap::from([("x".to_string(), Pattern::var("bound_x"))])),
+        )
+        .unwrap(),
+    ];
+    let rec_out = compile(&PatternMatrix::new(rec_ty, rec_arms).unwrap()).unwrap();
+    let missing_field_err =
+        eval_dag(&rec_out.dag, &Value::Record(BTreeMap::new()), |_, _| true).unwrap_err();
+    assert!(matches!(
+        missing_field_err,
+        EvalError::MissingRecordField { .. }
+    ));
+    assert_balanced_sexpr_no_newlines(&missing_field_err.to_string());
+
+    // 4. Out-of-bounds NodeId in malformed DecisionDag returns InvalidNodeId.
+    let mut builder = DagBuilder::new(CompileBudget::default());
+    let fail = builder.fail().unwrap();
+    let mut bad_dag: DecisionDag = builder.finalize(fail);
+    bad_dag.root = NodeId(99);
+    let bad_node_err = eval_dag(&bad_dag, &Value::Bool(true), |_, _| true).unwrap_err();
+    assert_eq!(
+        bad_node_err,
+        EvalError::InvalidNodeId {
+            id: 99,
+            node_count: 1
+        }
+    );
+    assert_balanced_sexpr_no_newlines(&bad_node_err.to_string());
+    let _ = DagNode::Fail;
+    let _ = Place::root();
+    let _ = SwitchKind::Bool {
+        on_false: fail,
+        on_true: fail,
+    };
 }

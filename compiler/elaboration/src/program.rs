@@ -787,6 +787,7 @@ fn elaborate_in_mode(
         bit_packed_validation_ready: false,
         validated_bit_packed_instances: std::collections::HashSet::new(),
         warned_bit_packed_instances: std::collections::HashSet::new(),
+        warned_unreachable_match_arms: BTreeSet::new(),
         warnings: Vec::new(),
         volatile_storage: n::VolatileStorage::default(),
         match_plans: n::MatchPlans::default(),
@@ -3652,6 +3653,7 @@ struct Checker<'a, 'h> {
     bit_packed_validation_ready: bool,
     validated_bit_packed_instances: std::collections::HashSet<(DeclarationId, Vec<Term>)>,
     warned_bit_packed_instances: std::collections::HashSet<(DeclarationId, Vec<Term>)>,
+    warned_unreachable_match_arms: BTreeSet<(Option<DeclarationId>, n::SourceRange)>,
     warnings: Vec<Warning>,
     volatile_storage: n::VolatileStorage,
     match_plans: n::MatchPlans,
@@ -5561,12 +5563,12 @@ impl Checker<'_, '_> {
         Ok(answer)
     }
 
-    fn patterns_exhaustive(
+    pub(in crate::program) fn legacy_patterns_exhaustive(
         &self,
         patterns: &[&n::Pattern],
         ty: &Term,
     ) -> crate::coverage::Coverage {
-        let legacy = crate::coverage::check_metered_with_collections_in(
+        crate::coverage::check_metered_with_collections_in(
             &self.structs,
             &self.enums,
             ty,
@@ -5577,7 +5579,15 @@ impl Checker<'_, '_> {
             &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
             self.target,
         )
-        .0;
+        .0
+    }
+
+    fn patterns_exhaustive(
+        &self,
+        patterns: &[&n::Pattern],
+        ty: &Term,
+    ) -> crate::coverage::Coverage {
+        let legacy = self.legacy_patterns_exhaustive(patterns, ty);
         if legacy == crate::coverage::Coverage::Exhaustive {
             return legacy;
         }

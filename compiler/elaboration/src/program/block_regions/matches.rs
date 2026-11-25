@@ -27,6 +27,7 @@ pub(super) struct Frame<'h> {
     state: State,
     next_source: usize,
     arms: Vec<(n::Pattern, CheckedBlock)>,
+    arm_spans: Vec<Span>,
     scope: Option<LexicalScope>,
     premise: Option<refinements::TypeConditionScope>,
 }
@@ -60,6 +61,7 @@ impl<'h> Frame<'h> {
             state: State::Ready,
             next_source: 0,
             arms: Vec::new(),
+            arm_spans: Vec::new(),
             scope: None,
             premise: None,
         })
@@ -98,6 +100,7 @@ impl<'h> Frame<'h> {
             state: State::Ready,
             next_source: 0,
             arms: Vec::new(),
+            arm_spans: Vec::new(),
             scope: None,
             premise: None,
         })
@@ -235,6 +238,7 @@ impl<'h> Frame<'h> {
                 // The common pattern rule embeds the final guard in Pattern.
                 // Do not duplicate it in an arm or discard it for coverage.
                 self.arms.push(checked);
+                self.arm_spans.push(arm.span);
                 self.state = State::Arms(value);
                 Ok(Step::Continue)
             }
@@ -276,6 +280,7 @@ impl<'h> Frame<'h> {
                 import_expr.span,
             )?;
             self.arms.push(checked);
+            self.arm_spans.push(import_expr.span);
         }
         Ok(())
     }
@@ -395,7 +400,14 @@ impl<'h> Frame<'h> {
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            let value = ordinary.finish(checker, &self.source, &self.destination, value, arms)?;
+            let value = ordinary.finish(
+                checker,
+                &self.source,
+                &self.destination,
+                value,
+                arms,
+                &self.arm_spans,
+            )?;
             CheckedBlock::Ordinary(self.operand_scope.close(
                 checker,
                 value,
@@ -404,7 +416,13 @@ impl<'h> Frame<'h> {
             )?)
         } else {
             let patterns: Vec<_> = self.arms.iter().map(|(pattern, _)| pattern).collect();
-            checker.require_match_coverage(&patterns, &value.ty, self.source.span)?;
+            checker.require_match_coverage(
+                &patterns,
+                &value.ty,
+                self.source.span,
+                &self.arm_spans,
+                !checker.in_unselected_inline,
+            )?;
             let arms = std::mem::take(&mut self.arms)
                 .into_iter()
                 .map(|(pattern, body)| {
@@ -545,6 +563,7 @@ mod tests {
             state: State::Body(value, n::Pattern::Wild),
             next_source: 0,
             arms: Vec::new(),
+            arm_spans: Vec::new(),
             scope: None,
             premise: None,
         };

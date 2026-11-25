@@ -127,24 +127,24 @@ impl FiniteInt {
     }
 
     /// Convert back to [`IntLit`], preferring `Signed` when `prefer_signed` is set
-    /// and the value fits in `i128`.
-    pub fn to_int_lit(self, prefer_signed: bool) -> IntLit {
+    /// and the value fits in `i128`. Returns `None` if `self` exceeds the 128-bit range.
+    pub fn to_int_lit(self, prefer_signed: bool) -> Option<IntLit> {
         if prefer_signed {
             if let Some(s) = self.to_i128() {
-                return IntLit::Signed(s);
+                return Some(IntLit::Signed(s));
             }
             if let Some(u) = self.to_u128() {
-                return IntLit::Unsigned(u);
+                return Some(IntLit::Unsigned(u));
             }
         } else {
             if let Some(u) = self.to_u128() {
-                return IntLit::Unsigned(u);
+                return Some(IntLit::Unsigned(u));
             }
             if let Some(s) = self.to_i128() {
-                return IntLit::Signed(s);
+                return Some(IntLit::Signed(s));
             }
         }
-        panic!("FiniteInt {self} exceeds 128-bit IntLit range")
+        None
     }
 }
 
@@ -300,24 +300,20 @@ impl IntInterval {
     /// Choose a canonical representative value inside this non-empty interval.
     pub fn representative(&self, prefer_signed: bool) -> IntLit {
         if self.contains_finite(FiniteInt::ZERO) {
-            return FiniteInt::ZERO.to_int_lit(prefer_signed);
+            return FiniteInt::ZERO
+                .to_int_lit(prefer_signed)
+                .unwrap_or(IntLit::Signed(0));
         }
         match (self.lo, self.hi) {
             (LowerPoint::Finite(lo), _) => {
-                if lo.to_i128().is_some() || lo.to_u128().is_some() {
-                    lo.to_int_lit(prefer_signed)
-                } else {
-                    IntLit::Signed(0)
-                }
+                lo.to_int_lit(prefer_signed).unwrap_or(IntLit::Signed(0))
             }
             (LowerPoint::NegInf, UpperPoint::Finite(hi)) => {
-                if hi.to_i128().is_some() || hi.to_u128().is_some() {
-                    hi.to_int_lit(prefer_signed)
-                } else {
-                    IntLit::Signed(-1)
-                }
+                hi.to_int_lit(prefer_signed).unwrap_or(IntLit::Signed(-1))
             }
-            (LowerPoint::NegInf, UpperPoint::PosInf) => FiniteInt::ZERO.to_int_lit(prefer_signed),
+            (LowerPoint::NegInf, UpperPoint::PosInf) => FiniteInt::ZERO
+                .to_int_lit(prefer_signed)
+                .unwrap_or(IntLit::Signed(0)),
         }
     }
 
