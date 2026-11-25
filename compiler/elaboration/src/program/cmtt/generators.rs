@@ -25,7 +25,7 @@ use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
 
 #[derive(Clone)]
 pub(in crate::program) struct Generator<O = Interface> {
-    pub(super) captures: Vec<(DeclarationId, Term)>,
+    pub(in crate::program) captures: Vec<(DeclarationId, Term)>,
     pub(super) types: Vec<(DeclarationId, Term)>,
     pub(super) signature: CodeFunctionSignature<O>,
     pub(super) input_values: BTreeMap<usize, Term>,
@@ -61,7 +61,7 @@ impl<O> std::ops::DerefMut for Generator<O> {
     }
 }
 
-pub(in crate::program::cmtt) enum Argument {
+pub(in crate::program) enum Argument {
     Data(Option<n::Expr>),
     LiveData(comptime_interpretor::Value),
     Code(CodeValue),
@@ -435,7 +435,7 @@ impl Checker<'_, '_> {
         result
     }
 
-    pub(in crate::program::cmtt) fn generator_frame<R>(
+    pub(in crate::program) fn generator_frame<R>(
         &mut self,
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
@@ -792,7 +792,11 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn copy_code_generator(&mut self, owner: OwnerId, span: Span) -> Result<Generator, Error> {
+    pub(in crate::program) fn copy_code_generator(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Generator, Error> {
         let definition = &self.code_generators[&owner];
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
         let definition = definition.clone();
@@ -825,7 +829,9 @@ impl Checker<'_, '_> {
         Ok(definition)
     }
 
-    fn instantiate_code_generator<O: nir::code_interfaces::SignatureOutput + Clone>(
+    pub(in crate::program) fn instantiate_code_generator<
+        O: nir::code_interfaces::SignatureOutput + Clone,
+    >(
         &mut self,
         definition: &Generator<O>,
         types: &[Term],
@@ -1216,7 +1222,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn run_code_generator(
+    pub(in crate::program) fn run_code_generator(
         &mut self,
         definition: &Generator,
         arguments: Vec<Option<Argument>>,
@@ -1256,9 +1262,37 @@ impl Checker<'_, '_> {
             // them. Invocation evaluates only omitted inputs, in prefix order.
             let from_default = argument.is_none() || definition.prepared_defaults.contains(&index);
             let supplied = if self.checking_code_generator || argument.is_none() {
-                default
-                    .map(|value| self.generator_default(value, input))
-                    .transpose()?
+                if let Some(value) = default {
+                    Some(self.generator_default(value, input)?)
+                } else if argument.is_none()
+                    && signature.params[index].ty.is_implicit()
+                    && !signature.params[index].ty.is_quote()
+                    && let Input::Data(ty) = input
+                {
+                    let callee_decl =
+                        Some(declaration(self.package, &self.package_identities, owner));
+                    let param_name = signature.params[index].name.name.as_str().to_string();
+                    let implicit_expr = self.resolve_implicit_passing_expr(
+                        callee_decl,
+                        &param_name,
+                        ty,
+                        span,
+                        true,
+                    )?;
+                    let (data, actual_ty) = self.required_normal_input(
+                        &Expr {
+                            hir_id: signature.params[index].hir_id,
+                            span,
+                            kind: H::Unit,
+                        },
+                        implicit_expr,
+                        vec![],
+                    )?;
+                    let materialized = self.materialize_generator_data(data, actual_ty, span)?;
+                    Some(Argument::Data(Some(materialized)))
+                } else {
+                    None
+                }
             } else {
                 None
             };

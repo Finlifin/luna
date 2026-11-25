@@ -123,6 +123,12 @@ pub(crate) fn compile_explicit_source_with_bindings(
                 .extended_variadic_collector
                 .map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),
+            deref_protocol: selectors.deref.map(str::to_owned),
+            deref_mut_protocol: selectors.deref_mut.map(str::to_owned),
+            reference_protocol: selectors.reference.map(str::to_owned),
+            implicit_passing_protocol: selectors.implicit_passing.map(str::to_owned),
+            call_context_type: selectors.call_context.map(str::to_owned),
+            call_description_type: selectors.call_description.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
             incremental: Default::default(),
         },

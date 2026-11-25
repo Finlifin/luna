@@ -323,32 +323,70 @@ impl<'h> Root<'h> for CallInputs<'h> {
         }
         let site = &self.completion.as_ref().expect("active call").site;
         let Phase::Supply(PreparedInputs {
+            signature,
             producers: prepared,
             binding,
-            ..
         }) = &mut self.phase
         else {
             unreachable!()
         };
+        let call_signature = CallSignature::of(signature).expect("prepared callable signature");
         for (index, assigned) in self.assigned.iter().enumerate() {
             if *assigned {
                 continue;
             }
             let parameter = index + self.offset;
+            let mut is_default = true;
             let value = if let Some(value) = prepared.values[parameter].take() {
                 value
-            } else {
-                let mut value = prepared.defaults[parameter]
-                    .take()
-                    .expect("prepared default");
+            } else if let Some(mut value) = prepared.defaults[parameter].take() {
                 checker.specialize_default_annotations(&mut value, binding, site.source.span)?;
                 value
+            } else if let Some(owner) = site.owner
+                && let Some(param_name) = checker
+                    .package
+                    .item(owner)
+                    .and_then(|item| match &item.kind {
+                        ItemKind::Fn(sig, _)
+                        | ItemKind::Case(sig, _)
+                        | ItemKind::FnDeclaration(sig) => sig.params.get(parameter),
+                        _ => None,
+                    })
+                    .filter(|param| param.ty.is_implicit() && !param.ty.is_quote())
+                    .map(|param| param.name.name.as_str().to_string())
+            {
+                let domain = checker
+                    .with_call_type_fuel(|_, fuel| {
+                        binding.substitute_bounded(&call_signature.parameters[parameter].ty, fuel)
+                    })
+                    .map_err(|failure| {
+                        error(
+                            site.source.span,
+                            format!("implicit call input is not available: {failure}"),
+                        )
+                    })?;
+                let domain = checker.observe_call_type(&domain, &site.source)?;
+                let callee_decl = Some(declaration(
+                    checker.package,
+                    &checker.package_identities,
+                    owner,
+                ));
+                is_default = false;
+                checker.resolve_implicit_passing_expr(
+                    callee_decl,
+                    &param_name,
+                    &domain,
+                    site.source.span,
+                    false,
+                )?
+            } else {
+                panic!("prepared default");
             };
             self.arguments.push(n::CallArgument {
                 passing: Default::default(),
                 parameter,
                 value,
-                is_default: true,
+                is_default,
             });
         }
         let Phase::Supply(prepared) = std::mem::replace(&mut self.phase, Phase::Finished) else {

@@ -51,6 +51,12 @@ pub struct Options {
     pub ord_protocol: Option<String>,
     pub eq_protocol: Option<String>,
     pub literal_into_protocol: Option<String>,
+    pub deref_protocol: Option<String>,
+    pub deref_mut_protocol: Option<String>,
+    pub reference_protocol: Option<String>,
+    pub implicit_passing_protocol: Option<String>,
+    pub call_context_type: Option<String>,
+    pub call_description_type: Option<String>,
     pub arithmetic_protocols: [Option<String>; 7],
     pub input: PathBuf,
     pub emit: Emit,
@@ -222,6 +228,12 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut ord_protocol = None;
     let mut eq_protocol = None;
     let mut literal_into_protocol = None;
+    let mut deref_protocol = None;
+    let mut deref_mut_protocol = None;
+    let mut reference_protocol = None;
+    let mut implicit_passing_protocol = None;
+    let mut call_context_type = None;
+    let mut call_description_type = None;
     let mut tuple_type = None;
     let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut positional = false;
@@ -902,6 +914,72 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--deref-protocol") => {
+                    if deref_protocol.is_some() {
+                        return Err("--deref-protocol may only be specified once".into());
+                    }
+                    deref_protocol = Some(
+                        option_value(&mut args, "--deref-protocol")?
+                            .into_string()
+                            .map_err(|_| "Deref protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--deref-mut-protocol") => {
+                    if deref_mut_protocol.is_some() {
+                        return Err("--deref-mut-protocol may only be specified once".into());
+                    }
+                    deref_mut_protocol = Some(
+                        option_value(&mut args, "--deref-mut-protocol")?
+                            .into_string()
+                            .map_err(|_| "DerefMut protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--reference-protocol") => {
+                    if reference_protocol.is_some() {
+                        return Err("--reference-protocol may only be specified once".into());
+                    }
+                    reference_protocol = Some(
+                        option_value(&mut args, "--reference-protocol")?
+                            .into_string()
+                            .map_err(|_| "Reference protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--implicit-passing-protocol") => {
+                    if implicit_passing_protocol.is_some() {
+                        return Err("--implicit-passing-protocol may only be specified once".into());
+                    }
+                    implicit_passing_protocol = Some(
+                        option_value(&mut args, "--implicit-passing-protocol")?
+                            .into_string()
+                            .map_err(|_| "ImplicitPassing protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--call-context-type") => {
+                    if call_context_type.is_some() {
+                        return Err("--call-context-type may only be specified once".into());
+                    }
+                    call_context_type = Some(
+                        option_value(&mut args, "--call-context-type")?
+                            .into_string()
+                            .map_err(|_| "Context type selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--call-description-type") => {
+                    if call_description_type.is_some() {
+                        return Err("--call-description-type may only be specified once".into());
+                    }
+                    call_description_type = Some(
+                        option_value(&mut args, "--call-description-type")?
+                            .into_string()
+                            .map_err(|_| "CallDescription type selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--splice-protocol") => {
                     if splice_protocol.is_some() {
                         return Err("--splice-protocol may only be specified once".into());
@@ -1188,6 +1266,12 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         ord_protocol,
         eq_protocol,
         literal_into_protocol,
+        deref_protocol,
+        deref_mut_protocol,
+        reference_protocol,
+        implicit_passing_protocol,
+        call_context_type,
+        call_description_type,
         incremental: crate::package_cache::IncrementalConfig {
             cache_dir,
             no_cache,
@@ -1365,6 +1449,12 @@ mod tests {
                 variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
+                deref_protocol: None,
+                deref_mut_protocol: None,
+                reference_protocol: None,
+                implicit_passing_protocol: None,
+                call_context_type: None,
+                call_description_type: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),
@@ -1419,6 +1509,12 @@ mod tests {
                 variadic_collector_protocol: None,
                 extended_variadic_collector_protocol: None,
                 literal_into_protocol: None,
+                deref_protocol: None,
+                deref_mut_protocol: None,
+                reference_protocol: None,
+                implicit_passing_protocol: None,
+                call_context_type: None,
+                call_description_type: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
                 incremental: Default::default(),

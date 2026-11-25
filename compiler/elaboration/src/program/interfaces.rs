@@ -2559,6 +2559,7 @@ impl Checker<'_, '_> {
                     .signature_owner
                     .and_then(|owner| self.capabilities.get(&owner))
                     .is_some_and(|requirements| !requirements.is_empty())
+                || !self.receiver_type_views(view).is_empty()
                 || self.checked_implementations.iter().any(|i| {
                     i.interface.is_none()
                         && i.methods
@@ -2605,6 +2606,63 @@ impl Checker<'_, '_> {
         let interface = interface
             .map(|expr| self.interface_expr_for(expr, &receiver.ty))
             .transpose()?;
+        // Layer 1: Type-annotation `.as(View)` chain evaluated in reverse order
+        // (`D, C, B` for `A.as(B).as(C).as(D)`), with no automatic `*`, `Deref`,
+        // `.ref`, or `Reference` fallback.
+        if interface.is_none() {
+            let view_candidates = self.receiver_type_views(base);
+            for view_ty in view_candidates {
+                let candidate_interface =
+                    self.context_member_interface(&view_ty, name.name.as_str(), expr.span)?;
+                let mut selected = self.selected_method(
+                    view_ty.clone(),
+                    candidate_interface.clone(),
+                    name.name.as_str(),
+                    expr.span,
+                )?;
+                if selected.is_none() && candidate_interface.is_none() {
+                    if let Some(discovered) = self.discovered_member_interface(
+                        &view_ty,
+                        name.name.as_str(),
+                        callee.hir_id,
+                        expr.span,
+                    )? {
+                        selected = self.selected_method(
+                            view_ty.clone(),
+                            Some(discovered),
+                            name.name.as_str(),
+                            expr.span,
+                        )?;
+                    }
+                }
+                if let Some(method) = selected {
+                    self.check_selected_method_access(Some(&method), callee.hir_id, expr.span)?;
+                    let Term::Function { parameters, .. } = method.ty.callable_signature() else {
+                        unreachable!()
+                    };
+                    let target = parameters[0]
+                        .ty
+                        .substitute_partial(&[])
+                        .map_err(|e| error(base.span, e.to_string()))?;
+                    let converted = n::Expr {
+                        ty: view_ty.clone(),
+                        source: source(base.span),
+                        kind: K::NewtypeConvert(Box::new(receiver)),
+                    };
+                    let adapted = if matches!(&target, Term::Pointer(inner) if **inner == view_ty) {
+                        n::Expr {
+                            ty: target.clone(),
+                            source: source(base.span),
+                            kind: K::AddressOf(Box::new(converted)),
+                        }
+                    } else {
+                        converted
+                    };
+                    self.require(&adapted.ty, &target, base.span)?;
+                    return Ok(Some((method, vec![adapted])));
+                }
+            }
+        }
         let mut subject = match interface
             .as_ref()
             .map(|interface| self.symbolic_interface_evidence(&receiver.ty, interface))
@@ -2616,7 +2674,10 @@ impl Checker<'_, '_> {
             }
             Err(e) => return Err(error(expr.span, e.to_string())),
         };
-        let mut depth = 0;
+        let mut depth = 0usize;
+        let mut deref_steps: Vec<receiver_adaptation::Layer2Step> = Vec::new();
+        let mut visited_subjects = vec![self.normalize_adaptation_key(&subject)];
+        let mut terminal_reference: Option<receiver_adaptation::ReferenceStep> = None;
         let method = loop {
             if let Some(method) = domain_method.take() {
                 break method;
@@ -2709,14 +2770,55 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let Term::Pointer(inner) = subject else {
-                return Ok(None);
-            };
-            if depth == 128 {
-                return Err(error(expr.span, "receiver dereference depth exhausted"));
+            if let Term::Pointer(inner) = subject {
+                let next = self.method_subject_view(&inner, base.span)?;
+                self.check_deref_cycle(&mut visited_subjects, &next, depth, expr.span)?;
+                depth += 1;
+                deref_steps.push(receiver_adaptation::Layer2Step::BuiltinPtr(next.clone()));
+                subject = next;
+                continue;
             }
-            depth += 1;
-            subject = self.method_subject_view(&inner, base.span)?;
+            if interface.is_none() {
+                if let Some(step) = self.query_deref_step(&subject, false, expr.span)? {
+                    let next = self.method_subject_view(&step.target, base.span)?;
+                    self.check_deref_cycle(&mut visited_subjects, &next, depth, expr.span)?;
+                    depth += 1;
+                    deref_steps.push(receiver_adaptation::Layer2Step::TraitDeref(step));
+                    subject = next;
+                    continue;
+                }
+                if let Some(ref_step) = self.query_reference_step(&subject, expr.span)? {
+                    let ref_subject = self.method_subject_view(&ref_step.target, base.span)?;
+                    let ref_iface =
+                        self.context_member_interface(&ref_subject, name.name.as_str(), expr.span)?;
+                    let mut ref_method = self.selected_method(
+                        ref_subject.clone(),
+                        ref_iface.clone(),
+                        name.name.as_str(),
+                        expr.span,
+                    )?;
+                    if ref_method.is_none() && ref_iface.is_none() {
+                        if let Some(discovered) = self.discovered_member_interface(
+                            &ref_subject,
+                            name.name.as_str(),
+                            callee.hir_id,
+                            expr.span,
+                        )? {
+                            ref_method = self.selected_method(
+                                ref_subject,
+                                Some(discovered),
+                                name.name.as_str(),
+                                expr.span,
+                            )?;
+                        }
+                    }
+                    if let Some(method) = ref_method {
+                        terminal_reference = Some(ref_step);
+                        break method;
+                    }
+                }
+            }
+            return Ok(None);
         };
         self.check_selected_method_access(Some(&method), callee.hir_id, expr.span)?;
         let has_receiver = match &method.kind {
@@ -2765,54 +2867,110 @@ impl Checker<'_, '_> {
             .substitute_partial(&[])
             .map_err(|e| error(base.span, e.to_string()))?;
         let target = &target;
-        for _ in 0..=128 {
-            if &receiver.ty == target {
-                break;
+        for (step_index, step) in deref_steps.iter().enumerate() {
+            match step {
+                receiver_adaptation::Layer2Step::BuiltinPtr(_) => {
+                    if let Term::Pointer(inner) = &receiver.ty {
+                        if matches!(
+                            deref_steps.get(step_index + 1),
+                            Some(receiver_adaptation::Layer2Step::BuiltinPtr(_))
+                        ) {
+                            receiver = n::Expr {
+                                ty: (**inner).clone(),
+                                source: source(base.span),
+                                kind: K::ReadPointer(Box::new(receiver)),
+                            };
+                        }
+                    }
+                }
+                receiver_adaptation::Layer2Step::TraitDeref(dstep) => {
+                    let addr = if matches!(receiver.ty, Term::Pointer(_)) {
+                        receiver
+                    } else {
+                        self.ensure_address_of_value(receiver, base.span)?
+                    };
+                    receiver = self.emit_deref_call(expr, addr, dstep)?;
+                }
             }
+        }
+        if let Some(ref_step) = terminal_reference {
+            let addr = if matches!(receiver.ty, Term::Pointer(_)) {
+                receiver
+            } else {
+                self.ensure_address_of_value(receiver, base.span)?
+            };
+            receiver = self.emit_reference_call(expr, addr, &ref_step)?;
+        }
+        if &receiver.ty != target {
             if matches!(target, Term::Pointer(inner) if **inner == receiver.ty) {
                 if let K::ReadPointer(pointer) = receiver.kind {
                     receiver = *pointer;
-                    break;
+                } else {
+                    let address = n::Expr {
+                        ty: target.clone(),
+                        source: source(base.span),
+                        kind: K::AddressOf(Box::new(receiver)),
+                    };
+                    if let Some(message) = n::pointer_operation_error_in(&address, self.target) {
+                        return Err(error(base.span, message));
+                    }
+                    receiver = address;
                 }
-                let address = n::Expr {
-                    ty: target.clone(),
-                    source: source(base.span),
-                    kind: K::AddressOf(Box::new(receiver)),
-                };
-                if let Some(message) = n::pointer_operation_error_in(&address, self.target) {
-                    return Err(error(base.span, message));
+            } else if matches!(&receiver.ty, Term::Pointer(inner) if **inner == *target) {
+                if !method.ty.is_comptime_callable() {
+                    receiver = self.emit_place_read_with_copy_check(
+                        receiver,
+                        base.span,
+                        "by-value pointer receiver requires `Copy`",
+                    )?;
+                } else {
+                    let Term::Pointer(inner) = &receiver.ty else {
+                        unreachable!()
+                    };
+                    receiver = n::Expr {
+                        ty: (**inner).clone(),
+                        source: source(base.span),
+                        kind: K::ReadPointer(Box::new(receiver)),
+                    };
                 }
-                receiver = address;
-                break;
             }
-            let Term::Pointer(inner) = &receiver.ty else {
-                break;
-            };
-            if !method.ty.is_comptime_callable() && !n::intrinsic_pointer_value(inner) {
-                return Err(error(
-                    base.span,
-                    "by-value pointer receiver requires memory transfer contracts",
-                ));
-            }
-            receiver = n::Expr {
-                ty: (**inner).clone(),
-                source: source(base.span),
-                kind: K::ReadPointer(Box::new(receiver)),
-            };
-        }
-        // Comptime reads use the VM's checked value-transfer rules. Runtime
-        // pointer reads still need intrinsic copy or memory transfer contracts.
-        if !method.ty.is_comptime_callable()
-            && matches!(receiver.kind, K::ReadPointer(_))
-            && !n::intrinsic_pointer_value(&receiver.ty)
-        {
-            return Err(error(
-                base.span,
-                "by-value pointer receiver requires memory transfer contracts",
-            ));
         }
         self.require(&receiver.ty, target, base.span)?;
         Ok(Some((method, vec![receiver])))
+    }
+
+    fn field_could_be_callable(&self, ty: &Term) -> bool {
+        let mut cursor = ty;
+        let mut depth = 0usize;
+        while let Term::Nominal {
+            declaration,
+            arguments,
+        } = cursor
+            && let Some(newtype) = self.newtypes.get(declaration)
+            && depth < 16
+        {
+            depth += 1;
+            let mut fuel = 1_000;
+            if let Ok(inner) = newtype.representation_budgeted(arguments, &[], &mut fuel) {
+                return self.field_could_be_callable(&inner);
+            }
+            return true;
+        }
+        match cursor {
+            Term::Primitive(_)
+            | Term::Tuple(_)
+            | Term::Record(_)
+            | Term::Optional(_)
+            | Term::ErrorResult { .. }
+            | Term::Pointer(_) => false,
+            Term::Nominal { declaration, .. }
+                if self.structs.contains_key(declaration)
+                    || self.enums.contains_key(declaration) =>
+            {
+                false
+            }
+            _ => true,
+        }
     }
 
     fn receiver_has_field(
@@ -2822,15 +2980,35 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<bool, Error> {
         self.ensure_nominal_type(subject, span)?;
-        let fields = match subject {
-            Term::Nominal { declaration, .. } => self
-                .structs
-                .get(declaration)
-                .map(|definition| &definition.fields),
-            Term::Record(fields) => Some(fields),
+        let field_ty = match subject {
+            Term::Nominal {
+                declaration,
+                arguments,
+            } => {
+                if let Some(definition) = self.structs.get(declaration)
+                    && let Some(index) = definition
+                        .fields
+                        .iter()
+                        .position(|(field, _)| field == name)
+                {
+                    let frames = self.call_input_frames();
+                    Some(
+                        nominal_fields::metered(&mut self.required_steps, |fuel| {
+                            definition.instantiate_field_bounded(index, arguments, &frames, fuel)
+                        })
+                        .map_err(|e| error(span, e.to_string()))?,
+                    )
+                } else {
+                    None
+                }
+            }
+            Term::Record(fields) => fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, ty)| ty.clone()),
             _ => None,
         };
-        Ok(fields.is_some_and(|fields| fields.iter().any(|(field, _)| field == name)))
+        Ok(field_ty.is_some_and(|ty| self.field_could_be_callable(&ty)))
     }
 }
 

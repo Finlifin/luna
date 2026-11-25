@@ -54,6 +54,12 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         variadic_collector_protocol: None,
         extended_variadic_collector_protocol: None,
         literal_into_protocol: None,
+        deref_protocol: None,
+        deref_mut_protocol: None,
+        reference_protocol: None,
+        implicit_passing_protocol: None,
+        call_context_type: None,
+        call_description_type: None,
         arithmetic_protocols: Default::default(),
         incremental: Default::default(),
     });

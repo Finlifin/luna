@@ -261,7 +261,7 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                let ty = self.type_expr(annotation)?;
+                let (ty, _) = self.resolve_type_annotation_with_views(annotation)?;
                 let sort = if phase == n::FunctionPhase::NormalForm || input.is_comptime() {
                     Sort::of_comptime_domain(&ty)
                 } else {
@@ -287,7 +287,10 @@ impl Checker<'_, '_> {
                 }
             }
             let result = output
-                .map(|output| self.type_expr(output))
+                .map(|output| {
+                    self.resolve_type_annotation_with_views(output)
+                        .map(|(ty, _)| ty)
+                })
                 .transpose()?
                 .unwrap_or(p(P::Void));
             let signature = nominal_fields::metered(&mut self.required_steps, |fuel| {

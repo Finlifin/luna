@@ -106,65 +106,92 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         let (ty, kind) = match &expr.kind {
             H::Ref(inner) => {
+                self.require_runtime_pointer_context(expr.span, "reference (`.ref`)")?;
                 if self.checking_code_generator {
                     self.forget_generator_schema_evidence(expr.span)?;
                 }
-                if let Some(pointer) = self.dereferenced_place(inner)? {
+                let base_pointer = if let Some(pointer) = self.dereferenced_place_for_ref(inner)? {
                     if self.pointer_targets_packed_field(&pointer) {
                         return Err(error(
                             expr.span,
                             "cannot take an aligned pointer to a field of a packed struct",
                         ));
                     }
-                    if let Some(expected) = expected {
-                        self.require(&pointer.ty, expected, expr.span)?;
+                    pointer
+                } else if let Some(const_address) =
+                    self.try_const_address(inner, expr.span, expected)?
+                {
+                    const_address
+                } else {
+                    let place = self.expr(inner, None)?;
+                    let result = n::Expr {
+                        ty: Term::Pointer(Box::new(place.ty.clone())),
+                        source: source(expr.span),
+                        kind: K::AddressOf(Box::new(place)),
+                    };
+                    if self.pointer_targets_packed_field(&result) {
+                        return Err(error(
+                            expr.span,
+                            "cannot take an aligned pointer to a field of a packed struct",
+                        ));
                     }
-                    return Ok(pointer);
-                }
-                if let Some(const_address) = self.try_const_address(inner, expr.span, expected)? {
-                    return Ok(const_address);
-                }
-                let place = self.expr(inner, None)?;
-                let result = n::Expr {
-                    ty: Term::Pointer(Box::new(place.ty.clone())),
-                    source: source(expr.span),
-                    kind: K::AddressOf(Box::new(place)),
+                    if let Some(message) = n::pointer_operation_error_in(&result, self.target) {
+                        return Err(error(expr.span, message));
+                    }
+                    result
                 };
-                if self.pointer_targets_packed_field(&result) {
-                    return Err(error(
-                        expr.span,
-                        "cannot take an aligned pointer to a field of a packed struct",
-                    ));
-                }
-                if let Some(message) = n::pointer_operation_error_in(&result, self.target) {
-                    return Err(error(expr.span, message));
+                if let Some(Term::Pointer(target_inner)) = expected
+                    && let Term::Pointer(base_inner) = &base_pointer.ty
+                    && self.require(base_inner, target_inner, expr.span).is_err()
+                    && let Some(ref_step) = self.query_reference_step(base_inner, expr.span)?
+                {
+                    self.require(&ref_step.target, target_inner, expr.span)?;
+                    let adapted = self.emit_reference_call(expr, base_pointer, &ref_step)?;
+                    if let Some(expected) = expected {
+                        self.require(&adapted.ty, expected, expr.span)?;
+                    }
+                    return Ok(adapted);
                 }
                 if let Some(expected) = expected {
-                    self.require(&result.ty, expected, expr.span)?;
+                    self.require(&base_pointer.ty, expected, expr.span)?;
                 }
-                return Ok(result);
+                return Ok(base_pointer);
             }
             H::Deref(inner) => {
+                self.require_runtime_pointer_context(expr.span, "dereference (`.*`)")?;
                 let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
-                let pointer = self.expr(inner, None);
+                let operand = self.expr(inner, None);
                 self.allow_packed_pointer_projection = prev_allow;
-                let pointer = pointer?;
-                let Term::Pointer(ty) = &pointer.ty else {
-                    return Err(error(expr.span, "dereference requires a pointer"));
-                };
-                if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty, expr.span) {
+                let operand = operand?;
+                if let Term::Pointer(ty) = &operand.ty {
+                    if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty, expr.span) {
+                        return Err(error(
+                            expr.span,
+                            "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
+                        ));
+                    }
+                    ((**ty).clone(), K::ReadPointer(Box::new(operand)))
+                } else if let Some(step) = self.query_deref_step(&operand.ty, false, expr.span)? {
+                    let addr = self.ensure_address_of_value(operand, inner.span)?;
+                    let target_ptr = self.emit_deref_call(expr, addr, &step)?;
+                    let read = self.emit_place_read_with_copy_check(
+                        target_ptr,
+                        expr.span,
+                        "cannot move non-Copy target out of `Deref`",
+                    )?;
+                    (read.ty, read.kind)
+                } else {
                     return Err(error(
                         expr.span,
-                        "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
+                        "dereference requires a pointer or `Deref` implementation",
                     ));
                 }
-                ((**ty).clone(), K::ReadPointer(Box::new(pointer)))
             }
             H::AssignOp(op, target, value) => {
                 return self.compound_assignment(expr, op, target, value, expected);
             }
             H::Assign(target, value) => {
-                if let Some(mut pointer) = self.dereferenced_place(target)? {
+                if let Some(mut pointer) = self.dereferenced_place_for_write(target)? {
                     let Term::Pointer(ty) = &pointer.ty else {
                         return Err(error(target.span, "pointer assignment requires a pointer"));
                     };
@@ -212,7 +239,7 @@ impl Checker<'_, '_> {
                 };
                 let bit_assignment = take_bits || !selections.is_empty();
                 if bit_assignment {
-                    if let Some(mut pointer) = self.dereferenced_place(storage)? {
+                    if let Some(mut pointer) = self.dereferenced_place_for_write(storage)? {
                         let Term::Pointer(ty) = &pointer.ty else {
                             unreachable!()
                         };

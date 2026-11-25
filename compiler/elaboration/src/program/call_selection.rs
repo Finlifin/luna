@@ -632,18 +632,19 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         if offset > signature.parameters.len() {
             return Err(error(expr.span, "method receiver count mismatch"));
         }
-        let (routes, mut assigned) = route_arguments(
-            args,
-            declarations.map(|p| &p[offset..]),
-            signature.parameters.len() - offset,
-            expr.span,
-        )
-        .map_err(|mut failure| {
-            if offset != 0 && failure.message.starts_with("argument count mismatch") {
-                failure.message = format!("method {}", failure.message);
-            }
-            failure
-        })?;
+        let (routes, mut assigned) = self
+            .route_call_arguments(
+                args,
+                declarations.map(|p| &p[offset..]),
+                signature.parameters.len() - offset,
+                expr.span,
+            )
+            .map_err(|mut failure| {
+                if offset != 0 && failure.message.starts_with("argument count mismatch") {
+                    failure.message = format!("method {}", failure.message);
+                }
+                failure
+            })?;
         let contextual =
             self.resolve_contextual_quote_inputs(expr, declarations, offset, &assigned)?;
         for &(slot, _) in &contextual {

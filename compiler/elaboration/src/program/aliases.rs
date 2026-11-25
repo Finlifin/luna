@@ -87,7 +87,13 @@ impl Checker<'_, '_> {
                         .insert(parameter, (binding, domain));
                 }
             }
-            self.expr(value, Some(&p(P::Type))).map(|_| ())
+            if matches!(value.kind, H::Cast(..)) {
+                let (_, views) = self.resolve_type_annotation_with_views(value)?;
+                self.alias_type_views.insert(owner, views);
+                Ok(())
+            } else {
+                self.expr(value, Some(&p(P::Type))).map(|_| ())
+            }
         })();
         self.abstract_alias_types = saved_definition_inputs;
         self.signature_owner = saved_owner;
@@ -138,7 +144,12 @@ impl Checker<'_, '_> {
         }
         let data =
             self.with_alias_arguments(owner, &parameters, &key.arguments, span, |checker| {
-                checker.completed_type(value)
+                if matches!(value.kind, H::Cast(..)) {
+                    let (ty, _) = checker.resolve_type_annotation_with_views(value)?;
+                    Ok(CompletedType::Identity(ty))
+                } else {
+                    checker.completed_type(value)
+                }
             })?;
         let cached = self.copy_completed_type(&data, span)?;
         self.completed_aliases

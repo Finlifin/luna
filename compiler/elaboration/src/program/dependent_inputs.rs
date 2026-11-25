@@ -565,6 +565,23 @@ impl Checker<'_, '_> {
                     "default computation needs declaration parameter metadata",
                 )
             })?;
+            let is_non_optional_implicit = self
+                .package
+                .item(owner)
+                .and_then(|item| match &item.kind {
+                    ItemKind::Fn(sig, _)
+                    | ItemKind::Case(sig, _)
+                    | ItemKind::FnDeclaration(sig) => sig.params.get(parameter),
+                    _ => None,
+                })
+                .is_some_and(|param| {
+                    param.ty.is_implicit()
+                        && !param.ty.is_quote()
+                        && !matches!(param.ty.kind, TyParamKind::Optional(..))
+                });
+            if is_non_optional_implicit {
+                continue;
+            }
             let value = self.call_default(site, owner, parameter, expr.span)?;
             demanded.extend(
                 self.checked_substitution_inputs(&value, expr.span)?

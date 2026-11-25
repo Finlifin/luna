@@ -172,6 +172,10 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
     ) -> Result<Annotation, Error> {
         let H::Defer(value) = &expr.kind else {
+            if matches!(expr.kind, H::Cast(..)) {
+                let (ty, _) = self.resolve_type_annotation_with_views(expr)?;
+                return Ok(Annotation::Known(ty));
+            }
             return self.completed_type(expr).map(Annotation::from);
         };
         if let H::ResolvedFnParam(_, binding) = value.kind {
@@ -262,6 +266,10 @@ impl Checker<'_, '_> {
         ) && !matches!(&value.kind, H::NFApplication(head, _)
             if matches!(&head.kind, H::Builtin(name) if name.as_str() == "BitVec"))
         {
+            if matches!(value.kind, H::Cast(..)) {
+                let (ty, _) = self.resolve_type_annotation_with_views(value)?;
+                return Ok(Annotation::Known(ty));
+            }
             return self.completed_type(value).map(Annotation::from);
         }
         let prepared =
@@ -514,7 +522,12 @@ impl Checker<'_, '_> {
                             }
                         }
                     }
-                    this.completed_type(value)
+                    if matches!(value.kind, H::Cast(..)) {
+                        this.resolve_type_annotation_with_views(value)
+                            .map(|(ty, _)| CompletedType::Identity(ty))
+                    } else {
+                        this.completed_type(value)
+                    }
                 })?
             }
             Annotation::InputType { slot } => {

@@ -1850,7 +1850,7 @@ impl Checker<'_, '_> {
                             }
                         }
                     }
-                    if let Ok((routes, _)) = route_arguments(
+                    if let Ok((routes, _)) = self.route_call_arguments(
                         flat.as_deref().unwrap_or(&arguments),
                         Some(target_sig.params),
                         target_sig.params.len(),
@@ -2295,6 +2295,17 @@ impl Checker<'_, '_> {
                 if let D::Known(ty) = &description {
                     let binding = local(parameter.hir_id);
                     this.locals.insert(binding, ty.clone());
+                    if let Some(ty_expr) = match parameter.ty.kind {
+                        TyParamKind::Positional(ty) | TyParamKind::Optional(_, ty, _) => Some(ty),
+                        _ => None,
+                    } && matches!(ty_expr.kind, H::Cast(..))
+                    {
+                        if let Ok((_, views)) = this.resolve_type_annotation_with_views(ty_expr)
+                            && !views.is_empty()
+                        {
+                            this.local_type_views.insert(binding, views);
+                        }
+                    }
                     this.input_facts.parameters.bind(binding, slot, *sort, ty);
                 }
                 locals.insert(local(parameter.hir_id), description);
@@ -3378,17 +3389,18 @@ impl Checker<'_, '_> {
             {
                 // Form the destination address without reading its contents;
                 // writes must retain their own transfer/Copy contract checks.
-                let target_type = if let Some(pointer) = self.dereferenced_place(target)? {
-                    let Term::Pointer(ty) = pointer.ty else {
-                        return Err(error(
-                            target.span,
-                            "dereferenced place must have pointer type",
-                        ));
+                let target_type =
+                    if let Some(pointer) = self.dereferenced_place_for_write(target)? {
+                        let Term::Pointer(ty) = pointer.ty else {
+                            return Err(error(
+                                target.span,
+                                "dereferenced place must have pointer type",
+                            ));
+                        };
+                        *ty
+                    } else {
+                        self.expr(target, None)?.ty
                     };
-                    *ty
-                } else {
-                    self.expr(target, None)?.ty
-                };
                 let description = self.describe_open_expression(
                     value,
                     locals,
@@ -3412,17 +3424,18 @@ impl Checker<'_, '_> {
                 })?
             }
             H::AssignOp(op, target, value) if self.contains_inline_control(value)? => {
-                let target_type = if let Some(pointer) = self.dereferenced_place(target)? {
-                    let Term::Pointer(ty) = pointer.ty else {
-                        return Err(error(
-                            target.span,
-                            "dereferenced place must have pointer type",
-                        ));
+                let target_type =
+                    if let Some(pointer) = self.dereferenced_place_for_write(target)? {
+                        let Term::Pointer(ty) = pointer.ty else {
+                            return Err(error(
+                                target.span,
+                                "dereferenced place must have pointer type",
+                            ));
+                        };
+                        *ty
+                    } else {
+                        self.expr(target, None)?.ty
                     };
-                    *ty
-                } else {
-                    self.expr(target, None)?.ty
-                };
                 let arithmetic = match op {
                     BinOp::Add => Some(crate::arithmetic::Operator::Add),
                     BinOp::Sub => Some(crate::arithmetic::Operator::Subtract),
@@ -4032,7 +4045,13 @@ impl Checker<'_, '_> {
         let init = decl
             .init
             .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
-        let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
+        let annotation = decl
+            .ty
+            .map(|ty| {
+                self.resolve_type_annotation_with_views(ty)
+                    .map(|(ty, _)| ty)
+            })
+            .transpose()?;
         let value = self.with_staged_input(true, |this| {
             let value = this.expr(init, annotation.as_ref())?;
             if this.checking_open_behavior {
@@ -4136,7 +4155,13 @@ impl Checker<'_, '_> {
         let init = decl
             .init
             .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
-        let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
+        let annotation = decl
+            .ty
+            .map(|ty| {
+                self.resolve_type_annotation_with_views(ty)
+                    .map(|(ty, _)| ty)
+            })
+            .transpose()?;
         let value = self.with_staged_input(true, |this| {
             let value = this.expr(init, annotation.as_ref())?;
             if this.checking_open_behavior {
@@ -5060,7 +5085,13 @@ impl Checker<'_, '_> {
             let init = binding
                 .init
                 .ok_or_else(|| error(expr.span, "constant binding needs an initializer"))?;
-            let annotation = binding.ty.map(|ty| self.type_expr(ty)).transpose()?;
+            let annotation = binding
+                .ty
+                .map(|ty| {
+                    self.resolve_type_annotation_with_views(ty)
+                        .map(|(ty, _)| ty)
+                })
+                .transpose()?;
             let input =
                 self.with_staged_input(true, |this| this.expr(init, annotation.as_ref()))?;
             self.with_staged_input(true, |this| {
@@ -5981,7 +6012,8 @@ impl Checker<'_, '_> {
                 D::Known((**result).clone()),
             )
         };
-        let (routes, _) = route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
+        let (routes, _) =
+            self.route_call_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let mut symbols = vec![None; parameters.len()];
         let mut needed = BTreeSet::new();
         for requirement in &self.open_definition_obligations(owner) {
@@ -6249,7 +6281,7 @@ impl Checker<'_, '_> {
                 .map_err(|e| error(expr.span, e.to_string()))?,
         };
         let (routes, assigned) =
-            route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
+            self.route_call_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let target = match expected {
             Some(D::Known(ty)) => Some(ty),
             _ => None,
@@ -6259,6 +6291,9 @@ impl Checker<'_, '_> {
         let mut default_diverges = false;
         for (slot, assigned) in assigned.iter().enumerate() {
             if *assigned {
+                continue;
+            }
+            if sig.params[slot].ty.is_implicit() && !sig.params[slot].ty.is_quote() {
                 continue;
             }
             self.ensure_parameter_default(owner, slot, expr.span)?;
@@ -6906,7 +6941,7 @@ impl Checker<'_, '_> {
         let mut definition = self.open_functions[&owner].clone();
         let sig = self.open_fn_or_case_sig(owner, expr.span)?;
         let (routes, assigned) =
-            route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
+            self.route_call_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let all = self.type_parameters[&owner].clone();
         let (generic, template, pending) = plan;
         let mut checked = StagedInputs::new(sig.params.len());
@@ -7270,6 +7305,29 @@ impl Checker<'_, '_> {
                             }
                             continue;
                         }
+                    }
+                    let is_implicit_param =
+                        sig.params[slot].ty.is_implicit() && !sig.params[slot].ty.is_quote();
+                    if is_implicit_param {
+                        let callee_decl =
+                            Some(declaration(self.package, &self.package_identities, owner));
+                        let param_name = sig.params[slot].name.name.as_str().to_string();
+                        let ty = prefix[slot].1.clone().ok_or_else(|| {
+                            error(expr.span, "implicit parameter domain has not formed")
+                        })?;
+                        let is_comptime =
+                            prefix[slot].0 != Sort::Runtime || sig.modifiers.is_comptime;
+                        let implicit_expr = self.resolve_implicit_passing_expr(
+                            callee_decl,
+                            &param_name,
+                            &ty,
+                            expr.span,
+                            is_comptime,
+                        )?;
+                        let (value, symbol) = self.freeze_open_call_input(expr, implicit_expr)?;
+                        checked.values[slot] = Some(value);
+                        checked.symbols[slot] = Some(symbol);
+                        continue;
                     }
                     let (value, symbol) = self.prepare_open_default_in_scope(
                         owner,
@@ -8059,7 +8117,7 @@ impl Checker<'_, '_> {
         if offset > sig.params.len() {
             return Err(error(expr.span, "method receiver count mismatch"));
         }
-        let (mut routes, tail_assigned) = route_arguments(
+        let (mut routes, tail_assigned) = self.route_call_arguments(
             args,
             Some(&sig.params[offset..]),
             sig.params.len() - offset,
@@ -8357,6 +8415,18 @@ impl Checker<'_, '_> {
                         .ok_or_else(|| error(expr.span, "missing prefix staged argument"))?;
                     self.require_expression(&checked.ty, &ty, expr.span)?;
                     self.freeze_open_call_input(expr, checked)?
+                } else if sig.params[slot].ty.is_implicit() && !sig.params[slot].ty.is_quote() {
+                    let callee_decl =
+                        Some(declaration(self.package, &self.package_identities, owner));
+                    let param_name = sig.params[slot].name.name.as_str().to_string();
+                    let implicit_expr = self.resolve_implicit_passing_expr(
+                        callee_decl,
+                        &param_name,
+                        &ty,
+                        expr.span,
+                        true,
+                    )?;
+                    self.freeze_open_call_input(expr, implicit_expr)?
                 } else {
                     let (value, symbol) = self.prepare_open_default(
                         owner,
@@ -8521,6 +8591,22 @@ impl Checker<'_, '_> {
             if let Some(value) = values[slot].take() {
                 // This default already executed. Deliver its caller-owned value
                 // before entering the frame for the remaining runtime defaults.
+                arguments.push(n::CallArgument {
+                    passing: Default::default(),
+                    parameter: slot,
+                    value,
+                    is_default: false,
+                });
+            } else if sig.params[slot].ty.is_implicit() && !sig.params[slot].ty.is_quote() {
+                let callee_decl = Some(declaration(self.package, &self.package_identities, owner));
+                let param_name = sig.params[slot].name.name.as_str().to_string();
+                let value = self.resolve_implicit_passing_expr(
+                    callee_decl,
+                    &param_name,
+                    &parameters[slot].ty,
+                    expr.span,
+                    false,
+                )?;
                 arguments.push(n::CallArgument {
                     passing: Default::default(),
                     parameter: slot,

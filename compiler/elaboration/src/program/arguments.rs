@@ -386,8 +386,40 @@ pub(super) fn argument_routes(
     count: usize,
     span: Span,
 ) -> Result<input_routing::Plan, Error> {
-    input_routing::route(&input_entries(declarations, count), &routing_inputs(args))
-        .map_err(|failure| routing_error(failure, args, span))
+    argument_routes_with_policy(args, declarations, count, span, false)
+}
+
+pub(super) fn argument_routes_with_policy(
+    args: &[Arg<'_>],
+    declarations: Option<&[hir::common::FnParam<'_>]>,
+    count: usize,
+    span: Span,
+    allow_implicit_passing: bool,
+) -> Result<input_routing::Plan, Error> {
+    input_routing::route_with_policy(
+        &input_entries(declarations, count),
+        &routing_inputs(args),
+        allow_implicit_passing,
+    )
+    .map_err(|failure| routing_error(failure, args, span))
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn route_call_arguments<'h>(
+        &self,
+        args: &[Arg<'h>],
+        declarations: Option<&[hir::common::FnParam<'_>]>,
+        count: usize,
+        span: Span,
+    ) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
+        route_arguments_with_policy(
+            args,
+            declarations,
+            count,
+            span,
+            self.protocols.implicit_passing.is_some(),
+        )
+    }
 }
 
 pub(super) fn route_arguments<'h>(
@@ -396,7 +428,18 @@ pub(super) fn route_arguments<'h>(
     count: usize,
     span: Span,
 ) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
-    let plan = argument_routes(args, declarations, count, span)?;
+    route_arguments_with_policy(args, declarations, count, span, false)
+}
+
+pub(super) fn route_arguments_with_policy<'h>(
+    args: &[Arg<'h>],
+    declarations: Option<&[hir::common::FnParam<'_>]>,
+    count: usize,
+    span: Span,
+    allow_implicit_passing: bool,
+) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
+    let plan =
+        argument_routes_with_policy(args, declarations, count, span, allow_implicit_passing)?;
     let routes = plan
         .routes
         .into_iter()

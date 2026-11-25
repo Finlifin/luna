@@ -241,6 +241,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--ord-protocol"
                 | "--eq-protocol"
                 | "--literal-into-protocol"
+                | "--deref-protocol"
+                | "--deref-mut-protocol"
+                | "--reference-protocol"
+                | "--implicit-passing-protocol"
+                | "--call-context-type"
+                | "--call-description-type"
                 | "--add-protocol"
                 | "--sub-protocol"
                 | "--mul-protocol"
@@ -778,6 +784,12 @@ impl Request {
                 ordering: options.ord_protocol.as_deref(),
                 equality: options.eq_protocol.as_deref(),
                 literal_into: options.literal_into_protocol.as_deref(),
+                deref: options.deref_protocol.as_deref(),
+                deref_mut: options.deref_mut_protocol.as_deref(),
+                reference: options.reference_protocol.as_deref(),
+                implicit_passing: options.implicit_passing_protocol.as_deref(),
+                call_context: options.call_context_type.as_deref(),
+                call_description: options.call_description_type.as_deref(),
                 arithmetic: std::array::from_fn(|i| options.arithmetic_protocols[i].as_deref()),
                 ..Default::default()
             },

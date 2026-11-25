@@ -1,15 +1,16 @@
-use builtin.{Integer, bool, str}
+use bindings.{from_usize, to_isize, to_usize}
+use builtin.{CallDescription, Clone, Context, Copy, ImplicitPassing, Integer, Splice, Type, bool, isize, str, usize}
 use numeric.equality.ComptimeEq;
 
 {-
     Byte-offset source span carried by AST tokens, syntax tree nodes, and PEG
-    captures during macro expansion.
+    captures during macro expansion, and by `implicit __src__` call-site traces.
 -}
 pub struct SourceSpan {
     file: str,
-    start: Integer,
-    end: Integer,
-    expansion_id: Integer,
+    start: usize,
+    end: usize,
+    expansion_id: isize,
 }
 
 impl SourceSpan {
@@ -30,9 +31,9 @@ impl SourceSpan {
     ) -> SourceSpan {
         SourceSpan {
             file: file,
-            start: start,
-            end: end,
-            expansion_id: expansion_id,
+            start: to_usize(start),
+            end: to_usize(end),
+            expansion_id: to_isize(expansion_id),
         }
     }
 
@@ -66,11 +67,100 @@ impl SourceSpan {
     }
 }
 
+impl Splice for SourceSpan {
+    assoc RuntimeTarget: Type = SourceSpan;
+
+    fn splice(comptime data: SourceSpan) -> SourceSpan {
+        data
+    }
+}
+
+impl ImplicitPassing<.__src__> for SourceSpan {
+    assoc ArgType: Type = SourceSpan;
+
+    pure comptime fn pass(
+        caller: Context,
+        callee: Context,
+        calling: CallDescription,
+    ) -> < |- SourceSpan > {
+        let span_val = SourceSpan.new(
+            calling.call_file(),
+            from_usize(calling.call_byte_start()),
+            from_usize(calling.call_byte_end()),
+            calling.expansion_id(),
+        );
+        '( span_val )
+    }
+}
+
 comptime impl ComptimeEq for SourceSpan {
     comptime fn eq(self, other: Self) -> bool {
         self.file == other.file
             and self.start == other.start
             and self.end == other.end
             and self.expansion_id == other.expansion_id
+    }
+}
+
+impl Clone for SourceSpan {
+    fn clone(*self) -> Self {
+        SourceSpan {
+            file: self.file.*,
+            start: self.start.*,
+            end: self.end.*,
+            expansion_id: self.expansion_id.*,
+        }
+    }
+}
+
+impl Copy for SourceSpan {}
+
+pub trait SourceSpanOps {
+    pure fn file(self) -> str;
+    pure fn start(self) -> usize;
+    pure fn end(self) -> usize;
+    pure fn expansion_id(self) -> isize;
+}
+
+impl SourceSpanOps for SourceSpan {
+    pure fn file(self) -> str {
+        self.file
+    }
+
+    pure fn start(self) -> usize {
+        self.start
+    }
+
+    pure fn end(self) -> usize {
+        self.end
+    }
+
+    pure fn expansion_id(self) -> isize {
+        self.expansion_id
+    }
+}
+
+pub pure comptime trait ComptimeSourceSpanOps {
+    pure comptime fn file(self) -> str;
+    pure comptime fn start(self) -> usize;
+    pure comptime fn end(self) -> usize;
+    pure comptime fn expansion_id(self) -> isize;
+}
+
+comptime impl ComptimeSourceSpanOps for SourceSpan {
+    pure comptime fn file(self) -> str {
+        self.file
+    }
+
+    pure comptime fn start(self) -> usize {
+        self.start
+    }
+
+    pure comptime fn end(self) -> usize {
+        self.end
+    }
+
+    pure comptime fn expansion_id(self) -> isize {
+        self.expansion_id
     }
 }

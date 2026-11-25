@@ -49,7 +49,7 @@ impl Checker<'_, '_> {
         if offset > parameters.len() || offset > decl.params.len() {
             return Ok(vec![]);
         }
-        let (routes, _) = route_arguments(
+        let (routes, _) = self.route_call_arguments(
             args,
             Some(&decl.params[offset..]),
             parameters.len() - offset,

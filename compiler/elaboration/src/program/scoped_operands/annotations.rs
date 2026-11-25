@@ -157,16 +157,25 @@ impl Checker<'_, '_> {
         site: hir::HirId,
         ty: &Expr<'_>,
     ) -> Result<Term, Error> {
+        self.local_binding_annotation_with_views(site, ty)
+            .map(|(ty, _)| ty)
+    }
+
+    pub(in crate::program) fn local_binding_annotation_with_views(
+        &mut self,
+        site: hir::HirId,
+        ty: &Expr<'_>,
+    ) -> Result<(Term, Vec<Term>), Error> {
         let collecting = self
             .input_facts
             .annotation
             .as_ref()
             .is_some_and(|a| a.site == site);
         if !collecting {
-            return self.type_expr(ty);
+            return self.resolve_type_annotation_with_views(ty);
         }
         self.input_facts.annotation.as_mut().unwrap().forming = true;
-        let result = self.type_expr(ty);
+        let result = self.resolve_type_annotation_with_views(ty);
         self.input_facts.annotation.as_mut().unwrap().forming = false;
         result
     }

@@ -577,6 +577,44 @@ impl Frame {
                             "dependent default needs declaration parameter metadata",
                         )
                     })?;
+                    let implicit_param = checker
+                        .package
+                        .item(owner)
+                        .and_then(|item| match &item.kind {
+                            ItemKind::Fn(sig, _)
+                            | ItemKind::Case(sig, _)
+                            | ItemKind::FnDeclaration(sig) => sig.params.get(slot),
+                            _ => None,
+                        })
+                        .filter(|param| param.ty.is_implicit() && !param.ty.is_quote())
+                        .map(|param| param.name.name.as_str().to_string());
+                    if prepared.defaults[slot].is_none()
+                        && let Some(param_name) = implicit_param
+                    {
+                        let callee_decl = Some(declaration(
+                            checker.package,
+                            &checker.package_identities,
+                            owner,
+                        ));
+                        let is_comptime = call.parameters()[slot].sort != Sort::Runtime
+                            || call.signature().is_comptime_callable();
+                        let value = checker.resolve_implicit_passing_expr(
+                            callee_decl,
+                            &param_name,
+                            &expected,
+                            source.span,
+                            is_comptime,
+                        )?;
+                        let resolution = checker.resolve_type_dependency(
+                            Some(owner),
+                            callee,
+                            source,
+                            false,
+                            value,
+                            BTreeMap::new(),
+                        )?;
+                        return self.resolved(slot, resolution);
+                    }
                     let mut value = match prepared.defaults[slot].take() {
                         Some(value) => value,
                         None => checker.call_default(site, owner, slot, source.span)?,

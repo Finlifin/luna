@@ -19,6 +19,7 @@ mod function_bodies;
 mod function_templates;
 mod function_types;
 mod generated_functions;
+mod implicit_passing;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;
@@ -95,6 +96,7 @@ use pattern_checking::*;
 mod places;
 mod projections;
 mod purity;
+mod receiver_adaptation;
 mod refinements;
 mod required;
 mod source_declarations;
@@ -293,6 +295,92 @@ pub fn elaborate_packages(
     elaborate_packages_with_protocols(package, package_identities, &Protocols::default())
 }
 
+/// Snapshot of a source file's line table for compile-time call-site descriptions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallSourceFile {
+    pub name: String,
+    pub start_pos: u32,
+    pub end_pos: u32,
+    pub lines: Vec<u32>,
+    pub src: Option<std::sync::Arc<str>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallSourceLocator {
+    pub files: Vec<CallSourceFile>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct CallSiteLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub expansion_id: i128,
+}
+
+impl std::fmt::Display for CallSiteLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(call-site-location (file {:?}) (line {}) (column {}) (bytes {} {}) (expansion-id {}))",
+            self.file, self.line, self.column, self.byte_start, self.byte_end, self.expansion_id
+        )
+    }
+}
+
+impl CallSiteLocation {
+    pub(super) fn fallback(span: Span) -> Self {
+        Self {
+            file: "<unknown>".to_string(),
+            line: 0,
+            column: 0,
+            byte_start: span.lo().0 as usize,
+            byte_end: span.hi().0 as usize,
+            expansion_id: -1,
+        }
+    }
+}
+
+impl CallSourceLocator {
+    pub(super) fn locate(&self, span: Span) -> CallSiteLocation {
+        let lo = span.lo().0;
+        let hi = span.hi().0.max(lo);
+        let Some(sf) = self
+            .files
+            .iter()
+            .find(|file| file.start_pos <= lo && lo <= file.end_pos)
+        else {
+            return CallSiteLocation::fallback(span);
+        };
+        let line = sf.lines.partition_point(|&start| start <= lo).max(1) as u32;
+        let line_start = sf
+            .lines
+            .get((line - 1) as usize)
+            .copied()
+            .unwrap_or(sf.start_pos);
+        let rel_line = line_start.saturating_sub(sf.start_pos) as usize;
+        let rel_lo = lo.saturating_sub(sf.start_pos) as usize;
+        let column = sf
+            .src
+            .as_deref()
+            .and_then(|text| text.get(rel_line..rel_lo))
+            .map_or_else(
+                || lo.saturating_sub(line_start) + 1,
+                |slice| (slice.chars().count() + 1) as u32,
+            );
+        CallSiteLocation {
+            file: sf.name.clone(),
+            line,
+            column,
+            byte_start: lo.saturating_sub(sf.start_pos) as usize,
+            byte_end: hi.saturating_sub(sf.start_pos) as usize,
+            expansion_id: -1,
+        }
+    }
+}
+
 /// Trusted, package-qualified language-item identities supplied by the driver.
 /// Source names never designate these protocols implicitly.
 #[derive(Clone, Debug, Default)]
@@ -305,6 +393,8 @@ pub struct Protocols {
     pub package_names: BTreeMap<u64, String>,
     /// Canonical SemVer 2.0.0 versions by semantic package identity.
     pub package_versions: BTreeMap<u64, String>,
+    /// Source file line map snapshot for `ImplicitPassing` call descriptions.
+    pub source_locator: Option<std::sync::Arc<CallSourceLocator>>,
     /// Explicit build modes by source semantic package identity. Empty means
     /// unavailable, never an implicit host/debug configuration.
     pub build_modes: BTreeMap<u64, String>,
@@ -344,6 +434,12 @@ pub struct Protocols {
     pub type_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
+    pub deref: Option<DeclarationId>,
+    pub deref_mut: Option<DeclarationId>,
+    pub reference: Option<DeclarationId>,
+    pub implicit_passing: Option<DeclarationId>,
+    pub call_context: Option<DeclarationId>,
+    pub call_description: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
@@ -975,6 +1071,8 @@ fn elaborate_in_mode(
         local_runtime_deliveries: BTreeMap::new(),
         local_write_versions: BTreeMap::new(),
         active_env_parameters: BTreeMap::new(),
+        local_type_views: LocalBindings::default(),
+        alias_type_views: BTreeMap::new(),
     });
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
@@ -3985,6 +4083,8 @@ struct Checker<'a, 'h> {
     active_env_parameters: BTreeMap<DeclarationId, (n::LocalId, Term)>,
     package_metadata: BTreeMap<u64, n::PackageMetadata>,
     declaration_paths: BTreeMap<DeclarationId, n::CanonicalDeclarationPath>,
+    local_type_views: LocalBindings<Vec<Term>>,
+    alias_type_views: BTreeMap<OwnerId, Vec<Term>>,
 }
 
 fn build_package_metadata(
@@ -7887,7 +7987,7 @@ impl Checker<'_, '_> {
         if offset > declarations.len() {
             return Err(error(expr.span, "method receiver count mismatch"));
         }
-        let (routes, supplied) = route_arguments(
+        let (routes, supplied) = self.route_call_arguments(
             args,
             Some(&declarations[offset..]),
             declarations.len() - offset,
@@ -8100,17 +8200,43 @@ impl Checker<'_, '_> {
                 })?
             };
         }
+        let callee_decl = Some(declaration(self.package, &self.package_identities, owner));
+        let mut deferred_implicit = vec![false; declarations.len()];
         for (index, assigned) in assigned.iter().enumerate() {
             if !assigned {
-                checked[index] = Some(if let Some(value) = prepared.values[index].take() {
-                    value
-                } else {
-                    let mut value = prepared.defaults[index].take().unwrap();
+                if let Some(value) = prepared.values[index].take() {
+                    checked[index] = Some(value);
+                } else if let Some(mut value) = prepared.defaults[index].take() {
                     value
                         .rewrite_types(&mut |ty| call_binding.substitute(ty))
                         .map_err(|e| error(expr.span, e.to_string()))?;
-                    value
-                });
+                    checked[index] = Some(value);
+                } else if declarations[index].ty.is_implicit() && !declarations[index].ty.is_quote()
+                {
+                    if let Some(domain) = initial
+                        .parameter_type(index)
+                        .map_err(|e| call_inference_error(expr.span, e))?
+                    {
+                        let param_name = declarations[index].name.name.as_str().to_string();
+                        checked[index] = Some(self.resolve_implicit_passing_expr(
+                            callee_decl,
+                            &param_name,
+                            &domain,
+                            expr.span,
+                            declarations[index].ty.is_comptime(),
+                        )?);
+                    } else {
+                        deferred_implicit[index] = true;
+                    }
+                } else {
+                    return Err(error(
+                        expr.span,
+                        format!(
+                            "missing required argument for parameter {}",
+                            declarations[index].name.name.as_str()
+                        ),
+                    ));
+                }
             }
         }
         let instance = loop {
@@ -8195,6 +8321,25 @@ impl Checker<'_, '_> {
                 &mut candidate,
                 expr.span,
             )?;
+            let mut progress = false;
+            for (index, deferred) in deferred_implicit.iter().enumerate() {
+                if *deferred
+                    && checked[index].is_none()
+                    && let Some(domain) = candidate
+                        .parameter_type(index)
+                        .map_err(|e| call_inference_error(expr.span, e))?
+                {
+                    let param_name = declarations[index].name.name.as_str().to_string();
+                    checked[index] = Some(self.resolve_implicit_passing_expr(
+                        callee_decl,
+                        &param_name,
+                        &domain,
+                        expr.span,
+                        declarations[index].ty.is_comptime(),
+                    )?);
+                    progress = true;
+                }
+            }
             if checked.iter().all(Option::is_some) {
                 if !defaults_ready {
                     return Err(context_error(
@@ -8206,12 +8351,13 @@ impl Checker<'_, '_> {
                     .finish()
                     .map_err(|e| call_inference_error(expr.span, e))?;
             }
-            let mut progress = false;
             for (index, input) in inputs.iter().enumerate() {
                 if checked[index].is_some() {
                     continue;
                 }
-                let route = input.expect("an unchecked parameter has an explicit input");
+                let Some(route) = input else {
+                    continue;
+                };
                 if route.has_collection_fields() {
                     let context = candidate
                         .parameter_input_context(index)

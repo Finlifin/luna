@@ -1761,13 +1761,67 @@ impl Checker<'_, '_> {
                 }
             }
 
-            let pointer_projection = matches!(value.ty, Term::Pointer(_));
-            let subject = match &value.ty {
-                Term::Pointer(inner) => inner.as_ref(),
-                ty => ty,
+            let mut value = value;
+            let mut pointer_projection = matches!(value.ty, Term::Pointer(_));
+            let mut visited = Vec::new();
+            let mut deref_depth = 0usize;
+            let shape = loop {
+                let subject = match &value.ty {
+                    Term::Pointer(inner) => inner.as_ref(),
+                    ty => ty,
+                };
+                let candidate_shape = self.structural_type(subject, field.span)?;
+                self.ensure_nominal_type(&candidate_shape, field.span)?;
+                let has_direct_field = match &candidate_shape {
+                    Term::Record(fields) => {
+                        fields.iter().any(|(name, _)| name == field.name.as_str())
+                    }
+                    _ => self
+                        .struct_layout_head(&candidate_shape)
+                        .and_then(|(decl, _)| {
+                            self.structs
+                                .get(&decl)
+                                .or_else(|| self.generator_layouts.as_ref()?.get(&decl))
+                        })
+                        .is_some_and(|def| {
+                            def.fields
+                                .iter()
+                                .any(|(name, _)| name == field.name.as_str())
+                        }),
+                };
+                if has_direct_field {
+                    break candidate_shape;
+                }
+                if let Term::Pointer(inner) = &value.ty
+                    && matches!(self.structural_type(inner, field.span)?, Term::Pointer(_))
+                {
+                    let inner_ty = (**inner).clone();
+                    self.check_deref_cycle(&mut visited, &inner_ty, deref_depth, field.span)?;
+                    deref_depth += 1;
+                    value = n::Expr {
+                        source: source(expr.span),
+                        ty: inner_ty,
+                        kind: K::ReadPointer(Box::new(value)),
+                    };
+                    pointer_projection = true;
+                    continue;
+                }
+                let subject_owned = subject.clone();
+                if let Some(step) = self.query_deref_step(&subject_owned, false, field.span)? {
+                    let target_ty = step.target.clone();
+                    self.check_deref_cycle(&mut visited, &target_ty, deref_depth, field.span)?;
+                    deref_depth += 1;
+                    let addr = if matches!(value.ty, Term::Pointer(_)) {
+                        value
+                    } else {
+                        self.ensure_address_of_value(value, expr.span)?
+                    };
+                    value = self.emit_deref_call(expr, addr, &step)?;
+                    pointer_projection = true;
+                    continue;
+                }
+                break candidate_shape;
             };
-            let shape = self.structural_type(subject, field.span)?;
-            self.ensure_nominal_type(&shape, field.span)?;
             if let Term::Record(fields) = &shape {
                 let index = fields
                     .iter()
@@ -1887,9 +1941,9 @@ impl Checker<'_, '_> {
     }
 
     /// A field pointer keeps its identity without a target. With a concrete
-    /// target, only built-in Copy reads may remove pointer layers.
+    /// target, only Copy-verified reads may remove pointer layers.
     fn contextual_field_read(
-        &self,
+        &mut self,
         mut value: n::Expr,
         expected: Option<&Term>,
         span: rustc_span::Span,
@@ -1904,14 +1958,37 @@ impl Checker<'_, '_> {
             let Term::Pointer(pointee) = &value.ty else {
                 break;
             };
-            if !self.intrinsic_pointer_input(pointee) {
-                break;
+            match self.type_copy_status(pointee, span)? {
+                receiver_adaptation::CopyStatus::Copy => {
+                    value = n::Expr {
+                        source: value.source,
+                        ty: (**pointee).clone(),
+                        kind: K::ReadPointer(Box::new(value)),
+                    };
+                }
+                receiver_adaptation::CopyStatus::NotCopy => {
+                    if self.require(pointee, expected, span).is_ok() {
+                        return Err(error(
+                            span,
+                            format!(
+                                "cannot move non-Copy field `{pointee}` through pointer projection; take `.ref` or implement `Copy`"
+                            ),
+                        ));
+                    }
+                    break;
+                }
+                receiver_adaptation::CopyStatus::Unknown => {
+                    if self.require(pointee, expected, span).is_ok() {
+                        return Err(context_error(
+                            span,
+                            format!(
+                                "pointer projection read blocked until `Copy` is established for `{pointee}`"
+                            ),
+                        ));
+                    }
+                    break;
+                }
             }
-            value = n::Expr {
-                source: value.source,
-                ty: (**pointee).clone(),
-                kind: K::ReadPointer(Box::new(value)),
-            };
         }
         self.require(&value.ty, expected, span)?;
         Ok(value)

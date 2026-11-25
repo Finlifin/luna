@@ -211,8 +211,12 @@ impl<Name: Clone + Eq + Hash> Cursor<Name> {
     }
 
     pub fn finish(&self) -> Result<(), FailureKind> {
+        self.finish_with_policy(false)
+    }
+
+    pub fn finish_with_policy(&self, allow_implicit_passing: bool) -> Result<(), FailureKind> {
         for (entry, supplied) in self.entries.iter().zip(&self.supplied) {
-            if !supplied && entry.implicit && !entry.contextual {
+            if !supplied && entry.implicit && !entry.contextual && !allow_implicit_passing {
                 return Err(FailureKind::MissingImplicit);
             }
             if !supplied && !entry.skipped() && !entry.variadic {

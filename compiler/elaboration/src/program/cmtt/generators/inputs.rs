@@ -30,7 +30,7 @@ impl Checker<'_, '_> {
         else {
             return Err(error(site.span, "contextual call requires a function item"));
         };
-        let (mut routes, _) = route_arguments(
+        let (mut routes, _) = self.route_call_arguments(
             arguments,
             Some(signature.params),
             template.inputs.len(),

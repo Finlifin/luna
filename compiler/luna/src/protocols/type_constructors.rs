@@ -35,6 +35,12 @@ pub struct Selectors<'a> {
     pub type_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
+    pub deref: Option<&'a str>,
+    pub deref_mut: Option<&'a str>,
+    pub reference: Option<&'a str>,
+    pub implicit_passing: Option<&'a str>,
+    pub call_context: Option<&'a str>,
+    pub call_description: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
@@ -84,6 +90,12 @@ impl Selectors<'_> {
                 self.type_pattern,
                 self.literal_into,
                 self.handle_error,
+                self.deref,
+                self.deref_mut,
+                self.reference,
+                self.implicit_passing,
+                self.call_context,
+                self.call_description,
                 self.splice,
                 self.meta_list,
                 self.tuple,
@@ -343,6 +355,22 @@ pub(crate) fn resolve_source(
                 selectors.handle_error,
                 &mut result.handle_error,
             ),
+            ("Deref".into(), selectors.deref, &mut result.deref),
+            (
+                "DerefMut".into(),
+                selectors.deref_mut,
+                &mut result.deref_mut,
+            ),
+            (
+                "Reference".into(),
+                selectors.reference,
+                &mut result.reference,
+            ),
+            (
+                "ImplicitPassing".into(),
+                selectors.implicit_passing,
+                &mut result.implicit_passing,
+            ),
             ("Copy".into(), selectors.copy, &mut result.copy),
             ("Drop".into(), selectors.drop, &mut result.drop),
         ])
@@ -527,6 +555,56 @@ pub(crate) fn resolve_source(
         }
         result.range_end = Some(id);
     }
+    if result.deref_mut.is_some() && result.deref.is_none() {
+        return Err("DerefMut binding requires a Deref binding".into());
+    }
+    for (label, selector, target) in [
+        ("Context", selectors.call_context, &mut result.call_context),
+        (
+            "CallDescription",
+            selectors.call_description,
+            &mut result.call_description,
+        ),
+    ] {
+        let Some(selector) = selector else {
+            continue;
+        };
+        let parts = selector.split(".").collect::<Vec<_>>();
+        if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+            return Err(format!(
+                "{label} selector requires package.struct or package.module.struct"
+            ));
+        }
+        let providers = packages
+            .iter()
+            .filter(|(_, _, name)| *name == parts[0])
+            .collect::<Vec<_>>();
+        let [provider] = providers.as_slice() else {
+            return Err(format!("{label} selector package is missing or ambiguous"));
+        };
+        let owner = paths
+            .resolve(provider.0, &parts[1..])
+            .ok_or_else(|| format!("{label} selector is missing or ambiguous"))?;
+        if !hir
+            .item(owner)
+            .is_some_and(|item| matches!(item.kind, hir::ItemKind::Struct(_)))
+        {
+            return Err(format!("{label} selector requires a struct"));
+        }
+        let definition = hir
+            .owner_definition(owner)
+            .ok_or_else(|| format!("{label} has no source identity"))?;
+        let id = nir::DeclarationId {
+            package: provider.1,
+            local: definition.index,
+        };
+        if target.is_some_and(|previous| previous != id) {
+            return Err(format!(
+                "{label} selector conflicts with the driver's bound identity"
+            ));
+        }
+        *target = Some(id);
+    }
     if result.range_pattern.is_some() && result.range_end.is_none() {
         return Err("RangePatternView binding requires a RangeEnd binding".into());
     }
@@ -633,6 +711,12 @@ pub(crate) struct SysrootBindings {
     extended_variadic_collector: Option<String>,
     literal_into: Option<String>,
     handle_error: Option<String>,
+    deref: Option<String>,
+    deref_mut: Option<String>,
+    reference: Option<String>,
+    implicit_passing: Option<String>,
+    call_context: Option<String>,
+    call_description: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
@@ -739,6 +823,12 @@ impl SysrootBindings {
                 "extended-variadic-collector-protocol" => &mut result.extended_variadic_collector,
                 "literal-into-protocol" => &mut result.literal_into,
                 "handle-error-protocol" => &mut result.handle_error,
+                "deref-protocol" => &mut result.deref,
+                "deref-mut-protocol" => &mut result.deref_mut,
+                "reference-protocol" => &mut result.reference,
+                "implicit-passing-protocol" => &mut result.implicit_passing,
+                "call-context-type" => &mut result.call_context,
+                "call-description-type" => &mut result.call_description,
                 "copy-protocol" => &mut result.copy,
                 "drop-protocol" => &mut result.drop,
                 "add-protocol" => &mut result.arithmetic[0],
@@ -1020,6 +1110,48 @@ impl SysrootBindings {
                     .handle_error
                     .is_none()
                     .then_some(self.handle_error.as_deref())
+                    .flatten()
+            }),
+            deref: explicit.deref.or_else(|| {
+                identities
+                    .deref
+                    .is_none()
+                    .then_some(self.deref.as_deref())
+                    .flatten()
+            }),
+            deref_mut: explicit.deref_mut.or_else(|| {
+                identities
+                    .deref_mut
+                    .is_none()
+                    .then_some(self.deref_mut.as_deref())
+                    .flatten()
+            }),
+            reference: explicit.reference.or_else(|| {
+                identities
+                    .reference
+                    .is_none()
+                    .then_some(self.reference.as_deref())
+                    .flatten()
+            }),
+            implicit_passing: explicit.implicit_passing.or_else(|| {
+                identities
+                    .implicit_passing
+                    .is_none()
+                    .then_some(self.implicit_passing.as_deref())
+                    .flatten()
+            }),
+            call_context: explicit.call_context.or_else(|| {
+                identities
+                    .call_context
+                    .is_none()
+                    .then_some(self.call_context.as_deref())
+                    .flatten()
+            }),
+            call_description: explicit.call_description.or_else(|| {
+                identities
+                    .call_description
+                    .is_none()
+                    .then_some(self.call_description.as_deref())
                     .flatten()
             }),
             arithmetic: std::array::from_fn(|index| {
@@ -1400,6 +1532,12 @@ mod stage_tests {
             variadic_collector_protocol: None,
             extended_variadic_collector_protocol: None,
             literal_into_protocol: None,
+            deref_protocol: None,
+            deref_mut_protocol: None,
+            reference_protocol: None,
+            implicit_passing_protocol: None,
+            call_context_type: None,
+            call_description_type: None,
             arithmetic_protocols: Default::default(),
             splice_protocol: None,
             meta_list_type: None,

@@ -300,6 +300,12 @@ struct OwnedSelectors {
     type_pattern: Option<String>,
     literal_into: Option<String>,
     handle_error: Option<String>,
+    deref: Option<String>,
+    deref_mut: Option<String>,
+    reference: Option<String>,
+    implicit_passing: Option<String>,
+    call_context: Option<String>,
+    call_description: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
     meta_list: Option<String>,
@@ -341,6 +347,12 @@ impl OwnedSelectors {
             type_pattern: s.type_pattern.map(str::to_owned),
             literal_into: s.literal_into.map(str::to_owned),
             handle_error: s.handle_error.map(str::to_owned),
+            deref: s.deref.map(str::to_owned),
+            deref_mut: s.deref_mut.map(str::to_owned),
+            reference: s.reference.map(str::to_owned),
+            implicit_passing: s.implicit_passing.map(str::to_owned),
+            call_context: s.call_context.map(str::to_owned),
+            call_description: s.call_description.map(str::to_owned),
             arithmetic: std::array::from_fn(|i| s.arithmetic[i].map(str::to_owned)),
             splice: s.splice.map(str::to_owned),
             meta_list: s.meta_list.map(str::to_owned),
@@ -382,6 +394,12 @@ impl OwnedSelectors {
             type_pattern: self.type_pattern.as_deref(),
             literal_into: self.literal_into.as_deref(),
             handle_error: self.handle_error.as_deref(),
+            deref: self.deref.as_deref(),
+            deref_mut: self.deref_mut.as_deref(),
+            reference: self.reference.as_deref(),
+            implicit_passing: self.implicit_passing.as_deref(),
+            call_context: self.call_context.as_deref(),
+            call_description: self.call_description.as_deref(),
             arithmetic: std::array::from_fn(|i| self.arithmetic[i].as_deref()),
             splice: self.splice.as_deref(),
             meta_list: self.meta_list.as_deref(),
@@ -1879,9 +1897,9 @@ fn encode_source_span_value(span: Span, layout: &StructLayout) -> Value {
         declaration: layout.declaration,
         fields: vec![
             Value::String(Arc::from("<source>")),
-            Value::Integer(Integer::from_u128(span.lo().0 as u128)),
-            Value::Integer(Integer::from_u128(span.hi().0 as u128)),
-            Value::Integer(Integer::from_i128(-1)),
+            Value::UnsignedInteger(span.lo().0 as u128),
+            Value::UnsignedInteger(span.hi().0 as u128),
+            Value::SignedInteger(-1),
         ],
     }
 }
@@ -1893,7 +1911,7 @@ fn encode_token_buffer_value(tokens: &[MacroToken], types: &MacroAstTypes) -> Va
             let mut span_val = encode_source_span_value(tok.span, &types.source_span);
             if let Some(exp_id) = tok.expansion_id {
                 if let Value::Record { fields, .. } = &mut span_val {
-                    fields[3] = Value::Integer(Integer::from_u128(exp_id.0 as u128));
+                    fields[3] = Value::SignedInteger(exp_id.0 as i128);
                 }
             }
             Value::Record {
@@ -2117,18 +2135,24 @@ fn decode_source_span_value(
     let Value::String(file) = &fields[0] else {
         return Err("expected `str` in `SourceSpan.file`".into());
     };
-    let Value::Integer(start_int) = &fields[1] else {
-        return Err("expected `Integer` in `SourceSpan.start`".into());
+    let start: i128 = match &fields[1] {
+        Value::UnsignedInteger(v) => {
+            i128::try_from(*v).map_err(|e| format!("invalid `SourceSpan.start`: {e:?}"))?
+        }
+        Value::Integer(v) => v
+            .to_i128()
+            .map_err(|e| format!("invalid `SourceSpan.start`: {e:?}"))?,
+        _ => return Err("expected `usize` in `SourceSpan.start`".into()),
     };
-    let Value::Integer(end_int) = &fields[2] else {
-        return Err("expected `Integer` in `SourceSpan.end`".into());
+    let end: i128 = match &fields[2] {
+        Value::UnsignedInteger(v) => {
+            i128::try_from(*v).map_err(|e| format!("invalid `SourceSpan.end`: {e:?}"))?
+        }
+        Value::Integer(v) => v
+            .to_i128()
+            .map_err(|e| format!("invalid `SourceSpan.end`: {e:?}"))?,
+        _ => return Err("expected `usize` in `SourceSpan.end`".into()),
     };
-    let start = start_int
-        .to_i128()
-        .map_err(|e| format!("invalid `SourceSpan.start`: {e:?}"))?;
-    let end = end_int
-        .to_i128()
-        .map_err(|e| format!("invalid `SourceSpan.end`: {e:?}"))?;
 
     if file.as_ref() != "<source>" || (start == 0 && end == 0) || start < 0 || end < start {
         return Ok(fallback);

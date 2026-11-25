@@ -15,6 +15,8 @@ pub const compiler_list_concat: comptime fn(comptime T: Type, List<T>, List<T>) 
     .list_concat'builtin;
 const compiler_to_usize: comptime fn(Integer) -> usize = .comptime_integer_convert'builtin;
 const compiler_from_usize: comptime fn(usize) -> Integer = .comptime_integer_convert'builtin;
+const compiler_to_isize: comptime fn(Integer) -> isize = .comptime_integer_convert'builtin;
+const compiler_from_isize: comptime fn(isize) -> Integer = .comptime_integer_convert'builtin;
 pub const compiler_object_length: comptime fn(Object) -> Integer = .object_length'builtin;
 pub const compiler_object_key: comptime fn(Object, Integer) -> ?Symbol = .object_key'builtin;
 pub const CompilerObjectEntryType: comptime fn(Object, Integer) -> Type =
@@ -114,6 +116,14 @@ pub pure comptime fn to_usize(value: Integer) -> usize {
 
 pub pure comptime fn from_usize(value: usize) -> Integer {
     compiler_from_usize(value)
+}
+
+pub pure comptime fn to_isize(value: Integer) -> isize {
+    compiler_to_isize(value)
+}
+
+pub pure comptime fn from_isize(value: isize) -> Integer {
+    compiler_from_isize(value)
 }
 
 pub const div_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_div_trunc;

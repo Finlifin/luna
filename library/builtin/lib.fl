@@ -6,11 +6,12 @@
 use numeric.{comparison, conversions, math_intrinsics}
 use protocols.capabilities.{effects as capability_effects, errors as capability_errors}
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
-use protocols.{conversion, iterator, native_resources, ops, patterns, resources, traits}
+use protocols.{conversion, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
 use types.{equality, hashing, option, ordering, result, tuple}
 
 pub use capability_effects.{HandleCapturingEffect, HandleEffect};
 pub use capability_errors.HandleError;
+pub use implicit_passing.{CallDescription, Context, ImplicitPassing};
 pub use iterator.{
     ChainIterator,
     EnumerateIterator,
@@ -95,6 +96,7 @@ pub mod prelude {
     pub use .math;
     pub use capability_effects.{HandleCapturingEffect, HandleEffect};
     pub use capability_errors.HandleError;
+pub use implicit_passing.{CallDescription, Context, ImplicitPassing};
     pub use debug.Debug;
     pub use display.Display;
     pub use iterator.{FromIterator, IntoIterator, Iterator}

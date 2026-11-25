@@ -109,3 +109,20 @@ pub trait ExtendedVariadicCollector {
     ^attrs.comptime_phase
     comptime fn comptime_extended_variadic_collect(properties: Ps) -> Self where Ps;
 }
+
+-- ── Deref / DerefMut / Reference ──────────────────────────────────────────
+pub trait Deref {
+    assoc Target: Type;
+
+    fn deref(*self) -> *Target;
+}
+
+pub trait DerefMut :- Deref {
+    fn deref_mut(*self) -> *Self.as(Deref).Target;
+}
+
+pub trait Reference {
+    assoc Target: Type;
+
+    fn reference(*self) -> *Target;
+}

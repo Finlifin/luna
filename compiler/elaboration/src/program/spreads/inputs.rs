@@ -358,7 +358,8 @@ impl Checker<'_, '_> {
                 None => Arg::Positional(value),
             })
             .collect();
-        let (routes, _) = route_arguments(&routed, declarations, actual.len() - offset, span)?;
+        let (routes, _) =
+            self.route_call_arguments(&routed, declarations, actual.len() - offset, span)?;
         for route in &routes {
             if !route.is_collected() {
                 if let Some(ty) = route.single_position().and_then(|position| {

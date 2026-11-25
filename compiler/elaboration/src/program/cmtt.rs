@@ -5,7 +5,7 @@ use super::*;
 
 mod function_templates;
 mod functions;
-mod generators;
+pub(super) mod generators;
 pub(super) mod patterns;
 mod test_templates;
 

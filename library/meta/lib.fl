@@ -115,6 +115,7 @@ pub mod prelude {
     pub use .MapEntry;
     pub use .Object;
     pub use .Set;
+    pub use ast_impl.{ComptimeSourceSpanOps, SourceSpanOps}
     pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;

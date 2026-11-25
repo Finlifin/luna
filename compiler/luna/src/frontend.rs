@@ -540,6 +540,11 @@ fn compile_bound_for_target_with_invocation(
             .package_names
             .entry(package_identity)
             .or_insert_with(|| "input".to_string());
+        if protocols.source_locator.is_none() {
+            protocols.source_locator = Some(std::sync::Arc::new(source_locator_from_map(
+                &sess.source_map,
+            )));
+        }
         if matches!(options.emit, Emit::Attributes | Emit::MergedAttributes) {
             let attributes = elaboration::program::attributes::inspect(
                 package.package(),
@@ -586,6 +591,46 @@ fn compile_bound_for_target_with_invocation(
     ))
 }
 
+pub(crate) fn source_locator_from_map(
+    source_map: &rustc_span::SourceMap,
+) -> elaboration::program::CallSourceLocator {
+    use rustc_span::FileNameDisplayPreference;
+    let files = source_map
+        .files()
+        .iter()
+        .map(|sf| {
+            let lines = sf.src.as_deref().map_or_else(
+                || vec![sf.start_pos.0],
+                |text| {
+                    std::iter::once(sf.start_pos.0)
+                        .chain(
+                            text.match_indices('\n')
+                                .map(|(idx, _)| sf.start_pos.0.saturating_add(idx as u32 + 1)),
+                        )
+                        .collect::<Vec<u32>>()
+                },
+            );
+            let end_pos = sf.src.as_deref().map_or(sf.start_pos.0, |text| {
+                sf.start_pos.0.saturating_add(text.len() as u32)
+            });
+            elaboration::program::CallSourceFile {
+                name: sf
+                    .name
+                    .display(FileNameDisplayPreference::Local)
+                    .to_string(),
+                start_pos: sf.start_pos.0,
+                end_pos,
+                lines,
+                src: sf
+                    .src
+                    .as_deref()
+                    .map(|text| std::sync::Arc::from(text.as_str())),
+            }
+        })
+        .collect();
+    elaboration::program::CallSourceLocator { files }
+}
+
 pub(crate) fn source_protocols(
     options: &Options,
 ) -> crate::protocols::type_constructors::Selectors<'_> {
@@ -622,6 +667,12 @@ pub(crate) fn source_protocols(
         equality: options.eq_protocol.as_deref(),
         literal_into: options.literal_into_protocol.as_deref(),
         handle_error: None,
+        deref: options.deref_protocol.as_deref(),
+        deref_mut: options.deref_mut_protocol.as_deref(),
+        reference: options.reference_protocol.as_deref(),
+        implicit_passing: options.implicit_passing_protocol.as_deref(),
+        call_context: options.call_context_type.as_deref(),
+        call_description: options.call_description_type.as_deref(),
         arithmetic: std::array::from_fn(|index| options.arithmetic_protocols[index].as_deref()),
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),

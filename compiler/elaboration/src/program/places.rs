@@ -190,6 +190,29 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn dereferenced_place(&mut self, expr: &Expr<'_>) -> Result<Option<n::Expr>, Error> {
+        self.dereferenced_place_with(expr, false, false)
+    }
+
+    pub(super) fn dereferenced_place_for_ref(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<n::Expr>, Error> {
+        self.dereferenced_place_with(expr, false, true)
+    }
+
+    pub(super) fn dereferenced_place_for_write(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<n::Expr>, Error> {
+        self.dereferenced_place_with(expr, true, true)
+    }
+
+    pub(super) fn dereferenced_place_with(
+        &mut self,
+        expr: &Expr<'_>,
+        mutable: bool,
+        allow_projected_base: bool,
+    ) -> Result<Option<n::Expr>, Error> {
         let mut base = expr;
         let mut fields = Vec::new();
         let mut static_owner = None;
@@ -209,26 +232,71 @@ impl Checker<'_, '_> {
         }
         let mut pointer = if let Some(owner) = static_owner {
             self.static_pointer(owner, base.span)?
-        } else {
+        } else if matches!(base.kind, H::Deref(_) | H::MultiDeref(_)) {
             let (inner, multi) = match &base.kind {
                 H::Deref(pointer) => (*pointer, false),
                 H::MultiDeref(pointer) => (*pointer, true),
-                _ => return Ok(None),
+                _ => unreachable!(),
             };
+            self.require_runtime_pointer_context(base.span, "dereference")?;
             let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
-            let pointer = self.expr(inner, None);
+            let inner_place = self.dereferenced_place_with(inner, mutable, false);
             self.allow_packed_pointer_projection = prev_allow;
-            let mut pointer = pointer?;
-            let shape = self.structural_type(&pointer.ty, base.span)?;
-            let Term::Pointer(mut pointee) = shape else {
-                return Err(error(
-                    base.span,
-                    if multi {
-                        "multi_deref requires a pointer"
+            let mut pointer = if let Some(place_addr) = inner_place? {
+                let Term::Pointer(pointee) = &place_addr.ty else {
+                    unreachable!()
+                };
+                let inner_shape = self.structural_type(pointee, base.span)?;
+                if matches!(inner_shape, Term::Pointer(_)) {
+                    if let K::AddressOf(place) = place_addr.kind {
+                        *place
                     } else {
-                        "dereference requires a pointer"
-                    },
-                ));
+                        n::Expr {
+                            source: source(base.span),
+                            ty: (**pointee).clone(),
+                            kind: K::ReadPointer(Box::new(place_addr)),
+                        }
+                    }
+                } else if !multi
+                    && let Some(step) = self.query_deref_step(pointee, mutable, base.span)?
+                {
+                    self.emit_deref_call(base, place_addr, &step)?
+                } else {
+                    return Err(error(
+                        base.span,
+                        if multi {
+                            "multi_deref requires a pointer"
+                        } else {
+                            "dereference requires a pointer or `Deref` implementation"
+                        },
+                    ));
+                }
+            } else {
+                let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
+                let operand = self.expr(inner, None);
+                self.allow_packed_pointer_projection = prev_allow;
+                let operand = operand?;
+                let shape = self.structural_type(&operand.ty, base.span)?;
+                if matches!(shape, Term::Pointer(_)) {
+                    operand
+                } else if !multi
+                    && let Some(step) = self.query_deref_step(&operand.ty, mutable, base.span)?
+                {
+                    let addr = self.ensure_address_of_value(operand, inner.span)?;
+                    self.emit_deref_call(base, addr, &step)?
+                } else {
+                    return Err(error(
+                        base.span,
+                        if multi {
+                            "multi_deref requires a pointer"
+                        } else {
+                            "dereference requires a pointer or `Deref` implementation"
+                        },
+                    ));
+                }
+            };
+            let Term::Pointer(mut pointee) = self.structural_type(&pointer.ty, base.span)? else {
+                return Err(error(base.span, "dereference did not yield a pointer"));
             };
             if multi {
                 let mut depth = 0usize;
@@ -250,13 +318,82 @@ impl Checker<'_, '_> {
                 }
             }
             pointer
+        } else if allow_projected_base && !fields.is_empty() {
+            // If a projected base is itself a pointer (for writes) or implements
+            // Deref/DerefMut (and does not own the projected field directly), resolve
+            // its address without evaluating it twice so Layer 2 can project through it.
+            let val = self.expr(base, None)?;
+            let shape = self.structural_type(&val.ty, base.span)?;
+            let first_field = fields.last().unwrap().name.as_str();
+            let has_direct_field = match &shape {
+                Term::Record(entries) => entries.iter().any(|(name, _)| name == first_field),
+                Term::Nominal { declaration, .. } => self
+                    .structs
+                    .get(declaration)
+                    .is_some_and(|def| def.fields.iter().any(|(name, _)| name == first_field)),
+                _ => false,
+            };
+            if mutable && matches!(shape, Term::Pointer(_)) {
+                val
+            } else if !has_direct_field
+                && !matches!(shape, Term::Pointer(_))
+                && self
+                    .query_deref_step(&val.ty, mutable, base.span)?
+                    .is_some()
+            {
+                self.ensure_address_of_value(val, base.span)?
+            } else {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
         };
         for field in fields.into_iter().rev() {
-            let Term::Pointer(subject) = &pointer.ty else {
-                unreachable!()
+            let mut visited = Vec::new();
+            let mut depth = 0usize;
+            let shape = loop {
+                let Term::Pointer(subject) = &pointer.ty else {
+                    unreachable!()
+                };
+                let candidate_shape = self.structural_type(subject, field.span)?;
+                self.ensure_nominal_type(&candidate_shape, field.span)?;
+                let has_field = match &candidate_shape {
+                    Term::Record(entries) => {
+                        entries.iter().any(|(name, _)| name == field.name.as_str())
+                    }
+                    Term::Nominal { declaration, .. } => {
+                        self.structs.get(declaration).is_some_and(|def| {
+                            def.fields
+                                .iter()
+                                .any(|(name, _)| name == field.name.as_str())
+                        })
+                    }
+                    _ => false,
+                };
+                if has_field {
+                    break candidate_shape;
+                }
+                if matches!(&candidate_shape, Term::Pointer(_)) {
+                    let pointee = (**subject).clone();
+                    self.check_deref_cycle(&mut visited, &pointee, depth, field.span)?;
+                    depth += 1;
+                    pointer = n::Expr {
+                        source: source(field.span),
+                        ty: pointee,
+                        kind: K::ReadPointer(Box::new(pointer)),
+                    };
+                    continue;
+                }
+                let subject_owned = (**subject).clone();
+                if let Some(step) = self.query_deref_step(&subject_owned, mutable, field.span)? {
+                    let target = step.target.clone();
+                    self.check_deref_cycle(&mut visited, &target, depth, field.span)?;
+                    depth += 1;
+                    pointer = self.emit_deref_call(expr, pointer, &step)?;
+                    continue;
+                }
+                break candidate_shape;
             };
-            let shape = self.structural_type(subject, field.span)?;
-            self.ensure_nominal_type(&shape, field.span)?;
             if let Term::Record(fields) = &shape {
                 let index = fields
                     .iter()
@@ -341,7 +478,9 @@ impl Checker<'_, '_> {
             false
         };
         if take_bits || !indices.is_empty() {
-            let (operand, place) = if let Some(pointer) = self.dereferenced_place(storage)? {
+            let (operand, place) = if let Some(pointer) =
+                self.dereferenced_place_for_write(storage)?
+            {
                 (pointer, None)
             } else {
                 let read = self.expr(storage, None)?;
@@ -393,7 +532,7 @@ impl Checker<'_, '_> {
                 expression, op, operand, place, width, &indices, value, expected,
             );
         }
-        let Some(pointer) = self.dereferenced_place(target)? else {
+        let Some(pointer) = self.dereferenced_place_for_write(target)? else {
             // Restrict this rewrite to stable local field paths. Indexing needs
             // its own prepared location protocol, not duplicated source code.
             let mut base = target;

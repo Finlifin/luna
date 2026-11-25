@@ -913,6 +913,12 @@ fn all_resolved_protocols_in(
         protocols.type_pattern,
         protocols.literal_into,
         protocols.handle_error,
+        protocols.deref,
+        protocols.deref_mut,
+        protocols.reference,
+        protocols.implicit_passing,
+        protocols.call_context,
+        protocols.call_description,
         protocols.splice,
         protocols.meta_list,
         protocols.tuple,
@@ -1797,6 +1803,11 @@ fn compile_packages_core(
             .package_names
             .entry(pkg.identity)
             .or_insert_with(|| pkg.name.clone());
+    }
+    if protocols.source_locator.is_none() {
+        protocols.source_locator = Some(std::sync::Arc::new(
+            crate::frontend::source_locator_from_map(&session.source_map),
+        ));
     }
     if let Some(selected) = builtin {
         if let Some(package) = packages

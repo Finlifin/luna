@@ -124,9 +124,14 @@ impl Checker<'_, '_> {
                     || decl.ty.is_some_and(|ty|matches!(ty.kind,H::ContextualExprType(..)))) {
                     return self.code_declaration(decl, expected);
                 }
-                let annotation = decl.ty
-                    .map(|ty| self.local_binding_annotation(expr.hir_id, ty))
+                let annotation_with_views = decl
+                    .ty
+                    .map(|ty| self.local_binding_annotation_with_views(expr.hir_id, ty))
                     .transpose()?;
+                let (annotation, binding_views) = match annotation_with_views {
+                    Some((ty, views)) => (Some(ty), views),
+                    None => (None, Vec::new()),
+                };
                 let init = decl.init.ok_or_else(|| {
                     error(
                         decl.span,
@@ -162,6 +167,11 @@ impl Checker<'_, '_> {
                 }
                 let observed = self.known_pattern_type_value(&value, decl.span)?;
                 let pattern = self.pattern_observed(&decl.pattern, &binding_type, observed.as_ref())?;
+                if !binding_views.is_empty() {
+                    for id in pattern_binding_ids(&decl.pattern) {
+                        self.local_type_views.insert(id, binding_views.clone());
+                    }
+                }
                 if !decl.mutable {
                     if in_comptime_body {
                         if decl.comptime {

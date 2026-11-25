@@ -131,6 +131,14 @@ pub(super) fn route<Name: Clone + Eq + Hash>(
     entries: &[Entry<Name>],
     inputs: &[Input<Name>],
 ) -> Result<Plan, Failure> {
+    route_with_policy(entries, inputs, false)
+}
+
+pub(super) fn route_with_policy<Name: Clone + Eq + Hash>(
+    entries: &[Entry<Name>],
+    inputs: &[Input<Name>],
+    allow_implicit_passing: bool,
+) -> Result<Plan, Failure> {
     let remaining = inputs
         .iter()
         .filter(|input| matches!(input, Input::Positional))
@@ -162,7 +170,9 @@ pub(super) fn route<Name: Clone + Eq + Hash>(
         }
         assigned[parameter] = true;
     }
-    cursor.finish().map_err(FailureKind::call)?;
+    cursor
+        .finish_with_policy(allow_implicit_passing)
+        .map_err(FailureKind::call)?;
     for (index, entry) in entries.iter().enumerate() {
         if !assigned[index] && entry.variadic {
             routes.push(Route {

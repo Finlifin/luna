@@ -52,7 +52,9 @@ const BINDINGS: &str = "Compiler binding overrides:
   --map-pattern-protocol, --stable-map-pattern-protocol,
   --struct-pattern-protocol, --stable-struct-pattern-protocol,
   --type-pattern-protocol,
-  --literal-into-protocol, --iterator-protocol, --into-iterator-protocol,
+  --literal-into-protocol, --deref-protocol, --deref-mut-protocol,
+  --reference-protocol, --implicit-passing-protocol, --call-context-type,
+  --call-description-type, --iterator-protocol, --into-iterator-protocol,
   --variadic-collector-protocol, --extended-variadic-collector-protocol,
   --add-protocol, --sub-protocol, --mul-protocol, --div-protocol,
   --rem-protocol, --neg-protocol, --not-protocol <source-selector>

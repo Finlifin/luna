@@ -228,6 +228,17 @@ impl Checker<'_, '_> {
         for (index, (parameter, ty)) in sig.params.iter().zip(parameters).enumerate() {
             let binding = local(parameter.hir_id);
             self.locals.insert(binding, ty.ty.clone());
+            if let Some(ty_expr) = match parameter.ty.kind {
+                TyParamKind::Positional(ty) | TyParamKind::Optional(_, ty, _) => Some(ty),
+                _ => None,
+            } && matches!(ty_expr.kind, H::Cast(..))
+            {
+                if let Ok((_, views)) = self.resolve_type_annotation_with_views(ty_expr)
+                    && !views.is_empty()
+                {
+                    self.local_type_views.insert(binding, views);
+                }
+            }
             self.input_facts
                 .parameters
                 .bind(binding, index, ty.sort, &ty.ty);
