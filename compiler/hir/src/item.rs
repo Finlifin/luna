@@ -153,6 +153,14 @@ pub struct QuoteFnArm<'hir> {
     pub span: Span,
 }
 
+/// A package-wide pattern-function arm contributed by `fn id(... case pat ...) { body }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternFnArm {
+    pub target: crate::common::DefId,
+    pub arm: OwnerId,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EffectModifiers {
     pub is_async: bool,

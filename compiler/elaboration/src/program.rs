@@ -83,6 +83,7 @@ mod open_functions;
 mod operators;
 mod packed_bit;
 mod pattern_checking;
+mod pattern_functions;
 mod returned_environment;
 mod runtime_defaults;
 mod runtime_environment;
@@ -797,10 +798,15 @@ fn elaborate_in_mode(
         list_pattern_infos: BTreeMap::new(),
         range_pattern_infos: BTreeMap::new(),
         bitvec_pattern_infos: BTreeMap::new(),
+        case_pattern_infos: BTreeMap::new(),
+        pattern_stable_cases: BTreeSet::new(),
         direct_passing_effects: BTreeMap::new(),
         quote_fn_template_flags: BTreeMap::new(),
         checked_quote_fn_arms: BTreeMap::new(),
         quote_fn_arms_by_template: BTreeMap::new(),
+        checked_pattern_functions: BTreeMap::new(),
+        active_pattern_functions: BTreeSet::new(),
+        pattern_fn_arm_targets: BTreeMap::new(),
         internal_return_empty_replacements: BTreeMap::new(),
         definition_attributes,
         attribute_demands,
@@ -1525,6 +1531,9 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::TestTemplateInstance { .. } => continue,
             ItemKind::Fn(sig, _) if sig.modifiers.is_test_template => continue,
             ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
+                if package.is_pattern_fn_arm(owner) {
+                    continue;
+                }
                 if checker.is_data_consumer(owner) {
                     checker.ensure_data_consumer(owner, item.span)?;
                     continue;
@@ -1537,9 +1546,13 @@ fn elaborate_candidate<'a, 'h>(
                     checker.ensure_code_generator(owner, item.span)?;
                     continue;
                 }
+                let decl_has_pattern_arms = package
+                    .owner_definition(owner)
+                    .is_some_and(|def| package.has_pattern_fn_arms(def));
                 if sig.modifiers.is_pure
                     && !sig.modifiers.is_comptime
                     && !sig.modifiers.is_function_template
+                    && !decl_has_pattern_arms
                     && matches!(item.kind, ItemKind::FnDeclaration(_))
                     && !checker
                         .checked_traits
@@ -1612,6 +1625,7 @@ fn elaborate_candidate<'a, 'h>(
     for (owner, info) in package.owners() {
         checker.signature_owner = Some(owner);
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
+            || package.is_pattern_fn_arm(owner)
             || checker.is_code_generator(owner)
             || checker.is_pattern_generator(owner)
             || checker.is_data_consumer(owner)
@@ -1740,6 +1754,7 @@ fn elaborate_candidate<'a, 'h>(
     // parameters are available; no caller-local lookup or evaluation occurs.
     for (owner, info) in package.owners() {
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
+            || package.is_pattern_fn_arm(owner)
             || checker.is_code_generator(owner)
             || checker.is_pattern_generator(owner)
             || checker.is_data_consumer(owner)
@@ -1885,6 +1900,7 @@ fn elaborate_candidate<'a, 'h>(
         checker.check_data_consumer(owner)?;
     }
     checker.check_all_quote_fn_arms()?;
+    checker.check_all_pattern_functions()?;
     let mut recorded_bodies =
         (!incremental.record_upstream_packages.is_empty()).then(CachedUpstreamBodies::default);
     for (owner, item, sig) in functions {
@@ -1975,6 +1991,9 @@ fn elaborate_candidate<'a, 'h>(
         }
     }
     let attributes = prepared_attributes;
+    for function in checker.checked_pattern_functions.values().cloned() {
+        output.functions.push(function);
+    }
     checker.expand_test_templates(&mut output)?;
     output.formed_nullary_nominals = checker.declared_theory.formed_nullary_nominals().clone();
     // Required invocations in bodies, defaults and templates can publish types
@@ -3675,10 +3694,15 @@ struct Checker<'a, 'h> {
     list_pattern_infos: BTreeMap<n::LocalId, crate::automata::ListPatternInfo>,
     range_pattern_infos: BTreeMap<n::LocalId, crate::automata::RangePatternInfo>,
     bitvec_pattern_infos: BTreeMap<n::LocalId, crate::automata::BitVecPatternInfo>,
+    case_pattern_infos: BTreeMap<n::LocalId, crate::automata::CasePatternInfo>,
+    pattern_stable_cases: BTreeSet<OwnerId>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
     quote_fn_template_flags: BTreeMap<OwnerId, attributes::QuoteFnTemplateFlags>,
     checked_quote_fn_arms: BTreeMap<OwnerId, CheckedQuoteFnArm>,
     quote_fn_arms_by_template: BTreeMap<OwnerId, Vec<OwnerId>>,
+    checked_pattern_functions: BTreeMap<OwnerId, n::Function>,
+    active_pattern_functions: BTreeSet<OwnerId>,
+    pattern_fn_arm_targets: BTreeMap<OwnerId, OwnerId>,
     internal_return_empty_replacements: BTreeMap<(u32, u32), DeclarationId>,
     definition_attributes: n::DefinitionAttributes,
     attribute_demands: attributes::Demands,
@@ -4722,15 +4746,33 @@ impl Checker<'_, '_> {
                             open_functions::Annotation::Known(subject)
                         }
                     }
+                    TyParamKind::Positional(ty)
+                        if matches!(ty.kind, hir::ExprKind::TyPlaceholder)
+                            && self.pattern_fn_arm_targets.contains_key(&owner) =>
+                    {
+                        open_functions::Annotation::Known(self.pattern_fn_arm_parameter_type(
+                            owner,
+                            parameter_index,
+                            parameter.span,
+                        )?)
+                    }
                     TyParamKind::Optional(_, ty, _)
                     | TyParamKind::Positional(ty)
                     | TyParamKind::PositionalDependencyCatched(_, ty)
                     | TyParamKind::Varadic(_, ty) => self.signature_annotation(ty)?,
                     TyParamKind::Case(_) => {
-                        return Err(error(
-                            parameter.span,
-                            "case parameters are only valid on quote function template arm instances",
-                        ));
+                        if self.pattern_fn_arm_targets.contains_key(&owner) {
+                            open_functions::Annotation::Known(self.pattern_fn_arm_parameter_type(
+                                owner,
+                                parameter_index,
+                                parameter.span,
+                            )?)
+                        } else {
+                            return Err(error(
+                                parameter.span,
+                                "case parameters are only valid on quote function template arm instances",
+                            ));
+                        }
                     }
                 };
                 self.check_template_parameter_annotation(parameter, &annotation)?;
@@ -4840,7 +4882,11 @@ impl Checker<'_, '_> {
             let open_functions::Annotation::Known(result) = result_annotation else {
                 unreachable!()
             };
-            let signatures = if matches!(item.kind, ItemKind::FnDeclaration(_)) {
+            let signatures = if matches!(item.kind, ItemKind::FnDeclaration(_))
+                && !package
+                    .owner_definition(owner)
+                    .is_some_and(|def| package.has_pattern_fn_arms(def))
+            {
                 &mut self.interface_signatures
             } else {
                 &mut self.signatures

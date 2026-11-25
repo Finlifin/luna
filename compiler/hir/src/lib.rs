@@ -115,6 +115,8 @@ pub struct Package<'hir> {
     pub match_arm_imports: std::collections::BTreeMap<HirId, &'hir Expr<'hir>>,
     /// Quote function match-arm instances (`quote fn name(case pat) use template { body }`).
     pub quote_fn_arms: std::collections::BTreeMap<OwnerId, item::QuoteFnArm<'hir>>,
+    /// Package-wide pattern function arms (`fn name(case pat) { body }`).
+    pub pattern_fn_arms: Vec<item::PatternFnArm>,
     /// Visible lexical local bindings (`name -> HirId`) captured at call sites
     /// for contextual `implicit quote` parameter resolution.
     pub lexical_call_locals:
@@ -146,6 +148,7 @@ impl<'hir> Package<'hir> {
             staged_parameter_definitions: FxHashMap::default(),
             match_arm_imports: std::collections::BTreeMap::new(),
             quote_fn_arms: std::collections::BTreeMap::new(),
+            pattern_fn_arms: Vec::new(),
             lexical_call_locals: std::collections::BTreeMap::new(),
         }
     }
@@ -158,6 +161,14 @@ impl<'hir> Package<'hir> {
 
     pub fn next_definition_index(&self) -> u32 {
         self.next_definition_index
+    }
+
+    pub fn is_pattern_fn_arm(&self, owner: OwnerId) -> bool {
+        self.pattern_fn_arms.iter().any(|arm| arm.arm == owner)
+    }
+
+    pub fn has_pattern_fn_arms(&self, target: symbol::DefId) -> bool {
+        self.pattern_fn_arms.iter().any(|arm| arm.target == target)
     }
 
     pub fn bind_definition(&mut self, definition: symbol::DefId, owner: OwnerId) {

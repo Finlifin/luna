@@ -354,6 +354,7 @@ impl<'a> AstScanner<'a> {
             def_id,
             true, // ordered
         );
+        let mut has_case_param = false;
         if matches!(
             self.ast.get_node_kind(item),
             Some(NodeKind::Function | NodeKind::CaseDef | NodeKind::DeriverDef)
@@ -396,6 +397,11 @@ impl<'a> AstScanner<'a> {
                         NodeKind::TypeBoundParam | NodeKind::OptionalParam | NodeKind::VarargParam,
                     ) => self.ast.get_children(entry)[0],
                     Some(NodeKind::Id) => entry,
+                    Some(NodeKind::CaseParam) => {
+                        has_case_param = true;
+                        known = false;
+                        continue;
+                    }
                     _ => {
                         known = false;
                         continue;
@@ -494,15 +500,26 @@ impl<'a> AstScanner<'a> {
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 
-        // Register the function name in the parent scope
-        self.define_in_scope(
-            name,
-            BindingKind::Definition(def_id, parent_scope),
-            Some(item),
-            parent_scope,
-            vis,
-        )?;
-        self.def_names.push((def_id, name));
+        if self.ast.get_node_kind(item) == Some(NodeKind::Function) && has_case_param {
+            // Pattern-function arms share the base declaration's name without
+            // colliding in unordered scope; assign an AST-site-keyed DefId instead.
+            self.scope_tree
+                .get_mut(parent_scope)
+                .expect("parent scope exists for pattern fn arm")
+                .pattern_fn_arms
+                .push((AstNodeRef::new(self.file_id, item), def_id, scope_id));
+            self.def_names.push((def_id, name));
+        } else {
+            // Register the function name in the parent scope
+            self.define_in_scope(
+                name,
+                BindingKind::Definition(def_id, parent_scope),
+                Some(item),
+                parent_scope,
+                vis,
+            )?;
+            self.def_names.push((def_id, name));
+        }
 
         if self.ast.get_node_kind(item) == Some(NodeKind::TestDef) {
             self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[1])?;

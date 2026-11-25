@@ -401,6 +401,10 @@ impl Checker<'_, '_> {
             }
             if matches!(&item.kind, ItemKind::FnDeclaration(sig) if !sig.modifiers.is_quote && !sig.modifiers.is_function_template)
                 && !required_members.contains(&owner)
+                && !self
+                    .package
+                    .owner_definition(owner)
+                    .is_some_and(|def| self.package.has_pattern_fn_arms(def))
             {
                 return Err(error(
                     item.span,

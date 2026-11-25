@@ -1,6 +1,6 @@
 //! Checked pattern-matching decision-DAG plans exported from elaboration to IIR and backends.
 
-use crate::program::SourceRange;
+use crate::program::{LocalId, SourceRange};
 use crate::{DeclarationId, Term};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -84,6 +84,27 @@ impl fmt::Display for ListViewOps {
     }
 }
 
+/// Stable `case` pattern view invocation metadata for DAG deduplication and single evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseViewOps {
+    pub id: u32,
+    pub place: pattern_automata::Place,
+    pub declaration: DeclarationId,
+    pub bindings: Vec<LocalId>,
+    pub is_predicate: bool,
+    pub payload_type: Term,
+}
+
+impl fmt::Display for CaseViewOps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(case-view-ops (id {}) (place {}) (decl {}) (predicate {}) (payload-type {}))",
+            self.id, self.place, self.declaration, self.is_predicate, self.payload_type
+        )
+    }
+}
+
 /// Compiled Maranget decision DAG and list-view resolution metadata for one `match`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchPlan {
@@ -92,6 +113,7 @@ pub struct MatchPlan {
     pub type_desc: pattern_automata::TypeDesc,
     pub dag: pattern_automata::DecisionDag,
     pub list_views: BTreeMap<pattern_automata::Place, ListViewOps>,
+    pub case_views: Vec<CaseViewOps>,
     pub unreachable_arms: Vec<usize>,
     pub is_exhaustive: bool,
     pub stats: pattern_automata::CompileStats,
@@ -104,6 +126,7 @@ impl MatchPlan {
         1usize
             .saturating_add(self.dag.node_count())
             .saturating_add(self.list_views.len())
+            .saturating_add(self.case_views.len())
             .saturating_add(self.unreachable_arms.len())
     }
 }
@@ -126,6 +149,10 @@ impl fmt::Display for MatchPlan {
         f.write_str(") (list-views")?;
         for (place, ops) in &self.list_views {
             write!(f, " (view {place} {ops})")?;
+        }
+        f.write_str(") (case-views")?;
+        for ops in &self.case_views {
+            write!(f, " {ops}")?;
         }
         write!(f, ") {} {})", self.stats, self.dag)
     }
@@ -251,6 +278,7 @@ mod tests {
                 type_desc: TypeDesc::List(Box::new(TypeDesc::Bool)),
                 dag,
                 list_views,
+                case_views: Vec::new(),
                 unreachable_arms: vec![2],
                 is_exhaustive: true,
                 stats: pattern_automata::CompileStats {

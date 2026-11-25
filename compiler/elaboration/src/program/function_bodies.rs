@@ -181,7 +181,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn bind_source_declaration(
+    pub(super) fn bind_source_declaration(
         &mut self,
         owner: OwnerId,
         signature: Term,

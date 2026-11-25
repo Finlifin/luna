@@ -28,4 +28,5 @@
 | `__flurry_volatile` | `attrs.mem.volatile`（或 `attrs.volatile` 包装，禁止裸附） | `bool` | 易失内存／MMIO 访问控制（已端到端接通 `struct`/`newtype`/字段级 `load volatile`/`store volatile` 与纯度 P0 降级，`ef1eac47`） |
 | `__flurry_quote_fn_template_for_match_arms` | `attrs.quote_fn_template.for_match_arms` | `bool` | 标记无体 `template quote fn` 为 quoted match arm 模板（`use expr` in `match`） |
 | `__flurry_quote_fn_template_allow_non_exhaustive_instance` | `attrs.quote_fn_template.allow_non_exhaustive_instance` | `bool` | 允许单条 `quote fn ... (case ...) use template` 实例非穷尽（最终 `match` 仍须穷尽） |
+| `__flurry_pattern_stable` | `attrs.pattern.stable` | `bool` | 标记用户 `case` 视图可稳定重复求值／去重并纳入 `pattern_automata` 决策 DAG |
 | `__flurry_macro_*`（预留） | 待在 `library/attrs/` 新增对应宏包装构造器 | — | 宏系统展开元数据（禁止使用未加 `__` 前缀或裸附的 `flurry_macro_kind`） |

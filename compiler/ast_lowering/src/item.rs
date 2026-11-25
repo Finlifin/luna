@@ -702,19 +702,59 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             self.node_to_ident(id_node)
         };
         let previous_scope = self.file_scope;
-        let resolved = self.resolve_declared(ident);
-        if resolved.is_err() {
-            if modifiers.is_test {
-                self.emit_malformed("test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported", span);
-            } else if modifiers.is_test_template {
-                self.emit_malformed("test template declaration requires a scanned declaration scope; test templates inside runtime blocks are not supported", span);
+        let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
+        let has_case_param = kind == NodeKind::Function
+            && param_nodes
+                .iter()
+                .any(|&param_node| ast_node_has_case_param(self.ast, param_node));
+        let mut pattern_fn_target: Option<hir::common::DefId> = None;
+        if has_case_param {
+            match self.resolve_declared(ident) {
+                Ok(binding) => {
+                    if let resolve::BindingKind::Definition(target_def, _) = binding.kind {
+                        pattern_fn_target = Some(target_def);
+                    } else {
+                        self.emit_malformed(
+                            "pattern function arm requires a declared base function with the same name",
+                            span,
+                        );
+                    }
+                }
+                Err(_) => {
+                    self.emit_malformed(
+                        "pattern function arm requires a declared base function with the same name",
+                        span,
+                    );
+                }
             }
-        }
-        if let Ok(binding) = resolved {
-            if let resolve::BindingKind::Definition(definition, _) = binding.kind {
-                self.package.bind_definition(definition, owner_id);
-                if let Some(scope) = self.resolver.find_scope_for_def(definition) {
-                    self.file_scope = scope;
+            let site = self.ast_node_ref(node);
+            if let Some((arm_def, arm_scope)) = self.resolver.pattern_fn_arm(previous_scope, site) {
+                self.package.bind_definition(arm_def, owner_id);
+                self.file_scope = arm_scope;
+            } else {
+                self.emit_malformed(
+                    "pattern function arm requires a scanned declaration scope",
+                    span,
+                );
+            }
+            if body_node == 0 {
+                self.emit_malformed("pattern function arm must have a body", span);
+            }
+        } else {
+            let resolved = self.resolve_declared(ident);
+            if resolved.is_err() {
+                if modifiers.is_test {
+                    self.emit_malformed("test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported", span);
+                } else if modifiers.is_test_template {
+                    self.emit_malformed("test template declaration requires a scanned declaration scope; test templates inside runtime blocks are not supported", span);
+                }
+            }
+            if let Ok(binding) = resolved {
+                if let resolve::BindingKind::Definition(definition, _) = binding.kind {
+                    self.package.bind_definition(definition, owner_id);
+                    if let Some(scope) = self.resolver.find_scope_for_def(definition) {
+                        self.file_scope = scope;
+                    }
                 }
             }
         }
@@ -722,17 +762,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let rib_index = self.local_enter(RibKind::FnParam);
 
         // Parameters
-        let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
         let mut fn_params = Vec::new();
+        let mut seen_param_binders = std::collections::HashSet::new();
         for param_node in param_nodes.to_vec() {
             if let Some(mut param) = self.lower_fn_param(param_node) {
                 let is_case = matches!(param.ty.kind, TyParamKind::Case(_));
-                if !is_case
-                    && fn_params
-                        .iter()
-                        .any(|previous: &FnParam<'hir>| previous.name.name == param.name.name)
-                {
+                if !is_case && !seen_param_binders.insert(param.name.name) {
                     self.emit_malformed("duplicate function parameter", param.span);
+                }
+                if let TyParamKind::Case(pat) = param.ty.kind {
+                    check_case_param_duplicate_binders(pat, &mut seen_param_binders, |dup_span| {
+                        self.emit_malformed(
+                            "duplicate pattern binding across function parameters",
+                            dup_span,
+                        );
+                    });
                 }
                 param.index = fn_params.len() as u32;
                 if !is_case {
@@ -950,6 +994,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             nodes: OwnerNodes::new(),
         };
         self.package.insert_owner(owner_id, owner_info);
+        if let Some(target) = pattern_fn_target {
+            self.package.pattern_fn_arms.push(hir::item::PatternFnArm {
+                target,
+                arm: owner_id,
+                span,
+            });
+        }
 
         self.local_exit(rib_index);
 
@@ -2792,4 +2843,113 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.current_owner = prev_owner;
         owner_id
     }
+}
+
+fn ast_node_has_case_param(ast: &ast::Ast, mut node: NodeIndex) -> bool {
+    loop {
+        match ast.get_node_kind(node) {
+            Some(NodeKind::CaseParam) => return true,
+            Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
+                node = ast.get_children(node)[1];
+            }
+            Some(
+                NodeKind::ComptimeParam
+                | NodeKind::QuoteParam
+                | NodeKind::LambdaParam
+                | NodeKind::ImplicitParam
+                | NodeKind::ErrorParam
+                | NodeKind::CatchParam,
+            ) => {
+                node = ast.get_children(node)[0];
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn check_case_param_duplicate_binders(
+    pat: &hir::Pattern<'_>,
+    seen: &mut std::collections::HashSet<Symbol>,
+    mut on_dup: impl FnMut(Span),
+) {
+    fn walk(
+        pat: &hir::Pattern<'_>,
+        seen: &mut std::collections::HashSet<Symbol>,
+        on_dup: &mut impl FnMut(Span),
+    ) {
+        use hir::PatternKind as PK;
+        match &pat.kind {
+            PK::Wild
+            | PK::Const(_)
+            | PK::Comptime(_)
+            | PK::OptionNull
+            | PK::Async
+            | PK::Invalid => {}
+            PK::Binding(_, ident, sub) => {
+                if !seen.insert(ident.name) {
+                    on_dup(ident.span);
+                }
+                if let Some(sub) = sub {
+                    walk(sub, seen, on_dup);
+                }
+            }
+            PK::Then(first, _, next) => {
+                walk(first, seen, on_dup);
+                walk(next, seen, on_dup);
+            }
+            PK::Guard(inner, _)
+            | PK::Projection(inner, _)
+            | PK::OptionSome(inner)
+            | PK::ErrorOk(inner)
+            | PK::ErrorErr(inner)
+            | PK::Not(inner)
+            | PK::Ref(inner) => walk(inner, seen, on_dup),
+            PK::Tuple(items) | PK::Or(items) => {
+                for item in *items {
+                    walk(item, seen, on_dup);
+                }
+            }
+            PK::List(prefix, rest) => {
+                for item in *prefix {
+                    walk(item, seen, on_dup);
+                }
+                if let Some(rest) = rest {
+                    walk(rest, seen, on_dup);
+                }
+            }
+            PK::AppTuple(head, fields) => {
+                walk(head, seen, on_dup);
+                for field in *fields {
+                    walk(field, seen, on_dup);
+                }
+            }
+            PK::Struct(head, fields, _) | PK::AppStruct(head, fields) => {
+                walk(head, seen, on_dup);
+                for field in *fields {
+                    walk(&field.pat, seen, on_dup);
+                }
+            }
+            PK::NormalForm(_, args) => {
+                for arg in *args {
+                    walk(&arg.pattern, seen, on_dup);
+                }
+            }
+            PK::CodeSplice(_, outputs) => {
+                for out in outputs {
+                    if !seen.insert(out.name.name) {
+                        on_dup(out.name.span);
+                    }
+                }
+            }
+            PK::Range(..) => {}
+            PK::BitVec { segments, .. } => {
+                for seg in segments {
+                    if let hir::pattern::BitSegment::Typed { pattern, .. } = seg {
+                        walk(pattern, seen, on_dup);
+                    }
+                }
+            }
+        }
+    }
+    walk(pat, seen, &mut on_dup);
 }

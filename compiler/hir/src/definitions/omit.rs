@@ -112,6 +112,9 @@ pub fn omit_generation_sources<'h>(
         .quote_fn_arms
         .retain(|owner, _| !omitted.contains(owner));
     package
+        .pattern_fn_arms
+        .retain(|arm| !omitted.contains(&arm.arm));
+    package
         .lexical_call_locals
         .retain(|id, _| !omitted.contains(&id.owner));
     package.definition_attributes.retain(|attribute| {

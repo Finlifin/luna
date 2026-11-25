@@ -78,8 +78,10 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         function_template_origins,
         match_arm_imports,
         quote_fn_arms,
+        pattern_fn_arms,
         lexical_call_locals,
     } = package;
+    charge(fuel, pattern_fn_arms.len())?;
     for strategies in derive_visible_strategies.values() {
         charge(fuel, strategies.len().saturating_add(1))?;
     }

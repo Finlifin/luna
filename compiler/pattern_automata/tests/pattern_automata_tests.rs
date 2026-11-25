@@ -2,8 +2,9 @@ use pattern_automata::{
     BitInterval, BitSegmentPattern, BitValue, BitVecPattern, CompileBudget, CompileError,
     CompileOutput, DagBuilder, DagNode, DecisionDag, EnumType, ErrorRowType, ErrorTag, EvalError,
     FiniteInt, IntLit, IntType, MatchArm, MatchOutcome, MissingWitness, NodeId, Pattern,
-    PatternMatrix, Place, RangeBound, SwitchKind, TypeDesc, Value, VariantPayloadType,
-    VariantSchema, VariantTag, compile, compile_with_budget, eval_dag, eval_linear,
+    PatternMatrix, Place, RangeBound, SwitchKind, TypeDesc, Value, VariantPayloadPattern,
+    VariantPayloadType, VariantSchema, VariantTag, compile, compile_with_budget, eval_dag,
+    eval_linear, patterns_overlap,
 };
 use std::collections::BTreeMap;
 
@@ -1998,4 +1999,194 @@ fn finite_int_out_of_range_and_eval_dag_errors_do_not_panic() {
         on_false: fail,
         on_true: fail,
     };
+}
+
+#[test]
+fn case_pattern_compile_dedups_same_id_and_witnesses_uncovered_branches() {
+    let arms = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::Case {
+                id: 1,
+                is_predicate: false,
+                payload_ty: Some(Box::new(TypeDesc::Int(IntType::SignedBits(64)))),
+                payload: Box::new(Pattern::signed(1)),
+            },
+        )
+        .unwrap(),
+        MatchArm::unguarded(
+            1,
+            Pattern::Case {
+                id: 1,
+                is_predicate: false,
+                payload_ty: Some(Box::new(TypeDesc::Int(IntType::SignedBits(64)))),
+                payload: Box::new(Pattern::bind_as("n", Pattern::Wild)),
+            },
+        )
+        .unwrap(),
+        MatchArm::unguarded(2, Pattern::Wild).unwrap(),
+    ];
+    let matrix = PatternMatrix::new(TypeDesc::Any, arms).unwrap();
+    let out = compile(&matrix).unwrap();
+    assert!(out.is_exhaustive);
+    assert!(out.unreachable_arms.is_empty());
+
+    let case_switch_count = out
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node,
+                DagNode::Switch {
+                    kind: SwitchKind::Case { id: 1, .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        case_switch_count, 1,
+        "same Case(id=1) should be tested once in DAG: {}",
+        out.dag
+    );
+
+    let non_exhaustive = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::Case {
+                id: 7,
+                is_predicate: true,
+                payload_ty: Some(Box::new(TypeDesc::Tuple(Vec::new()))),
+                payload: Box::new(Pattern::Tuple(Vec::new())),
+            },
+        )
+        .unwrap(),
+    ];
+    let out2 = compile(&PatternMatrix::new(TypeDesc::Bool, non_exhaustive).unwrap()).unwrap();
+    assert!(!out2.is_exhaustive);
+    assert!(!out2.missing_witnesses.is_empty());
+
+    let exhaustive_with_bool_fallback = vec![
+        MatchArm::unguarded(
+            0,
+            Pattern::Case {
+                id: 7,
+                is_predicate: true,
+                payload_ty: Some(Box::new(TypeDesc::Tuple(Vec::new()))),
+                payload: Box::new(Pattern::Tuple(Vec::new())),
+            },
+        )
+        .unwrap(),
+        MatchArm::unguarded(1, Pattern::Bool(false)).unwrap(),
+        MatchArm::unguarded(2, Pattern::Bool(true)).unwrap(),
+    ];
+    let out3 = compile(&PatternMatrix::new(TypeDesc::Bool, exhaustive_with_bool_fallback).unwrap())
+        .unwrap();
+    assert!(out3.is_exhaustive);
+    assert!(out3.unreachable_arms.is_empty());
+}
+
+#[test]
+fn patterns_overlap_checks_exact_structural_and_case_intersections() {
+    let budget = CompileBudget::default();
+
+    // Disjoint vs overlapping integer ranges
+    let r1 = Pattern::IntRange {
+        start: RangeBound::Inclusive(IntLit::Signed(0)),
+        end: RangeBound::Exclusive(IntLit::Signed(10)),
+    };
+    let r2 = Pattern::IntRange {
+        start: RangeBound::Inclusive(IntLit::Signed(10)),
+        end: RangeBound::Inclusive(IntLit::Signed(20)),
+    };
+    let r3 = Pattern::IntRange {
+        start: RangeBound::Inclusive(IntLit::Signed(9)),
+        end: RangeBound::Inclusive(IntLit::Signed(20)),
+    };
+    let i64_ty = TypeDesc::Int(IntType::SignedBits(64));
+    assert!(!patterns_overlap(&i64_ty, &r1, &r2, budget).unwrap());
+    assert!(patterns_overlap(&i64_ty, &r1, &r3, budget).unwrap());
+
+    // Disjoint vs overlapping enums / tuples
+    let mut variants = BTreeMap::new();
+    variants.insert(
+        VariantTag::Named("lit".to_string()),
+        VariantSchema {
+            discrete_code: None,
+            payload: VariantPayloadType::Tuple(vec![i64_ty.clone()]),
+        },
+    );
+    variants.insert(
+        VariantTag::Named("add".to_string()),
+        VariantSchema {
+            discrete_code: None,
+            payload: VariantPayloadType::Tuple(vec![i64_ty.clone(), i64_ty.clone()]),
+        },
+    );
+    let expr_ty = TypeDesc::Enum(EnumType {
+        name: "Expr".to_string(),
+        is_open: false,
+        variants,
+    });
+    let lit_neg = Pattern::EnumVariant {
+        tag: VariantTag::Named("lit".to_string()),
+        payload: VariantPayloadPattern::Tuple(vec![Pattern::IntRange {
+            start: RangeBound::Unbounded,
+            end: RangeBound::Exclusive(IntLit::Signed(0)),
+        }]),
+    };
+    let lit_nonneg = Pattern::EnumVariant {
+        tag: VariantTag::Named("lit".to_string()),
+        payload: VariantPayloadPattern::Tuple(vec![Pattern::IntRange {
+            start: RangeBound::Inclusive(IntLit::Signed(0)),
+            end: RangeBound::Unbounded,
+        }]),
+    };
+    let add_any = Pattern::EnumVariant {
+        tag: VariantTag::Named("add".to_string()),
+        payload: VariantPayloadPattern::Tuple(vec![Pattern::Wild, Pattern::Wild]),
+    };
+    assert!(!patterns_overlap(&expr_ty, &lit_neg, &lit_nonneg, budget).unwrap());
+    assert!(!patterns_overlap(&expr_ty, &lit_neg, &add_any, budget).unwrap());
+    assert!(patterns_overlap(&expr_ty, &lit_neg, &Pattern::Wild, budget).unwrap());
+
+    // List prefix vs open-ended rest
+    let list_ty = TypeDesc::List(Box::new(TypeDesc::Bool));
+    let exact_one_true = Pattern::List {
+        prefix: vec![Pattern::Bool(true)],
+        rest: None,
+    };
+    let starts_false = Pattern::List {
+        prefix: vec![Pattern::Bool(false)],
+        rest: Some(Box::new(Pattern::Wild)),
+    };
+    let starts_any = Pattern::List {
+        prefix: vec![Pattern::Wild],
+        rest: Some(Box::new(Pattern::Wild)),
+    };
+    assert!(!patterns_overlap(&list_ty, &exact_one_true, &starts_false, budget).unwrap());
+    assert!(patterns_overlap(&list_ty, &exact_one_true, &starts_any, budget).unwrap());
+
+    // Case pattern views: same id with disjoint payloads -> disjoint; different ids -> overlap
+    let case_1_pos = Pattern::Case {
+        id: 1,
+        is_predicate: false,
+        payload_ty: Some(Box::new(i64_ty.clone())),
+        payload: Box::new(Pattern::signed(1)),
+    };
+    let case_1_neg = Pattern::Case {
+        id: 1,
+        is_predicate: false,
+        payload_ty: Some(Box::new(i64_ty)),
+        payload: Box::new(Pattern::signed(-1)),
+    };
+    let case_2 = Pattern::Case {
+        id: 2,
+        is_predicate: true,
+        payload_ty: Some(Box::new(TypeDesc::Tuple(Vec::new()))),
+        payload: Box::new(Pattern::Tuple(Vec::new())),
+    };
+    assert!(!patterns_overlap(&TypeDesc::Any, &case_1_pos, &case_1_neg, budget).unwrap());
+    assert!(patterns_overlap(&TypeDesc::Any, &case_1_pos, &case_2, budget).unwrap());
 }

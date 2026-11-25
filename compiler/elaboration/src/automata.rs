@@ -3,7 +3,7 @@
 use nir::DeclarationId;
 use nir::Primitive;
 use nir::Term;
-use nir::match_plan::{ListObservationMode, ListViewOps, MatchPlan};
+use nir::match_plan::{CaseViewOps, ListObservationMode, ListViewOps, MatchPlan};
 use nir::program::{self as n, SourceRange, VariantShape};
 use pattern_automata as pa;
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +70,17 @@ pub(crate) struct BitVecPatternInfo {
     pub segments: Vec<BitSegmentInfo>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CasePatternInfo {
+    pub declaration: DeclarationId,
+    pub binding: n::LocalId,
+    pub callee: n::Expr,
+    pub extra_args: Vec<n::Expr>,
+    pub is_predicate: bool,
+    pub payload_type: Term,
+    pub next_pattern: n::Pattern,
+}
+
 pub(crate) struct AutomataOutcome {
     pub plan: MatchPlan,
     pub missing_witnesses: Vec<pa::MissingWitness>,
@@ -103,6 +114,153 @@ pub(crate) trait AutomataEnv {
     fn range_pattern_info(&self, binding: n::LocalId) -> Option<&RangePatternInfo>;
 
     fn bitvec_pattern_info(&self, binding: n::LocalId) -> Option<&BitVecPatternInfo>;
+
+    fn case_pattern_info(&self, binding: n::LocalId) -> Option<&CasePatternInfo>;
+}
+
+#[derive(Default)]
+struct CaseViewTable {
+    entries: Vec<CaseEntry>,
+}
+
+struct CaseEntry {
+    place: pa::Place,
+    declaration: DeclarationId,
+    callee_ty: Term,
+    callee_kind: CaseCalleeKey,
+    extra_args: Vec<n::Expr>,
+    ops: CaseViewOps,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CaseCalleeKey {
+    Instance(DeclarationId, Vec<Term>),
+    Function(DeclarationId),
+    Other(String),
+}
+
+fn callee_key(expr: &n::Expr) -> CaseCalleeKey {
+    match &expr.kind {
+        n::ExprKind::FunctionInstance {
+            declaration,
+            arguments,
+        } => CaseCalleeKey::Instance(*declaration, arguments.clone()),
+        n::ExprKind::Function(declaration) => CaseCalleeKey::Function(*declaration),
+        _ => CaseCalleeKey::Other(expr.to_string()),
+    }
+}
+
+fn expr_equiv_ignoring_source(a: &n::Expr, b: &n::Expr) -> bool {
+    if a.ty != b.ty {
+        return false;
+    }
+    match (&a.kind, &b.kind) {
+        (n::ExprKind::Unit, n::ExprKind::Unit) => true,
+        (n::ExprKind::Literal(l1), n::ExprKind::Literal(l2)) => l1 == l2,
+        (n::ExprKind::Local(l1), n::ExprKind::Local(l2)) => l1 == l2,
+        (n::ExprKind::Tuple(e1), n::ExprKind::Tuple(e2)) => {
+            e1.len() == e2.len()
+                && e1
+                    .iter()
+                    .zip(e2.iter())
+                    .all(|(x, y)| expr_equiv_ignoring_source(x, y))
+        }
+        (
+            n::ExprKind::Record {
+                declaration: d1,
+                fields: f1,
+            },
+            n::ExprKind::Record {
+                declaration: d2,
+                fields: f2,
+            },
+        ) => {
+            d1 == d2
+                && f1.len() == f2.len()
+                && f1
+                    .iter()
+                    .zip(f2.iter())
+                    .all(|(x, y)| expr_equiv_ignoring_source(x, y))
+        }
+        (
+            n::ExprKind::Variant {
+                declaration: d1,
+                index: i1,
+                fields: f1,
+            },
+            n::ExprKind::Variant {
+                declaration: d2,
+                index: i2,
+                fields: f2,
+            },
+        ) => {
+            d1 == d2
+                && i1 == i2
+                && f1.len() == f2.len()
+                && f1
+                    .iter()
+                    .zip(f2.iter())
+                    .all(|(x, y)| expr_equiv_ignoring_source(x, y))
+        }
+        (n::ExprKind::TypeValue(t1), n::ExprKind::TypeValue(t2)) => t1 == t2,
+        (
+            n::ExprKind::FunctionInstance {
+                declaration: d1,
+                arguments: a1,
+            },
+            n::ExprKind::FunctionInstance {
+                declaration: d2,
+                arguments: a2,
+            },
+        ) => d1 == d2 && a1 == a2,
+        (n::ExprKind::Function(d1), n::ExprKind::Function(d2)) => d1 == d2,
+        _ => false,
+    }
+}
+
+impl CaseViewTable {
+    fn intern(&mut self, place: &pa::Place, info: &CasePatternInfo) -> u32 {
+        let ckey = callee_key(&info.callee);
+        for entry in &mut self.entries {
+            if &entry.place == place
+                && entry.declaration == info.declaration
+                && entry.callee_ty == info.callee.ty
+                && entry.callee_kind == ckey
+                && entry.extra_args.len() == info.extra_args.len()
+                && entry
+                    .extra_args
+                    .iter()
+                    .zip(info.extra_args.iter())
+                    .all(|(a, b)| expr_equiv_ignoring_source(a, b))
+            {
+                if !entry.ops.bindings.contains(&info.binding) {
+                    entry.ops.bindings.push(info.binding);
+                }
+                return entry.ops.id;
+            }
+        }
+        let id = self.entries.len() as u32;
+        self.entries.push(CaseEntry {
+            place: place.clone(),
+            declaration: info.declaration,
+            callee_ty: info.callee.ty.clone(),
+            callee_kind: ckey,
+            extra_args: info.extra_args.clone(),
+            ops: CaseViewOps {
+                id,
+                place: place.clone(),
+                declaration: info.declaration,
+                bindings: vec![info.binding],
+                is_predicate: info.is_predicate,
+                payload_type: info.payload_type.clone(),
+            },
+        });
+        id
+    }
+
+    fn into_ops(self) -> Vec<CaseViewOps> {
+        self.entries.into_iter().map(|e| e.ops).collect()
+    }
 }
 
 pub(crate) fn compile_match_plan(
@@ -112,6 +270,7 @@ pub(crate) fn compile_match_plan(
     source: SourceRange,
 ) -> Option<AutomataOutcome> {
     let mut list_views: BTreeMap<pa::Place, ListViewOps> = BTreeMap::new();
+    let mut case_table = CaseViewTable::default();
     let mut impure_list_places: BTreeSet<pa::Place> = BTreeSet::new();
     let mut record_places: BTreeSet<pa::Place> = BTreeSet::new();
     let mut exact = true;
@@ -128,6 +287,7 @@ pub(crate) fn compile_match_plan(
             inner_pat,
             &pa::Place::root(),
             &mut list_views,
+            &mut case_table,
             &mut impure_list_places,
             &mut record_places,
             &mut arm_exact,
@@ -182,6 +342,7 @@ pub(crate) fn compile_match_plan(
             type_desc,
             dag,
             list_views,
+            case_views: case_table.into_ops(),
             unreachable_arms,
             is_exhaustive,
             stats,
@@ -190,6 +351,74 @@ pub(crate) fn compile_match_plan(
         },
         missing_witnesses: output.missing_witnesses,
     })
+}
+
+pub(crate) fn patterns_overlap(
+    env: &dyn AutomataEnv,
+    lhs: &n::Pattern,
+    rhs: &n::Pattern,
+    ty: &Term,
+) -> Option<bool> {
+    let mut list_views: BTreeMap<pa::Place, ListViewOps> = BTreeMap::new();
+    let mut case_table = CaseViewTable::default();
+    let mut impure_list_places: BTreeSet<pa::Place> = BTreeSet::new();
+    let mut record_places: BTreeSet<pa::Place> = BTreeSet::new();
+    let mut exact = true;
+
+    let lhs_inner = match lhs {
+        n::Pattern::Guard { pattern, .. } => pattern.as_ref(),
+        other => other,
+    };
+    let rhs_inner = match rhs {
+        n::Pattern::Guard { pattern, .. } => pattern.as_ref(),
+        other => other,
+    };
+
+    let (pa_lhs, _) = convert_pattern(
+        env,
+        lhs_inner,
+        &pa::Place::root(),
+        &mut list_views,
+        &mut case_table,
+        &mut impure_list_places,
+        &mut record_places,
+        &mut exact,
+        0,
+    );
+    let (pa_rhs, _) = convert_pattern(
+        env,
+        rhs_inner,
+        &pa::Place::root(),
+        &mut list_views,
+        &mut case_table,
+        &mut impure_list_places,
+        &mut record_places,
+        &mut exact,
+        0,
+    );
+
+    if list_views.keys().any(|lp| {
+        record_places
+            .iter()
+            .any(|rp| same_normalized_path(&lp.steps, &rp.steps))
+            || impure_list_places
+                .iter()
+                .any(|ip| same_normalized_path(&lp.steps, &ip.steps))
+    }) {
+        return None;
+    }
+
+    let mut visiting = BTreeSet::new();
+    let type_desc = term_to_type_desc_at(
+        env,
+        ty,
+        &pa::Place::root(),
+        &list_views,
+        &mut exact,
+        &mut visiting,
+        0,
+    );
+    pa::patterns_overlap(&type_desc, &pa_lhs, &pa_rhs, pa::CompileBudget::default()).ok()
 }
 
 pub(crate) fn format_missing_witnesses(
@@ -392,6 +621,9 @@ fn rename_pa_pattern_bindings(
                 }
             }
         }
+        pa::Pattern::Case { payload, .. } => {
+            rename_pa_pattern_bindings(payload, rename_map, depth + 1, exact);
+        }
         pa::Pattern::Wild
         | pa::Pattern::Bool(_)
         | pa::Pattern::Char(_)
@@ -407,6 +639,7 @@ fn convert_pattern(
     pat: &n::Pattern,
     place: &pa::Place,
     list_views: &mut BTreeMap<pa::Place, ListViewOps>,
+    case_table: &mut CaseViewTable,
     impure_list_places: &mut BTreeSet<pa::Place>,
     record_places: &mut BTreeSet<pa::Place>,
     exact: &mut bool,
@@ -425,6 +658,7 @@ fn convert_pattern(
                 inner,
                 place,
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -444,6 +678,7 @@ fn convert_pattern(
                 pattern,
                 place,
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -477,6 +712,7 @@ fn convert_pattern(
                 inner,
                 &place.optional_inner(),
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -490,6 +726,7 @@ fn convert_pattern(
                 inner,
                 &place.error_ok_inner(),
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -506,6 +743,7 @@ fn convert_pattern(
                 inner,
                 &place.error_err_inner(),
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -528,6 +766,7 @@ fn convert_pattern(
                     elem,
                     &place.tuple_field(idx),
                     list_views,
+                    case_table,
                     impure_list_places,
                     record_places,
                     exact,
@@ -548,6 +787,7 @@ fn convert_pattern(
                     field,
                     &place.record_field(name.as_str()),
                     list_views,
+                    case_table,
                     impure_list_places,
                     record_places,
                     exact,
@@ -579,6 +819,7 @@ fn convert_pattern(
                     field,
                     &place.record_field(name.as_str()),
                     list_views,
+                    case_table,
                     impure_list_places,
                     record_places,
                     exact,
@@ -614,6 +855,7 @@ fn convert_pattern(
                             field,
                             &place.variant_tuple_field(tag.clone(), i),
                             list_views,
+                            case_table,
                             impure_list_places,
                             record_places,
                             exact,
@@ -636,6 +878,7 @@ fn convert_pattern(
                             field,
                             &place.variant_record_field(tag.clone(), name.as_str()),
                             list_views,
+                            case_table,
                             impure_list_places,
                             record_places,
                             exact,
@@ -658,6 +901,7 @@ fn convert_pattern(
                     alt,
                     place,
                     list_views,
+                    case_table,
                     impure_list_places,
                     record_places,
                     exact,
@@ -674,6 +918,7 @@ fn convert_pattern(
                 pattern,
                 place,
                 list_views,
+                case_table,
                 impure_list_places,
                 record_places,
                 exact,
@@ -699,6 +944,7 @@ fn convert_pattern(
                         elem_pat,
                         &place.list_elem(idx),
                         list_views,
+                        case_table,
                         impure_list_places,
                         record_places,
                         exact,
@@ -713,6 +959,7 @@ fn convert_pattern(
                         rest_pat,
                         &place.list_rest(info.prefix_patterns.len()),
                         list_views,
+                        case_table,
                         impure_list_places,
                         record_places,
                         exact,
@@ -724,6 +971,38 @@ fn convert_pattern(
                     None
                 };
                 return (pa::Pattern::List { prefix, rest }, has_guard);
+            }
+            if let Some(case_info) = env.case_pattern_info(*binding) {
+                let id = case_table.intern(place, case_info);
+                let payload_place = place.case_payload(id);
+                let mut visiting = BTreeSet::new();
+                let payload_desc = term_to_type_desc_plain(
+                    env,
+                    &case_info.payload_type,
+                    exact,
+                    &mut visiting,
+                    depth + 1,
+                );
+                let (payload_pat, g) = convert_pattern(
+                    env,
+                    &case_info.next_pattern,
+                    &payload_place,
+                    list_views,
+                    case_table,
+                    impure_list_places,
+                    record_places,
+                    exact,
+                    depth + 1,
+                );
+                return (
+                    pa::Pattern::Case {
+                        id,
+                        is_predicate: case_info.is_predicate,
+                        payload_ty: Some(Box::new(payload_desc)),
+                        payload: Box::new(payload_pat),
+                    },
+                    g,
+                );
             }
             if let Some(range) = env.range_pattern_info(*binding) {
                 return match range {
@@ -781,6 +1060,7 @@ fn convert_pattern(
                                 pattern,
                                 &slice_place,
                                 list_views,
+                                case_table,
                                 impure_list_places,
                                 record_places,
                                 exact,

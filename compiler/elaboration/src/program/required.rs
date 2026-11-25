@@ -2017,14 +2017,26 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Function, Error> {
         let item = self.package.item(owner).unwrap();
-        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &item.kind else {
-            return Err(error(span, "required comptime call needs a function body"));
+        let (is_pattern_fn, sig) = match &item.kind {
+            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) => (false, sig),
+            ItemKind::FnDeclaration(sig)
+                if self
+                    .package
+                    .owner_definition(owner)
+                    .is_some_and(|def| self.package.has_pattern_fn_arms(def)) =>
+            {
+                (true, sig)
+            }
+            _ => return Err(error(span, "required comptime call needs a function body")),
         };
         if !sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head {
             return Err(error(
                 span,
                 "required comptime evaluation cannot execute a runtime function or normal-form head",
             ));
+        }
+        if is_pattern_fn {
+            return self.check_and_cache_pattern_function(owner, span);
         }
         self.ensure_signature(owner, span)?;
         self.ensure_contract(owner, span)?;

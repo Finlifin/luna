@@ -227,6 +227,22 @@ impl<'a> Resolver<'a> {
         Ok(Resolution::from_binding(&binding))
     }
 
+    /// Look up the synthesized `(arm_def_id, body_scope)` for a `fn foo(case ...)` arm item.
+    pub fn pattern_fn_arm(
+        &self,
+        scope: ScopeId,
+        site: crate::ids::AstNodeRef,
+    ) -> Option<(DefId, ScopeId)> {
+        self.tree
+            .scope_tree
+            .get(scope)?
+            .pattern_fn_arms
+            .iter()
+            .find_map(|&(arm_site, def_id, body_scope)| {
+                (arm_site == site).then_some((def_id, body_scope))
+            })
+    }
+
     /// Locate a unique trait member for early pattern-output names. This does
     /// not establish the receiver's trait capability or substitute any types.
     pub fn pattern_trait_member(

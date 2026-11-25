@@ -461,6 +461,7 @@ fn match_into(pattern: &Pattern, value: &Value, out: &mut BTreeMap<String, Value
             }
             false
         }
+        Pattern::Case { .. } => false,
     }
 }
 
@@ -616,6 +617,12 @@ fn project_place(root: &Value, place: &Place) -> Result<Value, EvalError> {
                 let slice = bv.slice(*lo, *hi);
                 slice_to_value(&slice, ty)
                     .ok_or(EvalError::InvalidBitSliceConversion { lo: *lo, hi: *hi })?
+            }
+            (_, PlaceStep::CasePayload(id)) => {
+                return Err(EvalError::InvalidPlaceProjection {
+                    step: format!("case-payload {id}"),
+                    value: "requires runtime case evaluator".to_string(),
+                });
             }
             (val, step) => {
                 return Err(EvalError::InvalidPlaceProjection {
@@ -773,5 +780,9 @@ fn select_switch_target(
                 found: other.to_string(),
             }),
         },
+        SwitchKind::Case { id, .. } => Err(EvalError::MissingSwitchCase {
+            kind: "case",
+            detail: format!("case view {id} requires runtime evaluator"),
+        }),
     }
 }

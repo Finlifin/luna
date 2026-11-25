@@ -16,11 +16,23 @@ pub enum PlaceStep {
     OptionalInner,
     ErrorOkInner,
     ErrorErrInner,
-    VariantTupleField { tag: VariantTag, index: usize },
-    VariantRecordField { tag: VariantTag, field: String },
+    VariantTupleField {
+        tag: VariantTag,
+        index: usize,
+    },
+    VariantRecordField {
+        tag: VariantTag,
+        field: String,
+    },
     ListElem(usize),
     ListRest(usize),
-    BitSlice { lo: u32, hi: u32, ty: TypeDesc },
+    BitSlice {
+        lo: u32,
+        hi: u32,
+        ty: TypeDesc,
+    },
+    /// Payload extracted from a `pure` / `^attrs.pattern.stable` `case` pattern view call `id`.
+    CasePayload(u32),
 }
 
 impl fmt::Display for PlaceStep {
@@ -46,6 +58,7 @@ impl fmt::Display for PlaceStep {
             Self::ListElem(idx) => write!(f, "(list-elem {idx})"),
             Self::ListRest(from) => write!(f, "(list-rest {from})"),
             Self::BitSlice { lo, hi, ty } => write!(f, "(bit-slice {lo} {hi} {ty})"),
+            Self::CasePayload(id) => write!(f, "(case-payload {id})"),
         }
     }
 }
@@ -120,6 +133,11 @@ impl Place {
     /// Project `BitVec` bit slice `[lo, hi)` interpreted as `ty`.
     pub fn bit_slice(&self, lo: u32, hi: u32, ty: TypeDesc) -> Self {
         self.push(PlaceStep::BitSlice { lo, hi, ty })
+    }
+
+    /// Project the matched payload of `case` view call `id`.
+    pub fn case_payload(&self, id: u32) -> Self {
+        self.push(PlaceStep::CasePayload(id))
     }
 }
 
@@ -244,6 +262,13 @@ pub enum SwitchKind {
         cases: Vec<(BitInterval, NodeId)>,
         default: Option<NodeId>,
     },
+    /// Branch on a `pure` / `^attrs.pattern.stable` `case` pattern view call `id`.
+    Case {
+        id: u32,
+        is_predicate: bool,
+        on_miss: NodeId,
+        on_hit: NodeId,
+    },
 }
 
 impl SwitchKind {
@@ -315,6 +340,12 @@ impl SwitchKind {
                     out.push(*def);
                 }
             }
+            Self::Case {
+                on_miss, on_hit, ..
+            } => {
+                out.push(*on_miss);
+                out.push(*on_hit);
+            }
         }
         out
     }
@@ -367,6 +398,17 @@ impl SwitchKind {
                 hi: *hi,
                 cases: cases.iter().map(|(k, v)| (k.clone(), map[v.0])).collect(),
                 default: default.map(|d| map[d.0]),
+            },
+            Self::Case {
+                id,
+                is_predicate,
+                on_miss,
+                on_hit,
+            } => Self::Case {
+                id: *id,
+                is_predicate: *is_predicate,
+                on_miss: map[on_miss.0],
+                on_hit: map[on_hit.0],
             },
         }
     }
@@ -459,6 +501,15 @@ impl fmt::Display for SwitchKind {
                 }
                 f.write_str(")")
             }
+            Self::Case {
+                id,
+                is_predicate,
+                on_miss,
+                on_hit,
+            } => write!(
+                f,
+                "(case (id {id}) (predicate {is_predicate}) (miss {on_miss}) (hit {on_hit}))"
+            ),
         }
     }
 }
@@ -880,6 +931,22 @@ impl DagBuilder {
                     hi,
                     cases,
                     default,
+                }
+            }
+            SwitchKind::Case {
+                id,
+                is_predicate,
+                on_miss,
+                on_hit,
+            } => {
+                if on_miss == on_hit {
+                    return Ok(on_miss);
+                }
+                SwitchKind::Case {
+                    id,
+                    is_predicate,
+                    on_miss,
+                    on_hit,
                 }
             }
         };

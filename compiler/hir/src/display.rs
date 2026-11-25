@@ -305,6 +305,16 @@ impl Display for Package<'_> {
         for (owner, arm) in &self.quote_fn_arms {
             write!(f, " (arm-entry (owner {}) {arm})", Owner(*owner))?;
         }
+        f.write_str(") (pattern-fn-arms")?;
+        for arm in &self.pattern_fn_arms {
+            write!(
+                f,
+                " (pattern-arm (target {}) (arm {}) {})",
+                arm.target,
+                Owner(arm.arm),
+                Location(arm.span)
+            )?;
+        }
         f.write_str(") (lexical-call-locals")?;
         for (call, locals) in &self.lexical_call_locals {
             write!(f, " (call-locals (call {}) (bindings", Id(*call))?;

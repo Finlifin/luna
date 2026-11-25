@@ -390,6 +390,7 @@ fn pattern_has_any_bindings(pat: &Pattern) -> bool {
                 pattern_has_any_bindings(pattern)
             }
         }),
+        Pattern::Case { payload, .. } => pattern_has_any_bindings(payload),
     }
 }
 
@@ -517,6 +518,36 @@ impl Compiler {
         col_idx: usize,
     ) -> Result<NodeId, CompileError> {
         let col = cols[col_idx].clone();
+        if matches!(col.domain, ColDomain::Typed(_))
+            && rows.iter().any(|row| match &row.pats[col_idx] {
+                ColPattern::Pattern(pat) => pattern_contains_top_case(pat),
+                ColPattern::BitSlice(_) => false,
+            })
+        {
+            let expanded = expand_or_at_col(&cols, rows, col_idx);
+            if let Some((case_id, is_predicate, payload_ty)) =
+                expanded.iter().find_map(|row| match &row.pats[col_idx] {
+                    ColPattern::Pattern(Pattern::Case {
+                        id,
+                        is_predicate,
+                        payload_ty,
+                        ..
+                    }) => Some((*id, *is_predicate, payload_ty.as_deref().cloned())),
+                    _ => None,
+                })
+            {
+                return self.specialize_case(
+                    cols,
+                    expanded,
+                    col_idx,
+                    col.place,
+                    case_id,
+                    is_predicate,
+                    payload_ty,
+                );
+            }
+            return self.specialize_column(cols, expanded, col_idx);
+        }
         match &col.domain {
             ColDomain::AlignedBitSlice { parent, lo, hi } => {
                 self.specialize_aligned_bitslice(cols, rows, col_idx, parent.clone(), *lo, *hi)
@@ -1557,6 +1588,62 @@ impl Compiler {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_case(
+        &mut self,
+        cols: Vec<Column>,
+        expanded: Vec<Row>,
+        col_idx: usize,
+        place: Place,
+        case_id: u32,
+        is_predicate: bool,
+        payload_ty: Option<TypeDesc>,
+    ) -> Result<NodeId, CompileError> {
+        let mut hit_cols = cols.clone();
+        hit_cols.insert(
+            col_idx + 1,
+            Column {
+                place: place.case_payload(case_id),
+                domain: ColDomain::Typed(payload_ty.unwrap_or(TypeDesc::Any)),
+            },
+        );
+        let mut hit_rows = Vec::with_capacity(expanded.len());
+        for mut row in expanded.clone() {
+            let payload_pat = match &row.pats[col_idx] {
+                ColPattern::Pattern(Pattern::Case { id, payload, .. }) if *id == case_id => {
+                    let inner = payload.as_ref().clone();
+                    row.pats[col_idx] = ColPattern::Pattern(Pattern::Wild);
+                    ColPattern::Pattern(inner)
+                }
+                _ => ColPattern::Pattern(Pattern::Wild),
+            };
+            row.pats.insert(col_idx + 1, payload_pat);
+            hit_rows.push(row);
+        }
+        let on_hit = self.compile_matrix(hit_cols, hit_rows)?;
+
+        let miss_rows: Vec<Row> = expanded
+            .into_iter()
+            .filter(|row| {
+                !matches!(
+                    &row.pats[col_idx],
+                    ColPattern::Pattern(Pattern::Case { id, .. }) if *id == case_id
+                )
+            })
+            .collect();
+        let on_miss = self.compile_matrix(cols, miss_rows)?;
+
+        self.builder.switch(
+            place,
+            SwitchKind::Case {
+                id: case_id,
+                is_predicate,
+                on_miss,
+                on_hit,
+            },
+        )
+    }
+
     fn specialize_any(
         &mut self,
         mut cols: Vec<Column>,
@@ -2543,6 +2630,26 @@ fn collect_witness_dfs(
                         }
                     }
                 }
+                SwitchKind::Case {
+                    on_miss, on_hit, ..
+                } => {
+                    for child in [*on_miss, *on_hit] {
+                        if can_fail[child.0] {
+                            collect_witness_dfs(
+                                dag,
+                                child,
+                                root_ty,
+                                can_fail,
+                                constraints,
+                                known_types,
+                                witnesses,
+                                seen,
+                                max_witnesses,
+                                search_budget,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -2891,5 +2998,512 @@ fn default_witness(ty: &TypeDesc) -> MissingWitness {
         TypeDesc::EndlessList(_) => MissingWitness::EndlessList(Vec::new()),
         TypeDesc::BitVec(w) => MissingWitness::BitVec(BitValue::zero(*w)),
         TypeDesc::Any => MissingWitness::Opaque,
+    }
+}
+
+fn pattern_contains_top_case(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Case { .. } => true,
+        Pattern::Bind { subpattern, .. } => pattern_contains_top_case(subpattern),
+        Pattern::Or(alts) => alts.iter().any(pattern_contains_top_case),
+        _ => false,
+    }
+}
+
+/// Decide whether two validated patterns `lhs` and `rhs` share at least one common matching
+/// value of type `scrutinee_type`.
+pub fn patterns_overlap(
+    scrutinee_type: &TypeDesc,
+    lhs: &Pattern,
+    rhs: &Pattern,
+    budget: CompileBudget,
+) -> Result<bool, CompileError> {
+    lhs.validate_against_type(scrutinee_type)?;
+    rhs.validate_against_type(scrutinee_type)?;
+    let mut remaining = budget.max_steps;
+    intersect_patterns(scrutinee_type, lhs, rhs, &mut remaining, &budget)
+}
+
+fn charge_overlap_step(remaining: &mut usize, budget: &CompileBudget) -> Result<(), CompileError> {
+    if *remaining == 0 {
+        return Err(CompileError::BudgetExceeded {
+            steps_used: budget.max_steps,
+            nodes_created: 0,
+            budget: *budget,
+        });
+    }
+    *remaining -= 1;
+    Ok(())
+}
+
+fn int_intervals_overlap(a: IntInterval, b: IntInterval) -> bool {
+    let lo = a.lo.max(b.lo);
+    let hi = a.hi.min(b.hi);
+    match (lo, hi) {
+        (crate::pattern::LowerPoint::Finite(l), crate::pattern::UpperPoint::Finite(h)) => l <= h,
+        _ => true,
+    }
+}
+
+fn peel_binds(mut pat: &Pattern) -> &Pattern {
+    while let Pattern::Bind { subpattern, .. } = pat {
+        pat = subpattern.as_ref();
+    }
+    pat
+}
+
+fn intersect_patterns(
+    ty: &TypeDesc,
+    lhs: &Pattern,
+    rhs: &Pattern,
+    remaining: &mut usize,
+    budget: &CompileBudget,
+) -> Result<bool, CompileError> {
+    charge_overlap_step(remaining, budget)?;
+    let a = peel_binds(lhs);
+    let b = peel_binds(rhs);
+
+    if find_uninhabited_place(&Place::root(), ty).is_some() {
+        return Ok(false);
+    }
+
+    if let Pattern::Or(alts) = a {
+        for alt in alts {
+            if intersect_patterns(ty, alt, b, remaining, budget)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if let Pattern::Or(alts) = b {
+        for alt in alts {
+            if intersect_patterns(ty, a, alt, remaining, budget)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    match (a, b) {
+        (Pattern::Wild, Pattern::Wild) => Ok(true),
+        (Pattern::Wild, other) | (other, Pattern::Wild) => {
+            intersect_patterns(ty, other, other, remaining, budget)
+        }
+        (
+            Pattern::Case {
+                id: id1,
+                is_predicate: pred1,
+                payload_ty: ty1,
+                payload: p1,
+            },
+            Pattern::Case {
+                id: id2,
+                is_predicate: pred2,
+                payload_ty: ty2,
+                payload: p2,
+            },
+        ) => {
+            let eff_ty1 = ty1.as_deref().cloned().unwrap_or_else(|| {
+                if *pred1 {
+                    TypeDesc::Tuple(Vec::new())
+                } else {
+                    TypeDesc::Any
+                }
+            });
+            if id1 == id2 {
+                intersect_patterns(&eff_ty1, p1, p2, remaining, budget)
+            } else {
+                let eff_ty2 = ty2.as_deref().cloned().unwrap_or_else(|| {
+                    if *pred2 {
+                        TypeDesc::Tuple(Vec::new())
+                    } else {
+                        TypeDesc::Any
+                    }
+                });
+                Ok(
+                    intersect_patterns(&eff_ty1, p1, &Pattern::Wild, remaining, budget)?
+                        && intersect_patterns(&eff_ty2, p2, &Pattern::Wild, remaining, budget)?,
+                )
+            }
+        }
+        (
+            Pattern::Case {
+                is_predicate,
+                payload_ty,
+                payload,
+                ..
+            },
+            other,
+        )
+        | (
+            other,
+            Pattern::Case {
+                is_predicate,
+                payload_ty,
+                payload,
+                ..
+            },
+        ) => {
+            let eff_ty = payload_ty.as_deref().cloned().unwrap_or_else(|| {
+                if *is_predicate {
+                    TypeDesc::Tuple(Vec::new())
+                } else {
+                    TypeDesc::Any
+                }
+            });
+            Ok(
+                intersect_patterns(&eff_ty, payload, &Pattern::Wild, remaining, budget)?
+                    && intersect_patterns(ty, other, &Pattern::Wild, remaining, budget)?,
+            )
+        }
+        (Pattern::Bool(x), Pattern::Bool(y)) => Ok(x == y),
+        (
+            Pattern::Char(_) | Pattern::CharRange { .. },
+            Pattern::Char(_) | Pattern::CharRange { .. },
+        ) => {
+            let ivs_a = extract_char_intervals(a)?.unwrap_or_default();
+            let ivs_b = extract_char_intervals(b)?.unwrap_or_default();
+            Ok(ivs_a
+                .iter()
+                .any(|x| ivs_b.iter().any(|y| x.lo <= y.hi && y.lo <= x.hi)))
+        }
+        (
+            Pattern::Int(_) | Pattern::IntRange { .. },
+            Pattern::Int(_) | Pattern::IntRange { .. },
+        ) => {
+            let TypeDesc::Int(int_ty) = ty else {
+                return Ok(false);
+            };
+            let domain = IntInterval::domain_for(*int_ty);
+            let ivs_a = extract_int_intervals(a, domain)?.unwrap_or_default();
+            let ivs_b = extract_int_intervals(b, domain)?.unwrap_or_default();
+            Ok(ivs_a
+                .iter()
+                .any(|&x| ivs_b.iter().any(|&y| int_intervals_overlap(x, y))))
+        }
+        (Pattern::OptionalNull, Pattern::OptionalNull) => Ok(true),
+        (Pattern::OptionalNull, Pattern::OptionalPresent(_))
+        | (Pattern::OptionalPresent(_), Pattern::OptionalNull) => Ok(false),
+        (Pattern::OptionalPresent(p1), Pattern::OptionalPresent(p2)) => {
+            let TypeDesc::Optional(inner_ty) = ty else {
+                return Ok(false);
+            };
+            intersect_patterns(inner_ty, p1, p2, remaining, budget)
+        }
+        (Pattern::ErrorOk(p1), Pattern::ErrorOk(p2)) => {
+            let TypeDesc::ErrorRow(row) = ty else {
+                return Ok(false);
+            };
+            intersect_patterns(&row.ok_type, p1, p2, remaining, budget)
+        }
+        (Pattern::ErrorOk(_), Pattern::ErrorErr { .. })
+        | (Pattern::ErrorErr { .. }, Pattern::ErrorOk(_)) => Ok(false),
+        (Pattern::ErrorErr { tag: t1, inner: p1 }, Pattern::ErrorErr { tag: t2, inner: p2 }) => {
+            let TypeDesc::ErrorRow(row) = ty else {
+                return Ok(false);
+            };
+            match (t1, t2) {
+                (Some(tag1), Some(tag2)) => {
+                    if tag1 != tag2 {
+                        return Ok(false);
+                    }
+                    let inner_ty = row.error_tags.get(tag1).unwrap_or(&TypeDesc::Any);
+                    intersect_patterns(inner_ty, p1, p2, remaining, budget)
+                }
+                (Some(tag), None) | (None, Some(tag)) => {
+                    let inner_ty = row.error_tags.get(tag).unwrap_or(&TypeDesc::Any);
+                    intersect_patterns(inner_ty, p1, p2, remaining, budget)
+                }
+                (None, None) => {
+                    for inner_ty in row.error_tags.values() {
+                        if intersect_patterns(inner_ty, p1, p2, remaining, budget)? {
+                            return Ok(true);
+                        }
+                    }
+                    if row.is_open {
+                        return intersect_patterns(&TypeDesc::Any, p1, p2, remaining, budget);
+                    }
+                    Ok(false)
+                }
+            }
+        }
+        (
+            Pattern::EnumVariant {
+                tag: t1,
+                payload: pay1,
+            },
+            Pattern::EnumVariant {
+                tag: t2,
+                payload: pay2,
+            },
+        ) => {
+            if t1 != t2 {
+                return Ok(false);
+            }
+            let TypeDesc::Enum(enum_ty) = ty else {
+                return Ok(false);
+            };
+            let schema_payload = enum_ty.variants.get(t1).map(|s| &s.payload);
+            intersect_variant_payloads(schema_payload, pay1, pay2, remaining, budget)
+        }
+        (Pattern::Tuple(ps1), Pattern::Tuple(ps2)) => {
+            let TypeDesc::Tuple(tys) = ty else {
+                return Ok(false);
+            };
+            if ps1.len() != tys.len() || ps2.len() != tys.len() {
+                return Ok(false);
+            }
+            for i in 0..tys.len() {
+                if !intersect_patterns(&tys[i], &ps1[i], &ps2[i], remaining, budget)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Pattern::Record(f1), Pattern::Record(f2)) => {
+            let TypeDesc::Record(field_tys) = ty else {
+                return Ok(false);
+            };
+            for (name, field_ty) in field_tys {
+                let p1 = f1.get(name).unwrap_or(&Pattern::Wild);
+                let p2 = f2.get(name).unwrap_or(&Pattern::Wild);
+                if !intersect_patterns(field_ty, p1, p2, remaining, budget)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Pattern::List { .. }, Pattern::List { .. }) => {
+            let TypeDesc::List(elem_ty) = ty else {
+                return Ok(false);
+            };
+            intersect_list_patterns(elem_ty, a, b, remaining, budget)
+        }
+        (Pattern::BitVec(bv1), Pattern::BitVec(bv2)) => {
+            let TypeDesc::BitVec(width) = ty else {
+                return Ok(false);
+            };
+            let aligned = bitvec::align_bitvec_column(
+                *width,
+                &Place::root(),
+                &[
+                    BitColumnRow::BitVec(bv1.clone()),
+                    BitColumnRow::BitVec(bv2.clone()),
+                ],
+            )?;
+            for col_i in 0..aligned.intervals.len() {
+                let c1 = &aligned.rows[0].cells[col_i];
+                let c2 = &aligned.rows[1].cells[col_i];
+                if !intersect_aligned_bit_cells(c1, c2, remaining, budget)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn intersect_variant_payloads(
+    schema: Option<&VariantPayloadType>,
+    p1: &VariantPayloadPattern,
+    p2: &VariantPayloadPattern,
+    remaining: &mut usize,
+    budget: &CompileBudget,
+) -> Result<bool, CompileError> {
+    match (p1, p2) {
+        (VariantPayloadPattern::Unit, VariantPayloadPattern::Unit) => Ok(true),
+        (VariantPayloadPattern::Tuple(ps1), VariantPayloadPattern::Tuple(ps2)) => {
+            if ps1.len() != ps2.len() {
+                return Ok(false);
+            }
+            let elem_tys: Vec<TypeDesc> = match schema {
+                Some(VariantPayloadType::Tuple(ts)) => ts.clone(),
+                None => vec![TypeDesc::Any; ps1.len()],
+                _ => return Ok(false),
+            };
+            if elem_tys.len() != ps1.len() {
+                return Ok(false);
+            }
+            for i in 0..ps1.len() {
+                if !intersect_patterns(&elem_tys[i], &ps1[i], &ps2[i], remaining, budget)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (VariantPayloadPattern::Record(f1), VariantPayloadPattern::Record(f2)) => match schema {
+            Some(VariantPayloadType::Record(field_tys)) => {
+                for (name, field_ty) in field_tys {
+                    let sub1 = f1.get(name).unwrap_or(&Pattern::Wild);
+                    let sub2 = f2.get(name).unwrap_or(&Pattern::Wild);
+                    if !intersect_patterns(field_ty, sub1, sub2, remaining, budget)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            None => {
+                for (name, sub1) in f1 {
+                    let sub2 = f2.get(name).unwrap_or(&Pattern::Wild);
+                    if !intersect_patterns(&TypeDesc::Any, sub1, sub2, remaining, budget)? {
+                        return Ok(false);
+                    }
+                }
+                for (name, sub2) in f2 {
+                    if !f1.contains_key(name)
+                        && !intersect_patterns(
+                            &TypeDesc::Any,
+                            &Pattern::Wild,
+                            sub2,
+                            remaining,
+                            budget,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        _ => Ok(false),
+    }
+}
+
+fn normalize_list_pattern_branches(pat: &Pattern) -> Result<Vec<Pattern>, CompileError> {
+    let row = Row {
+        arm_pos: 0,
+        arm_index: 0,
+        has_guard: false,
+        pats: vec![ColPattern::Pattern(pat.clone())],
+        bindings: Vec::new(),
+    };
+    let mut normalized = Vec::new();
+    normalize_list_row(row, 0, &Place::root(), &mut normalized)?;
+    Ok(normalized
+        .into_iter()
+        .map(|entry| match entry.row.pats.into_iter().next().unwrap() {
+            ColPattern::Pattern(p) => p,
+            ColPattern::BitSlice(_) => unreachable!(),
+        })
+        .collect())
+}
+
+fn intersect_list_patterns(
+    elem_ty: &TypeDesc,
+    a: &Pattern,
+    b: &Pattern,
+    remaining: &mut usize,
+    budget: &CompileBudget,
+) -> Result<bool, CompileError> {
+    let alts_a = normalize_list_pattern_branches(a)?;
+    let alts_b = normalize_list_pattern_branches(b)?;
+    for pat_a in &alts_a {
+        for pat_b in &alts_b {
+            if intersect_normalized_list_pair(elem_ty, pat_a, pat_b, remaining, budget)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn intersect_normalized_list_pair(
+    elem_ty: &TypeDesc,
+    norm_a: &Pattern,
+    norm_b: &Pattern,
+    remaining: &mut usize,
+    budget: &CompileBudget,
+) -> Result<bool, CompileError> {
+    let to_shape = |pat: &Pattern| match pat {
+        Pattern::Wild => Some((Vec::new(), true)),
+        Pattern::List { prefix, rest } => Some((prefix.clone(), rest.is_some())),
+        _ => None,
+    };
+    let (Some((p1, has_rest1)), Some((p2, has_rest2))) = (to_shape(norm_a), to_shape(norm_b))
+    else {
+        return Ok(false);
+    };
+    match (has_rest1, has_rest2) {
+        (false, false) => {
+            if p1.len() != p2.len() {
+                return Ok(false);
+            }
+        }
+        (false, true) => {
+            if p1.len() < p2.len() {
+                return Ok(false);
+            }
+        }
+        (true, false) => {
+            if p2.len() < p1.len() {
+                return Ok(false);
+            }
+        }
+        (true, true) => {}
+    }
+    let shared = p1.len().min(p2.len());
+    for i in 0..shared {
+        if !intersect_patterns(elem_ty, &p1[i], &p2[i], remaining, budget)? {
+            return Ok(false);
+        }
+    }
+    for extra in p1.iter().skip(shared) {
+        if !intersect_patterns(elem_ty, extra, &Pattern::Wild, remaining, budget)? {
+            return Ok(false);
+        }
+    }
+    for extra in p2.iter().skip(shared) {
+        if !intersect_patterns(elem_ty, &Pattern::Wild, extra, remaining, budget)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn intersect_aligned_bit_cells(
+    c1: &AlignedBitCell,
+    c2: &AlignedBitCell,
+    remaining: &mut usize,
+    budget: &CompileBudget,
+) -> Result<bool, CompileError> {
+    match (c1, c2) {
+        (AlignedBitCell::Wild, AlignedBitCell::Wild) => Ok(true),
+        (AlignedBitCell::Wild, AlignedBitCell::BitRanges(ivs))
+        | (AlignedBitCell::BitRanges(ivs), AlignedBitCell::Wild) => Ok(!ivs.is_empty()),
+        (AlignedBitCell::Wild, AlignedBitCell::Opaque { ty, pattern })
+        | (AlignedBitCell::Opaque { ty, pattern }, AlignedBitCell::Wild) => {
+            intersect_patterns(ty, pattern, &Pattern::Wild, remaining, budget)
+        }
+        (AlignedBitCell::BitRanges(a), AlignedBitCell::BitRanges(b)) => Ok(a
+            .iter()
+            .any(|x| b.iter().any(|y| x.lo <= y.hi && y.lo <= x.hi))),
+        (
+            AlignedBitCell::Opaque {
+                ty: ty1,
+                pattern: p1,
+            },
+            AlignedBitCell::Opaque {
+                ty: ty2,
+                pattern: p2,
+            },
+        ) => {
+            if ty1 == ty2 {
+                intersect_patterns(ty1, p1, p2, remaining, budget)
+            } else {
+                Ok(
+                    intersect_patterns(ty1, p1, &Pattern::Wild, remaining, budget)?
+                        && intersect_patterns(ty2, p2, &Pattern::Wild, remaining, budget)?,
+                )
+            }
+        }
+        (AlignedBitCell::BitRanges(ivs), AlignedBitCell::Opaque { ty, pattern })
+        | (AlignedBitCell::Opaque { ty, pattern }, AlignedBitCell::BitRanges(ivs)) => {
+            if ivs.is_empty() {
+                return Ok(false);
+            }
+            intersect_patterns(ty, pattern, &Pattern::Wild, remaining, budget)
+        }
     }
 }

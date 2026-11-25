@@ -66,6 +66,8 @@ pub struct Scope {
     pub function_body_context: Option<(Symbol, Vec<(Symbol, rustc_span::Span)>)>,
     /// Source identities of explicitly staged ordinary parameters.
     pub staged_parameters: Vec<(crate::ids::AstNodeRef, DefId)>,
+    /// Package-wide pattern function arm definitions (`fn foo(case ...)`) keyed by AST item site.
+    pub pattern_fn_arms: Vec<(crate::ids::AstNodeRef, DefId, ScopeId)>,
     /// Syntactic parent heads. None means their source is not statically known.
     pub trait_parent_paths: Option<Vec<Vec<(Symbol, rustc_span::Span)>>>,
     /// Direct child scope IDs.
@@ -97,6 +99,7 @@ impl Scope {
             function_parameters: None,
             function_body_context: None,
             staged_parameters: Vec::new(),
+            pattern_fn_arms: Vec::new(),
             trait_parent_paths: None,
             children: Vec::new(),
             block_site: None,
@@ -125,6 +128,7 @@ impl fmt::Debug for Scope {
             .field("function_parameters", &self.function_parameters)
             .field("function_body_context", &self.function_body_context)
             .field("staged_parameters", &self.staged_parameters)
+            .field("pattern_fn_arms", &self.pattern_fn_arms)
             .field("trait_parent_paths", &self.trait_parent_paths)
             .field("children", &self.children)
             .field("block_site", &self.block_site)

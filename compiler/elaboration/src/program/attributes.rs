@@ -14,6 +14,7 @@ mod layouts;
 mod macros;
 mod merge;
 mod metadata;
+mod pattern;
 mod phases;
 mod purity;
 mod quote_fn_template;
@@ -27,6 +28,7 @@ pub use layout::{PackedStructLayout, packed_structs};
 pub use macros::{MacroHandlerAttr, MacroKindTag, macro_handlers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
+pub use pattern::{PatternCaseStability, stable_case_patterns};
 pub use phases::{MemberPhase, member_phases};
 pub use purity::{PurityEntry, PurityTier, purity_annotations};
 pub use quote_fn_template::{QuoteFnTemplateFlags, quote_fn_template_flags};
@@ -130,6 +132,7 @@ impl Checker<'_, '_> {
             let _stability = stable_since_versions(self.package, &selected, &mut budget)?;
             let _macros = macro_handlers(self.package, &selected, &mut budget)?;
             let quote_templates = quote_fn_template_flags(self.package, &selected, &mut budget)?;
+            let stable_cases = stable_case_patterns(self.package, &selected, &mut budget)?;
             for target in &selected {
                 for (key, value) in target.iter() {
                     if !inspect_only
@@ -148,6 +151,7 @@ impl Checker<'_, '_> {
                                 | "__flurry_macro_grammar"
                                 | "__flurry_quote_fn_template_for_match_arms"
                                 | "__flurry_quote_fn_template_allow_non_exhaustive_instance"
+                                | "__flurry_pattern_stable"
                         )
                     {
                         return Err(MergeFailure {
@@ -170,6 +174,7 @@ impl Checker<'_, '_> {
                 volatile,
                 direct_passing,
                 quote_templates,
+                stable_cases,
                 frozen,
             ))
         })();
@@ -185,7 +190,7 @@ impl Checker<'_, '_> {
         if inspect_only && result.is_err() {
             return Ok(attributes);
         }
-        let (phases, packed, volatile, direct_passing, quote_templates, frozen) =
+        let (phases, packed, volatile, direct_passing, quote_templates, stable_cases, frozen) =
             result.map_err(merge_error)?;
         self.member_phases = phases
             .into_iter()
@@ -243,6 +248,11 @@ impl Checker<'_, '_> {
         self.quote_fn_template_flags = quote_templates
             .into_iter()
             .map(|entry| (entry.owner, entry))
+            .collect();
+        self.pattern_stable_cases = stable_cases
+            .into_iter()
+            .filter(|entry| entry.stable)
+            .map(|entry| entry.owner)
             .collect();
         if let Some(frozen) = frozen {
             self.definition_attributes = if frozen.is_empty() {

@@ -25,7 +25,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         }
     }
 
-    fn select_explicit_instance<'h>(
+    pub(super) fn select_explicit_instance<'h>(
         &mut self,
         expr: &Expr<'h>,
         callee: &Expr<'_>,
@@ -380,7 +380,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
     }
 
     #[inline(never)]
-    fn finish_planned_prefix_call(
+    pub(super) fn finish_planned_prefix_call(
         &mut self,
         expr: &Expr<'_>,
         callee: n::Expr,

@@ -15,7 +15,7 @@ mod sexpr;
 pub use bitvec::{BitInterval, BitValue, BitVecError};
 pub use compile::{
     CompileOutput, CompileStats, MissingWitness, WitnessPayload, compile, compile_arms,
-    compile_with_budget,
+    compile_with_budget, patterns_overlap,
 };
 pub use decision::{
     Binding, DagBuilder, DagNode, DecisionDag, LenInterval, NodeId, Place, PlaceStep, SwitchKind,

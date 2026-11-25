@@ -65,6 +65,10 @@ impl crate::automata::AutomataEnv for Checker<'_, '_> {
     ) -> Option<&crate::automata::BitVecPatternInfo> {
         self.bitvec_pattern_infos.get(&binding)
     }
+
+    fn case_pattern_info(&self, binding: n::LocalId) -> Option<&crate::automata::CasePatternInfo> {
+        self.case_pattern_infos.get(&binding)
+    }
 }
 
 impl Checker<'_, '_> {
@@ -148,6 +152,7 @@ impl Checker<'_, '_> {
             _ => {
                 if let Some(ref outcome) = outcome
                     && outcome.plan.exact
+                    && outcome.plan.case_views.is_empty()
                     && !outcome.missing_witnesses.is_empty()
                 {
                     let witnesses = crate::automata::format_missing_witnesses(

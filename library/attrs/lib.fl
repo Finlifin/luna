@@ -32,6 +32,10 @@ pub mod quote_fn_template {
     }
 }
 
+pub mod pattern {
+    pub const stable = { __flurry_pattern_stable: true }
+}
+
 pub mod prelude {
     pub use .abi;
     pub use .comptime_phase;

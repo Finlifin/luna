@@ -44,6 +44,23 @@ struct ListCacheSlot {
     init_flag: Slot,
 }
 
+struct HarvestedCaseCall<'a> {
+    obs_binding: LocalId,
+    expr: &'a Expr,
+    is_predicate: bool,
+    payload_term: Term,
+}
+
+struct CaseCacheSlot {
+    obs_binding: LocalId,
+    expr_idx: CacheExprSource,
+    parent_slot: Option<Slot>,
+    is_predicate: bool,
+    hit_slot: Slot,
+    payload_slot: Slot,
+    init_flag: Slot,
+}
+
 enum CacheExprSource {
     Borrowed(*const Expr),
 }
@@ -68,9 +85,11 @@ struct DagPlanValidation<'a> {
     plan: &'a MatchPlan,
     arm_metas: Vec<ArmMeta<'a>>,
     harvested_lists: BTreeMap<Place, HarvestedListPlace<'a>>,
+    harvested_cases: BTreeMap<u32, HarvestedCaseCall<'a>>,
     place_infos: BTreeMap<Place, ValidatedPlaceInfo>,
     active_error_branches: BTreeMap<NodeId, BTreeMap<Place, Option<usize>>>,
     needed_list_ops: BTreeSet<(Place, ListCacheOp)>,
+    needed_case_ops: BTreeSet<(Place, u32)>,
     reachable_nodes: Vec<NodeId>,
     reachable_arms: BTreeSet<usize>,
     arm_exported_tys: BTreeMap<usize, BTreeMap<LocalId, Term>>,
@@ -139,6 +158,7 @@ impl Emitter<'_> {
     ) -> Result<Option<DagPlanValidation<'a>>, String> {
         let mut arm_metas = Vec::with_capacity(arms.len());
         let mut harvested_lists: BTreeMap<Place, HarvestedListPlace<'a>> = BTreeMap::new();
+        let mut harvested_cases: BTreeMap<u32, HarvestedCaseCall<'a>> = BTreeMap::new();
         for arm in arms {
             let (outer_guard, structural_pat) = match &arm.pattern {
                 Pattern::Guard { pattern, condition } => {
@@ -154,7 +174,9 @@ impl Emitter<'_> {
                 &Place::root(),
                 value_ty,
                 &plan.list_views,
+                &plan.case_views,
                 &mut harvested_lists,
+                &mut harvested_cases,
                 &mut remaps,
                 &mut binding_tys,
                 &mut exported_locals,
@@ -280,6 +302,7 @@ impl Emitter<'_> {
                             value_ty,
                             value,
                             &harvested_lists,
+                            &harvested_cases,
                             &incoming_errs,
                         )?
                         else {
@@ -426,6 +449,24 @@ impl Emitter<'_> {
                             );
                         }
                     }
+                    SwitchKind::Case {
+                        on_miss, on_hit, ..
+                    } => {
+                        child_updates(
+                            *on_miss,
+                            None,
+                            &mut active_error_branches,
+                            &mut queue,
+                            &mut in_queue,
+                        );
+                        child_updates(
+                            *on_hit,
+                            None,
+                            &mut active_error_branches,
+                            &mut queue,
+                            &mut in_queue,
+                        );
+                    }
                 },
                 DagNode::Bind { next, .. } => {
                     child_updates(
@@ -461,6 +502,7 @@ impl Emitter<'_> {
         let reachable_nodes: Vec<NodeId> = active_error_branches.keys().copied().collect();
         let mut place_infos: BTreeMap<Place, ValidatedPlaceInfo> = BTreeMap::new();
         let mut needed_list_ops: BTreeSet<(Place, ListCacheOp)> = BTreeSet::new();
+        let mut needed_case_ops: BTreeSet<(Place, u32)> = BTreeSet::new();
         let mut reachable_arms: BTreeSet<usize> = BTreeSet::new();
         let mut arm_exported_tys: BTreeMap<usize, BTreeMap<LocalId, Term>> = BTreeMap::new();
 
@@ -473,9 +515,11 @@ impl Emitter<'_> {
                         value_ty,
                         value,
                         &harvested_lists,
+                        &harvested_cases,
                         err_env,
                         &mut place_infos,
                         &mut needed_list_ops,
+                        &mut needed_case_ops,
                     )?
                     else {
                         return Ok(None);
@@ -579,6 +623,12 @@ impl Emitter<'_> {
                                 }
                             }
                         }
+                        SwitchKind::Case { id, .. } => {
+                            if !harvested_cases.contains_key(id) {
+                                return Ok(None);
+                            }
+                            needed_case_ops.insert((place.clone(), *id));
+                        }
                     }
                 }
                 DagNode::Bind {
@@ -593,9 +643,11 @@ impl Emitter<'_> {
                         value_ty,
                         value,
                         &harvested_lists,
+                        &harvested_cases,
                         err_env,
                         &mut place_infos,
                         &mut needed_list_ops,
+                        &mut needed_case_ops,
                         &mut arm_exported_tys,
                     )? {
                         return Ok(None);
@@ -617,9 +669,11 @@ impl Emitter<'_> {
                         value_ty,
                         value,
                         &harvested_lists,
+                        &harvested_cases,
                         err_env,
                         &mut place_infos,
                         &mut needed_list_ops,
+                        &mut needed_case_ops,
                         &mut arm_exported_tys,
                     )? {
                         return Ok(None);
@@ -640,9 +694,11 @@ impl Emitter<'_> {
                         value_ty,
                         value,
                         &harvested_lists,
+                        &harvested_cases,
                         err_env,
                         &mut place_infos,
                         &mut needed_list_ops,
+                        &mut needed_case_ops,
                         &mut arm_exported_tys,
                     )? {
                         return Ok(None);
@@ -677,15 +733,18 @@ impl Emitter<'_> {
             plan,
             arm_metas,
             harvested_lists,
+            harvested_cases,
             place_infos,
             active_error_branches,
             needed_list_ops,
+            needed_case_ops,
             reachable_nodes,
             reachable_arms,
             arm_exported_tys,
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_bindings<'a>(
         &self,
         arm_index: usize,
@@ -694,9 +753,11 @@ impl Emitter<'_> {
         value_ty: &Term,
         value: &Value,
         harvested_lists: &BTreeMap<Place, HarvestedListPlace<'a>>,
+        harvested_cases: &BTreeMap<u32, HarvestedCaseCall<'a>>,
         err_env: &BTreeMap<Place, Option<usize>>,
         place_infos: &mut BTreeMap<Place, ValidatedPlaceInfo>,
         needed_list_ops: &mut BTreeSet<(Place, ListCacheOp)>,
+        needed_case_ops: &mut BTreeSet<(Place, u32)>,
         arm_exported_tys: &mut BTreeMap<usize, BTreeMap<LocalId, Term>>,
     ) -> Result<bool, String> {
         let Some(meta) = arm_metas.get(arm_index) else {
@@ -712,9 +773,11 @@ impl Emitter<'_> {
                 value_ty,
                 value,
                 harvested_lists,
+                harvested_cases,
                 err_env,
                 place_infos,
                 needed_list_ops,
+                needed_case_ops,
             )?
             else {
                 return Ok(false);
@@ -743,15 +806,18 @@ impl Emitter<'_> {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_place<'a>(
         &self,
         place: &Place,
         value_ty: &Term,
         value: &Value,
         harvested_lists: &BTreeMap<Place, HarvestedListPlace<'a>>,
+        harvested_cases: &BTreeMap<u32, HarvestedCaseCall<'a>>,
         err_env: &BTreeMap<Place, Option<usize>>,
         place_infos: &mut BTreeMap<Place, ValidatedPlaceInfo>,
         needed_list_ops: &mut BTreeSet<(Place, ListCacheOp)>,
+        needed_case_ops: &mut BTreeSet<(Place, u32)>,
     ) -> Result<Option<ValidatedPlaceInfo>, String> {
         let mut cur_steps = Vec::with_capacity(place.steps.len());
         for step in &place.steps {
@@ -780,10 +846,21 @@ impl Emitter<'_> {
                     }
                     needed_list_ops.insert((parent, ListCacheOp::Rest(*from)));
                 }
+                PlaceStep::CasePayload(id) => {
+                    let parent = Place {
+                        steps: cur_steps.clone(),
+                    };
+                    if !harvested_cases.contains_key(id) {
+                        return Ok(None);
+                    }
+                    needed_case_ops.insert((parent, *id));
+                }
                 _ => {}
             }
-            if matches!(step, PlaceStep::ListElem(_) | PlaceStep::ListRest(_))
-                && !cur_steps.is_empty()
+            if matches!(
+                step,
+                PlaceStep::ListElem(_) | PlaceStep::ListRest(_) | PlaceStep::CasePayload(_)
+            ) && !cur_steps.is_empty()
             {
                 let parent = Place {
                     steps: cur_steps.clone(),
@@ -794,6 +871,7 @@ impl Emitter<'_> {
                         value_ty,
                         value,
                         harvested_lists,
+                        harvested_cases,
                         err_env,
                     )?
                     else {
@@ -804,8 +882,14 @@ impl Emitter<'_> {
             }
             cur_steps.push(step.clone());
         }
-        let Some(info) =
-            self.resolve_place_type(place, value_ty, value, harvested_lists, err_env)?
+        let Some(info) = self.resolve_place_type(
+            place,
+            value_ty,
+            value,
+            harvested_lists,
+            harvested_cases,
+            err_env,
+        )?
         else {
             return Ok(None);
         };
@@ -825,6 +909,7 @@ impl Emitter<'_> {
         root_term: &Term,
         root_val: &Value,
         harvested_lists: &BTreeMap<Place, HarvestedListPlace<'a>>,
+        harvested_cases: &BTreeMap<u32, HarvestedCaseCall<'a>>,
         err_env: &BTreeMap<Place, Option<usize>>,
     ) -> Result<Option<ValidatedPlaceInfo>, String> {
         let mut cur_term = root_term.clone();
@@ -999,6 +1084,19 @@ impl Emitter<'_> {
                     let slice_ty = Ty::Int(slice_w, false);
                     Some((slice_term, slice_ty))
                 }
+                PlaceStep::CasePayload(id) => {
+                    let Some(case_call) = harvested_cases.get(id) else {
+                        return Ok(None);
+                    };
+                    let payload_ty = if case_call.payload_term == Term::Tuple(Vec::new())
+                        || case_call.payload_term == Term::Primitive(P::Void)
+                    {
+                        Ty::Unit
+                    } else {
+                        repr(self.graph, &case_call.payload_term, self.checked)?
+                    };
+                    Some((case_call.payload_term.clone(), payload_ty))
+                }
             };
             let Some((next_term, next_ty)) = next_term_and_ty else {
                 return Ok(None);
@@ -1041,7 +1139,9 @@ impl Emitter<'_> {
         place: &Place,
         cur_ty: &Term,
         list_views: &BTreeMap<Place, ListViewOps>,
+        case_views: &[nir::match_plan::CaseViewOps],
         harvested_lists: &mut BTreeMap<Place, HarvestedListPlace<'a>>,
+        harvested_cases: &mut BTreeMap<u32, HarvestedCaseCall<'a>>,
         remaps: &mut BTreeMap<LocalId, LocalId>,
         binding_tys: &mut BTreeMap<LocalId, Term>,
         exported_locals: &mut BTreeSet<LocalId>,
@@ -1067,7 +1167,9 @@ impl Emitter<'_> {
                     place,
                     cur_ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     exported_locals,
@@ -1085,7 +1187,9 @@ impl Emitter<'_> {
                     place,
                     cur_ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     &mut inner_exports,
@@ -1116,7 +1220,9 @@ impl Emitter<'_> {
                     &place.optional_inner(),
                     inner_ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     exported_locals,
@@ -1141,7 +1247,9 @@ impl Emitter<'_> {
                     &next_place,
                     next_ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     exported_locals,
@@ -1162,7 +1270,9 @@ impl Emitter<'_> {
                         &place.tuple_field(idx),
                         elem_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1188,7 +1298,9 @@ impl Emitter<'_> {
                         &place.record_field(name.as_str()),
                         field_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1220,7 +1332,9 @@ impl Emitter<'_> {
                         &place.record_field(name.as_str()),
                         field_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1269,7 +1383,9 @@ impl Emitter<'_> {
                         &sub_place,
                         field_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1288,7 +1404,9 @@ impl Emitter<'_> {
                         place,
                         cur_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1301,6 +1419,45 @@ impl Emitter<'_> {
                 Ok(true)
             }
             Pattern::Observe { binding, inner } => {
+                if let Some(case_ops) = case_views
+                    .iter()
+                    .find(|ops| ops.place == *place && ops.bindings.contains(binding))
+                {
+                    let Pattern::Then { first, value, next } = inner.as_ref() else {
+                        return Ok(false);
+                    };
+                    if !matches!(first.as_ref(), Pattern::Wild) {
+                        return Ok(false);
+                    }
+                    harvested_cases
+                        .entry(case_ops.id)
+                        .or_insert_with(|| HarvestedCaseCall {
+                            obs_binding: *binding,
+                            expr: value.as_ref(),
+                            is_predicate: case_ops.is_predicate,
+                            payload_term: case_ops.payload_type.clone(),
+                        });
+                    if case_ops.is_predicate {
+                        return Ok(true);
+                    }
+                    let Pattern::OptionalPresent(payload_pat) = next.as_ref() else {
+                        return Ok(false);
+                    };
+                    return self.harvest_pattern(
+                        payload_pat,
+                        &place.case_payload(case_ops.id),
+                        &case_ops.payload_type,
+                        list_views,
+                        case_views,
+                        harvested_lists,
+                        harvested_cases,
+                        remaps,
+                        binding_tys,
+                        exported_locals,
+                        is_direct_export,
+                        depth + 1,
+                    );
+                }
                 if let Some(ops) = find_list_view_for_place(place, list_views) {
                     let mut steps = Vec::new();
                     flatten_then_unit_spine(inner, &mut steps);
@@ -1331,7 +1488,9 @@ impl Emitter<'_> {
                                 &place.list_elem(i),
                                 &elem_expr.ty,
                                 list_views,
+                                case_views,
                                 harvested_lists,
+                                harvested_cases,
                                 remaps,
                                 binding_tys,
                                 exported_locals,
@@ -1357,7 +1516,9 @@ impl Emitter<'_> {
                                 &place.list_rest(prefix_len),
                                 &rest_expr.ty,
                                 list_views,
+                                case_views,
                                 harvested_lists,
+                                harvested_cases,
                                 remaps,
                                 binding_tys,
                                 exported_locals,
@@ -1413,7 +1574,9 @@ impl Emitter<'_> {
                             &place.list_elem(i),
                             &elem_expr.ty,
                             list_views,
+                            case_views,
                             harvested_lists,
+                            harvested_cases,
                             remaps,
                             binding_tys,
                             exported_locals,
@@ -1439,7 +1602,9 @@ impl Emitter<'_> {
                             &place.list_rest(prefix_len),
                             &rest_expr.ty,
                             list_views,
+                            case_views,
                             harvested_lists,
+                            harvested_cases,
                             remaps,
                             binding_tys,
                             exported_locals,
@@ -1462,7 +1627,9 @@ impl Emitter<'_> {
                         place,
                         cur_ty,
                         list_views,
+                        case_views,
                         harvested_lists,
+                        harvested_cases,
                         remaps,
                         binding_tys,
                         exported_locals,
@@ -1477,7 +1644,9 @@ impl Emitter<'_> {
                     place,
                     cur_ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     exported_locals,
@@ -1491,7 +1660,9 @@ impl Emitter<'_> {
                     place,
                     &value.ty,
                     list_views,
+                    case_views,
                     harvested_lists,
+                    harvested_cases,
                     remaps,
                     binding_tys,
                     exported_locals,
@@ -1598,6 +1769,53 @@ impl Emitter<'_> {
             );
         }
 
+        // Pre-allocate lazy cache slots for stable `case` views and reset init flags at match entry.
+        let mut case_caches: BTreeMap<(Place, u32), CaseCacheSlot> = BTreeMap::new();
+        for (place, case_id) in &v.needed_case_ops {
+            let call = &v.harvested_cases[case_id];
+            let parent_ty = if place.steps.is_empty() {
+                value.ty.clone()
+            } else {
+                v.place_infos[place].ty.clone()
+            };
+            let parent_slot = if place.steps.is_empty() {
+                None
+            } else {
+                Some(self.slot(parent_ty))
+            };
+            let hit_slot = self.slot(Ty::Bool);
+            let payload_llvm_ty = if call.payload_term == Term::Tuple(Vec::new())
+                || call.payload_term == Term::Primitive(P::Void)
+            {
+                Ty::Unit
+            } else {
+                repr(self.graph, &call.payload_term, self.checked)?
+            };
+            let payload_slot = self.slot(payload_llvm_ty);
+            let init_flag = self.slot(Ty::Bool);
+            self.prologue
+                .push_str(&format!("  store i1 false, ptr {}\n", init_flag.pointer));
+            self.store(
+                &init_flag,
+                &Value {
+                    ty: Ty::Bool,
+                    text: "false".into(),
+                },
+            )?;
+            case_caches.insert(
+                (place.clone(), *case_id),
+                CaseCacheSlot {
+                    obs_binding: call.obs_binding,
+                    expr_idx: CacheExprSource::new(call.expr),
+                    parent_slot,
+                    is_predicate: call.is_predicate,
+                    hit_slot,
+                    payload_slot,
+                    init_flag,
+                },
+            );
+        }
+
         // Enter the decision DAG root.
         self.branch(&node_bbs[v.plan.dag.root.0]);
 
@@ -1625,6 +1843,7 @@ impl Emitter<'_> {
                         &scrutinee_slot,
                         err_env,
                         &list_caches,
+                        &case_caches,
                         &arm_local_slots,
                         &arm_receipt_slots,
                         depth,
@@ -1647,6 +1866,7 @@ impl Emitter<'_> {
                         &scrutinee_slot,
                         err_env,
                         &list_caches,
+                        &case_caches,
                         &arm_local_slots,
                         &arm_receipt_slots,
                         depth,
@@ -1704,6 +1924,7 @@ impl Emitter<'_> {
                         &scrutinee_slot,
                         err_env,
                         &list_caches,
+                        &case_caches,
                         &arm_local_slots,
                         &arm_receipt_slots,
                         depth,
@@ -1721,6 +1942,7 @@ impl Emitter<'_> {
                         &scrutinee_slot,
                         err_env,
                         &list_caches,
+                        &case_caches,
                         &node_bbs,
                         depth,
                     )?;
@@ -1795,6 +2017,7 @@ impl Emitter<'_> {
         scrutinee_slot: &Slot,
         err_env: &BTreeMap<Place, Option<usize>>,
         list_caches: &BTreeMap<(Place, ListCacheOp), ListCacheSlot>,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
         arm_local_slots: &BTreeMap<(usize, LocalId), Slot>,
         arm_receipt_slots: &BTreeMap<(usize, LocalId), (Slot, Slot)>,
         depth: usize,
@@ -1813,6 +2036,7 @@ impl Emitter<'_> {
                 v,
                 err_env,
                 list_caches,
+                case_caches,
                 depth,
             )?;
             if self.terminated {
@@ -1858,6 +2082,7 @@ impl Emitter<'_> {
         scrutinee_slot: &Slot,
         err_env: &BTreeMap<Place, Option<usize>>,
         list_caches: &BTreeMap<(Place, ListCacheOp), ListCacheSlot>,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
         node_bbs: &[String],
         depth: usize,
     ) -> Result<(), String> {
@@ -1871,12 +2096,40 @@ impl Emitter<'_> {
                     v,
                     err_env,
                     list_caches,
+                    case_caches,
                     depth,
                 )?;
                 if self.terminated {
                     return Ok(());
                 }
                 self.emit_list_len_switch(&len_val, cases, *default, node_bbs);
+                Ok(())
+            }
+            SwitchKind::Case {
+                id,
+                on_miss,
+                on_hit,
+                ..
+            } => {
+                let hit_val = self.eval_cached_case_op(
+                    place,
+                    *id,
+                    value_ty,
+                    scrutinee_slot,
+                    v,
+                    err_env,
+                    list_caches,
+                    case_caches,
+                    depth,
+                )?;
+                if self.terminated {
+                    return Ok(());
+                }
+                self.line(format!(
+                    "br i1 {}, label %{}, label %{}",
+                    hit_val.text, node_bbs[on_hit.0], node_bbs[on_miss.0]
+                ));
+                self.terminated = true;
                 Ok(())
             }
             _ => {
@@ -1887,6 +2140,7 @@ impl Emitter<'_> {
                     v,
                     err_env,
                     list_caches,
+                    case_caches,
                     depth,
                 )?;
                 if self.terminated {
@@ -1982,7 +2236,7 @@ impl Emitter<'_> {
                         cases,
                         default,
                     } => self.emit_bitslice_switch(&val, *lo, *hi, cases, *default, node_bbs),
-                    SwitchKind::ListLen { .. } => unreachable!(),
+                    SwitchKind::ListLen { .. } | SwitchKind::Case { .. } => unreachable!(),
                 }
             }
         }
@@ -2759,6 +3013,7 @@ impl Emitter<'_> {
         v: &DagPlanValidation<'a>,
         err_env: &BTreeMap<Place, Option<usize>>,
         list_caches: &BTreeMap<(Place, ListCacheOp), ListCacheSlot>,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
         depth: usize,
     ) -> Result<Value, String> {
         let mut cur = self.load(scrutinee_slot);
@@ -2869,6 +3124,23 @@ impl Emitter<'_> {
                     cur_term = Term::Primitive(P::BitVec((hi - lo) as usize));
                     self.bit_slice(raw_bits, *lo as usize, *hi as usize)?
                 }
+                PlaceStep::CasePayload(id) => {
+                    let _ = self.eval_cached_case_op_from_parent(
+                        &cur_place,
+                        &cur,
+                        *id,
+                        scrutinee_slot,
+                        case_caches,
+                        depth,
+                    )?;
+                    cur_term = v.harvested_cases[id].payload_term.clone();
+                    let cache = &case_caches[&(cur_place.clone(), *id)];
+                    if cache.payload_slot.ty == Ty::Unit {
+                        Value::unit()
+                    } else {
+                        self.load(&cache.payload_slot)
+                    }
+                }
             };
             cur_place.steps.push(step.clone());
             if let Some(info) = v.place_infos.get(&cur_place) {
@@ -2888,6 +3160,7 @@ impl Emitter<'_> {
         v: &DagPlanValidation<'a>,
         err_env: &BTreeMap<Place, Option<usize>>,
         list_caches: &BTreeMap<(Place, ListCacheOp), ListCacheSlot>,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
         depth: usize,
     ) -> Result<Value, String> {
         let parent_val = if place.steps.is_empty() {
@@ -2900,6 +3173,7 @@ impl Emitter<'_> {
                 v,
                 err_env,
                 list_caches,
+                case_caches,
                 depth,
             )?
         };
@@ -2914,6 +3188,115 @@ impl Emitter<'_> {
             list_caches,
             depth,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_cached_case_op<'a>(
+        &mut self,
+        place: &Place,
+        case_id: u32,
+        value_ty: &Term,
+        scrutinee_slot: &Slot,
+        v: &DagPlanValidation<'a>,
+        err_env: &BTreeMap<Place, Option<usize>>,
+        list_caches: &BTreeMap<(Place, ListCacheOp), ListCacheSlot>,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let parent_val = if place.steps.is_empty() {
+            self.load(scrutinee_slot)
+        } else {
+            self.eval_place(
+                place,
+                value_ty,
+                scrutinee_slot,
+                v,
+                err_env,
+                list_caches,
+                case_caches,
+                depth,
+            )?
+        };
+        if self.terminated {
+            return Ok(Value {
+                ty: Ty::Bool,
+                text: "false".into(),
+            });
+        }
+        self.eval_cached_case_op_from_parent(
+            place,
+            &parent_val,
+            case_id,
+            scrutinee_slot,
+            case_caches,
+            depth,
+        )
+    }
+
+    fn eval_cached_case_op_from_parent(
+        &mut self,
+        place: &Place,
+        parent_val: &Value,
+        case_id: u32,
+        scrutinee_slot: &Slot,
+        case_caches: &BTreeMap<(Place, u32), CaseCacheSlot>,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let cache = &case_caches[&(place.clone(), case_id)];
+        let is_init = self.load(&cache.init_flag);
+        let compute_bb = self.fresh();
+        let done_bb = self.fresh();
+        self.line(format!(
+            "br i1 {}, label %{done_bb}, label %{compute_bb}",
+            is_init.text
+        ));
+        self.label(&compute_bb);
+        let obs_slot = match &cache.parent_slot {
+            None => scrutinee_slot.clone(),
+            Some(slot) => {
+                self.store(slot, parent_val)?;
+                slot.clone()
+            }
+        };
+        let previous = self.locals.insert(cache.obs_binding, obs_slot);
+        // SAFETY: `cache.expr_idx` points into `&arms` held immutable for the whole match.
+        let expr = unsafe { cache.expr_idx.get() };
+        let computed = self.expr(expr, depth)?;
+        self.locals.remove(&cache.obs_binding);
+        if let Some(prev) = previous {
+            self.locals.insert(cache.obs_binding, prev);
+        }
+        if !self.terminated {
+            if cache.is_predicate {
+                self.store(&cache.hit_slot, &computed)?;
+            } else {
+                let hit = self.optional_tag(&computed)?;
+                self.store(&cache.hit_slot, &hit)?;
+                if cache.payload_slot.ty != Ty::Unit {
+                    let extract_bb = self.fresh();
+                    let finish_bb = self.fresh();
+                    self.line(format!(
+                        "br i1 {}, label %{extract_bb}, label %{finish_bb}",
+                        hit.text
+                    ));
+                    self.label(&extract_bb);
+                    let payload = self.optional_payload(&computed)?;
+                    self.store(&cache.payload_slot, &payload)?;
+                    self.branch(&finish_bb);
+                    self.label(&finish_bb);
+                }
+            }
+            self.store(
+                &cache.init_flag,
+                &Value {
+                    ty: Ty::Bool,
+                    text: "true".into(),
+                },
+            )?;
+            self.branch(&done_bb);
+        }
+        self.label(&done_bb);
+        Ok(self.load(&cache.hit_slot))
     }
 
     fn eval_cached_list_op_from_parent(
@@ -3311,7 +3694,10 @@ fn place_to_receipt_path(
                 path.push(f_idx);
                 cur_ty = next;
             }
-            PlaceStep::ListElem(_) | PlaceStep::ListRest(_) | PlaceStep::BitSlice { .. } => {
+            PlaceStep::ListElem(_)
+            | PlaceStep::ListRest(_)
+            | PlaceStep::BitSlice { .. }
+            | PlaceStep::CasePayload(_) => {
                 return Some(None);
             }
         }

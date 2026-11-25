@@ -1059,6 +1059,13 @@ pub enum Pattern {
     },
     /// `BitVec<N>` segmented pattern.
     BitVec(BitVecPattern),
+    /// Active/predicate `case` pattern view call identified by canonical `id`.
+    Case {
+        id: u32,
+        is_predicate: bool,
+        payload_ty: Option<Box<TypeDesc>>,
+        payload: Box<Pattern>,
+    },
     /// Alternative `p1 or p2 or ...` pattern (branches must share identical binder sets).
     Or(Vec<Pattern>),
 }
@@ -1210,6 +1217,7 @@ impl Pattern {
                 }
                 Ok(())
             }
+            Self::Case { payload, .. } => payload.collect_binders(out),
             Self::Or(alts) => {
                 if alts.is_empty() {
                     return Err(CompileError::EmptyOrPattern);
@@ -1241,6 +1249,33 @@ impl Pattern {
                     alt.validate_against_type(ty)?;
                 }
                 Ok(())
+            }
+            (
+                Self::Case {
+                    is_predicate: true,
+                    payload_ty,
+                    payload,
+                    ..
+                },
+                _,
+            ) => {
+                let expected = payload_ty
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| TypeDesc::Tuple(Vec::new()));
+                payload.validate_against_type(&expected)
+            }
+            (
+                Self::Case {
+                    is_predicate: false,
+                    payload_ty,
+                    payload,
+                    ..
+                },
+                _,
+            ) => {
+                let expected = payload_ty.as_deref().unwrap_or(&TypeDesc::Any);
+                payload.validate_against_type(expected)
             }
             (Self::Bool(_), TypeDesc::Bool) => Ok(()),
             (Self::Char(_) | Self::CharRange { .. }, TypeDesc::Char) => Ok(()),
@@ -1510,6 +1545,15 @@ impl fmt::Display for Pattern {
                 f.write_str(")")
             }
             Self::BitVec(bv) => write!(f, "{bv}"),
+            Self::Case {
+                id,
+                is_predicate,
+                payload_ty,
+                payload,
+            } => match payload_ty {
+                Some(ty) => write!(f, "(case {id} {is_predicate} {ty} {payload})"),
+                None => write!(f, "(case {id} {is_predicate} _ {payload})"),
+            },
             Self::Or(alts) => {
                 f.write_str("(or")?;
                 for alt in alts {
