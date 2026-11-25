@@ -80,7 +80,7 @@ Limitations:
 ### 内置包持续开发
 
 - **按最终语言设计编写六个内置包**：`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 都必须按照最终设计中的 Flurry 编写，尽情使用最终 Flurry 的完整设计特性，以此反推并驱动编译器通用能力的补齐与完善；不得为了让当前尚不完备的编译器“能编过／能跑通”而削足适履，把妥协实现或偏离范式的写法放进任何内置包。
-- 为某个类型准备的方法默认定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为单阶段方法另造承载 trait。作者已确认：同一个类型同时存在于 runtime 与 comptime、两阶段需要同名方法时，分别通过 runtime trait 与 `pure comptime trait` 的实现提供；comptime 上下文优先选择后者。此规则包括可选类型、错误限定类型及 str，不限于前两者，也不添加 `comptime_` 前缀。
+- 为某个类型准备的方法默认定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为单阶段方法另造承载 trait。作者已确认：`pure comptime trait Comptime*` 仅用于同一个类型同时存在于 runtime 与 comptime、且用户会直接调用同名方法（如 `Eq`、`Hash`、`OptionalOps`，包括可选类型、错误限定类型及 `str`）的场景，此时分别通过 runtime trait 与 `pure comptime trait` 提供，comptime 上下文优先选择后者，不添加 `comptime_` 前缀；对于方法不直接被用户调用的协议 trait（如模式视图、变参收集器等编译器协议），**优先采用单 trait 两相策略**——在同一个 trait 上通过 `^attrs.comptime_phase` 声明 comptime phase 成员，分别用 `impl` 兑现 runtime phase、用 `comptime impl` 兑现 comptime phase，由编译器按上下文阶段选择对应 phase（comptime 上下文选 comptime phase，runtime 上下文选 runtime phase）。
 - 对编译器 builtin 类型，`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 六个内置包都可以为其编写 `impl`（包括固有方法和 trait 实现），不受孤儿规则限制，不要求类型或 trait 归当前包所有。该豁免不自动扩展到用户包或非 builtin 类型，也不免除重复／冲突实现及其他语义检查；目标类型仍通过已有具名绑定引用。
 - 内置包是完成 Flurry 的主线交付，不能长期只推进编译器而搁置库实现，也不能等编译器全部完成后才补库。持续推进 `builtin`、`meta`、`build`、`attrs`、`std` 的实际能力；`verification` 按作者此前决定暂缓高级内容，但保留接口与依赖边界。
 - `math` 归入 `builtin`，通过 `builtin.prelude` 导出，其函数按 LLVM intrinsic 的泛型包装实现；不能遗漏，也不另立第七个内置包。

@@ -1480,6 +1480,8 @@ fn compile_in_with_resources(
             list_pattern_protocol: None,
             comptime_list_pattern_protocol: None,
             stable_list_pattern_protocol: None,
+            list_pattern_endless_protocol: None,
+            stable_list_pattern_endless_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,

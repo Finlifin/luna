@@ -788,3 +788,494 @@ fn impure_list_pattern_view_requires_fallback_and_preserves_reobservation() {
         );
     }
 }
+
+#[test]
+fn list_pattern_view_default_rest_rejects_rest_binding_and_direct_call() {
+    let wild_ok = r#"
+        struct RepeatTwo { first: i64, second: i64 }
+        impl builtin.ListPatternView for RepeatTwo {
+            assoc Element: Type = i64;
+            fn list_pattern_view_get_len(*self) -> usize { 2 }
+            fn list_pattern_view_get_element(*self, comptime index: usize) -> i64 {
+                if index == 0 { self.first.* } else { self.second.* }
+            }
+        }
+        fn run() -> bool {
+            let r = RepeatTwo { first: 11, second: 22 };
+            r match {
+                [a, ..._] => a == 11,
+                _ => false,
+            }
+        }
+    "#;
+    assert_eq!(support::run(wild_ok), Value::Bool(true));
+
+    let expected_err = "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding";
+
+    let named_rest_err = support::compile(&format!(
+        "{wild_ok}
+        fn bad_rest(r: RepeatTwo) -> bool {{
+            r match {{
+                [_, ...rest] => rest.first == 11,
+                _ => false,
+            }}
+        }}"
+    ))
+    .unwrap_err();
+    assert!(named_rest_err.contains(expected_err), "{named_rest_err}");
+
+    let direct_as_call_err = support::compile(&format!(
+        "{wild_ok}
+        fn bad_direct_as(r: RepeatTwo) -> bool {{
+            let rest = r.as(builtin.ListPatternView).list_pattern_view_rest(1);
+            rest.first == 11
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        direct_as_call_err.contains(expected_err),
+        "{direct_as_call_err}"
+    );
+
+    let direct_method_err = support::compile(&format!(
+        "{wild_ok}
+        fn bad_direct_method(r: RepeatTwo) -> bool {{
+            let rest = r.list_pattern_view_rest(1);
+            rest.first == 11
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        direct_method_err.contains(expected_err),
+        "{direct_method_err}"
+    );
+}
+
+#[test]
+fn two_phase_list_pattern_view_works_in_runtime_and_comptime() {
+    let source = r#"
+        struct PairSeq { a: i64, b: i64, count: usize }
+
+        impl builtin.ListPatternView for PairSeq {
+            assoc Element: Type = i64;
+            assoc Rest: Type = PairSeq;
+
+            fn list_pattern_view_get_len(*self) -> usize { self.count.* }
+
+            fn list_pattern_view_get_element(*self, comptime index: usize) -> i64 {
+                if index == 0 { self.a.* } else { self.b.* }
+            }
+
+            fn list_pattern_view_rest(*self, comptime start: usize) -> PairSeq {
+                let c = self.count.*;
+                if start >= c {
+                    PairSeq { a: 0, b: 0, count: 0 }
+                } else if start == 0 {
+                    PairSeq { a: self.a.*, b: self.b.*, count: c }
+                } else {
+                    PairSeq { a: self.b.*, b: 0, count: c - start }
+                }
+            }
+        }
+
+        impl builtin.StableListPatternView for PairSeq {}
+
+        comptime impl builtin.ListPatternView for PairSeq {
+            assoc ElementComptime: Type = i64;
+            assoc RestComptime: Type = PairSeq;
+
+            pure comptime fn list_pattern_view_get_len_comptime(self) -> usize { self.count }
+
+            pure comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> i64 {
+                if index == 0 { self.a } else { self.b }
+            }
+
+            pure comptime fn list_pattern_view_rest_comptime(self, start: usize) -> PairSeq {
+                if start >= self.count {
+                    PairSeq { a: 0, b: 0, count: 0 }
+                } else if start == 0 {
+                    self
+                } else {
+                    PairSeq { a: self.b, b: 0, count: self.count - start }
+                }
+            }
+        }
+
+        comptime impl builtin.StableListPatternView for PairSeq {}
+
+        fn rt(p: PairSeq) -> i64 {
+            p match {
+                [] => 0,
+                [x] => x,
+                [x, ...rest] => {
+                    if x >= 0 and x < 1000 and rest.a >= 0 and rest.a < 1000 {
+                        x * 10 + rest.a
+                    } else {
+                        0
+                    }
+                },
+            }
+        }
+
+        comptime fn ct() -> bool {
+            let p = PairSeq { a: 3, b: 7, count: 2 };
+            let ok_first = p match {
+                [] => false,
+                [x, ...rest] => x == 3 and rest.count == 1 and rest.a == 7,
+            };
+            ok_first
+        }
+
+        const CT_OK: bool = ct();
+
+        fn run() -> bool {
+            CT_OK and rt(PairSeq { a: 4, b: 9, count: 2 }) == 49
+                and rt(PairSeq { a: 5, b: 0, count: 1 }) == 5
+                and rt(PairSeq { a: 0, b: 0, count: 0 }) == 0
+        }
+    "#;
+
+    assert_eq!(support::run(source), Value::Bool(true));
+    assert_eq!(support::invoke(source, "ct").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn endless_list_pattern_view_and_stable_exhaustiveness_and_errors() {
+    let fib_source = r#"
+        struct FibStream { a: i64, b: i64 }
+
+        impl builtin.ListPatternViewEndless for FibStream {
+            assoc Element: Type = i64;
+            assoc Rest: Type = FibStream;
+
+            fn list_pattern_view_get_element(*self, comptime index: usize) -> i64 {
+                var cur_a = self.a.*;
+                var cur_b = self.b.*;
+                var i: usize = 0;
+                while i < index {
+                    let next = if cur_a >= 0 and cur_b >= 0 and cur_a < 10000 and cur_b < 10000 {
+                        cur_a + cur_b
+                    } else {
+                        0
+                    };
+                    cur_a = cur_b;
+                    cur_b = next;
+                    i = i + 1;
+                }
+                cur_a
+            }
+
+            fn list_pattern_view_rest(*self, comptime start: usize) -> FibStream {
+                var cur_a = self.a.*;
+                var cur_b = self.b.*;
+                var i: usize = 0;
+                while i < start {
+                    let next = if cur_a >= 0 and cur_b >= 0 and cur_a < 10000 and cur_b < 10000 {
+                        cur_a + cur_b
+                    } else {
+                        0
+                    };
+                    cur_a = cur_b;
+                    cur_b = next;
+                    i = i + 1;
+                }
+                FibStream { a: cur_a, b: cur_b }
+            }
+        }
+
+        impl builtin.StableListPatternViewEndless for FibStream {}
+
+        comptime impl builtin.ListPatternViewEndless for FibStream {
+            assoc ElementComptime: Type = i64;
+            assoc RestComptime: Type = FibStream;
+
+            pure comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> i64 {
+                var cur_a = self.a;
+                var cur_b = self.b;
+                var i: usize = 0;
+                while i < index {
+                    let next = if cur_a >= 0 and cur_b >= 0 and cur_a < 10000 and cur_b < 10000 {
+                        cur_a + cur_b
+                    } else {
+                        0
+                    };
+                    cur_a = cur_b;
+                    cur_b = next;
+                    i = i + 1;
+                }
+                cur_a
+            }
+
+            pure comptime fn list_pattern_view_rest_comptime(self, start: usize) -> FibStream {
+                var cur_a = self.a;
+                var cur_b = self.b;
+                var i: usize = 0;
+                while i < start {
+                    let next = if cur_a >= 0 and cur_b >= 0 and cur_a < 10000 and cur_b < 10000 {
+                        cur_a + cur_b
+                    } else {
+                        0
+                    };
+                    cur_a = cur_b;
+                    cur_b = next;
+                    i = i + 1;
+                }
+                FibStream { a: cur_a, b: cur_b }
+            }
+        }
+
+        comptime impl builtin.StableListPatternViewEndless for FibStream {}
+
+        struct BoolStream { head: bool }
+
+        impl builtin.ListPatternViewEndless for BoolStream {
+            assoc Element: Type = bool;
+
+            fn list_pattern_view_get_element(*self, comptime index: usize) -> bool {
+                if index == 0 { self.head.* } else { not self.head.* }
+            }
+        }
+
+        impl builtin.StableListPatternViewEndless for BoolStream {}
+
+        fn inspect_fib(s: FibStream) -> i64 {
+            s match {
+                [0, 1, third, ...tail] => {
+                    if third >= 0 and third < 1000 and tail.a >= 0 and tail.a < 1000 and tail.b >= 0 and tail.b < 1000 {
+                        third * 100 + tail.a * 10 + tail.b
+                    } else {
+                        0
+                    }
+                },
+                [first, ..._] => first,
+            }
+        }
+
+        fn inspect_bools(s: BoolStream) -> bool {
+            s match {
+                [true, ..._] => true,
+                [false, ..._] => false,
+            }
+        }
+
+        comptime fn ct_fib() -> i64 {
+            let s = FibStream { a: 0, b: 1 };
+            s match {
+                [0, 1, third, ...tail] => {
+                    if third >= 0 and third < 1000 and tail.a >= 0 and tail.a < 1000 and tail.b >= 0 and tail.b < 1000 {
+                        third * 100 + tail.a * 10 + tail.b
+                    } else {
+                        0
+                    }
+                },
+                [first, ..._] => first,
+            }
+        }
+
+        const CT_VAL: i64 = ct_fib();
+
+        comptime fn ct_fib_ok() -> bool {
+            ct_fib() == 123
+        }
+
+        fn run() -> bool {
+            CT_VAL == 123
+                and inspect_fib(FibStream { a: 0, b: 1 }) == 123
+                and inspect_fib(FibStream { a: 7, b: 8 }) == 7
+                and inspect_bools(BoolStream { head: true })
+                and not inspect_bools(BoolStream { head: false })
+        }
+    "#;
+
+    assert_eq!(support::run(fib_source), Value::Bool(true));
+    assert_eq!(
+        support::invoke(fib_source, "ct_fib_ok").unwrap(),
+        Value::Bool(true)
+    );
+
+    let pkg = support::compile(fib_source).unwrap();
+    for fn_name in ["inspect_fib", "inspect_bools"] {
+        let fn_id = support::source_function(&pkg, fn_name);
+        let plans = plans_for_fn(&pkg.match_plans, fn_id);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].is_exhaustive);
+        let ops = plans[0]
+            .list_views
+            .values()
+            .next()
+            .expect("endless list ops");
+        assert!(ops.endless);
+        assert_eq!(ops.mode, ListObservationMode::StableProtocol);
+    }
+
+    let missing_bool = support::compile(&format!(
+        "{fib_source}
+        fn non_exhaustive(s: BoolStream) -> bool {{
+            s match {{
+                [true, ..._] => true,
+            }}
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        missing_bool.contains("non-exhaustive match") && missing_bool.contains("[false, ..._]"),
+        "{missing_bool}"
+    );
+
+    let fixed_len_err = support::compile(&format!(
+        "{fib_source}
+        fn bad_fixed(s: FibStream) -> i64 {{
+            s match {{
+                [a, b] => a + b,
+                [a, ..._] => a,
+            }}
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        fixed_len_err.contains("endless list pattern requires a trailing '..._' or '...rest'"),
+        "{fixed_len_err}"
+    );
+
+    let both_views_err = support::compile(&format!(
+        "{fib_source}
+        impl builtin.ListPatternView for FibStream {{
+            assoc Element: Type = i64;
+            fn list_pattern_view_get_len(*self) -> usize {{ 1 }}
+            fn list_pattern_view_get_element(*self, comptime _index: usize) -> i64 {{ self.a.* }}
+        }}
+        fn bad_both(s: FibStream) -> i64 {{
+            s match {{
+                [a, ..._] => a,
+            }}
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        both_views_err.contains(
+            "ambiguous list pattern view: type implements both ListPatternView and ListPatternViewEndless"
+        ),
+        "{both_views_err}"
+    );
+
+    let default_rest_err = support::compile(&format!(
+        "{fib_source}
+        fn bad_default_rest(s: BoolStream) -> bool {{
+            s match {{
+                [a, ...rest] => a and rest.head,
+            }}
+        }}"
+    ))
+    .unwrap_err();
+    assert!(
+        default_rest_err.contains(
+            "type implements ListPatternViewEndless without overriding list_pattern_view_rest required for '...rest' binding"
+        ),
+        "{default_rest_err}"
+    );
+}
+
+#[test]
+fn vec_deque_and_vec_deque_slice_list_patterns_wraparound_and_exhaustiveness() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.{VecDeque, VecDequeSlice};
+
+        fn sum_slice(s: VecDequeSlice<i64>) -> i64 {
+            var cur = s;
+            var total: i64 = 0;
+            while cur is [head, ...tail] do {
+                if total >= 0 and total < 10000 and head >= 0 and head < 10000 {
+                    total = total + head;
+                }
+                cur = tail;
+            }
+            total
+        }
+
+        fn classify_bools(d: VecDeque<bool>) -> i64 {
+            d match {
+                [] => 0,
+                [true, ..._] => 1,
+                [false, ..._] => 2,
+            }
+        }
+
+        fn run() -> bool {
+            var dq = VecDeque<i64>.new();
+            dq.push_back(10) match {
+                ok! => {},
+                error _ => return false,
+            }
+            dq.push_back(20) match {
+                ok! => {},
+                error _ => return false,
+            }
+            dq.push_back(30) match {
+                ok! => {},
+                error _ => return false,
+            }
+            let popped = dq.pop_front() match {
+                v? => v,
+                null => return false,
+            };
+            if popped != 10 {
+                return false;
+            }
+            -- Push more elements to force ring-buffer wraparound (second_part non-empty).
+            dq.push_back(40) match {
+                ok! => {},
+                error _ => return false,
+            }
+            dq.push_back(50) match {
+                ok! => {},
+                error _ => return false,
+            }
+            let sum_all = dq match {
+                [first, second, ...rest] => {
+                    let tail_sum = sum_slice(rest);
+                    if first >= 0 and first < 10000 and second >= 0 and second < 10000 and tail_sum >= 0 and tail_sum < 100000 {
+                        first + second + tail_sum
+                    } else {
+                        -1
+                    }
+                },
+                _ => -1,
+            };
+            if sum_all != 140 {
+                return false;
+            }
+            let empty_bd = VecDeque<bool>.new();
+            if classify_bools(empty_bd) != 0 {
+                return false;
+            }
+            var bd = VecDeque<bool>.new();
+            bd.push_back(false) match {
+                ok! => {},
+                error _ => return false,
+            }
+            classify_bools(bd) == 2
+        }
+    "#;
+
+    let pkg = support::compile(source).unwrap();
+    let iir_pkg = luna::instantiation::instantiate(&pkg, "run", 1_000_000).unwrap();
+    let fn_id = support::source_function(&pkg, "classify_bools");
+    let plans = plans_for_fn(&iir_pkg.match_plans, fn_id);
+    assert_eq!(plans.len(), 1);
+    assert!(plans[0].is_exhaustive);
+    let ops = plans[0]
+        .list_views
+        .values()
+        .next()
+        .expect("VecDeque list view ops");
+    assert_eq!(ops.mode, ListObservationMode::StableProtocol);
+
+    for opt_level in ["0", "3"] {
+        let case = NativeCase::new(source);
+        assert_success(&case.build(opt_level));
+        let output = case.run();
+        assert_success(&output);
+        assert_eq!(output.stdout, b"(bool true)\n", "opt={opt_level}");
+    }
+}

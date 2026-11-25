@@ -11,6 +11,23 @@ pub trait ListPatternView {
     fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
 
     fn list_pattern_view_rest(*self, comptime start: usize) -> Rest {
+        assumes false;
+        while true {}
+    }
+
+    ^attrs.comptime_phase
+    assoc ElementComptime: Type;
+    ^attrs.comptime_phase
+    assoc RestComptime: Type = Self;
+
+    ^attrs.comptime_phase
+    comptime fn list_pattern_view_get_len_comptime(self) -> usize;
+    ^attrs.comptime_phase
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> ElementComptime;
+
+    ^attrs.comptime_phase
+    comptime fn list_pattern_view_rest_comptime(self, start: usize) -> RestComptime {
+        assumes false;
         while true {}
     }
 }
@@ -21,3 +38,41 @@ pub trait ListPatternView {
     single-observation decision DAGs and length-interval exhaustiveness proofs.
 -}
 pub trait StableListPatternView :- ListPatternView {}
+
+{-
+    Endless sequence (stream, generator, lazy sequence) pattern view.
+    Declares no length query; every endless list pattern arm must end with
+    `..._` or `...rest`.
+-}
+pub trait ListPatternViewEndless {
+    assoc Element: Type;
+    assoc Rest: Type = Self;
+
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> Rest {
+        assumes false;
+        while true {}
+    }
+
+    ^attrs.comptime_phase
+    assoc ElementComptime: Type;
+    ^attrs.comptime_phase
+    assoc RestComptime: Type = Self;
+
+    ^attrs.comptime_phase
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> ElementComptime;
+
+    ^attrs.comptime_phase
+    comptime fn list_pattern_view_rest_comptime(self, start: usize) -> RestComptime {
+        assumes false;
+        while true {}
+    }
+}
+
+{-
+    Marker protocol guaranteeing that endless sequence indexing and slicing are
+    referentially stable across match arms without side effects, authorizing
+    single-observation decision DAGs and prefix exhaustiveness proofs.
+-}
+pub trait StableListPatternViewEndless :- ListPatternViewEndless {}

@@ -6,7 +6,7 @@ use crate::bitvec::{
     partition_bit_intervals,
 };
 use crate::decision::{
-    Binding, DagBuilder, DagNode, DecisionDag, LenInterval, NodeId, Place, SwitchKind,
+    Binding, DagBuilder, DagNode, DecisionDag, LenInterval, NodeId, Place, PlaceStep, SwitchKind,
     coalesce_bit_cases, coalesce_char_cases, coalesce_int_cases, coalesce_len_cases,
 };
 use crate::pattern::{
@@ -75,6 +75,7 @@ pub enum MissingWitness {
     Tuple(Vec<MissingWitness>),
     Record(BTreeMap<String, MissingWitness>),
     List(Vec<MissingWitness>),
+    EndlessList(Vec<MissingWitness>),
     BitVec(BitValue),
     Opaque,
 }
@@ -129,7 +130,7 @@ impl MissingWitness {
                     .map(|(k, v)| Some((k.clone(), v.to_value()?)))
                     .collect::<Option<BTreeMap<_, _>>>()?,
             ),
-            Self::List(elems) => Value::List(
+            Self::List(elems) | Self::EndlessList(elems) => Value::List(
                 elems
                     .iter()
                     .map(Self::to_value)
@@ -176,6 +177,13 @@ impl fmt::Display for MissingWitness {
             }
             Self::List(elems) => {
                 f.write_str("(list")?;
+                for w in elems {
+                    write!(f, " {w}")?;
+                }
+                f.write_str(")")
+            }
+            Self::EndlessList(elems) => {
+                f.write_str("(endless-list")?;
                 for w in elems {
                     write!(f, " {w}")?;
                 }
@@ -536,6 +544,9 @@ impl Compiler {
                 TypeDesc::Char => self.specialize_char(cols, rows, col_idx, col.place),
                 TypeDesc::List(elem_ty) => {
                     self.specialize_list(cols, rows, col_idx, col.place, *elem_ty)
+                }
+                TypeDesc::EndlessList(elem_ty) => {
+                    self.specialize_endless_list(cols, rows, col_idx, col.place, *elem_ty)
                 }
                 TypeDesc::BitVec(width) => {
                     self.specialize_bitvec(cols, rows, col_idx, col.place, width)
@@ -1300,6 +1311,99 @@ impl Compiler {
         )
     }
 
+    fn specialize_endless_list(
+        &mut self,
+        mut cols: Vec<Column>,
+        rows: Vec<Row>,
+        col_idx: usize,
+        place: Place,
+        elem_ty: TypeDesc,
+    ) -> Result<NodeId, CompileError> {
+        let expanded = expand_or_at_col(&cols, rows, col_idx);
+
+        let mut normalized_rows = Vec::with_capacity(expanded.len());
+        for row in expanded {
+            normalize_list_row(row, col_idx, &place, &mut normalized_rows)?;
+        }
+
+        enum EndlessShape {
+            Wild,
+            AtLeast {
+                prefix: Vec<Pattern>,
+                rest_binds: Vec<(String, usize)>,
+            },
+        }
+
+        let mut required_elems = 0usize;
+        let mut shapes: Vec<(Row, EndlessShape)> = Vec::with_capacity(normalized_rows.len());
+
+        for norm in normalized_rows {
+            let row = norm.row;
+            let rest_binds = norm.rest_binds;
+            let shape = match &row.pats[col_idx] {
+                ColPattern::Pattern(Pattern::Wild) => EndlessShape::Wild,
+                ColPattern::Pattern(Pattern::List { prefix, rest }) => {
+                    let Some(rest_pat) = rest else {
+                        return Err(CompileError::TypeMismatch {
+                            expected: "endless list pattern with trailing rest".to_string(),
+                            found: "fixed-length list pattern".to_string(),
+                        });
+                    };
+                    debug_assert!(matches!(rest_pat.as_ref(), Pattern::Wild));
+                    required_elems = required_elems.max(prefix.len());
+                    EndlessShape::AtLeast {
+                        prefix: prefix.clone(),
+                        rest_binds,
+                    }
+                }
+                ColPattern::Pattern(other) => {
+                    return Err(CompileError::TypeMismatch {
+                        expected: "endless list".to_string(),
+                        found: other.to_string(),
+                    });
+                }
+                ColPattern::BitSlice(_) => unreachable!(),
+            };
+            shapes.push((row, shape));
+        }
+
+        let elem_cols: Vec<Column> = (0..required_elems)
+            .map(|i| Column {
+                place: place.list_elem(i),
+                domain: ColDomain::Typed(elem_ty.clone()),
+            })
+            .collect();
+        cols.splice(col_idx..=col_idx, elem_cols);
+
+        let mut next_rows = Vec::with_capacity(shapes.len());
+        for (mut row, shape) in shapes {
+            row.pats.remove(col_idx);
+            let replacement: Vec<ColPattern> = match shape {
+                EndlessShape::Wild => {
+                    vec![ColPattern::Pattern(Pattern::Wild); required_elems]
+                }
+                EndlessShape::AtLeast { prefix, rest_binds } => {
+                    for (bind_name, offset) in rest_binds {
+                        row.bindings.push(Binding {
+                            name: bind_name,
+                            place: place.list_rest(offset),
+                        });
+                    }
+                    let mut pats: Vec<ColPattern> =
+                        prefix.into_iter().map(ColPattern::Pattern).collect();
+                    while pats.len() < required_elems {
+                        pats.push(ColPattern::Pattern(Pattern::Wild));
+                    }
+                    pats
+                }
+            };
+            row.pats.splice(col_idx..col_idx, replacement);
+            next_rows.push(row);
+        }
+
+        self.compile_matrix(cols, next_rows)
+    }
+
     fn specialize_bitvec(
         &mut self,
         mut cols: Vec<Column>,
@@ -1916,7 +2020,9 @@ fn estimated_branching(col: &Column, rows: &[Row], col_idx: usize) -> isize {
                 (distinct.len() as isize) + 1
             }
         }
-        ColDomain::Typed(TypeDesc::Int(_) | TypeDesc::Char | TypeDesc::List(_)) => {
+        ColDomain::Typed(
+            TypeDesc::Int(_) | TypeDesc::Char | TypeDesc::List(_) | TypeDesc::EndlessList(_),
+        ) => {
             let count = rows.iter().filter(|r| !r.pats[col_idx].is_wild()).count();
             (count as isize) + 1
         }
@@ -2546,6 +2652,8 @@ fn resolve_place_type(
             }
             (TypeDesc::List(elem), PlaceStep::ListElem(_)) => *elem,
             (TypeDesc::List(elem), PlaceStep::ListRest(_)) => TypeDesc::List(elem),
+            (TypeDesc::EndlessList(elem), PlaceStep::ListElem(_)) => *elem,
+            (TypeDesc::EndlessList(elem), PlaceStep::ListRest(_)) => TypeDesc::EndlessList(elem),
             (_, PlaceStep::BitSlice { ty, .. }) => ty.clone(),
             _ => TypeDesc::Any,
         };
@@ -2585,6 +2693,25 @@ fn materialize_witness(
                 })
                 .collect(),
         ),
+        TypeDesc::EndlessList(elem_ty) => {
+            let mut max_elem: Option<usize> = None;
+            for key in constraints.keys().chain(known_types.keys()) {
+                if key.steps.len() > place.steps.len()
+                    && key.steps[..place.steps.len()] == place.steps[..]
+                    && let PlaceStep::ListElem(idx) = key.steps[place.steps.len()]
+                {
+                    max_elem = Some(max_elem.map_or(idx + 1, |cur| cur.max(idx + 1)));
+                }
+            }
+            let len = max_elem.unwrap_or(0);
+            MissingWitness::EndlessList(
+                (0..len)
+                    .map(|i| {
+                        materialize_witness(elem_ty, &place.list_elem(i), constraints, known_types)
+                    })
+                    .collect(),
+            )
+        }
         TypeDesc::BitVec(width) => {
             let mut bv = BitValue::zero(*width);
             if let Some(WitnessConstraint::BitSlices(_, slices)) = constraints.get(place) {
@@ -2761,6 +2888,7 @@ fn default_witness(ty: &TypeDesc) -> MissingWitness {
                 .collect(),
         ),
         TypeDesc::List(_) => MissingWitness::List(Vec::new()),
+        TypeDesc::EndlessList(_) => MissingWitness::EndlessList(Vec::new()),
         TypeDesc::BitVec(w) => MissingWitness::BitVec(BitValue::zero(*w)),
         TypeDesc::Any => MissingWitness::Opaque,
     }

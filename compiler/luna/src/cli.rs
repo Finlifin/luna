@@ -31,6 +31,8 @@ pub struct Options {
     pub list_pattern_protocol: Option<String>,
     pub comptime_list_pattern_protocol: Option<String>,
     pub stable_list_pattern_protocol: Option<String>,
+    pub list_pattern_endless_protocol: Option<String>,
+    pub stable_list_pattern_endless_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub index_protocol: Option<String>,
@@ -188,6 +190,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut list_pattern_protocol = None;
     let mut comptime_list_pattern_protocol = None;
     let mut stable_list_pattern_protocol = None;
+    let mut list_pattern_endless_protocol = None;
+    let mut stable_list_pattern_endless_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut index_protocol = None;
@@ -614,6 +618,37 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--list-pattern-endless-protocol") => {
+                    if list_pattern_endless_protocol.is_some() {
+                        return Err(
+                            "--list-pattern-endless-protocol may only be specified once".into()
+                        );
+                    }
+                    list_pattern_endless_protocol = Some(
+                        option_value(&mut args, "--list-pattern-endless-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "ListPatternViewEndless protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
+                Some("--stable-list-pattern-endless-protocol") => {
+                    if stable_list_pattern_endless_protocol.is_some() {
+                        return Err(
+                            "--stable-list-pattern-endless-protocol may only be specified once"
+                                .into(),
+                        );
+                    }
+                    stable_list_pattern_endless_protocol = Some(
+                        option_value(&mut args, "--stable-list-pattern-endless-protocol")?
+                            .into_string()
+                            .map_err(|_| {
+                                "StableListPatternViewEndless protocol selector must be valid UTF-8"
+                            })?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -946,6 +981,8 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         list_pattern_protocol,
         comptime_list_pattern_protocol,
         stable_list_pattern_protocol,
+        list_pattern_endless_protocol,
+        stable_list_pattern_endless_protocol,
         iterator_protocol,
         into_iterator_protocol,
         index_protocol,
@@ -1112,6 +1149,8 @@ mod tests {
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
                 stable_list_pattern_protocol: None,
+                list_pattern_endless_protocol: None,
+                stable_list_pattern_endless_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1152,6 +1191,8 @@ mod tests {
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
                 stable_list_pattern_protocol: None,
+                list_pattern_endless_protocol: None,
+                stable_list_pattern_endless_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,

@@ -326,6 +326,8 @@ pub struct Protocols {
     pub list_pattern: Option<DeclarationId>,
     pub comptime_list_pattern: Option<DeclarationId>,
     pub stable_list_pattern: Option<DeclarationId>,
+    pub list_pattern_endless: Option<DeclarationId>,
+    pub stable_list_pattern_endless: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub handle_error: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
@@ -1474,6 +1476,18 @@ fn elaborate_candidate<'a, 'h>(
             &checker.checked_traits,
             id,
             checker.protocols.list_pattern,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.list_pattern_endless {
+        crate::list_patterns::endless_protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.stable_list_pattern_endless {
+        crate::list_patterns::stable_endless_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.list_pattern_endless,
         )
         .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }

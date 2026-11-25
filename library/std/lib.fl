@@ -54,7 +54,7 @@ pub mod collections {
     pub use hash_set.{HashSet, HashSetIter}
     pub use slice.Slice;
     pub use vec.{Vec, VecIter}
-    pub use vec_deque.{VecDeque, VecDequeIter}
+    pub use vec_deque.{VecDeque, VecDequeIter, VecDequeSlice}
 }
 
 pub mod string {

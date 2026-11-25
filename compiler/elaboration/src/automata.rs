@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct ListPatternInfo {
     pub protocol: DeclarationId,
     pub mode: Option<ListObservationMode>,
+    pub endless: bool,
     pub by_value: bool,
     pub size_type: Term,
     pub element_type: Term,
@@ -29,6 +30,7 @@ impl ListPatternInfo {
         Some(ListViewOps {
             protocol: self.protocol,
             mode,
+            endless: self.endless,
             by_value: self.by_value,
             size_type: self.size_type.clone(),
             element_type: self.element_type.clone(),
@@ -854,7 +856,11 @@ fn term_to_type_desc_at(
             visiting,
             depth + 1,
         );
-        return pa::TypeDesc::List(Box::new(elem_desc));
+        return if ops.endless {
+            pa::TypeDesc::EndlessList(Box::new(elem_desc))
+        } else {
+            pa::TypeDesc::List(Box::new(elem_desc))
+        };
     }
 
     if let Some(element) = env.list_element_type(ty) {
@@ -1392,6 +1398,31 @@ fn format_witness_into(
                 );
             }
             out.push(']');
+        }
+        pa::MissingWitness::EndlessList(elems) => {
+            let elem_ty = find_list_view_for_place(place, list_views)
+                .map(|ops| &ops.element_type)
+                .or_else(|| env.list_element_type(ty))
+                .unwrap_or(&shape);
+            out.push('[');
+            for (i, w) in elems.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                format_witness_into(
+                    env,
+                    w,
+                    elem_ty,
+                    &place.list_elem(i),
+                    list_views,
+                    out,
+                    depth + 1,
+                );
+            }
+            if !elems.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str("..._]");
         }
         pa::MissingWitness::BitVec(bv) => {
             let width = bv.width();

@@ -3416,6 +3416,8 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             list_pattern_protocol: None,
             comptime_list_pattern_protocol: None,
             stable_list_pattern_protocol: None,
+            list_pattern_endless_protocol: None,
+            stable_list_pattern_endless_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,
@@ -3966,6 +3968,8 @@ fn trait_implementation_receiver_modes_must_match() {
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
                 stable_list_pattern_protocol: None,
+                list_pattern_endless_protocol: None,
+                stable_list_pattern_endless_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -18522,15 +18526,15 @@ fn scheduled_handler_scalar_capture_nested_installations_share_the_correct_scope
 #[test]
 fn scheduled_scalar_passing_provider_runs_once_before_arguments_and_cleans_locals() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Local {} impl Retire for Local {fn drop(*self) {}}
         ^attrs.effects.direct_passing effect config()->bool;
         fn provider()->bool {let local=Local {};true}
         fn argument()->bool {false}
         fn subject(value:bool)->#config bool {config()# and config()# and not value}
-        fn entry()->bool {subject(argument())# {config()=>provider(),}}"),
-    );
+        fn entry()->bool {subject(argument())# {config()=>provider(),}}"
+    ));
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
         .unwrap()
@@ -18611,14 +18615,14 @@ fn scheduled_scalar_passing_slot_keeps_provider_snapshot_after_argument_writes()
 #[test]
 fn scheduled_scalar_passing_unused_slot_still_runs_and_cleans_provider_once() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Local {} impl Retire for Local {fn drop(*self) {}}
         ^attrs.effects.direct_passing effect config()->bool;
         fn provider()->bool {let local=Local {};true}
         fn subject()->#config bool {false}
-        fn entry()->bool {subject()# {config()=>provider(),}}"),
-    );
+        fn entry()->bool {subject()# {config()=>provider(),}}"
+    ));
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
         .unwrap()
@@ -18674,15 +18678,15 @@ fn scheduled_scalar_passing_later_provider_failure_stops_installation_before_sub
 #[test]
 fn scheduled_scalar_passing_partial_provider_uses_outer_slot_without_reinvoking_provider() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Local {} impl Retire for Local {fn drop(*self) {}}
         ^attrs.effects.direct_passing effect config()->bool;
         fn provider()->bool {let local=Local {};true}
         fn subject()->#config bool {config()# and config()#}
         fn middle(flag:bool)->#config bool {subject()# {config() if flag=>false,}}
-        fn entry()->bool {middle(false)# {config()=>provider(),}}"),
-    );
+        fn entry()->bool {middle(false)# {config()=>provider(),}}"
+    ));
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
         .unwrap()
@@ -18701,16 +18705,16 @@ fn scheduled_scalar_passing_partial_provider_uses_outer_slot_without_reinvoking_
 #[test]
 fn scheduled_scalar_passing_void_provider_runs_once_for_repeated_requests() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Local {} impl Retire for Local {fn drop(*self) {}}
         ^attrs.effects.direct_passing effect setup();
         fn subject()->#setup bool {setup()#;setup()#;true}
         fn entry()->bool {var ready=false;
             let result=subject()# {setup()=>do {let local=Local {};ready=true;},};
             result and ready
-        }"),
-    );
+        }"
+    ));
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
         .unwrap()
@@ -18889,8 +18893,8 @@ fn scheduled_handler_lexical_return_checks_installer_postcondition_and_owned_res
 #[test]
 fn scheduled_handler_lexical_return_provider_exits_before_subject_arguments() {
     use comptime_interpretor::{Interpreter, Value};
-    let package = compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Caller {} struct Local {} impl Retire for Caller {fn drop(*self) {}}
         impl Retire for Local {fn drop(*self) {}}
         ^attrs.effects.direct_passing effect config()->bool;
@@ -18898,8 +18902,8 @@ fn scheduled_handler_lexical_return_provider_exits_before_subject_arguments() {
         fn subject(flag:bool)->#config bool {config()#}
         fn entry()->bool {let caller=Caller {};subject(argument())# {
             config()=>do {let local=Local {};return true;},
-        }}"),
-    );
+        }}"
+    ));
     let executable = source_executable(&package, "entry").unwrap();
     let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
         .unwrap()
@@ -19555,7 +19559,9 @@ fn scheduled_handler_returned_callable_nested_and_provider_returns_preserve_cont
     use comptime_interpretor::{Interpreter, Value};
     for source in [
         "effect ask()->bool;fn outer()->#ask bool {ask()#} fn build()->Callback {outer()# {ask()=>do {subject()# {poll()=>do {let ticket=Ticket {};return || ticket;},}},};let ticket=Ticket {};|| ticket}",
-        effect_fixture!("^attrs.effects.direct_passing effect config()->bool;fn configured()->#config bool {config()#} fn build()->Callback {configured()# {config()=>do {let ticket=Ticket {};return || ticket;},};let ticket=Ticket {};|| ticket}"),
+        effect_fixture!(
+            "^attrs.effects.direct_passing effect config()->bool;fn configured()->#config bool {config()#} fn build()->Callback {configured()# {config()=>do {let ticket=Ticket {};return || ticket;},};let ticket=Ticket {};|| ticket}"
+        ),
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}

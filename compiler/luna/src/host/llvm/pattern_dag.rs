@@ -1301,9 +1301,74 @@ impl Emitter<'_> {
                 Ok(true)
             }
             Pattern::Observe { binding, inner } => {
-                if has_list_view_for_place(place, list_views) {
+                if let Some(ops) = find_list_view_for_place(place, list_views) {
                     let mut steps = Vec::new();
                     flatten_then_unit_spine(inner, &mut steps);
+                    if ops.endless {
+                        let has_rest = ops.rest_method.is_some_and(|rest_id| {
+                            steps
+                                .last()
+                                .is_some_and(|(expr, _)| expr_calls_method(expr, rest_id))
+                        });
+                        let prefix_len = if has_rest {
+                            steps.len() - 1
+                        } else {
+                            steps.len()
+                        };
+                        for i in 0..prefix_len {
+                            let (elem_expr, elem_pat) = steps[i];
+                            harvested_lists
+                                .entry(place.clone())
+                                .or_default()
+                                .elems
+                                .entry(i)
+                                .or_insert(ListCallRef {
+                                    obs_binding: *binding,
+                                    expr: elem_expr,
+                                });
+                            if !self.harvest_pattern(
+                                elem_pat,
+                                &place.list_elem(i),
+                                &elem_expr.ty,
+                                list_views,
+                                harvested_lists,
+                                remaps,
+                                binding_tys,
+                                exported_locals,
+                                is_direct_export,
+                                depth + 1,
+                            )? {
+                                return Ok(false);
+                            }
+                        }
+                        if has_rest {
+                            let (rest_expr, rest_pat) = steps[prefix_len];
+                            harvested_lists
+                                .entry(place.clone())
+                                .or_default()
+                                .rests
+                                .entry(prefix_len)
+                                .or_insert(ListCallRef {
+                                    obs_binding: *binding,
+                                    expr: rest_expr,
+                                });
+                            if !self.harvest_pattern(
+                                rest_pat,
+                                &place.list_rest(prefix_len),
+                                &rest_expr.ty,
+                                list_views,
+                                harvested_lists,
+                                remaps,
+                                binding_tys,
+                                exported_locals,
+                                is_direct_export,
+                                depth + 1,
+                            )? {
+                                return Ok(false);
+                            }
+                        }
+                        return Ok(true);
+                    }
                     let Some(&(len_cond_expr, len_next)) = steps.first() else {
                         return Ok(false);
                     };
@@ -2991,13 +3056,16 @@ fn pattern_has_active_then_cleanup(
     false
 }
 
-fn has_list_view_for_place(place: &Place, list_views: &BTreeMap<Place, ListViewOps>) -> bool {
-    if list_views.contains_key(place) {
-        return true;
+fn find_list_view_for_place<'a>(
+    place: &Place,
+    list_views: &'a BTreeMap<Place, ListViewOps>,
+) -> Option<&'a ListViewOps> {
+    if let Some(ops) = list_views.get(place) {
+        return Some(ops);
     }
-    list_views.keys().any(|candidate| {
+    list_views.iter().find_map(|(candidate, ops)| {
         if candidate.steps.len() != place.steps.len() {
-            return false;
+            return None;
         }
         candidate
             .steps
@@ -3007,7 +3075,37 @@ fn has_list_view_for_place(place: &Place, list_views: &BTreeMap<Place, ListViewO
                 (PlaceStep::ListElem(_), PlaceStep::ListElem(_)) => true,
                 _ => a == b,
             })
+            .then_some(ops)
     })
+}
+
+fn expr_calls_method(expr: &Expr, target: nir::DeclarationId) -> bool {
+    let mut cur = expr;
+    for _ in 0..16 {
+        match &cur.kind {
+            K::Call { callee, .. } => {
+                return matches!(
+                    &callee.kind,
+                    K::Function(id)
+                        | K::FunctionInstance { declaration: id, .. }
+                        | K::TraitMethod { member: id, .. }
+                        if *id == target
+                );
+            }
+            K::Block {
+                result: Some(result),
+                ..
+            }
+            | K::CallPreparation {
+                result: Some(result),
+                ..
+            } => {
+                cur = result;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn flatten_then_unit_spine<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Expr, &'a Pattern)>) {

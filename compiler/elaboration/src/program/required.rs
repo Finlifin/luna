@@ -3026,6 +3026,8 @@ fn scope_for_required(
         protocols_cfg.list_pattern,
         protocols_cfg.comptime_list_pattern,
         protocols_cfg.stable_list_pattern,
+        protocols_cfg.list_pattern_endless,
+        protocols_cfg.stable_list_pattern_endless,
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,

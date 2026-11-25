@@ -518,7 +518,9 @@ fn list_patterns_named_rest_nesting_and_missing_rest_rejection() {
     )
     .unwrap_err();
     assert!(
-        custom_named_err.contains("list rest patterns require a slicing protocol"),
+        custom_named_err.contains(
+            "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding"
+        ),
         "unexpected error: {custom_named_err}"
     );
 }

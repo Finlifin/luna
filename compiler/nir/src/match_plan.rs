@@ -46,6 +46,7 @@ impl fmt::Display for ListObservationMode {
 pub struct ListViewOps {
     pub protocol: DeclarationId,
     pub mode: ListObservationMode,
+    pub endless: bool,
     pub by_value: bool,
     pub size_type: Term,
     pub element_type: Term,
@@ -59,8 +60,13 @@ impl fmt::Display for ListViewOps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(list-view-ops (protocol {}) (mode {}) (by-value {}) (size-type {}) (element-type {})",
-            self.protocol, self.mode, self.by_value, self.size_type, self.element_type
+            "(list-view-ops (protocol {}) (mode {}) (endless {}) (by-value {}) (size-type {}) (element-type {})",
+            self.protocol,
+            self.mode,
+            self.endless,
+            self.by_value,
+            self.size_type,
+            self.element_type
         )?;
         if let Some(rest_type) = &self.rest_type {
             write!(f, " (rest-type {rest_type})")?;
@@ -220,6 +226,7 @@ mod tests {
                     local: 3,
                 },
                 mode: ListObservationMode::StableProtocol,
+                endless: false,
                 by_value: false,
                 size_type: Term::Primitive(Primitive::Usize),
                 element_type: Term::Primitive(Primitive::Bool),

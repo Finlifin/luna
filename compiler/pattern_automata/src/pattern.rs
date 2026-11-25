@@ -810,6 +810,7 @@ pub enum TypeDesc {
     Tuple(Vec<TypeDesc>),
     Record(BTreeMap<String, TypeDesc>),
     List(Box<TypeDesc>),
+    EndlessList(Box<TypeDesc>),
     BitVec(u32),
     Any,
 }
@@ -840,6 +841,7 @@ impl fmt::Display for TypeDesc {
                 f.write_str(")")
             }
             Self::List(elem) => write!(f, "(list {elem})"),
+            Self::EndlessList(elem) => write!(f, "(endless-list {elem})"),
             Self::BitVec(width) => write!(f, "(bitvec {width})"),
             Self::Any => f.write_str("any"),
         }
@@ -1325,6 +1327,25 @@ impl Pattern {
                     rest_pat.validate_against_type(ty)?;
                 }
                 Ok(())
+            }
+            (
+                Self::List {
+                    prefix,
+                    rest: Some(rest_pat),
+                },
+                TypeDesc::EndlessList(elem_ty),
+            ) => {
+                for pat in prefix {
+                    pat.validate_against_type(elem_ty)?;
+                }
+                rest_pat.validate_against_type(ty)?;
+                Ok(())
+            }
+            (Self::List { rest: None, .. }, TypeDesc::EndlessList(_)) => {
+                Err(CompileError::TypeMismatch {
+                    expected: "endless list pattern with trailing rest".to_string(),
+                    found: "fixed-length list pattern".to_string(),
+                })
             }
             (Self::BitVec(bv), TypeDesc::BitVec(width)) => {
                 let sum = bv.computed_width();

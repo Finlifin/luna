@@ -6,7 +6,8 @@ pub struct Protocol {
     pub size: Term,
     pub comptime: bool,
     pub by_value: bool,
-    pub length: &'static str,
+    pub endless: bool,
+    pub length: Option<&'static str>,
     pub element: &'static str,
     pub rest: Option<&'static str>,
     pub rest_default: Option<DeclarationId>,
@@ -17,39 +18,71 @@ pub fn stable_protocol(
     id: DeclarationId,
     list_pattern: Option<DeclarationId>,
 ) -> Result<(), String> {
+    stable_marker_protocol(
+        traits,
+        id,
+        list_pattern,
+        "StableListPatternView",
+        "ListPatternView",
+    )
+}
+
+pub fn stable_endless_protocol(
+    traits: &[Trait],
+    id: DeclarationId,
+    endless_list_pattern: Option<DeclarationId>,
+) -> Result<(), String> {
+    stable_marker_protocol(
+        traits,
+        id,
+        endless_list_pattern,
+        "StableListPatternViewEndless",
+        "ListPatternViewEndless",
+    )
+}
+
+fn stable_marker_protocol(
+    traits: &[Trait],
+    id: DeclarationId,
+    supertrait: Option<DeclarationId>,
+    name: &str,
+    super_name: &str,
+) -> Result<(), String> {
     let mut candidates = traits.iter().filter(|item| item.declaration == id);
     let interface = candidates
         .next()
-        .ok_or("StableListPatternView binding is not a trait")?;
+        .ok_or_else(|| format!("{name} binding is not a trait"))?;
     if candidates.next().is_some()
         || !interface.type_parameters.is_empty()
         || interface.comptime_only
     {
-        return Err(
-            "StableListPatternView requires one runtime trait without explicit parameters".into(),
-        );
+        return Err(format!(
+            "{name} requires one runtime trait without explicit parameters"
+        ));
     }
     if !interface.associated.is_empty() || !interface.methods.is_empty() {
-        return Err("StableListPatternView marker trait must not declare extra members".into());
+        return Err(format!(
+            "{name} marker trait must not declare extra members"
+        ));
     }
-    if let Some(list_id) = list_pattern
+    if let Some(list_id) = supertrait
         && !interface
             .parents
             .iter()
             .any(|parent| parent.declaration == list_id && parent.arguments.is_empty())
     {
-        return Err("StableListPatternView must require ListPatternView as a supertrait".into());
+        return Err(format!("{name} must require {super_name} as a supertrait"));
     }
     Ok(())
 }
 
 pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String> {
-    let runtime = phase_protocol(traits, id, false)?;
+    let runtime = phase_protocol(traits, id, false, false)?;
     if has_staged_contract(traits, id) {
         if runtime.comptime {
             return Err("dual-phase ListPatternView requires runtime base methods".into());
         }
-        phase_protocol(traits, id, true)?;
+        phase_protocol(traits, id, true, false)?;
     }
     Ok(runtime)
 }
@@ -57,13 +90,37 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String>
 pub fn for_phase(traits: &[Trait], id: DeclarationId, comptime: bool) -> Result<Protocol, String> {
     let base = protocol(traits, id)?;
     if comptime && has_staged_contract(traits, id) {
-        phase_protocol(traits, id, true)
+        phase_protocol(traits, id, true, false)
     } else {
         Ok(base)
     }
 }
 
-fn has_staged_contract(traits: &[Trait], id: DeclarationId) -> bool {
+pub fn endless_protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String> {
+    let runtime = phase_protocol(traits, id, false, true)?;
+    if has_staged_contract(traits, id) {
+        if runtime.comptime {
+            return Err("dual-phase ListPatternViewEndless requires runtime base methods".into());
+        }
+        phase_protocol(traits, id, true, true)?;
+    }
+    Ok(runtime)
+}
+
+pub fn endless_for_phase(
+    traits: &[Trait],
+    id: DeclarationId,
+    comptime: bool,
+) -> Result<Protocol, String> {
+    let base = endless_protocol(traits, id)?;
+    if comptime && has_staged_contract(traits, id) {
+        phase_protocol(traits, id, true, true)
+    } else {
+        Ok(base)
+    }
+}
+
+pub fn has_staged_contract(traits: &[Trait], id: DeclarationId) -> bool {
     traits
         .iter()
         .filter(|item| item.declaration == id)
@@ -82,7 +139,17 @@ fn has_staged_contract(traits: &[Trait], id: DeclarationId) -> bool {
         })
 }
 
-fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<Protocol, String> {
+fn phase_protocol(
+    traits: &[Trait],
+    id: DeclarationId,
+    staged: bool,
+    endless: bool,
+) -> Result<Protocol, String> {
+    let label = if endless {
+        "ListPatternViewEndless"
+    } else {
+        "ListPatternView"
+    };
     let (element_name, length_name, get_name, rest_name) = if staged {
         (
             "ElementComptime",
@@ -101,11 +168,11 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
     let mut candidates = traits.iter().filter(|item| item.declaration == id);
     let interface = candidates
         .next()
-        .ok_or("ListPatternView binding is not a trait")?;
+        .ok_or_else(|| format!("{label} binding is not a trait"))?;
     if candidates.next().is_some() || !interface.type_parameters.is_empty() {
-        return Err(
-            "ListPatternView requires one trait identity without explicit parameters".into(),
-        );
+        return Err(format!(
+            "{label} requires one trait identity without explicit parameters"
+        ));
     }
     let elements = interface
         .associated
@@ -113,39 +180,65 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
         .filter(|item| item.name == element_name)
         .collect::<Vec<_>>();
     let [element] = elements.as_slice() else {
-        return Err(format!(
-            "ListPatternView requires one associated {element_name}"
-        ));
+        return Err(format!("{label} requires one associated {element_name}"));
     };
     if element.ty != Term::Primitive(Primitive::Type)
         || (staged && element.phase != TraitPhase::Comptime)
     {
-        return Err("ListPatternView Element must be Type-valued".into());
+        return Err(format!("{label} Element must be Type-valued"));
     }
-    let lengths = interface
-        .methods
-        .iter()
-        .filter(|method| method.name == length_name)
-        .collect::<Vec<_>>();
-    let [length] = lengths.as_slice() else {
-        return Err("ListPatternView requires one length method".into());
+    let (size, comptime) = if endless {
+        if interface
+            .methods
+            .iter()
+            .any(|method| method.name == length_name)
+        {
+            return Err(format!("{label} must not declare {length_name}"));
+        }
+        let gets = interface
+            .methods
+            .iter()
+            .filter(|method| method.name == get_name)
+            .collect::<Vec<_>>();
+        let [get] = gets.as_slice() else {
+            return Err(format!("{label} requires one {get_name} method"));
+        };
+        let Ok(Term::Function { parameters, .. }) = get.signature.callable_signature() else {
+            return Err(format!("{label} {get_name} method is not callable"));
+        };
+        let Some(index_param) = parameters.get(1) else {
+            return Err(format!("invalid {label} {get_name} signature"));
+        };
+        (index_param.ty.clone(), get.signature.is_comptime_callable())
+    } else {
+        let lengths = interface
+            .methods
+            .iter()
+            .filter(|method| method.name == length_name)
+            .collect::<Vec<_>>();
+        let [length] = lengths.as_slice() else {
+            return Err(format!("{label} requires one length method"));
+        };
+        let Ok(Term::Function { result, .. }) = length.signature.callable_signature() else {
+            return Err(format!("{label} length method is not callable"));
+        };
+        (
+            result.as_ref().clone(),
+            length.signature.is_comptime_callable(),
+        )
     };
-    let Ok(Term::Function { result, .. }) = length.signature.callable_signature() else {
-        return Err("ListPatternView length method is not callable".into());
-    };
-    let size = result.as_ref().clone();
-    let comptime = length.signature.is_comptime_callable();
     if staged && !comptime {
-        return Err("ListPatternView comptime methods must be comptime callables".into());
+        return Err(format!(
+            "{label} comptime methods must be comptime callables"
+        ));
     }
     if !matches!(&size, Term::Primitive(p) if *p == Primitive::Usize
         || p.fixed_integer_layout().is_some_and(|(signed,_)| !signed)
         || (comptime && *p == Primitive::Integer))
     {
-        return Err(
-            "ListPatternView length and index require an unsigned size type or comptime Integer"
-                .into(),
-        );
+        return Err(format!(
+            "{label} length and index require an unsigned size type or comptime Integer"
+        ));
     }
     let subject = Term::Rigid {
         declaration: interface.self_parameter,
@@ -175,21 +268,23 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
         },
         ty: size.clone(),
     };
-    for (name, parameters, result) in [
-        (length_name, vec![receiver.clone()], size.clone()),
-        (
-            get_name,
-            vec![receiver.clone(), index_param.clone()],
-            element_type,
-        ),
-    ] {
+    let mut required_methods = Vec::new();
+    if !endless {
+        required_methods.push((length_name, vec![receiver.clone()], size.clone()));
+    }
+    required_methods.push((
+        get_name,
+        vec![receiver.clone(), index_param.clone()],
+        element_type,
+    ));
+    for (name, parameters, result) in required_methods {
         let methods = interface
             .methods
             .iter()
             .filter(|method| method.name == name)
             .collect::<Vec<_>>();
         let [method] = methods.as_slice() else {
-            return Err(format!("ListPatternView requires one {name} method"));
+            return Err(format!("{label} requires one {name} method"));
         };
         let expected = Term::Function {
             parameters,
@@ -203,7 +298,7 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
             || !method.type_parameters.is_empty()
             || !method.type_arguments.is_empty()
         {
-            return Err(format!("invalid ListPatternView {name} signature"));
+            return Err(format!("invalid {label} {name} signature"));
         }
     }
     let rest_methods = interface
@@ -227,21 +322,20 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
                 || !method.type_parameters.is_empty()
                 || !method.type_arguments.is_empty()
             {
-                return Err(format!("invalid ListPatternView {rest_name} signature"));
+                return Err(format!("invalid {label} {rest_name} signature"));
             }
             (Some(rest_name), method.default)
         }
         _ => {
-            return Err(format!(
-                "ListPatternView requires at most one {rest_name} method"
-            ));
+            return Err(format!("{label} requires at most one {rest_name} method"));
         }
     };
     Ok(Protocol {
         size,
         comptime,
         by_value: comptime,
-        length: length_name,
+        endless,
+        length: (!endless).then_some(length_name),
         element: get_name,
         rest,
         rest_default,

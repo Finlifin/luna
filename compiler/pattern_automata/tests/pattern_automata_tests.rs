@@ -1717,6 +1717,74 @@ fn differential_fuzz_random_matrices_and_bitvec_splits() {
     }
 }
 
+#[test]
+fn endless_list_exhaustiveness_and_witness_formatting() {
+    let ty = TypeDesc::EndlessList(Box::new(TypeDesc::Bool));
+
+    let exhaustive_arms = vec![
+        MatchArm::new(
+            0,
+            Pattern::List {
+                prefix: vec![Pattern::Bool(true)],
+                rest: Some(Box::new(Pattern::Wild)),
+            },
+            false,
+        )
+        .unwrap(),
+        MatchArm::new(
+            1,
+            Pattern::List {
+                prefix: vec![Pattern::Bool(false)],
+                rest: Some(Box::new(Pattern::Wild)),
+            },
+            false,
+        )
+        .unwrap(),
+    ];
+    let out = compile(&PatternMatrix::new(ty.clone(), exhaustive_arms.clone()).unwrap()).unwrap();
+    assert!(
+        out.missing_witnesses.is_empty(),
+        "{:?}",
+        out.missing_witnesses
+    );
+    let samples = vec![
+        Value::List(vec![Value::Bool(true)]),
+        Value::List(vec![Value::Bool(false), Value::Bool(true)]),
+    ];
+    assert_differential_with_trace(&out, &exhaustive_arms, &samples, |_, _| false);
+
+    let incomplete_arms = vec![exhaustive_arms[0].clone()];
+    let out_incomplete =
+        compile(&PatternMatrix::new(ty.clone(), incomplete_arms.clone()).unwrap()).unwrap();
+    assert_eq!(
+        out_incomplete.missing_witnesses,
+        vec![MissingWitness::EndlessList(vec![MissingWitness::Bool(
+            false
+        )])]
+    );
+    verify_witnesses_unmatched(&out_incomplete, &incomplete_arms);
+
+    let fixed_err = PatternMatrix::new(
+        ty,
+        vec![
+            MatchArm::new(
+                0,
+                Pattern::List {
+                    prefix: vec![Pattern::Bool(true)],
+                    rest: None,
+                },
+                false,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(fixed_err, CompileError::TypeMismatch { .. }),
+        "{fixed_err:?}"
+    );
+}
+
 trait BoolExt {
     fn into_val(self) -> Value;
 }

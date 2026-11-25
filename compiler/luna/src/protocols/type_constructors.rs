@@ -19,6 +19,8 @@ pub struct Selectors<'a> {
     pub list_pattern: Option<&'a str>,
     pub comptime_list_pattern: Option<&'a str>,
     pub stable_list_pattern: Option<&'a str>,
+    pub list_pattern_endless: Option<&'a str>,
+    pub stable_list_pattern_endless: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub handle_error: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
@@ -54,6 +56,8 @@ impl Selectors<'_> {
                 self.list_pattern,
                 self.comptime_list_pattern,
                 self.stable_list_pattern,
+                self.list_pattern_endless,
+                self.stable_list_pattern_endless,
                 self.literal_into,
                 self.handle_error,
                 self.splice,
@@ -239,6 +243,16 @@ pub(crate) fn resolve_source(
                 "StableListPatternView".into(),
                 selectors.stable_list_pattern,
                 &mut result.stable_list_pattern,
+            ),
+            (
+                "ListPatternViewEndless".into(),
+                selectors.list_pattern_endless,
+                &mut result.list_pattern_endless,
+            ),
+            (
+                "StableListPatternViewEndless".into(),
+                selectors.stable_list_pattern_endless,
+                &mut result.stable_list_pattern_endless,
             ),
             (
                 "LiteralInto".into(),
@@ -486,6 +500,8 @@ pub(crate) struct SysrootBindings {
     list_pattern: Option<String>,
     comptime_list_pattern: Option<String>,
     stable_list_pattern: Option<String>,
+    list_pattern_endless: Option<String>,
+    stable_list_pattern_endless: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
@@ -578,6 +594,8 @@ impl SysrootBindings {
                 "list-pattern-protocol" => &mut result.list_pattern,
                 "comptime-list-pattern-protocol" => &mut result.comptime_list_pattern,
                 "stable-list-pattern-protocol" => &mut result.stable_list_pattern,
+                "list-pattern-endless-protocol" => &mut result.list_pattern_endless,
+                "stable-list-pattern-endless-protocol" => &mut result.stable_list_pattern_endless,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
@@ -737,6 +755,20 @@ impl SysrootBindings {
                     .stable_list_pattern
                     .is_none()
                     .then_some(self.stable_list_pattern.as_deref())
+                    .flatten()
+            }),
+            list_pattern_endless: explicit.list_pattern_endless.or_else(|| {
+                identities
+                    .list_pattern_endless
+                    .is_none()
+                    .then_some(self.list_pattern_endless.as_deref())
+                    .flatten()
+            }),
+            stable_list_pattern_endless: explicit.stable_list_pattern_endless.or_else(|| {
+                identities
+                    .stable_list_pattern_endless
+                    .is_none()
+                    .then_some(self.stable_list_pattern_endless.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1116,6 +1148,8 @@ mod stage_tests {
             list_pattern_protocol: None,
             comptime_list_pattern_protocol: None,
             stable_list_pattern_protocol: None,
+            list_pattern_endless_protocol: None,
+            stable_list_pattern_endless_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,

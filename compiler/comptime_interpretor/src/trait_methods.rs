@@ -3,11 +3,14 @@ use super::*;
 use comptime_compiler::methods::{Method, View};
 
 type Key = (InterfaceInstance, Term, DeclarationId);
+
 type Binding = (DeclarationId, Vec<Term>);
+
 pub(super) enum Preparation {
     Ready(Selection),
     Request(Request),
 }
+
 pub(super) struct Request {
     access: Expr,
     method: Method,
@@ -15,11 +18,13 @@ pub(super) struct Request {
     has_preconditions: bool,
     retained_template: bool,
 }
+
 impl Request {
     pub(super) fn access(&self) -> &Expr {
         &self.access
     }
 }
+
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -42,6 +47,7 @@ pub(super) enum Selection {
         instantiate: bool,
     },
 }
+
 impl Interpreter<'_> {
     pub(super) fn admit_runtime_method_identity(
         &mut self,
@@ -326,7 +332,15 @@ impl Interpreter<'_> {
             )?;
             self.signature_from_admission(formation, &inputs, source)?
         };
-        if !self.observe_same_type(&ty, output, source)? {
+        let signature_for_check = match &ty {
+            Term::PureFunction(inner)
+                if !output.is_pure_callable() && !output.is_unsafe_callable() =>
+            {
+                inner.as_ref()
+            }
+            _ => &ty,
+        };
+        if !self.observe_same_type(signature_for_check, output, source)? {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         if transport {
@@ -363,6 +377,7 @@ impl Interpreter<'_> {
             ty,
         })
     }
+
     pub(super) fn bytecode_trait_method(
         &mut self,
         method: View<'_>,
@@ -374,6 +389,7 @@ impl Interpreter<'_> {
         let selection = self.select_trait_method(method, direct_callee)?;
         self.trait_selection_value(selection, method.source)
     }
+
     pub(super) fn trait_selection_value(
         &mut self,
         selection: Selection,

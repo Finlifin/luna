@@ -35,7 +35,12 @@ pub use iterator.{
 }
 pub use ops.*;
 pub use option.OptionalOps;
-pub use patterns.{ListPatternView, StableListPatternView}
+pub use patterns.{
+    ListPatternView,
+    ListPatternViewEndless,
+    StableListPatternView,
+    StableListPatternViewEndless,
+}
 pub use primitives.*;
 pub use protocols.staging.{Splice, splice_auto};
 pub use result.ErrorResultOps;
@@ -86,7 +91,12 @@ pub mod prelude {
     pub use iterator.{FromIterator, IntoIterator, Iterator}
     pub use ops.*;
     pub use option.OptionalOps;
-    pub use patterns.{ListPatternView, StableListPatternView}
+    pub use patterns.{
+    ListPatternView,
+    ListPatternViewEndless,
+    StableListPatternView,
+    StableListPatternViewEndless,
+}
     pub use primitives.*;
     pub use protocols.staging.{Splice, splice_auto};
     pub use result.ErrorResultOps;

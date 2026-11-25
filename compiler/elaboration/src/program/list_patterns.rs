@@ -3,6 +3,34 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    fn has_list_protocol_impl(
+        &self,
+        protocol: DeclarationId,
+        ty: &Term,
+        required_phase: Option<n::TraitPhase>,
+    ) -> bool {
+        let iface = n::InterfaceInstance {
+            declaration: protocol,
+            arguments: vec![],
+        };
+        if self.symbolic_interface_evidence(ty, &iface).ok() == Some(true) {
+            return true;
+        }
+        self.resolve_trait_capability(&iface, ty, crate::ptc::Budget::default())
+            .ok()
+            .is_some_and(|res| {
+                matches!(
+                    res.selection,
+                    crate::implementation::Selection::Selected(impl_id)
+                        if self
+                            .implementation_positions
+                            .get(&impl_id)
+                            .and_then(|pos| self.checked_implementations.get(*pos))
+                            .is_some_and(|imp| required_phase.is_none_or(|p| imp.phases.contains(p)))
+                )
+            })
+    }
+
     pub(super) fn list_pattern(
         &mut self,
         pattern: &hir::pattern::Pattern<'_>,
@@ -11,29 +39,125 @@ impl Checker<'_, '_> {
         ty: &Term,
     ) -> Result<n::Pattern, Error> {
         let comptime = !self.runtime_value_context() && !self.in_code_body;
-        let selected = if comptime {
-            self.protocols
-                .comptime_list_pattern
-                .or(self.protocols.list_pattern)
+        let active_phase = if comptime {
+            n::TraitPhase::Comptime
         } else {
-            self.protocols.list_pattern
+            n::TraitPhase::Runtime
         };
+        let finite_any = self
+            .protocols
+            .list_pattern
+            .is_some_and(|id| self.has_list_protocol_impl(id, ty, None))
+            || (comptime
+                && self
+                    .protocols
+                    .comptime_list_pattern
+                    .is_some_and(|id| self.has_list_protocol_impl(id, ty, None)));
+        let endless_any = self
+            .protocols
+            .list_pattern_endless
+            .is_some_and(|id| self.has_list_protocol_impl(id, ty, None));
+        if finite_any && endless_any {
+            return Err(error(
+                pattern.span,
+                "ambiguous list pattern view: type implements both ListPatternView and ListPatternViewEndless",
+            ));
+        }
+
+        let (selected, endless) = if let Some(endless_id) = self
+            .protocols
+            .list_pattern_endless
+            .filter(|&id| self.has_list_protocol_impl(id, ty, Some(active_phase)))
+        {
+            (Some(endless_id), true)
+        } else if comptime {
+            let finite_staged_active = self.protocols.list_pattern.filter(|&id| {
+                crate::list_patterns::has_staged_contract(&self.checked_traits, id)
+                    && self.has_list_protocol_impl(id, ty, Some(n::TraitPhase::Comptime))
+            });
+            let comptime_active = self
+                .protocols
+                .comptime_list_pattern
+                .filter(|&id| self.has_list_protocol_impl(id, ty, Some(n::TraitPhase::Comptime)));
+            if let Some(id) = finite_staged_active {
+                if comptime_active.is_some() {
+                    return Err(error(
+                        pattern.span,
+                        "ambiguous list pattern view: type implements both ListPatternView and ComptimeListPatternView in comptime phase",
+                    ));
+                }
+                (Some(id), false)
+            } else if let Some(id) = comptime_active {
+                (Some(id), false)
+            } else if let Some(endless_id) = self
+                .protocols
+                .list_pattern_endless
+                .filter(|&id| self.has_list_protocol_impl(id, ty, None))
+            {
+                (Some(endless_id), true)
+            } else if let Some(lp) = self.protocols.list_pattern
+                && !crate::list_patterns::has_staged_contract(&self.checked_traits, lp)
+                && self.protocols.comptime_list_pattern.is_none()
+            {
+                (Some(lp), false)
+            } else if let Some(lp) = self
+                .protocols
+                .list_pattern
+                .filter(|&id| self.has_list_protocol_impl(id, ty, None))
+            {
+                (Some(lp), false)
+            } else {
+                (
+                    self.protocols
+                        .comptime_list_pattern
+                        .or(self.protocols.list_pattern),
+                    false,
+                )
+            }
+        } else if let Some(endless_id) = self
+            .protocols
+            .list_pattern_endless
+            .filter(|&id| self.has_list_protocol_impl(id, ty, None))
+        {
+            (Some(endless_id), true)
+        } else if let Some(lp) = self.protocols.list_pattern {
+            (Some(lp), false)
+        } else {
+            (self.protocols.list_pattern_endless, true)
+        };
+
         let protocol = selected.ok_or_else(|| {
             error(
                 pattern.span,
                 "list patterns require a bound ListPatternView protocol",
             )
         })?;
-        let contract = crate::list_patterns::for_phase(&self.checked_traits, protocol, comptime)
-            .map_err(|message| error(pattern.span, message))?;
+        let contract = if endless {
+            crate::list_patterns::endless_for_phase(&self.checked_traits, protocol, comptime)
+        } else {
+            crate::list_patterns::for_phase(&self.checked_traits, protocol, comptime)
+        }
+        .map_err(|message| error(pattern.span, message))?;
         if contract.comptime != comptime {
             return Err(error(
                 pattern.span,
-                if comptime {
+                if endless {
+                    if comptime {
+                        "list patterns require the comptime ListPatternViewEndless phase"
+                    } else {
+                        "list patterns require the runtime ListPatternViewEndless phase"
+                    }
+                } else if comptime {
                     "list patterns require the comptime ListPatternView phase"
                 } else {
                     "list patterns require the runtime ListPatternView phase"
                 },
+            ));
+        }
+        if endless && rest.is_none() {
+            return Err(error(
+                pattern.span,
+                "endless list pattern requires a trailing '..._' or '...rest'",
             ));
         }
         let size = contract.size.clone();
@@ -97,51 +221,54 @@ impl Checker<'_, '_> {
             }
             this.finish_call(&site, method, &[], inputs, None, None)
         };
-        let len_call_span = pattern.span.shrink_to_lo();
-        let len_cmp_span = if pattern.span.hi().0 > pattern.span.lo().0 + 1 {
-            pattern
-                .span
-                .with_hi(rustc_span::BytePos(pattern.span.lo().0 + 1))
-        } else {
-            pattern.span
-        };
         let bridge_span = pattern.span.shrink_to_hi();
-        let arity = self.integer_proxy(
-            &elements.len().to_string(),
-            false,
-            Some(&size),
-            len_cmp_span,
-        )?;
-        let length = call(self, pattern, len_call_span, contract.length, None)?;
-        let (value, next) = if rest.is_some() {
-            (
-                n::Expr {
-                    source: source(len_cmp_span),
-                    ty: p(P::Bool),
-                    kind: if size == p(P::Integer) {
-                        K::IntegerBinary {
-                            op: n::IntegerOp::LessEqual,
-                            left: Box::new(arity),
-                            right: Box::new(length),
-                        }
-                    } else {
-                        K::ScalarLessEqual(Box::new(arity), Box::new(length))
-                    },
-                },
-                n::Pattern::Literal(n::Literal::Bool(true)),
-            )
-        } else {
-            let K::Literal(arity) = arity.kind else {
-                unreachable!("validated list size literal")
+        let mut steps = if let Some(length_name) = contract.length {
+            let len_call_span = pattern.span.shrink_to_lo();
+            let len_cmp_span = if pattern.span.hi().0 > pattern.span.lo().0 + 1 {
+                pattern
+                    .span
+                    .with_hi(rustc_span::BytePos(pattern.span.lo().0 + 1))
+            } else {
+                pattern.span
             };
-            (length, n::Pattern::Literal(arity))
+            let arity = self.integer_proxy(
+                &elements.len().to_string(),
+                false,
+                Some(&size),
+                len_cmp_span,
+            )?;
+            let length = call(self, pattern, len_call_span, length_name, None)?;
+            let (value, next) = if rest.is_some() {
+                (
+                    n::Expr {
+                        source: source(len_cmp_span),
+                        ty: p(P::Bool),
+                        kind: if size == p(P::Integer) {
+                            K::IntegerBinary {
+                                op: n::IntegerOp::LessEqual,
+                                left: Box::new(arity),
+                                right: Box::new(length),
+                            }
+                        } else {
+                            K::ScalarLessEqual(Box::new(arity), Box::new(length))
+                        },
+                    },
+                    n::Pattern::Literal(n::Literal::Bool(true)),
+                )
+            } else {
+                let K::Literal(arity) = arity.kind else {
+                    unreachable!("validated list size literal")
+                };
+                (length, n::Pattern::Literal(arity))
+            };
+            vec![n::Pattern::Then {
+                first: Box::new(n::Pattern::Wild),
+                value: Box::new(value),
+                next: Box::new(next),
+            }]
+        } else {
+            Vec::new()
         };
-        let length_check = n::Pattern::Then {
-            first: Box::new(n::Pattern::Wild),
-            value: Box::new(value),
-            next: Box::new(next),
-        };
-        let mut steps = vec![length_check];
         let mut prefix_patterns = Vec::with_capacity(elements.len());
         let mut first_element_ty = None;
         for (index, element) in elements.iter().enumerate() {
@@ -203,7 +330,11 @@ impl Checker<'_, '_> {
                     if !overridden {
                         return Err(error(
                             rest_pat.span,
-                            "list rest patterns require a slicing protocol",
+                            if endless {
+                                "type implements ListPatternViewEndless without overriding list_pattern_view_rest required for '...rest' binding"
+                            } else {
+                                "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding"
+                            },
                         ));
                     }
                 }
@@ -238,6 +369,7 @@ impl Checker<'_, '_> {
             crate::automata::ListPatternInfo {
                 protocol,
                 mode,
+                endless,
                 by_value: contract.by_value,
                 size_type: size,
                 element_type,
@@ -272,7 +404,7 @@ impl Checker<'_, '_> {
             }
             steps = balanced;
         }
-        let result = steps.pop().expect("length check is always present");
+        let result = steps.pop().unwrap_or(n::Pattern::Wild);
         Ok(n::Pattern::Observe {
             binding,
             inner: Box::new(result),
@@ -379,7 +511,7 @@ impl Checker<'_, '_> {
                     .map(|(_, body)| *body)
             })
         };
-        let length_method = method_decl(contract.length);
+        let length_method = contract.length.and_then(&method_decl);
         let element_method = method_decl(contract.element);
         let rest_method = contract.rest.and_then(|name| {
             let decl = method_decl(name)?;
@@ -399,7 +531,12 @@ impl Checker<'_, '_> {
             );
         }
 
-        let stable = if let Some(stable_id) = self.protocols.stable_list_pattern {
+        let stable_id = if contract.endless {
+            self.protocols.stable_list_pattern_endless
+        } else {
+            self.protocols.stable_list_pattern
+        };
+        let stable = if let Some(stable_id) = stable_id {
             let stable_iface = n::InterfaceInstance {
                 declaration: stable_id,
                 arguments: vec![],
@@ -445,6 +582,9 @@ impl Checker<'_, '_> {
                     |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_pure),
                 )
         };
+        let length_pure = contract
+            .length
+            .is_none_or(|length_name| method_pure(length_name, length_method));
         let rest_pure = if named_rest_used {
             contract
                 .rest
@@ -452,9 +592,7 @@ impl Checker<'_, '_> {
         } else {
             true
         };
-        let mode = (method_pure(contract.length, length_method)
-            && method_pure(contract.element, element_method)
-            && rest_pure)
+        let mode = (length_pure && method_pure(contract.element, element_method) && rest_pure)
             .then_some(n::ListObservationMode::PureMethods);
 
         (mode, length_method, element_method, rest_method)

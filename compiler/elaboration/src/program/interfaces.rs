@@ -931,46 +931,50 @@ impl Checker<'_, '_> {
                             (
                                 MethodSignature::Callable(expected_signature),
                                 MethodSignature::Callable(actual_signature),
-                            ) => match (expected_signature, actual_signature) {
-                                (
-                                    Term::Function {
-                                        parameters: expected,
-                                        result: left,
-                                    },
-                                    Term::Function {
-                                        parameters: supplied_parameters,
-                                        result: right,
-                                    },
-                                ) if expected.len() == supplied_parameters.len()
-                                    && expected
-                                        .iter()
-                                        .zip(supplied_parameters)
-                                        .all(|(a, b)| a.sort == b.sort)
-                                    && expected_signature.check_scope(&[]).is_ok()
-                                    && actual_signature.check_scope(&[]).is_ok() =>
-                                {
-                                    if signatures::equivalent(
-                                        &context,
-                                        expected
+                            ) => {
+                                let actual_signature =
+                                    widen_covariant_purity(expected_signature, actual_signature);
+                                match (expected_signature, actual_signature) {
+                                    (
+                                        Term::Function {
+                                            parameters: expected,
+                                            result: left,
+                                        },
+                                        Term::Function {
+                                            parameters: supplied_parameters,
+                                            result: right,
+                                        },
+                                    ) if expected.len() == supplied_parameters.len()
+                                        && expected
                                             .iter()
                                             .zip(supplied_parameters)
-                                            .map(|(a, b)| (&a.ty, &b.ty))
-                                            .chain(std::iter::once((
-                                                left.as_ref(),
-                                                right.as_ref(),
-                                            ))),
-                                        Budget::default(),
-                                    ) {
-                                        Formula::True
-                                    } else {
-                                        Formula::False
+                                            .all(|(a, b)| a.sort == b.sort)
+                                        && expected_signature.check_scope(&[]).is_ok()
+                                        && actual_signature.check_scope(&[]).is_ok() =>
+                                    {
+                                        if signatures::equivalent(
+                                            &context,
+                                            expected
+                                                .iter()
+                                                .zip(supplied_parameters)
+                                                .map(|(a, b)| (&a.ty, &b.ty))
+                                                .chain(std::iter::once((
+                                                    left.as_ref(),
+                                                    right.as_ref(),
+                                                ))),
+                                            Budget::default(),
+                                        ) {
+                                            Formula::True
+                                        } else {
+                                            Formula::False
+                                        }
                                     }
+                                    _ => Formula::equal(
+                                        expected_signature.clone(),
+                                        actual_signature.clone(),
+                                    ),
                                 }
-                                _ => Formula::equal(
-                                    expected_signature.clone(),
-                                    actual_signature.clone(),
-                                ),
-                            },
+                            }
                             (
                                 MethodSignature::Generator(expected),
                                 MethodSignature::Generator(actual),
@@ -1525,8 +1529,16 @@ impl Checker<'_, '_> {
                             )
                         })?
                         .value;
-                    if !signatures::equivalent(&context, [(&expected, &actual)], Budget::default())
-                    {
+                    let actual_for_check = if clause_domains {
+                        &actual
+                    } else {
+                        widen_covariant_purity(&expected, &actual)
+                    };
+                    if !signatures::equivalent(
+                        &context,
+                        [(&expected, actual_for_check)],
+                        Budget::default(),
+                    ) {
                         return Err(error(
                             span,
                             if clause_domains {
@@ -1542,6 +1554,17 @@ impl Checker<'_, '_> {
         self.implementation_index = index;
         self.inherent_index = inherent_index;
         Ok(implementations)
+    }
+}
+
+/// Covariant method-level purity widening: a `pure fn` implementation method
+/// satisfies a non-pure `fn` trait contract, while a `pure fn` or `unsafe fn`
+/// trait contract still demands matching qualifiers on the implementation.
+fn widen_covariant_purity<'a>(expected: &'a Term, actual: &'a Term) -> &'a Term {
+    match (expected, actual) {
+        (Term::PureFunction(_) | Term::UnsafeFunction(_), _) => actual,
+        (_, Term::PureFunction(inner)) => inner.as_ref(),
+        _ => actual,
     }
 }
 
@@ -1917,6 +1940,34 @@ impl Checker<'_, '_> {
             .find(|(method, _)| method == name)
             .map(|(_, body)| *body)
             .ok_or_else(|| error(span, "unknown trait method"))?;
+        if let Some(interface) = interface.as_ref() {
+            let is_finite_list_proto = Some(interface.declaration) == self.protocols.list_pattern
+                || Some(interface.declaration) == self.protocols.comptime_list_pattern;
+            let is_endless_list_proto =
+                Some(interface.declaration) == self.protocols.list_pattern_endless;
+            if (is_finite_list_proto || is_endless_list_proto)
+                && matches!(
+                    name,
+                    "list_pattern_view_rest" | "list_pattern_view_rest_comptime"
+                )
+            {
+                let is_default = self
+                    .checked_traits
+                    .by_id(interface.declaration)
+                    .and_then(|t| t.methods.iter().find(|method| method.name == name))
+                    .is_some_and(|contract| contract.default == Some(body));
+                if is_default {
+                    return Err(error(
+                        span,
+                        if is_endless_list_proto {
+                            "type implements ListPatternViewEndless without overriding list_pattern_view_rest required for '...rest' binding"
+                        } else {
+                            "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding"
+                        },
+                    ));
+                }
+            }
+        }
         if interface.is_none() && !implementation.phases.runtime {
             let body_owner = self.source_declarations.owner(body);
             let spliceable_comptime_method = self.protocols.splice.is_some()

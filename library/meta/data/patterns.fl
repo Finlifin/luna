@@ -3,18 +3,22 @@ use builtin.{Type, usize}
 {- List patterns observe comptime values through ordinary value-reference self. -}
 pub pure comptime trait ComptimeListPatternView {
     assoc Element: Type;
+    assoc Rest: Type = Self;
 
     comptime fn list_pattern_view_get_len(self) -> usize;
     comptime fn list_pattern_view_get_element(self, index: usize) -> Element;
 
-    comptime fn list_pattern_view_rest(self, start: usize) -> Self {
+    comptime fn list_pattern_view_rest(self, start: usize) -> Rest {
         assumes false;
-        self
+        while true {}
     }
 }
 
+pub pure comptime trait ComptimeStableListPatternView :- ComptimeListPatternView {}
+
 comptime impl ComptimeListPatternView for List<T> where T {
     assoc Element: Type = T;
+    assoc Rest: Type = Self;
 
     comptime fn list_pattern_view_get_len(self) -> usize {
         to_usize(self.length())
@@ -33,3 +37,5 @@ comptime impl ComptimeListPatternView for List<T> where T {
         }
     }
 }
+
+comptime impl ComptimeStableListPatternView for List<T> where T {}

@@ -1741,3 +1741,53 @@ fn pure_functions_allow_const_globals_and_reject_static_and_volatile_globals() {
         "{p3_static_err}"
     );
 }
+
+#[test]
+fn trait_implementations_allow_covariant_pure_fn_but_reject_impure_for_pure_trait() {
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input.Copy"),
+        drop: Some("input.Drop"),
+        ..Default::default()
+    };
+    let runtime_ok = execution_support::compile_with_source_bindings(
+        "trait Copy {} trait Drop { fn drop(*self); }
+        trait Read { fn read(self) -> bool; }
+        struct Flag { value: bool }
+        impl Copy for Flag {}
+        impl Read for Flag { pure fn read(self) -> bool { self.value } }
+        fn run() -> bool { Flag { value: true }.as(Read).read() }",
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&runtime_ok, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    let comptime_ok = compile(
+        "trait StagedRead { ^{__flurry_comptime_phase: true} comptime fn read(self) -> bool; }
+        struct Flag { value: bool }
+        comptime impl StagedRead for Flag { pure comptime fn read(self) -> bool { self.value } }
+        comptime fn run() -> bool { Flag { value: true }.as(StagedRead).read() }",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&comptime_ok, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    let pure_trait_impure_impl = execution_support::compile_with_source_bindings(
+        "trait Copy {} trait Drop { fn drop(*self); }
+        trait PureRead { pure fn read(self) -> bool; }
+        struct Flag { value: bool }
+        impl Copy for Flag {}
+        impl PureRead for Flag { fn read(self) -> bool { self.value } }",
+        &Default::default(),
+        selectors,
+    )
+    .unwrap_err();
+    assert!(
+        pure_trait_impure_impl.contains("does not match its trait signature"),
+        "{pure_trait_impure_impl}"
+    );
+}

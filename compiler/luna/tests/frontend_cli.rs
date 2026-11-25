@@ -1039,6 +1039,8 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         list_pattern_protocol: None,
         comptime_list_pattern_protocol: None,
         stable_list_pattern_protocol: None,
+        list_pattern_endless_protocol: None,
+        stable_list_pattern_endless_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         literal_into_protocol: None,
@@ -6751,6 +6753,80 @@ fn list_pattern_cli_overrides_sysroot_manifest_default() {
     let mut selected = args.to_vec();
     selected.extend(["--list-pattern-protocol", "input.ListView"]);
     assert_eq!(success(&sandbox.run(&selected)).trim(), "(bool true)");
+}
+
+#[test]
+fn list_pattern_endless_cli_selectors_and_manifest_override() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
+    fs::create_dir_all(sandbox.path("library/std")).unwrap();
+    sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
+    sandbox.write("library/std/lib.fl", "");
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\nlist-pattern-endless-protocol = builtin.Missing\nstable-list-pattern-endless-protocol = builtin.MissingStable\n",
+    );
+    sandbox.write(
+        "input.fl",
+        "typealias Type = .Type'builtin;
+        typealias Size = .u64'builtin;
+        trait EndlessView {
+            assoc Element: Type;
+            assoc Rest: Type = Self;
+            fn list_pattern_view_get_element(*self, comptime index: Size) -> Element;
+            fn list_pattern_view_rest(*self, comptime start: Size) -> Rest {
+                assumes false;
+                while true {}
+            }
+        }
+        trait StableEndlessView :- EndlessView {}
+        struct BoolStream { head: bool }
+        impl EndlessView for BoolStream {
+            assoc Element: Type = bool;
+            fn list_pattern_view_get_element(*self, comptime index: Size) -> bool {
+                if index == 0 { self.head.* } else { not self.head.* }
+            }
+        }
+        impl StableEndlessView for BoolStream {}
+        fn evaluate() -> bool {
+            BoolStream { head: true } match {
+                [true, ..._] => true,
+                [false, ..._] => false,
+            }
+        }",
+    );
+    let base = [
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "evaluate",
+    ];
+    failure(&sandbox.run(&base), 1);
+
+    let mut selected = base.to_vec();
+    selected.extend([
+        "--list-pattern-endless-protocol",
+        "input.EndlessView",
+        "--stable-list-pattern-endless-protocol",
+        "input.StableEndlessView",
+    ]);
+    assert_eq!(success(&sandbox.run(&selected)).trim(), "(bool true)");
+
+    for bad_extra in [
+        vec!["--list-pattern-endless-protocol"],
+        vec!["--stable-list-pattern-endless-protocol"],
+        vec![
+            "--list-pattern-endless-protocol",
+            "input.EndlessView",
+            "--list-pattern-endless-protocol",
+            "input.EndlessView",
+        ],
+    ] {
+        let mut args = vec!["input.fl", "--emit", "nir"];
+        args.extend(bad_extra);
+        failure(&sandbox.run(&args), 2);
+    }
 }
 
 #[test]

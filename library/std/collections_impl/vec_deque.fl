@@ -1,6 +1,7 @@
 use builtin.fmt.{ByteWriter, Debug}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
+use slice.Slice;
 
 {-
     Growable double-ended ring buffer VecDeque<T, .A, .allocator> and its
@@ -735,3 +736,214 @@ where
         output.write_byte(93)
     }
 }
+
+{-
+    Contiguous pair of borrowed slices representing a (possibly wrapped) view
+    into a `VecDeque<T, .A, .allocator>`.
+-}
+pub struct VecDequeSlice
+where
+    T,
+{
+    first_part: Slice<T>,
+    second_part: Slice<T>,
+}
+
+impl Clone for VecDequeSlice<T> where T {
+    fn clone(*self) -> Self {
+        VecDequeSlice<T> {
+            first_part: self.first_part.*,
+            second_part: self.second_part.*,
+        }
+    }
+}
+
+impl Copy for VecDequeSlice<T> where T {}
+
+impl VecDequeSlice<T> where T {
+    pub pure fn empty() -> Self {
+        VecDequeSlice<T> {
+            first_part: Slice<T>.empty(),
+            second_part: Slice<T>.empty(),
+        }
+    }
+
+    pub fn len(*self) -> usize {
+        builtin.mem.checked_add_usize(self.first_part.len(), self.second_part.len()) match {
+            total? => total,
+            null => builtin.mem.usize_max(),
+        }
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.first_part.is_empty() and self.second_part.is_empty()
+    }
+
+    pub fn subslice_from(*self, start: usize) -> ?VecDequeSlice<T> {
+        let n1 = self.first_part.len();
+        if start <= n1 {
+            let first = self.first_part.subslice_from(start) match {
+                s? => s,
+                null => return null,
+            };
+            if first.is_empty() {
+                return VecDequeSlice<T> {
+                    first_part: self.second_part.*,
+                    second_part: Slice<T>.empty(),
+                };
+            }
+            return VecDequeSlice<T> {
+                first_part: first,
+                second_part: self.second_part.*,
+            };
+        }
+        let rem_start = start - n1;
+        let second = self.second_part.subslice_from(rem_start) match {
+            s? => s,
+            null => return null,
+        };
+        VecDequeSlice<T> {
+            first_part: second,
+            second_part: Slice<T>.empty(),
+        }
+    }
+}
+
+impl VecDequeSlice<T> where T :- Copy {
+    pub fn get(*self, index: usize) -> ?T {
+        let n1 = self.first_part.len();
+        if index < n1 {
+            return self.first_part.get(index);
+        }
+        self.second_part.get(index - n1)
+    }
+
+    pub fn first(*self) -> ?T {
+        self.get(0)
+    }
+
+    pub fn last(*self) -> ?T {
+        let total = self.len();
+        if total == 0 {
+            return null;
+        }
+        self.get(total - 1)
+    }
+}
+
+impl ListPatternView for VecDequeSlice<T> where T :- Copy {
+    assoc Element: Type = T;
+    assoc Rest: Type = VecDequeSlice<T>;
+
+    fn list_pattern_view_get_len(*self) -> usize {
+        self.len()
+    }
+
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> T {
+        let n1 = self.first_part.len();
+        if index < n1 {
+            unsafe { builtin.mem.raw_read<T>(slot_address<T>(self.first_part.as_addr(), index)) }
+        } else {
+            unsafe {
+                builtin
+                    .mem
+                    .raw_read<T>(slot_address<T>(self.second_part.as_addr(), index - n1))
+            }
+        }
+    }
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> VecDequeSlice<T> {
+        self.subslice_from(start) match {
+            rest? => rest,
+            null => VecDequeSlice<T>.empty(),
+        }
+    }
+}
+
+impl StableListPatternView for VecDequeSlice<T> where T :- Copy {}
+
+impl VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn as_slices(*self) -> VecDequeSlice<T> {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return VecDequeSlice<T>.empty();
+        }
+        if Type.size_of(T) == 0 {
+            return VecDequeSlice<T> {
+                first_part: unsafe { Slice<T>.from_raw_parts(0, len) },
+                second_part: Slice<T>.empty(),
+            };
+        }
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let base = self.raw_addr.*;
+        if cap == 0 or head >= cap or len > cap {
+            return VecDequeSlice<T>.empty();
+        }
+        let rem = cap - head;
+        if len <= rem {
+            VecDequeSlice<T> {
+                first_part: unsafe { Slice<T>.from_raw_parts(slot_address<T>(base, head), len) },
+                second_part: Slice<T>.empty(),
+            }
+        } else {
+            let second_len = len - rem;
+            VecDequeSlice<T> {
+                first_part: unsafe { Slice<T>.from_raw_parts(slot_address<T>(base, head), rem) },
+                second_part: unsafe { Slice<T>.from_raw_parts(slot_address<T>(base, 0), second_len) },
+            }
+        }
+    }
+}
+
+impl ListPatternView for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Element: Type = T;
+    assoc Rest: Type = VecDequeSlice<T>;
+
+    fn list_pattern_view_get_len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> T {
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let slot = if cap > 0 and index < cap {
+            ring_index(head, index, cap)
+        } else {
+            0
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_read<T>(slot_address<T>(self.raw_addr.*, slot))
+        }
+    }
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> VecDequeSlice<T> {
+        let slices = self.as_slices();
+        slices.subslice_from(start) match {
+            rest? => rest,
+            null => VecDequeSlice<T>.empty(),
+        }
+    }
+}
+
+impl StableListPatternView for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{}
