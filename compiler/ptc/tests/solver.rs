@@ -483,6 +483,7 @@ fn supported_boolean_theory_results_agree_with_independent_ground_evaluation() {
             F::IntLe(_) | F::IntCongruent(_) => panic!("no integer atoms in this generator"),
             F::NotSized(_)
             | F::HasHeadShape(_)
+            | F::HasField(_)
             | F::RowContains(_)
             | F::RowSubset(_)
             | F::RowDisjoint(_) => {

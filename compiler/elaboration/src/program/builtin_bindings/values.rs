@@ -210,8 +210,37 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
         "struct_field_names" => K::StructFieldNames(subject),
         "record_field_types" => K::RecordFieldTypes(subject),
         "record_field_names" => K::RecordFieldNames(subject),
+        "struct_field_spans" => K::StructFieldSpans(subject),
+        "record_field_spans" => K::RecordFieldSpans(subject),
+        "declaration_span" => K::DeclarationSpan(subject),
+        "enum_variant_spans" => K::EnumVariantSpans(subject),
+        "enum_variant_field_spans" => K::EnumVariantFieldSpans(subject),
         "reflect_callable" => K::ReflectCallable(subject),
         "type_id" => K::TypeId(subject),
+        "implicit_caller" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::Caller,
+            operand: subject,
+        },
+        "implicit_module" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::Module,
+            operand: subject,
+        },
+        "implicit_package" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::Package,
+            operand: subject,
+        },
+        "implicit_file" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::File,
+            operand: subject,
+        },
+        "implicit_line" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::Line,
+            operand: subject,
+        },
+        "implicit_src" => K::ImplicitQuery {
+            kind: n::ImplicitQueryKind::SourceSpan,
+            operand: subject,
+        },
         _ => K::EnumStructure {
             subject,
             query: match name {

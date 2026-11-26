@@ -1468,6 +1468,7 @@ struct Environment {
     local_candidates: BTreeMap<CallablePlace, BTreeSet<usize>>,
     callees: BTreeMap<CallablePlace, CallableResult>,
     upper_bounds: BTreeMap<LocalId, u128>,
+    symbols: BTreeMap<LocalId, String>,
 }
 
 // Invocation-local evidence; unlike a named Summary it has no declaration identity.
@@ -2800,6 +2801,9 @@ impl<'a> Infer<'a, '_> {
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
                 | Term::NormalForm { .. }
                 | Term::Hole { .. }
         ) {
@@ -2843,7 +2847,7 @@ impl<'a> Infer<'a, '_> {
     fn known_data(&mut self, expr: &Expr, depth: usize) -> Result<Option<Term>, String> {
         self.step(depth)?;
         match &expr.kind {
-            K::ComptimeValue(value) => {
+            K::ComptimeValue(value) | K::TypeValue(value) => {
                 let domain = self.ty(&expr.ty)?;
                 let value = self
                     .substitution
@@ -3089,12 +3093,17 @@ impl<'a> Infer<'a, '_> {
             .fuel
             .checked_sub(environment.upper_bounds.len())
             .ok_or("memory upper bound budget exhausted")?;
+        *self.fuel = self
+            .fuel
+            .checked_sub(environment.symbols.len())
+            .ok_or("memory symbol budget exhausted")?;
         Ok(Environment {
             pointers,
             field_pointers: environment.field_pointers.clone(),
             local_candidates: environment.local_candidates.clone(),
             callees: environment.callees.clone(),
             upper_bounds: environment.upper_bounds.clone(),
+            symbols: environment.symbols.clone(),
         })
     }
 
@@ -3179,6 +3188,8 @@ impl<'a> Infer<'a, '_> {
                 false
             }
         });
+        left.symbols
+            .retain(|binding, name| right.symbols.get(binding) == Some(name));
         Ok(left)
     }
 
@@ -5103,6 +5114,67 @@ impl<'a> Infer<'a, '_> {
                         .collect(),
                 ))
             }
+            K::FieldPtr { pointer, field } => {
+                let targets = self.target(pointer, depth + 1)?;
+                self.target_work(&targets)?;
+                let field_name = match &field.kind {
+                    K::TypeValue(Term::Symbol(name)) | K::ComptimeValue(Term::Symbol(name)) => {
+                        Some(name.to_string())
+                    }
+                    K::Literal(nir::program::Literal::Symbol(name)) => Some(name.clone()),
+                    K::Local(binding) => self.environment.symbols.get(binding).cloned(),
+                    _ => match self.known_data(field, depth + 1)? {
+                        Some(Term::Symbol(name)) => Some(name.to_string()),
+                        _ => None,
+                    },
+                };
+                let Some(field_name) = field_name else {
+                    return Err(format!(
+                        "memory target requires a richer contract (unresolved FieldPtr field {:?})",
+                        field.kind
+                    ));
+                };
+                let pointer_ty = self.ty(&pointer.ty)?;
+                let Term::Pointer(pointee) = pointer_ty else {
+                    return Err(format!(
+                        "memory target requires a richer contract (FieldPtr base is not pointer: {})",
+                        pointer_ty
+                    ));
+                };
+                let owner_and_index = match &*pointee {
+                    Term::Record(fields) => fields
+                        .iter()
+                        .position(|(name, _)| name == &field_name)
+                        .map(|index| (nir::program::FieldOwner::Anonymous, index)),
+                    Term::Nominal { declaration, .. } => self
+                        .package
+                        .and_then(|pkg| {
+                            pkg.structs
+                                .iter()
+                                .find(|def| def.declaration == *declaration)
+                        })
+                        .and_then(|def| def.fields.iter().position(|(name, _)| name == &field_name))
+                        .map(|index| (nir::program::FieldOwner::Nominal(*declaration), index)),
+                    _ => None,
+                };
+                let Some((owner, index)) = owner_and_index else {
+                    return Err(format!(
+                        "memory target requires a richer contract (FieldPtr missing field {} on {} pkg_present={})",
+                        field_name,
+                        pointee,
+                        self.package.is_some()
+                    ));
+                };
+                Ok(Some(
+                    targets
+                        .into_iter()
+                        .map(|mut target| {
+                            target.fields.push((owner, index));
+                            target
+                        })
+                        .collect(),
+                ))
+            }
             _ => Err("memory target requires a richer contract".into()),
         }
     }
@@ -5826,6 +5898,7 @@ impl<'a> Infer<'a, '_> {
             }
             K::PointerAnonymousField { pointer, .. }
             | K::PointerField { pointer, .. }
+            | K::FieldPtr { pointer, .. }
             | K::ReadPointer(pointer) => {
                 self.check_guard(pointer, depth + 1)?;
                 Ok(())
@@ -5852,6 +5925,8 @@ impl<'a> Infer<'a, '_> {
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::EnumVariantIndex(value)
             | K::BitSlice { value, .. } => self.check_guard(value, depth + 1),
             K::BitWindow { value, start, end } => {
                 self.check_guard(value, depth + 1)?;
@@ -7186,10 +7261,16 @@ impl<'a> Infer<'a, '_> {
                 self.walk(value, depth + 1)?;
                 self.record_access(target, true, true, ty)?;
             }
-            K::PointerAnonymousField { pointer, .. } | K::PointerField { pointer, .. } => {
+            K::PointerAnonymousField { pointer, .. }
+            | K::PointerField { pointer, .. }
+            | K::FieldPtr { pointer, .. } => {
+                if let K::FieldPtr { field, .. } = &expr.kind {
+                    self.walk(field, depth + 1)?;
+                }
                 self.walk(pointer, depth + 1)?;
                 let target = self.target(expr, depth + 1)?;
-                let Term::Pointer(ty) = &expr.ty else {
+                let pointer_ty = self.ty(&expr.ty)?;
+                let Term::Pointer(ty) = &pointer_ty else {
                     return Err("field pointer type mismatch".into());
                 };
                 let ty = self.ty(ty)?;
@@ -7351,6 +7432,7 @@ impl<'a> Infer<'a, '_> {
                             local_candidates: BTreeMap::new(),
                             callees: prepared_callees.clone(),
                             upper_bounds: BTreeMap::new(),
+                            symbols: BTreeMap::new(),
                         };
                         for ty in prepared_types.values() {
                             bound_type(ty, self.fuel)?;
@@ -7816,6 +7898,16 @@ impl<'a> Infer<'a, '_> {
                 } else {
                     self.environment.upper_bounds.remove(binding);
                 }
+                let symbol_val = match &value.kind {
+                    K::Literal(nir::program::Literal::Symbol(name)) => Some(name.clone()),
+                    K::Local(src) => self.environment.symbols.get(src).cloned(),
+                    _ => None,
+                };
+                if let Some(name) = symbol_val {
+                    self.environment.symbols.insert(*binding, name);
+                } else {
+                    self.environment.symbols.remove(binding);
+                }
                 self.replace_local_fields(CallablePlace::root(*binding), local_fields)?;
                 if self.local_pointer_value(&value.ty)? {
                     let targets = self.optional_target(value, depth + 1)?;
@@ -7959,6 +8051,7 @@ impl<'a> Infer<'a, '_> {
             }
             K::Assign { place, value } => {
                 self.environment.upper_bounds.remove(&place.root);
+                self.environment.symbols.remove(&place.root);
                 self.walk(value, depth + 1)?;
                 let path: Vec<_> = place.fields.iter().map(|(_, index)| *index).collect();
                 let root_ty = self
@@ -8106,6 +8199,8 @@ impl<'a> Infer<'a, '_> {
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::EnumVariantIndex(value)
             | K::BitSlice { value, .. } => self.walk(value, depth + 1)?,
             K::TextQuery { subject, query } => {
                 if !query.validate(&self.ty(&subject.ty)?, &self.ty(&expr.ty)?) {
@@ -8166,10 +8261,275 @@ impl<'a> Infer<'a, '_> {
                 self.walk(a, depth + 1)?;
                 self.walk(b, depth + 1)?;
             }
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            } => {
+                self.walk(pointer, depth + 1)?;
+                self.walk(variant, depth + 1)?;
+                self.walk(field, depth + 1)?;
+                let pointer_ty = self.ty(&pointer.ty)?;
+                let Term::Pointer(pointee) = &pointer_ty else {
+                    return Err("enum variant field pointer base is not pointer".into());
+                };
+                let owner = match &**pointee {
+                    Term::Nominal { declaration, .. } => {
+                        nir::program::FieldOwner::Nominal(*declaration)
+                    }
+                    _ => return Err("enum variant field pointer requires nominal enum".into()),
+                };
+                let base_targets = self.optional_target(pointer, depth + 1)?;
+                let out_targets = if let Some(base_targets) = base_targets {
+                    let const_v = mem_constant_usize(variant);
+                    let const_f = mem_constant_usize(field);
+                    let variants = self.owned_variant_fields(pointee)?;
+                    let mut collected = BTreeSet::new();
+                    for (v_idx, variant_fields) in variants.iter().enumerate() {
+                        if const_v.is_some_and(|v| v != v_idx) {
+                            continue;
+                        }
+                        for (f_idx, _) in variant_fields.iter().enumerate() {
+                            if const_f.is_some_and(|f| f != f_idx) {
+                                continue;
+                            }
+                            for target in &base_targets {
+                                *self.fuel = self
+                                    .fuel
+                                    .checked_sub(target.path_cost().saturating_add(1))
+                                    .ok_or("enum variant field pointer budget exhausted")?;
+                                let mut next = target.clone();
+                                let prefix: Vec<usize> =
+                                    next.fields.iter().map(|(_, i)| *i).collect();
+                                let stage = next.through.len();
+                                next.conditions
+                                    .entry(stage)
+                                    .or_default()
+                                    .push((prefix, v_idx));
+                                next.fields.push((owner, f_idx));
+                                collected.insert(next);
+                            }
+                        }
+                    }
+                    Some(collected)
+                } else {
+                    None
+                };
+                self.aggregate_pointers.insert(
+                    expr as *const Expr as usize,
+                    BTreeMap::from([(vec![VARIANT_FIELD, 1, 0], out_targets)]),
+                );
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, BTreeMap::new());
+                self.local_code_fields
+                    .insert(expr as *const Expr as usize, BTreeMap::new());
+            }
+            K::FieldValue { value, field } => {
+                self.walk(value, depth + 1)?;
+                self.walk(field, depth + 1)?;
+                let parent = self.ty(&value.ty)?;
+                let mut pointers = BTreeMap::new();
+                let mut callees = BTreeMap::new();
+                let mut local_fields = BTreeMap::new();
+                if let Some(index) =
+                    mem_resolve_struct_or_record_field(self.package, &parent, field)
+                {
+                    for (path, targets) in self.pointer_fields_for(value)? {
+                        self.step(path.len())?;
+                        if path.first() == Some(&index) {
+                            pointers.insert(path[1..].to_vec(), targets);
+                        }
+                    }
+                    for (path, key) in self.value_callees(value)? {
+                        if path.first() == Some(&index) {
+                            callees.insert(path[1..].to_vec(), key);
+                        }
+                    }
+                    for (path, keys) in self.local_fields_for(value)? {
+                        if path.first() == Some(&index) {
+                            local_fields.insert(path[1..].to_vec(), keys);
+                        }
+                    }
+                }
+                self.aggregate_pointers
+                    .insert(expr as *const Expr as usize, pointers);
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, callees);
+                self.local_code_fields
+                    .insert(expr as *const Expr as usize, local_fields);
+            }
+            K::ConstructStruct { fields } => {
+                self.walk(fields, depth + 1)?;
+                let ty = self.ty(&expr.ty)?;
+                let pointers = self.pointer_fields_for(fields)?;
+                let callees = self.value_callees(fields)?;
+                let local_fields = self.local_fields_for(fields)?;
+                self.aggregate_pointers
+                    .insert(expr as *const Expr as usize, pointers);
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, callees);
+                self.local_code_fields
+                    .insert(expr as *const Expr as usize, local_fields);
+                self.may_reject |= match self.round.cleanup.as_deref_mut() {
+                    Some(cleanup) => cleanup.may_reject(&ty, self.fuel)?,
+                    None => true,
+                };
+            }
+            K::ConstructEnum { variant, fields } => {
+                self.walk(variant, depth + 1)?;
+                self.walk(fields, depth + 1)?;
+                let ty = self.ty(&expr.ty)?;
+                let src_pointers = self.pointer_fields_for(fields)?;
+                let src_callees = self.value_callees(fields)?;
+                let src_locals = self.local_fields_for(fields)?;
+                let mut pointers = BTreeMap::new();
+                let mut callees = BTreeMap::new();
+                let mut local_fields = BTreeMap::new();
+                let const_v = mem_constant_usize(variant);
+                let variants = self.owned_variant_fields(&ty)?;
+                let fields_ty = self.ty(&fields.ty)?;
+                let field_count = mem_resolve_tuple_length(self.package, &fields_ty);
+                for (v_idx, v_fields) in variants.iter().enumerate() {
+                    if const_v.is_some_and(|v| v != v_idx) {
+                        continue;
+                    }
+                    if field_count.is_some_and(|c| c != v_fields.len()) {
+                        continue;
+                    }
+                    let mut p = BTreeMap::new();
+                    for (path, targets) in &src_pointers {
+                        let mut prefixed = vec![VARIANT_FIELD, v_idx];
+                        prefixed.extend(path);
+                        p.insert(prefixed, targets.clone());
+                    }
+                    pointers = if pointers.is_empty() {
+                        p
+                    } else {
+                        self.join_pointer_fields(pointers, p)?
+                    };
+                    let mut c = BTreeMap::new();
+                    for (path, key) in &src_callees {
+                        let mut prefixed = vec![VARIANT_FIELD, v_idx];
+                        prefixed.extend(path);
+                        c.insert(prefixed, key.clone());
+                    }
+                    callees = if callees.is_empty() {
+                        c
+                    } else {
+                        self.join_callee_fields(callees, c)?
+                    };
+                    let mut l = BTreeMap::new();
+                    for (path, keys) in &src_locals {
+                        let mut prefixed = vec![VARIANT_FIELD, v_idx];
+                        prefixed.extend(path);
+                        l.insert(prefixed, keys.clone());
+                    }
+                    local_fields = if local_fields.is_empty() {
+                        l
+                    } else {
+                        self.join_local_fields(local_fields, l)?
+                    };
+                }
+                self.aggregate_pointers
+                    .insert(expr as *const Expr as usize, pointers);
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, callees);
+                self.local_code_fields
+                    .insert(expr as *const Expr as usize, local_fields);
+                self.may_reject |= match self.round.cleanup.as_deref_mut() {
+                    Some(cleanup) => cleanup.may_reject(&ty, self.fuel)?,
+                    None => true,
+                };
+            }
+            K::TupleAppend { tuple, element } => {
+                self.walk(tuple, depth + 1)?;
+                self.walk(element, depth + 1)?;
+                let ty = self.ty(&expr.ty)?;
+                let tuple_ty = self.ty(&tuple.ty)?;
+                let Some(prefix_len) = mem_resolve_tuple_length(self.package, &tuple_ty) else {
+                    return Err("tuple append prefix length is unknown in memory analysis".into());
+                };
+                let mut pointers = self.pointer_fields_for(tuple)?;
+                let elem_pointers = if self.local_pointer_value(&element.ty)? {
+                    BTreeMap::from([(vec![], self.optional_target(element, depth + 1)?)])
+                } else {
+                    self.pointer_fields_for(element)?
+                };
+                for (path, targets) in elem_pointers {
+                    let mut dest = vec![prefix_len];
+                    dest.extend(path);
+                    pointers.insert(dest, targets);
+                }
+                let mut callees = self.value_callees(tuple)?;
+                for (path, key) in self.value_callees(element)? {
+                    let mut dest = vec![prefix_len];
+                    dest.extend(path);
+                    callees.insert(dest, key);
+                }
+                let mut local_fields = self.local_fields_for(tuple)?;
+                for (path, keys) in self.local_fields_for(element)? {
+                    let mut dest = vec![prefix_len];
+                    dest.extend(path);
+                    local_fields.insert(dest, keys);
+                }
+                self.aggregate_pointers
+                    .insert(expr as *const Expr as usize, pointers);
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, callees);
+                self.local_code_fields
+                    .insert(expr as *const Expr as usize, local_fields);
+                self.may_reject |= match self.round.cleanup.as_deref_mut() {
+                    Some(cleanup) => cleanup.may_reject(&ty, self.fuel)?,
+                    None => true,
+                };
+            }
             _ => return Err("operation requires a richer memory contract".into()),
         }
         Ok(())
     }
+}
+
+pub(super) fn mem_constant_usize(expr: &Expr) -> Option<usize> {
+    match &expr.kind {
+        K::Literal(nir::program::Literal::UnsignedInteger(value)) => usize::try_from(*value).ok(),
+        K::Literal(nir::program::Literal::SignedInteger(value)) => usize::try_from(*value).ok(),
+        K::Literal(nir::program::Literal::Integer(value)) => value.parse().ok(),
+        K::ComptimeValue(Term::Integer(value)) => value.to_string().parse().ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn mem_resolve_struct_or_record_field(
+    package: Option<&Package>,
+    subject_ty: &Term,
+    field: &Expr,
+) -> Option<usize> {
+    let name = match &field.kind {
+        K::TypeValue(Term::Symbol(name)) | K::ComptimeValue(Term::Symbol(name)) => name.as_ref(),
+        K::Literal(nir::program::Literal::Symbol(name)) => name.as_str(),
+        _ => return None,
+    };
+    match subject_ty {
+        Term::Record(fields) => fields.iter().position(|(field_name, _)| field_name == name),
+        Term::Nominal { declaration, .. } => package?
+            .structs
+            .iter()
+            .find(|def| def.declaration == *declaration)?
+            .fields
+            .iter()
+            .position(|(field_name, _)| field_name == name),
+        _ => None,
+    }
+}
+
+pub(super) fn mem_resolve_tuple_length(package: Option<&Package>, ty: &Term) -> Option<usize> {
+    if matches!(ty, Term::Primitive(Primitive::Unit | Primitive::Void)) {
+        return Some(0);
+    }
+    if let Term::TupleAppend { tuple, .. } = ty {
+        return mem_resolve_tuple_length(package, tuple).map(|len| len + 1);
+    }
+    tuple_fields(package, ty).map(|fields| fields.len())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -8550,6 +8910,9 @@ fn term_rank(term: &Term) -> u8 {
         Term::AssociatedTypeCall(_) => 53,
         Term::ComptimeCall(_) => 54,
         Term::DeferredErrorResult { .. } => 55,
+        Term::FieldType { .. } => 56,
+        Term::VariantFieldType { .. } => 57,
+        Term::TupleAppend { .. } => 58,
     }
 }
 
@@ -8625,6 +8988,40 @@ pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
                 result: br,
             },
         ) => cmp_term(ae, be).then_with(|| cmp_term(ar, br)),
+        (
+            Term::FieldType {
+                subject: asub,
+                field: af,
+            },
+            Term::FieldType {
+                subject: bsub,
+                field: bf,
+            },
+        ) => cmp_term(asub, bsub).then_with(|| cmp_term(af, bf)),
+        (
+            Term::VariantFieldType {
+                subject: asub,
+                variant: av,
+                field: af,
+            },
+            Term::VariantFieldType {
+                subject: bsub,
+                variant: bv,
+                field: bf,
+            },
+        ) => cmp_term(asub, bsub)
+            .then_with(|| cmp_term(av, bv))
+            .then_with(|| cmp_term(af, bf)),
+        (
+            Term::TupleAppend {
+                tuple: at,
+                element: ae,
+            },
+            Term::TupleAppend {
+                tuple: bt,
+                element: be,
+            },
+        ) => cmp_term(at, bt).then_with(|| cmp_term(ae, be)),
         (
             Term::Nominal {
                 declaration: ad,

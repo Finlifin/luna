@@ -458,6 +458,7 @@ pub struct Protocols {
     pub implicit_passing: Option<DeclarationId>,
     pub call_context: Option<DeclarationId>,
     pub call_description: Option<DeclarationId>,
+    pub source_span: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
     pub compound_arithmetic: [Option<DeclarationId>; 5],
     pub comptime_compound_arithmetic: [Option<DeclarationId>; 5],
@@ -796,12 +797,15 @@ fn elaborate_in_mode(
             )?;
         }
         let arena = hir::HirArena::new();
+        let mut expand_fuel = usize::try_from(*invocation_steps)
+            .unwrap_or(usize::MAX)
+            .min(4_000_000);
         let expanded = derivation::expand(
             package,
             &arena,
             &resolved_defaults,
             &validated_deriver_attrs,
-            &mut 100_000,
+            &mut expand_fuel,
         )
         .map_err(|failure| derivation::with_context(package, failure))?;
         return elaborate_in_mode(
@@ -925,6 +929,7 @@ fn elaborate_in_mode(
         volatile_storage: n::VolatileStorage::default(),
         match_plans: n::MatchPlans::default(),
         active_body_declaration: None,
+        active_implicit_call_site: None,
         list_pattern_infos: BTreeMap::new(),
         range_pattern_infos: BTreeMap::new(),
         bitvec_pattern_infos: BTreeMap::new(),
@@ -1004,10 +1009,12 @@ fn elaborate_in_mode(
         checking_contract: false,
         numeric_defaults: true,
         signature_owner: None,
+        open_definition_needs_instance: false,
         context: crate::ptc::Context::default(),
         defaults: BTreeMap::new(),
         locals: LocalBindings::default(),
         code_values: LocalBindings::default(),
+        any_result_code_locals: BTreeSet::new(),
         template_code_values: BTreeMap::new(),
         pattern_codes: LocalBindings::default(),
         pattern_quote_pending: None,
@@ -1100,6 +1107,7 @@ fn elaborate_in_mode(
         active_env_parameters: BTreeMap::new(),
         local_type_views: LocalBindings::default(),
         alias_type_views: BTreeMap::new(),
+        reflection_spans: Default::default(),
     });
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
@@ -2173,6 +2181,26 @@ fn elaborate_candidate<'a, 'h>(
     for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
         checker.check_open_definition(owner)?;
     }
+    for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
+        if checker
+            .open_functions
+            .get(&owner)
+            .is_some_and(|def| !def.requires_open_instance())
+            && !checker.default_behavior_functions.contains(&owner)
+            && matches!(
+                package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Fn(..) | ItemKind::Case(..))
+            )
+        {
+            if let Some(sig) = checker
+                .declared_signature(owner)
+                .map(|sig| sig.into_owned())
+            {
+                checker.signatures.entry(owner).or_insert(sig);
+            }
+            checker.open_functions.remove(&owner);
+        }
+    }
     for owner in checker
         .pattern_generators
         .keys()
@@ -2429,6 +2457,7 @@ fn elaborate_candidate<'a, 'h>(
     // inline alternatives must be checked before their inputs are supplied.
     output.runtime_domains = checker.runtime_domains.clone();
     output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
+    output.reflection_spans = checker.reflection_spans.clone();
     purity::with_definition_bodies(
         &mut output,
         &mut checker.ordinary_behavior_functions,
@@ -2469,6 +2498,7 @@ fn elaborate_candidate<'a, 'h>(
     }
     output.runtime_domains = checker.runtime_domains.clone();
     output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
+    output.reflection_spans = checker.reflection_spans.clone();
     output.quote_identity_cursor = checker.next_temporary_binding;
     output.definition_identity_cursor = checker.definition_identities.next();
     output.observed_associated_types =
@@ -2646,7 +2676,9 @@ impl Checker<'_, '_> {
             self.ensure_contract(marker.owner, item.span)?;
             self.signature_owner = Some(marker.owner);
             self.context = self.definition_context(marker.owner);
-            let instance = self.interface_expr_optional_subject(generator.trait_ref, None)?;
+            let subject_self = self.self_type(marker.owner, item.span)?;
+            let instance =
+                self.interface_expr_optional_subject(generator.trait_ref, Some(&subject_self))?;
             let decl = declaration(self.package, &self.package_identities, marker.owner);
             registry
                 .register(
@@ -2702,6 +2734,12 @@ impl Checker<'_, '_> {
                 .get(&marker.owner)
                 .cloned()
                 .unwrap_or_default();
+            let mut coherence_params = params.clone();
+            let mut coherence_param_types = param_types.clone();
+            if !coherence_params.contains(&decl) {
+                coherence_params.push(decl);
+                coherence_param_types.push(Term::Primitive(P::Type));
+            }
             // Every default strategy uses the same fixed concrete subject so
             // coherence never introduces a precision tie-break between default
             // strategies and proves pairwise disjointness over full trait args
@@ -2713,8 +2751,8 @@ impl Checker<'_, '_> {
                         interface: Some(instance.declaration),
                         interface_arguments: instance.arguments,
                         subject: Term::Primitive(P::Bool),
-                        type_parameters: params.clone(),
-                        parameter_types: param_types.clone(),
+                        type_parameters: coherence_params,
+                        parameter_types: coherence_param_types,
                         requirements: requirements.clone(),
                     },
                     crate::ptc::Budget::default(),
@@ -2731,8 +2769,12 @@ impl Checker<'_, '_> {
                     }
                     diagnostic
                 })?;
+            let mut match_params = params;
+            if !match_params.contains(&decl) {
+                match_params.push(decl);
+            }
             strategy_owners.insert(decl, marker.owner);
-            strategy_params.insert(decl, params);
+            strategy_params.insert(decl, match_params);
             strategy_param_types.insert(decl, param_types);
             strategy_requirements.insert(decl, requirements);
         }
@@ -2858,7 +2900,15 @@ impl Checker<'_, '_> {
                                 .unwrap_or(&[]);
                             let mut binders = Vec::new();
                             let mut replacements = Vec::new();
+                            binders.push(nir::DeclarationParameter::comptime(
+                                candidate.declaration,
+                                &Term::Primitive(P::Type),
+                            ));
+                            replacements.push(subject.clone());
                             for (index, param) in params.iter().enumerate() {
+                                if *param == candidate.declaration {
+                                    continue;
+                                }
                                 if let Some(bound) = bindings.get(param) {
                                     let domain = param_types
                                         .get(index)
@@ -2948,7 +2998,8 @@ fn default_strategy_predicate_has_trait(predicate: &n::TypePredicate) -> bool {
             | n::TypePredicate::Equal(..)
             | n::TypePredicate::IntLe(..)
             | n::TypePredicate::Kind(..)
-            | n::TypePredicate::NotSized(..) => {}
+            | n::TypePredicate::NotSized(..)
+            | n::TypePredicate::HasField { .. } => {}
         }
     }
     false
@@ -4008,6 +4059,7 @@ struct Checker<'a, 'h> {
     volatile_storage: n::VolatileStorage,
     match_plans: n::MatchPlans,
     active_body_declaration: Option<DeclarationId>,
+    active_implicit_call_site: Option<comptime_interpretor::ImplicitCallSite>,
     list_pattern_infos: BTreeMap<n::LocalId, crate::automata::ListPatternInfo>,
     range_pattern_infos: BTreeMap<n::LocalId, crate::automata::RangePatternInfo>,
     bitvec_pattern_infos: BTreeMap<n::LocalId, crate::automata::BitVecPatternInfo>,
@@ -4085,10 +4137,12 @@ struct Checker<'a, 'h> {
     // speculative attempts must leave room for a later enum target.
     numeric_defaults: bool,
     signature_owner: Option<OwnerId>,
+    open_definition_needs_instance: bool,
     context: crate::ptc::Context,
     defaults: BTreeMap<OwnerId, Vec<Option<n::Expr>>>,
     locals: LocalBindings<Term>,
     code_values: LocalBindings<cmtt::ExpressionCode>,
+    any_result_code_locals: BTreeSet<n::LocalId>,
     template_code_values: BTreeMap<(u32, u32), std::sync::Arc<cmtt::ExpressionCode>>,
     pattern_codes: LocalBindings<cmtt::patterns::PatternCode>,
     pattern_quote_pending: Option<bool>,
@@ -4193,6 +4247,7 @@ struct Checker<'a, 'h> {
     declaration_paths: BTreeMap<DeclarationId, n::CanonicalDeclarationPath>,
     local_type_views: LocalBindings<Vec<Term>>,
     alias_type_views: BTreeMap<OwnerId, Vec<Term>>,
+    reflection_spans: n::ReflectionSpans,
 }
 
 fn build_package_metadata(
@@ -5665,12 +5720,7 @@ impl Checker<'_, '_> {
             candidate
                 .constrain_result_context(context, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(expr.span, e))?;
-            candidate
-                .refine_type_views_metered(
-                    |ty, budget| self.callable_input_view_metered(ty, budget),
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(expr.span, e))?;
+            self.refine_call_views(&mut candidate, expr.span)?;
             if checked
                 .iter()
                 .zip(&inputs)
@@ -6860,6 +6910,16 @@ impl Checker<'_, '_> {
             let operand = self.type_expr(arg)?;
             return Ok(n::TypePredicate::Kind(operand, kind));
         }
+        if let Some((lhs, rhs)) = self.type_predicate_eq_call(expr)? {
+            let left = self.type_expr(lhs)?;
+            let right = self.type_expr(rhs)?;
+            return Ok(n::TypePredicate::Equal(left, right));
+        }
+        if let Some((subject, field)) = self.type_predicate_has_field_call(expr)? {
+            let subject = self.type_expr(subject)?;
+            let field = self.symbol_type_term(field)?;
+            return Ok(n::TypePredicate::HasField { subject, field });
+        }
         if let Some(predicate) = self.ptc_integer_comparison(expr) {
             return Ok(predicate);
         }
@@ -7149,6 +7209,10 @@ impl Checker<'_, '_> {
             Q::IntLe(a, b) => Q::IntLe(a.clone(), b.clone()),
             Q::Kind(ty, kind) => Q::Kind(self.callable_input_view(ty, span)?, *kind),
             Q::NotSized(ty) => Q::NotSized(self.callable_input_view(ty, span)?),
+            Q::HasField { subject, field } => Q::HasField {
+                subject: self.callable_input_view(subject, span)?,
+                field: self.callable_input_view(field, span)?,
+            },
             Q::Not(inner) => Q::Not(Box::new(self.requirement_type_view(
                 inner,
                 span,
@@ -7783,12 +7847,7 @@ impl Checker<'_, '_> {
                 &scope,
             )
             .map_err(|e| call_inference_error(expr.span, e))?;
-        candidate
-            .refine_type_views_metered(
-                |ty, budget| self.callable_input_view_metered(ty, budget),
-                crate::ptc::Budget::default(),
-            )
-            .map_err(|e| call_inference_error(expr.span, e))?;
+        self.refine_call_views(&mut candidate, expr.span)?;
         if !self.settle_function_defaults(
             owner,
             &generic_parameters,
@@ -8303,12 +8362,7 @@ impl Checker<'_, '_> {
                 .constrain_result_context(context, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(expr.span, e))?;
         }
-        initial
-            .refine_type_views_metered(
-                |ty, budget| self.callable_input_view_metered(ty, budget),
-                crate::ptc::Budget::default(),
-            )
-            .map_err(|e| call_inference_error(expr.span, e))?;
+        self.refine_call_views(&mut initial, expr.span)?;
         let mut resolved_defaults = BTreeMap::new();
         self.settle_function_defaults(
             owner,
@@ -8472,12 +8526,7 @@ impl Checker<'_, '_> {
                     .constrain_result_context(context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(expr.span, e))?;
             }
-            candidate
-                .refine_type_views_metered(
-                    |ty, budget| self.callable_input_view_metered(ty, budget),
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(expr.span, e))?;
+            self.refine_call_views(&mut candidate, expr.span)?;
             let defaults_ready = self.settle_function_defaults(
                 owner,
                 &parameters,
@@ -8732,29 +8781,55 @@ impl Checker<'_, '_> {
             p(P::Never)
         } else {
             let result = self.callable_input_view(&instance.result, expr.span)?;
+            let result = self.resolve_ptc_associated_calls(&result, expr.span)?;
             let observed = self.observe_call_type(&result, expr)?;
             self.simplify_deferred_error_result(&observed, expr.span)?
         };
-        let callee_expr = if let Some(method) = selected_method {
-            method.callee(self, owner, &full_arguments, expr.span)?
-        } else {
-            n::Expr {
-                ty: self.callable_type(
-                    owner,
-                    self.instantiate_input_types_in_scope(
-                        &signature,
-                        &parameters,
-                        &instance.type_arguments,
-                        &caller_frames,
-                        expr.span,
-                    )?,
-                ),
-                source: source(expr.span),
-                kind: K::FunctionInstance {
-                    declaration: declaration(self.package, &self.package_identities, owner),
-                    arguments: full_arguments,
-                },
+        let (callee_expr, parameter_bindings) = if let Some(method) = selected_method {
+            let method_arguments = &full_arguments[1 + method.interface_arguments.len()..];
+            if call_use == CallUse::Invocation
+                && let Some((impl_owner, clauses)) = self.selected_open_trait_method_target(
+                    method.interface,
+                    &method.interface_arguments,
+                    &method.subject,
+                    method.member,
+                    method_arguments,
+                )
+            {
+                self.specialize_open_trait_method_value(impl_owner, clauses, expr.span)?
+            } else {
+                (
+                    method.callee(self, owner, &full_arguments, expr.span)?,
+                    declarations
+                        .iter()
+                        .map(|param| local(param.hir_id))
+                        .collect(),
+                )
             }
+        } else {
+            (
+                n::Expr {
+                    ty: self.callable_type(
+                        owner,
+                        self.instantiate_input_types_in_scope(
+                            &signature,
+                            &parameters,
+                            &instance.type_arguments,
+                            &caller_frames,
+                            expr.span,
+                        )?,
+                    ),
+                    source: source(expr.span),
+                    kind: K::FunctionInstance {
+                        declaration: declaration(self.package, &self.package_identities, owner),
+                        arguments: full_arguments,
+                    },
+                },
+                declarations
+                    .iter()
+                    .map(|param| local(param.hir_id))
+                    .collect(),
+            )
         };
         let inputs = self.call_environment_inputs(&callee_expr, expr.span)?;
         let mut call = n::Expr {
@@ -8764,10 +8839,7 @@ impl Checker<'_, '_> {
                 callee: Box::new(callee_expr),
                 arguments,
                 env_arguments: Vec::new(),
-                parameter_bindings: declarations
-                    .iter()
-                    .map(|param| local(param.hir_id))
-                    .collect(),
+                parameter_bindings,
             },
         };
         let environment =
@@ -9662,7 +9734,9 @@ impl Checker<'_, '_> {
                 | "enum_bit_base_type"
                 | "enum_bit_masks"
                 | "enum_bit_values"
-                | "enum_bit_offsets" => {
+                | "enum_bit_offsets"
+                | "enum_variant_spans"
+                | "enum_variant_field_spans" => {
                     return self
                         .enum_reflection_builtin(expr, callee, args, expected)
                         .map(Some);
@@ -9705,9 +9779,30 @@ impl Checker<'_, '_> {
                         .newtype_reflection_builtin(expr, args, expected)
                         .map(Some);
                 }
-                "struct_field_types" | "struct_field_names" => {
+                "struct_field_types" | "struct_field_names" | "record_field_types"
+                | "record_field_names" | "struct_field_spans" | "record_field_spans" => {
                     return self
                         .struct_reflection_builtin(expr, callee, args, expected)
+                        .map(Some);
+                }
+                "declaration_span" => {
+                    return self.span_reflection_builtin(expr, args, expected).map(Some);
+                }
+                "struct_field_type"
+                | "variant_field_type"
+                | "tuple_append_type"
+                | "field_ptr"
+                | "field_value"
+                | "comptime_field_entry"
+                | "construct_struct"
+                | "tuple_append"
+                | "enum_variant_index"
+                | "enum_variant_field_ptr"
+                | "construct_enum"
+                | "comptime_enum_variant_index"
+                | "comptime_enum_variant_field_values" => {
+                    return self
+                        .reflection_op_builtin(expr, name.as_str(), args, expected)
                         .map(Some);
                 }
                 "list_length" | "list_concat" => {
@@ -9862,6 +9957,63 @@ impl Checker<'_, '_> {
                 },
             }));
         }
+        if let Some((lhs, rhs)) = self.type_predicate_eq_call(expr)? {
+            let left = self.type_observation_operand(lhs)?;
+            let right = self.type_observation_operand(rhs)?;
+            let ty = p(if is_never(&left.ty) || is_never(&right.ty) {
+                P::Never
+            } else {
+                P::Bool
+            });
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeEqual(Box::new(left), Box::new(right)),
+            }));
+        }
+        if let Some((subject, field)) = self.type_predicate_has_field_call(expr)? {
+            let subject = self.type_observation_operand(subject)?;
+            let field = self.symbol_observation_operand(field)?;
+            let ty = p(if is_never(&subject.ty) || is_never(&field.ty) {
+                P::Never
+            } else {
+                P::Bool
+            });
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeHasField {
+                    subject: Box::new(subject),
+                    field: Box::new(field),
+                },
+            }));
+        }
+        if let Some((subject, field)) = self.type_predicate_field_type_call(expr)? {
+            let subject = self.type_observation_operand(subject)?;
+            let field = self.symbol_observation_operand(field)?;
+            let ty = if is_never(&subject.ty) || is_never(&field.ty) {
+                p(P::Never)
+            } else {
+                Term::Optional(Box::new(p(P::Type)))
+            };
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            return Ok(Some(n::Expr {
+                source: source(expr.span),
+                ty,
+                kind: K::TypeFieldType {
+                    subject: Box::new(subject),
+                    field: Box::new(field),
+                },
+            }));
+        }
         if let Some((query, arg, field)) = self.type_layout_query_call(expr)? {
             let subject_op = self.type_observation_operand(arg)?;
             let (operand, never_operand) = if let Some(field_expr) = field {
@@ -9917,6 +10069,138 @@ impl Checker<'_, '_> {
             });
         }
         Ok(operand)
+    }
+
+    pub(super) fn symbol_observation_operand(&mut self, arg: &Expr<'_>) -> Result<n::Expr, Error> {
+        let operand = self.expr(arg, Some(&p(P::Symbol)))?;
+        if let H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) = &arg.kind
+            && let Some((Term::Symbol(s), _)) = self.input_facts.value_identity(&local(*id))
+        {
+            return Ok(n::Expr {
+                source: operand.source,
+                ty: p(P::Symbol),
+                kind: K::Literal(n::Literal::Symbol(s.to_string())),
+            });
+        }
+        let generator_id = match (&arg.kind, &operand.kind) {
+            (H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id), _) => Some(local(*id)),
+            (_, K::Local(id)) => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = generator_id
+            && let Some(Some(known)) = self.generator_data.get(&id)
+        {
+            let resolved = match &known.kind {
+                K::Literal(n::Literal::Symbol(s)) => Some(s.clone()),
+                K::ComptimeValue(Term::Symbol(s)) | K::TypeValue(Term::Symbol(s)) => {
+                    Some(s.to_string())
+                }
+                _ => None,
+            };
+            if let Some(s) = resolved {
+                return Ok(n::Expr {
+                    source: operand.source,
+                    ty: p(P::Symbol),
+                    kind: K::Literal(n::Literal::Symbol(s)),
+                });
+            }
+        }
+        if !matches!(
+            operand.kind,
+            K::TypeValue(_) | K::Literal(n::Literal::Symbol(_))
+        ) && operand.ty == p(P::Symbol)
+            && let Some(term) =
+                self.checked_normal_input_in(&operand, &BTreeMap::new(), arg.span)?
+        {
+            return Ok(n::Expr {
+                source: operand.source,
+                ty: p(P::Symbol),
+                kind: match term {
+                    Term::Symbol(sym) => K::Literal(n::Literal::Symbol(sym.to_string())),
+                    other if other.check_scope(&[]).is_ok() => K::ComptimeValue(other),
+                    _ => return Ok(operand),
+                },
+            });
+        }
+        Ok(operand)
+    }
+
+    pub(super) fn symbol_type_term(&mut self, arg: &Expr<'_>) -> Result<Term, Error> {
+        if let H::Lit(hir::Lit {
+            kind: hir::LitKind::Symbol(sym),
+            ..
+        }) = &arg.kind
+        {
+            return Ok(Term::Symbol(sym.as_str().into()));
+        }
+        if let H::ResolvedLocal(_, id) = &arg.kind
+            && let Some((sym, _)) = self.input_facts.value_identity(&local(*id))
+        {
+            return Ok(sym.clone());
+        }
+        let operand = self.expr(arg, Some(&p(P::Symbol)))?;
+        if let K::Literal(n::Literal::Symbol(sym)) = &operand.kind {
+            return Ok(Term::Symbol(sym.as_str().into()));
+        }
+        if let K::ComptimeValue(term) = &operand.kind {
+            return Ok(term.clone());
+        }
+        if let Some(term) = self.checked_normal_input_in(&operand, &BTreeMap::new(), arg.span)? {
+            return Ok(term);
+        }
+        let allow_staged = self.in_unselected_inline
+            || self.checking_open_behavior
+            || self.in_staged_input
+            || self.describing_open_call
+            || matches!(&arg.kind, H::ResolvedLocal(_, id) if self.open_staged_locals.contains(&local(*id)));
+        if allow_staged {
+            if self.checking_open_behavior {
+                self.check_open_fragment(&operand, arg.span, false)?;
+            } else {
+                self.check_inline_input_availability(&operand, &BTreeSet::new(), arg.span)?;
+            }
+            let symbol = if let Some(symbol) =
+                self.deferred_definition_input(arg.hir_id.owner, &operand, arg.span)?
+            {
+                symbol
+            } else {
+                let binder = self.fresh_value_binder(arg.hir_id.owner, arg.span)?;
+                self.definition_refinements
+                    .staged_values
+                    .push((binder.declaration, p(P::Symbol)));
+                Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                }
+            };
+            if let H::ResolvedLocal(_, id) = arg.kind {
+                let binding = local(id);
+                if self.locals.contains_key(&binding) {
+                    self.input_facts
+                        .values
+                        .insert(binding, (symbol.clone(), p(P::Symbol)));
+                }
+            }
+            return Ok(symbol);
+        }
+        Err(error(arg.span, "expected a compile-time Symbol field name"))
+    }
+
+    pub(super) fn usize_type_term(
+        &mut self,
+        arg: &Expr<'_>,
+        checked: &n::Expr,
+    ) -> Result<Term, Error> {
+        if let K::ComptimeValue(term) = &checked.kind {
+            return Ok(term.clone());
+        }
+        if let K::Literal(n::Literal::UnsignedInteger(v)) = &checked.kind {
+            return Ok(Term::Integer(comptime_runtime::Integer::from_u128(*v)));
+        }
+        if let Some(term) = self.checked_normal_input_in(checked, &BTreeMap::new(), arg.span)? {
+            return Ok(term);
+        }
+        Err(error(arg.span, "expected a compile-time usize index"))
     }
 }
 

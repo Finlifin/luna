@@ -1,4 +1,4 @@
-use builtin.{Integer, Symbol, bool, char, isize, str, u8, u16, u32, u64, u128, usize}
+use builtin.{Integer, Symbol, Type, bool, char, isize, str, u8, u16, u32, u64, u128, usize}
 use builtin.fmt.options.{
     FormatOptions,
     parse_comptime_int_options,
@@ -6,7 +6,7 @@ use builtin.fmt.options.{
     parse_plain_options,
     parse_text_options,
 }
-use data.text.str_from_char;
+use data.text.{ComptimeTextBytes, str_from_char};
 use formatting.helpers.{
     format_integer_comptime,
     format_signed_comptime,

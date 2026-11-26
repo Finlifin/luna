@@ -73,6 +73,7 @@ pub struct Options {
     pub implicit_passing_protocol: Option<String>,
     pub call_context_type: Option<String>,
     pub call_description_type: Option<String>,
+    pub source_span_type: Option<String>,
     pub arithmetic_protocols: [Option<String>; 7],
     pub compound_arithmetic_protocols: [Option<String>; 5],
     pub comptime_compound_arithmetic_protocols: [Option<String>; 5],
@@ -269,6 +270,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut implicit_passing_protocol = None;
     let mut call_context_type = None;
     let mut call_description_type = None;
+    let mut source_span_type = None;
     let mut tuple_type = None;
     let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
@@ -1149,6 +1151,17 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--source-span-type") => {
+                    if source_span_type.is_some() {
+                        return Err("--source-span-type may only be specified once".into());
+                    }
+                    source_span_type = Some(
+                        option_value(&mut args, "--source-span-type")?
+                            .into_string()
+                            .map_err(|_| "SourceSpan type selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
                 Some("--splice-protocol") => {
                     if splice_protocol.is_some() {
                         return Err("--splice-protocol may only be specified once".into());
@@ -1535,6 +1548,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         implicit_passing_protocol,
         call_context_type,
         call_description_type,
+        source_span_type,
         incremental: crate::package_cache::IncrementalConfig {
             cache_dir,
             no_cache,
@@ -1734,6 +1748,7 @@ mod tests {
                 implicit_passing_protocol: None,
                 call_context_type: None,
                 call_description_type: None,
+                source_span_type: None,
                 arithmetic_protocols: Default::default(),
                 compound_arithmetic_protocols: Default::default(),
                 comptime_compound_arithmetic_protocols: Default::default(),
@@ -1813,6 +1828,7 @@ mod tests {
                 implicit_passing_protocol: None,
                 call_context_type: None,
                 call_description_type: None,
+                source_span_type: None,
                 arithmetic_protocols: Default::default(),
                 compound_arithmetic_protocols: Default::default(),
                 comptime_compound_arithmetic_protocols: Default::default(),

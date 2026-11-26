@@ -284,6 +284,10 @@ fn specialize_bound_inputs<C>(
             P::Kind(ty, _) | P::NotSized(ty) => {
                 *ty = scope.rebind(ty).map_err(|e| e.to_string())?;
             }
+            P::HasField { subject, field } => {
+                *subject = scope.rebind(subject).map_err(|e| e.to_string())?;
+                *field = scope.rebind(field).map_err(|e| e.to_string())?;
+            }
             P::Not(value) => predicates.push(value),
             P::And(values) | P::Or(values) => predicates.extend(values),
         }

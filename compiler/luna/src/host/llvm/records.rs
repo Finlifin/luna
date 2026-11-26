@@ -105,6 +105,124 @@ impl Emitter<'_> {
         Ok(value)
     }
 
+    pub(super) fn extract_tuple_values(&mut self, value: &Value) -> Result<Vec<Value>, String> {
+        match &value.ty {
+            Ty::Unit => Ok(Vec::new()),
+            Ty::Record(fields) | Ty::PackedRecord(fields) => (0..fields.len())
+                .map(|idx| self.record_field(value, idx))
+                .collect(),
+            _ => Err("host tuple operation requires a tuple or unit value".into()),
+        }
+    }
+
+    pub(super) fn record_from_values(
+        &mut self,
+        prepared_source: Option<nir::program::SourceRange>,
+        evaluated: Vec<Value>,
+        ty: &Term,
+    ) -> Result<Value, String> {
+        let ty = repr(self.graph, ty, self.checked)?;
+        if ty == Ty::Unit && evaluated.is_empty() {
+            return Ok(Value::unit());
+        }
+        if let Ty::BitPackedRecord(layout) = &ty {
+            if evaluated.len() != layout.fields.len() {
+                return Err("host bit-packed record field count mismatch".into());
+            }
+            let mut field_bits = Vec::with_capacity(evaluated.len());
+            for (value, expected) in evaluated.into_iter().zip(layout.fields.iter()) {
+                if value.ty != expected.ty {
+                    return Err("host bit-packed field representation mismatch".into());
+                }
+                field_bits.push(self.to_bits(value)?);
+            }
+            let mut acc = None;
+            for bits_val in field_bits {
+                if bits::bit_width(&bits_val.ty) == Some(0) {
+                    continue;
+                }
+                acc = Some(match acc {
+                    None => bits_val,
+                    Some(lo) => self.bit_concat(bits_val, lo)?,
+                });
+            }
+            if let Some(source) = prepared_source {
+                self.finish_prepared_construction(source)?;
+            }
+            let packed_bits = acc.unwrap_or(Value {
+                ty: Ty::Int(0, false),
+                text: "zeroinitializer".into(),
+            });
+            return self.from_bits(packed_bits, ty);
+        }
+        let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &ty else {
+            return Err("host anonymous construction lacks a record layout".into());
+        };
+        if evaluated.len() != layout.len() {
+            return Err("host anonymous field count mismatch".into());
+        }
+        let mut value = Value {
+            ty: ty.clone(),
+            text: "zeroinitializer".into(),
+        };
+        for (index, (field, expected)) in evaluated.into_iter().zip(layout.iter()).enumerate() {
+            if field.ty != *expected {
+                return Err("host record field representation mismatch".into());
+            }
+            let (storage, text) = if field.ty == Ty::Unit {
+                ("{}".into(), "zeroinitializer".into())
+            } else {
+                (field.ty.llvm(), field.text)
+            };
+            value = self.instruction(
+                ty.clone(),
+                format!(
+                    "insertvalue {} {}, {storage} {text}, {index}",
+                    ty.llvm(),
+                    value.text
+                ),
+            );
+        }
+        if let Some(source) = prepared_source {
+            self.finish_prepared_construction(source)?;
+        }
+        Ok(value)
+    }
+
+    pub(super) fn construct_struct(
+        &mut self,
+        fields: &Expr,
+        ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let tuple_val = self.expr(fields, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let evaluated = self.extract_tuple_values(&tuple_val)?;
+        self.record_from_values(None, evaluated, ty)
+    }
+
+    pub(super) fn tuple_append(
+        &mut self,
+        tuple: &Expr,
+        element: &Expr,
+        ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let tuple_val = self.expr(tuple, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let elem_val = self.expr(element, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let mut evaluated = self.extract_tuple_values(&tuple_val)?;
+        evaluated.push(elem_val);
+        self.record_from_values(None, evaluated, ty)
+    }
+
     pub(super) fn record_field(&mut self, value: &Value, index: usize) -> Result<Value, String> {
         if let Ty::BitPackedRecord(layout) = &value.ty {
             let field = layout

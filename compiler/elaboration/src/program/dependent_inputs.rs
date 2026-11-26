@@ -340,12 +340,7 @@ impl Checker<'_, '_> {
                     .constrain_parameter_context(index, &context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(expr.span, e))?;
             }
-            candidate
-                .refine_type_views_metered(
-                    |ty, budget| self.callable_input_view_metered(ty, budget),
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(expr.span, e))?;
+            self.refine_call_views(&mut candidate, expr.span)?;
             let mut progress = false;
             for allow_defaults in [false, true] {
                 if allow_defaults && (progress || !self.numeric_defaults) {

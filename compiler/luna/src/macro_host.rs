@@ -324,6 +324,7 @@ struct OwnedSelectors {
     implicit_passing: Option<String>,
     call_context: Option<String>,
     call_description: Option<String>,
+    source_span: Option<String>,
     arithmetic: [Option<String>; 7],
     compound_arithmetic: [Option<String>; 5],
     comptime_compound_arithmetic: [Option<String>; 5],
@@ -392,6 +393,7 @@ impl OwnedSelectors {
             implicit_passing: s.implicit_passing.map(str::to_owned),
             call_context: s.call_context.map(str::to_owned),
             call_description: s.call_description.map(str::to_owned),
+            source_span: s.source_span.map(str::to_owned),
             arithmetic: std::array::from_fn(|i| s.arithmetic[i].map(str::to_owned)),
             compound_arithmetic: std::array::from_fn(|i| {
                 s.compound_arithmetic[i].map(str::to_owned)
@@ -466,6 +468,7 @@ impl OwnedSelectors {
             implicit_passing: self.implicit_passing.as_deref(),
             call_context: self.call_context.as_deref(),
             call_description: self.call_description.as_deref(),
+            source_span: self.source_span.as_deref(),
             arithmetic: std::array::from_fn(|i| self.arithmetic[i].as_deref()),
             compound_arithmetic: std::array::from_fn(|i| self.compound_arithmetic[i].as_deref()),
             comptime_compound_arithmetic: std::array::from_fn(|i| {

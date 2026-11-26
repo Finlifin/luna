@@ -73,6 +73,7 @@ impl Circuit {
                             (Formula::Kind(a), Atom::Kind(b)) => a == b,
                             (Formula::NotSized(a), Atom::NotSized(b)) => a == b,
                             (Formula::HasHeadShape(a), Atom::HasHeadShape(b)) => a == b,
+                            (Formula::HasField(a), Atom::HasField(b)) => a == b,
                             (Formula::RowContains(a), Atom::RowContains(b)) => a == b,
                             (Formula::RowSubset(a), Atom::RowSubset(b)) => a == b,
                             (Formula::RowDisjoint(a), Atom::RowDisjoint(b)) => a == b,

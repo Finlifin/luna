@@ -163,7 +163,47 @@ impl Checker<'_, '_> {
             ));
         };
         if self.closed_comptime_control_body() {
-            return self.comptime_range(expr, start, end, inclusive, expected);
+            let mut static_bounds = None;
+            if let Ok(checked_start) = self.expr(start, Some(&p(P::Integer)))
+                && let Ok(checked_end) = self.expr(end, Some(&p(P::Integer)))
+            {
+                let mut budget = comptime_runtime::Budget {
+                    steps: usize::try_from(self.required_steps)
+                        .unwrap_or(usize::MAX)
+                        .min(100_000),
+                    max_limbs: 4096,
+                };
+                if let Ok(Some(Term::Integer(s))) =
+                    self.normal_input_hint(&checked_start, &mut budget)
+                    && let Ok(Some(Term::Integer(e))) =
+                        self.normal_input_hint(&checked_end, &mut budget)
+                    && let Ok(diff) = e.subtract(&s, &mut budget)
+                {
+                    let count = if inclusive {
+                        diff.add(&comptime_runtime::Integer::from_u128(1), &mut budget)
+                            .ok()
+                    } else {
+                        Some(diff)
+                    };
+                    if let Some(ref count) = count
+                        && let Ok(count_usize) = count
+                            .to_u128()
+                            .map_err(|_| ())
+                            .and_then(|c| usize::try_from(c).map_err(|_| ()))
+                        && count_usize <= 4096
+                    {
+                        static_bounds = Some((s, count_usize));
+                    } else if count
+                        .as_ref()
+                        .is_some_and(|c| *c <= comptime_runtime::Integer::from_u128(0))
+                    {
+                        static_bounds = Some((s, 0));
+                    }
+                }
+            }
+            if static_bounds.is_none() {
+                return self.comptime_range(expr, start, end, inclusive, expected);
+            }
         }
         let suppressed = self.in_unselected_inline
             && self

@@ -435,6 +435,26 @@ impl Writer {
                 self.term(errors, d)?;
                 self.term(result, d)?;
             }
+            T::FieldType { subject, field } => {
+                self.byte(47)?;
+                self.term(subject, d)?;
+                self.term(field, d)?;
+            }
+            T::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                self.byte(48)?;
+                self.term(subject, d)?;
+                self.term(variant, d)?;
+                self.term(field, d)?;
+            }
+            T::TupleAppend { tuple, element } => {
+                self.byte(49)?;
+                self.term(tuple, d)?;
+                self.term(element, d)?;
+            }
             T::TraitObject {
                 interface,
                 arguments,
@@ -764,6 +784,9 @@ impl<'a> Reader<'a> {
                 ty: self.term(d)?,
             })),
             46 => T::deferred_error_result(self.term(d)?, self.term(d)?),
+            47 => T::field_type(self.term(d)?, self.term(d)?),
+            48 => T::variant_field_type(self.term(d)?, self.term(d)?, self.term(d)?),
+            49 => T::tuple_append(self.term(d)?, self.term(d)?),
             _ => return Err(failure("unknown descriptor tag")),
         })
     }

@@ -1,0 +1,223 @@
+use List;
+use builtin.{
+    Integer,
+    Symbol,
+    TotalFloat,
+    Type,
+    bf16,
+    bool,
+    char,
+    f16,
+    f32,
+    f64,
+    i128,
+    i16,
+    i32,
+    i64,
+    i8,
+    isize,
+    str,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+    void,
+}
+
+{-
+    Comptime cloning protocol using value-reference `self` semantics (no comptime pointers).
+-}
+pub pure comptime trait ComptimeClone {
+    pure comptime fn clone(self) -> Self;
+}
+
+comptime impl ComptimeClone for bool {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for char {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for Symbol {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for str {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for void {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for Integer {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for Type {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for u8 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for u16 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for u32 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for u64 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for u128 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for usize {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for i8 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for i16 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for i32 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for i64 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for i128 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for isize {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for f16 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for bf16 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for f32 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for f64 {
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for TotalFloat<F>
+where
+    F: Type,
+    requires F == f16 or F == bf16 or F == f32 or F == f64,
+{
+    pure comptime fn clone(self) -> Self {
+        self
+    }
+}
+
+comptime impl ComptimeClone for List<T>
+where
+    T :- ComptimeClone,
+{
+    pure comptime fn clone(self) -> Self {
+        var out: List<T> = [];
+        let count = self.length();
+        var index: Integer = 0;
+        while index < count {
+            out.append(self[index].as(ComptimeClone).clone());
+            index = index + 1;
+        }
+        out
+    }
+}
+
+comptime impl ComptimeClone for ?T
+where
+    T :- ComptimeClone,
+{
+    pure comptime fn clone(self) -> Self {
+        self match {
+            value? => value.as(ComptimeClone).clone(),
+            null => null,
+        }
+    }
+}
+
+comptime impl ComptimeClone for !E T
+where
+    E :- ComptimeClone,
+    T :- ComptimeClone,
+{
+    pure comptime fn clone(self) -> Self {
+        self match {
+            value! => value.as(ComptimeClone).clone(),
+            error err => error err.as(ComptimeClone).clone(),
+        }
+    }
+}

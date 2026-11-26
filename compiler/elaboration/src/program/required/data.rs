@@ -8,6 +8,7 @@ use ::materialization::MemberDataSource;
 pub(super) struct Reader<'a> {
     pub owner: &'a MemberDataSource,
     pub attributes: Option<&'a comptime_interpretor::AttributeSource<'a>>,
+    pub implicit_call_site: Option<&'a comptime_interpretor::ImplicitCallSite>,
     pub form: &'a dyn Fn(
         DeclarationId,
         DeclarationId,

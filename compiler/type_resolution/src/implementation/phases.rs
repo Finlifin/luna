@@ -75,6 +75,10 @@ fn predicate_scope(predicate: &TypePredicate) -> Result<(), nir::TypeError> {
             right.check_scope(&[])
         }
         TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => ty.check_scope(&[]),
+        TypePredicate::HasField { subject, field } => {
+            subject.check_scope(&[])?;
+            field.check_scope(&[])
+        }
         TypePredicate::Not(inner) => predicate_scope(inner),
         TypePredicate::And(parts) | TypePredicate::Or(parts) => {
             for part in parts {

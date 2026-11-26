@@ -54,6 +54,10 @@ impl<'a> PropositionInputs<'a> {
                     Formula::Kind(query) => observe(&query.ty)?,
                     Formula::NotSized(query) => observe(&query.ty)?,
                     Formula::HasHeadShape(query) => observe(&query.ty)?,
+                    Formula::HasField(query) => {
+                        observe(&query.ty)?;
+                        observe(&query.field)?;
+                    }
                     Formula::RowContains(query) => {
                         observe(&query.row)?;
                         match &query.label {
@@ -97,7 +101,7 @@ impl<'a> PropositionInputs<'a> {
 
 /// A whole-operand equality derived from the selected associated Type definitions.
 /// Both sides live in the caller's scope, including any nested callable binders.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct ProjectionEquation {
     pub source: Term,
     pub value: Term,

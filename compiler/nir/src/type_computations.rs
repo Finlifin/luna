@@ -614,6 +614,9 @@ pub fn contains_associated_projection(
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
         );
     })?;
     Ok(found)
@@ -647,7 +650,10 @@ pub fn runtime_dependencies_bounded(
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
             | Term::ComptimeCall(_)
-            | Term::DeferredErrorResult { .. } => {
+            | Term::DeferredErrorResult { .. }
+            | Term::FieldType { .. }
+            | Term::VariantFieldType { .. }
+            | Term::TupleAppend { .. } => {
                 dependencies.may_change = true;
             }
             _ => {}

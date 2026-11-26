@@ -501,6 +501,7 @@ impl Completion<'_> {
                         format!("dependent call result is not available: {e}"),
                     )
                 })?;
+            let result = checker.resolve_ptc_associated_calls(&result, expr.span)?;
             let observed = checker.observe_call_type(&result, expr)?;
             checker.simplify_deferred_error_result(&observed, expr.span)?
         };

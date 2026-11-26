@@ -1943,6 +1943,210 @@ impl Checker<'_, '_> {
                 let neg = pos.clone().negate();
                 known_type_formula(&self.context, pos, neg, budget).map(Term::Bool)
             }
+            K::TypeHasField { subject, field } => {
+                let subject = self.observe_normal_input_in(subject, depth + 1, budget, bindings)?;
+                let field = self.observe_normal_input_in(field, depth + 1, budget, bindings)?;
+                let pos = crate::ptc::Formula::HasField(crate::ptc::HasFieldQuery {
+                    ty: copy_observed_term(&subject, budget)?,
+                    field: copy_observed_term(&field, budget)?,
+                });
+                let neg = pos.clone().negate();
+                known_type_formula(&self.context, pos, neg, budget).map(Term::Bool)
+            }
+            K::StructFieldType { subject, field } => {
+                let subject = self.observe_normal_input_in(subject, depth + 1, budget, bindings)?;
+                let field = self.observe_normal_input_in(field, depth + 1, budget, bindings)?;
+                if subject.sort() != Sort::Type || field.sort() != Sort::ComptimeValue {
+                    return Err(Failure::Unavailable);
+                }
+                Ok(Term::field_type(subject, field))
+            }
+            K::ListLength(list) => {
+                let frozen = self.observe_normal_input_in(list, depth + 1, budget, bindings)?;
+                let element = self
+                    .list_element_type(&list.ty)
+                    .ok_or(Failure::Unavailable)?;
+                let fields = take_known_list_elements(frozen, &list.ty, element, budget)?;
+                Ok(Term::Integer(comptime_runtime::Integer::from_u128(
+                    fields.len() as u128,
+                )))
+            }
+            K::StructFieldNames(subject) => {
+                let subject = self.observe_normal_input_in(subject, depth + 1, budget, bindings)?;
+                self.observe_struct_field_names(&subject, &expr.ty, budget)
+            }
+            K::RecordFieldNames(subject) => {
+                let subject = self.observe_normal_input_in(subject, depth + 1, budget, bindings)?;
+                self.observe_record_field_names(&subject, &expr.ty, budget)
+            }
+            K::EnumStructure { subject, query } => {
+                let subject = self.observe_normal_input_in(subject, depth + 1, budget, bindings)?;
+                self.observe_enum_structure(&subject, *query, &expr.ty, budget)
+            }
+            K::ComptimeIntegerConvert(value) => {
+                let Term::Integer(int) =
+                    self.observe_normal_input_in(value, depth + 1, budget, bindings)?
+                else {
+                    return Err(Failure::Unavailable);
+                };
+                self.observe_comptime_integer_convert(&int, &expr.ty)
+            }
+            K::Call {
+                callee,
+                arguments,
+                env_arguments,
+                ..
+            } if env_arguments.is_empty() => {
+                let decl_id = match &callee.kind {
+                    K::Function(decl_id) => *decl_id,
+                    K::FunctionInstance { declaration, .. } => *declaration,
+                    _ => return Err(Failure::Unavailable),
+                };
+                let Some(kind) = self.pure_field_type_builtin_wrapper(decl_id) else {
+                    return Err(Failure::Unavailable);
+                };
+                let mut observed = Vec::with_capacity(arguments.len());
+                for arg in arguments {
+                    observed.push(self.observe_normal_input_in(
+                        &arg.value,
+                        depth + 1,
+                        budget,
+                        bindings,
+                    )?);
+                }
+                match (kind, observed.as_slice()) {
+                    ("struct_field_type", [subject, field])
+                        if subject.sort() == Sort::Type && field.sort() == Sort::ComptimeValue =>
+                    {
+                        if let Term::Symbol(name) = field
+                            && let Term::Nominal {
+                                declaration,
+                                arguments,
+                            } = subject
+                            && let Some(def) = self.structs.get(declaration)
+                            && let Some((_, raw_field_ty)) = def
+                                .fields
+                                .iter()
+                                .find(|(field_name, _)| field_name.as_str() == name.as_ref())
+                            && let Ok(instantiated) =
+                                nir::normal_forms::instantiate_value_fields_checked(
+                                    &def.type_parameters,
+                                    &def.parameter_types,
+                                    arguments,
+                                    std::iter::once(raw_field_ty),
+                                    &mut budget.steps,
+                                )
+                            && let Some(field_ty) = instantiated.into_iter().next()
+                        {
+                            Ok(field_ty)
+                        } else if let Term::Symbol(name) = field
+                            && let Term::Record(fields) = subject
+                            && let Some((_, field_ty)) = fields
+                                .iter()
+                                .find(|(field_name, _)| field_name.as_str() == name.as_ref())
+                        {
+                            Ok(field_ty.clone())
+                        } else {
+                            Ok(Term::field_type(subject.clone(), field.clone()))
+                        }
+                    }
+                    ("variant_field_type", [subject, variant, field])
+                        if subject.sort() == Sort::Type =>
+                    {
+                        let index_of = |term: &Term| -> Option<usize> {
+                            match term {
+                                Term::Integer(int) => {
+                                    int.to_u128().ok().and_then(|v| usize::try_from(v).ok())
+                                }
+                                Term::BitVec(bv) => {
+                                    if bv.width() <= 64 {
+                                        let w0 = bv.words().first().copied().unwrap_or(0) as u64;
+                                        let w1 = bv.words().get(1).copied().unwrap_or(0) as u64;
+                                        usize::try_from(((w1 as u128) << 32) | (w0 as u128)).ok()
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Term::Nominal {
+                            declaration,
+                            arguments,
+                        } = subject
+                            && let Some(v_idx) = index_of(variant)
+                            && let Some(f_idx) = index_of(field)
+                            && let Some(def) = self.enums.get(declaration)
+                            && let Some(variant_def) = def.variants.get(v_idx)
+                            && let Some(raw_field_ty) = variant_def.fields.get(f_idx)
+                            && let Ok(instantiated) =
+                                nir::normal_forms::instantiate_value_fields_checked(
+                                    &def.type_parameters,
+                                    &def.parameter_types,
+                                    arguments,
+                                    std::iter::once(raw_field_ty),
+                                    &mut budget.steps,
+                                )
+                            && let Some(field_ty) = instantiated.into_iter().next()
+                        {
+                            Ok(field_ty)
+                        } else {
+                            Ok(Term::variant_field_type(
+                                subject.clone(),
+                                variant.clone(),
+                                field.clone(),
+                            ))
+                        }
+                    }
+                    ("tuple_append_type", [tuple, elem])
+                        if tuple.sort() == Sort::Type && elem.sort() == Sort::Type =>
+                    {
+                        Ok(Term::tuple_append(tuple.clone(), elem.clone()))
+                    }
+                    ("list_length", [list]) => {
+                        let list_ty = &arguments[0].value.ty;
+                        let element = self
+                            .list_element_type(list_ty)
+                            .ok_or(Failure::Unavailable)?;
+                        let fields =
+                            take_known_list_elements(list.clone(), list_ty, element, budget)?;
+                        Ok(Term::Integer(comptime_runtime::Integer::from_u128(
+                            fields.len() as u128,
+                        )))
+                    }
+                    ("struct_field_names", [subject]) if subject.sort() == Sort::Type => {
+                        self.observe_struct_field_names(subject, &expr.ty, budget)
+                    }
+                    ("record_field_names", [subject]) if subject.sort() == Sort::Type => {
+                        self.observe_record_field_names(subject, &expr.ty, budget)
+                    }
+                    ("enum_variant_paths", [subject]) if subject.sort() == Sort::Type => self
+                        .observe_enum_structure(
+                            subject,
+                            n::EnumStructureQuery::VariantPaths,
+                            &expr.ty,
+                            budget,
+                        ),
+                    ("enum_variant_field_names", [subject]) if subject.sort() == Sort::Type => self
+                        .observe_enum_structure(
+                            subject,
+                            n::EnumStructureQuery::FieldNames,
+                            &expr.ty,
+                            budget,
+                        ),
+                    ("enum_variant_field_types", [subject]) if subject.sort() == Sort::Type => self
+                        .observe_enum_structure(
+                            subject,
+                            n::EnumStructureQuery::FieldTypes,
+                            &expr.ty,
+                            budget,
+                        ),
+                    ("comptime_integer_convert", [Term::Integer(int)]) => {
+                        self.observe_comptime_integer_convert(int, &expr.ty)
+                    }
+                    _ => Err(Failure::Unavailable),
+                }
+            }
             K::TypeLayout { query, operand } => {
                 let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
                 let (ty, field) = match (*query, &operand) {
@@ -2202,6 +2406,250 @@ impl Checker<'_, '_> {
             return Err(error(block.span, "contextual input nesting limit exceeded"));
         }
         self.check_contextual_block_region(block, block_regions::ContextualTail { depth })
+    }
+
+    fn observe_struct_field_names(
+        &self,
+        subject: &Term,
+        output: &Term,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Term, Failure> {
+        let names = match subject {
+            Term::Nominal { declaration, .. } => {
+                let Some(def) = self.structs.get(declaration) else {
+                    return Err(Failure::Unavailable);
+                };
+                budget.consume(def.fields.len().saturating_add(1))?;
+                def.fields
+                    .iter()
+                    .map(|(name, _)| Term::Symbol(name.as_str().into()))
+                    .collect::<Vec<_>>()
+            }
+            Term::Record(fields) => {
+                budget.consume(fields.len().saturating_add(1))?;
+                fields
+                    .iter()
+                    .map(|(name, _)| Term::Symbol(name.as_str().into()))
+                    .collect::<Vec<_>>()
+            }
+            _ => return Err(Failure::Unavailable),
+        };
+        freeze_known_list(output, &p(P::Symbol), names, budget)
+    }
+
+    fn observe_record_field_names(
+        &self,
+        subject: &Term,
+        output: &Term,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Term, Failure> {
+        let Term::Record(fields) = subject else {
+            return Err(Failure::Unavailable);
+        };
+        budget.consume(fields.len().saturating_add(1))?;
+        let names = fields
+            .iter()
+            .map(|(name, _)| Term::Symbol(name.as_str().into()))
+            .collect::<Vec<_>>();
+        freeze_known_list(output, &p(P::Symbol), names, budget)
+    }
+
+    fn observe_enum_structure(
+        &self,
+        subject: &Term,
+        query: n::EnumStructureQuery,
+        output: &Term,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Term, Failure> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = subject
+        else {
+            return Err(Failure::Unavailable);
+        };
+        let Some(def) = self.enums.get(declaration) else {
+            return Err(Failure::Unavailable);
+        };
+        let Some(inner) = self.list_element_type(output) else {
+            return Err(Failure::Unavailable);
+        };
+        budget.consume(def.variants.len().saturating_add(1))?;
+        match query {
+            n::EnumStructureQuery::VariantPaths => {
+                let mut paths = Vec::with_capacity(def.variants.len());
+                for variant in &def.variants {
+                    budget.consume(variant.name.len().saturating_add(1))?;
+                    let segments = variant
+                        .name
+                        .split('.')
+                        .map(|seg| Term::Symbol(seg.into()))
+                        .collect::<Vec<_>>();
+                    paths.push(freeze_known_list(inner, &p(P::Symbol), segments, budget)?);
+                }
+                freeze_known_list(output, inner, paths, budget)
+            }
+            n::EnumStructureQuery::FieldTypes => {
+                let mut variant_lists = Vec::with_capacity(def.variants.len());
+                for variant in &def.variants {
+                    let instantiated = nir::normal_forms::instantiate_value_fields_checked(
+                        &def.type_parameters,
+                        &def.parameter_types,
+                        arguments,
+                        variant.fields.iter(),
+                        &mut budget.steps,
+                    )
+                    .map_err(|_| Failure::Unavailable)?;
+                    variant_lists.push(freeze_known_list(
+                        inner,
+                        &p(P::Type),
+                        instantiated,
+                        budget,
+                    )?);
+                }
+                freeze_known_list(output, inner, variant_lists, budget)
+            }
+            _ => Err(Failure::Unavailable),
+        }
+    }
+
+    fn observe_comptime_integer_convert(
+        &self,
+        value: &comptime_runtime::Integer,
+        target: &Term,
+    ) -> Result<Term, Failure> {
+        let Term::Primitive(prim) = target else {
+            return Err(Failure::Unavailable);
+        };
+        let (signed, bits) = if let Some(layout) = prim.fixed_integer_layout() {
+            layout
+        } else if matches!(prim, P::Usize | P::Isize) {
+            let bits = self
+                .target
+                .map(|target| target.pointer_bits() as u32)
+                .unwrap_or(8);
+            (matches!(prim, P::Isize), bits)
+        } else {
+            return Err(Failure::Unavailable);
+        };
+        let in_range = if signed {
+            value.to_i128().is_ok_and(|n| {
+                bits >= 128 || {
+                    let shift = bits - 1;
+                    n >= -(1i128 << shift) && n <= (1i128 << shift) - 1
+                }
+            })
+        } else {
+            value
+                .to_u128()
+                .is_ok_and(|n| bits >= 128 || n <= ((1u128 << bits) - 1))
+        };
+        if !in_range {
+            return Err(Failure::Evaluation(
+                "integer conversion out of range".into(),
+            ));
+        }
+        Ok(Term::Integer(value.clone()))
+    }
+
+    pub(super) fn pure_field_type_builtin_wrapper(
+        &self,
+        decl_id: DeclarationId,
+    ) -> Option<&'static str> {
+        let mut current = decl_id;
+        for _ in 0..4 {
+            let owner = self
+                .source_declarations
+                .owner(current)
+                .or_else(|| self.generated_functions.instance_owner(current))?;
+            let item = self.package.item(owner)?;
+            let ItemKind::Fn(sig, body_id) = &item.kind else {
+                return None;
+            };
+            if !sig.modifiers.is_comptime || !sig.modifiers.is_pure {
+                return None;
+            }
+            let hir_body = self.package.body(*body_id)?;
+            let tail = match &hir_body.value.kind {
+                H::Block(block) if block.stmts.is_empty() => block.expr?,
+                _ => &hir_body.value,
+            };
+            let H::Application(callee, args) = &tail.kind else {
+                return None;
+            };
+            let matched_params = if args.len() == sig.params.len() {
+                sig.params.iter().enumerate().all(|(idx, param)| {
+                    matches!(
+                        args[idx],
+                        Arg::Positional(expr)
+                            if matches!(expr.kind, H::ResolvedFnParam(_, id) if id == param.hir_id)
+                                || (idx == 0
+                                    && matches!(param.ty.kind, TyParamKind::Itself { .. })
+                                    && matches!(expr.kind, H::SelfValue))
+                    )
+                })
+            } else if sig.params.len() == 1
+                && args.len() == 2
+                && matches!(args[0], Arg::Positional(e) if matches!(e.kind, H::ResolvedClauseParam(..)))
+                && matches!(
+                    args[1],
+                    Arg::Positional(e) if matches!(e.kind, H::ResolvedFnParam(_, id) if id == sig.params[0].hir_id)
+                )
+            {
+                true
+            } else {
+                false
+            };
+            if !matched_params {
+                return None;
+            }
+            let callee_builtin = match &callee.kind {
+                H::Builtin(name) => Some(name.as_str()),
+                H::ResolvedDef { def_id, .. } => {
+                    let next_owner = self.package.definition_owner(*def_id)?;
+                    match &self.package.item(next_owner)?.kind {
+                        ItemKind::Const(_, init) => match &init.kind {
+                            H::Builtin(name) => Some(name.as_str()),
+                            _ => None,
+                        },
+                        _ => {
+                            current =
+                                declaration(self.package, &self.package_identities, next_owner);
+                            continue;
+                        }
+                    }
+                }
+                _ => return None,
+            };
+            let result = match callee_builtin {
+                Some("struct_field_type") => Some("struct_field_type"),
+                Some("variant_field_type") => Some("variant_field_type"),
+                Some("tuple_append_type") => Some("tuple_append_type"),
+                Some("list_length") => Some("list_length"),
+                Some("struct_field_names") => Some("struct_field_names"),
+                Some("record_field_names") => Some("record_field_names"),
+                Some("enum_variant_paths") => Some("enum_variant_paths"),
+                Some("enum_variant_field_names") => Some("enum_variant_field_names"),
+                Some("enum_variant_field_types") => Some("enum_variant_field_types"),
+                Some("comptime_integer_convert") => Some("comptime_integer_convert"),
+                _ => None,
+            };
+            if result.is_some() {
+                return result;
+            }
+            if let H::ResolvedDef { def_id, .. } = &callee.kind
+                && let Some(next_owner) = self.package.definition_owner(*def_id)
+                && !matches!(
+                    self.package.item(next_owner).map(|item| &item.kind),
+                    Some(ItemKind::Const(..))
+                )
+            {
+                current = declaration(self.package, &self.package_identities, next_owner);
+                continue;
+            }
+            return None;
+        }
+        None
     }
 }
 

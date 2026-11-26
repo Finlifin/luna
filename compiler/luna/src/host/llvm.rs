@@ -1673,10 +1673,23 @@ impl Emitter<'_> {
             | K::ReadPointer(_)
             | K::PointerAnonymousField { .. }
             | K::PointerField { .. }
+            | K::FieldPtr { .. }
             | K::WritePointer { .. }
             | K::AnonymousField { .. }
             | K::Field { .. }
+            | K::NamedField { .. }
             | K::Assign { .. } => self.inner_access(expr, depth),
+            K::ConstructStruct { fields } => self.construct_struct(fields, &expr.ty, depth),
+            K::ConstructEnum { variant, fields } => {
+                self.construct_enum(expr.source, variant, fields, &expr.ty, depth)
+            }
+            K::EnumVariantIndex(pointer) => self.enum_variant_index(pointer, &expr.ty, depth),
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            } => self.enum_variant_field_ptr(pointer, variant, field, &expr.ty, depth),
+            K::TupleAppend { tuple, element } => self.tuple_append(tuple, element, &expr.ty, depth),
             K::Break(_)
             | K::Continue(_)
             | K::Return(_)
@@ -1703,6 +1716,7 @@ impl Emitter<'_> {
             | K::TypeLayout { .. }
             | K::TypeKind { .. }
             | K::TypeNotSized { .. }
+            | K::TypeHasField { .. }
             | K::IntegerRepresentation(_)
             | K::TryIntegerConvert(_)
             | K::TakeBits(_)
@@ -1714,6 +1728,54 @@ impl Emitter<'_> {
             | K::BitConvert(_)
             | K::NewtypeConvert(_) => self.inner_conversions_and_bits(expr, depth),
             _ => self.inner_unimplemented(expr),
+        }
+    }
+
+    fn resolve_field_name(&self, mut field: &Expr) -> Result<String, String> {
+        loop {
+            match &field.kind {
+                K::TypeValue(Term::Symbol(name)) | K::ComptimeValue(Term::Symbol(name)) => {
+                    return Ok(name.to_string());
+                }
+                K::Literal(nir::program::Literal::Symbol(name)) => return Ok(name.clone()),
+                K::Block {
+                    statements,
+                    result: Some(res),
+                }
+                | K::CallPreparation {
+                    statements,
+                    result: Some(res),
+                } if statements.is_empty() => field = res,
+                K::UnsafeScope(inner) | K::Snapshot(inner) => field = inner,
+                _ => return Err("host field access requires a resolved Symbol field name".into()),
+            }
+        }
+    }
+
+    fn resolve_named_field(&self, subject_ty: &Term, name: &str) -> Result<usize, String> {
+        match subject_ty {
+            Term::Record(fields) => fields
+                .iter()
+                .position(|(field_name, _)| field_name == name)
+                .ok_or_else(|| format!("host record has no field '{name}'")),
+            Term::Nominal { .. } => {
+                let instance = self
+                    .graph
+                    .nominals
+                    .iter()
+                    .find(|entry| entry.ty == *subject_ty)
+                    .ok_or_else(|| format!("host nominal layout missing for {subject_ty}"))?;
+                let iir::NominalDefinition::Struct(def) = &instance.definition else {
+                    return Err(format!("host type {subject_ty} is not a struct"));
+                };
+                def.fields
+                    .iter()
+                    .position(|(field_name, _)| field_name == name)
+                    .ok_or_else(|| format!("host struct has no field '{name}'"))
+            }
+            _ => Err(format!(
+                "host field lookup requires a struct or record, got {subject_ty}"
+            )),
         }
     }
 
@@ -2357,6 +2419,17 @@ impl Emitter<'_> {
                     self.project_pointer(pointer, *index, pointers::pointee(pointer_type)?)
                 }
             }
+            K::FieldPtr { pointer, field } => {
+                let pointee = pointers::pointee(&pointer.ty)?;
+                let name = self.resolve_field_name(field)?;
+                let index = self.resolve_named_field(pointee, &name)?;
+                let pointer = self.expr(pointer, depth)?;
+                if self.terminated {
+                    Ok(Value::unit())
+                } else {
+                    self.project_pointer(pointer, index, pointee)
+                }
+            }
             K::WritePointer { pointer, value } => {
                 let pointee_ty = pointers::pointee(&pointer.ty)?;
                 if let Some(chain) = self.resolve_bit_packed_pointer_chain(pointer, pointee_ty)? {
@@ -2436,6 +2509,15 @@ impl Emitter<'_> {
                     Ok(Value::unit())
                 } else {
                     self.record_field(&value, *index)
+                }
+            }
+            K::NamedField { value, name } => {
+                let index = self.resolve_named_field(&value.ty, name)?;
+                let value = self.expr(value, depth)?;
+                if self.terminated {
+                    Ok(Value::unit())
+                } else {
+                    self.record_field(&value, index)
                 }
             }
             K::Assign { place, value } => {
@@ -2976,6 +3058,17 @@ impl Emitter<'_> {
                 let result = nir::layout::evaluate_not_sized(&world, ty, self.fuel)
                     .map_err(|err| err.to_string())?
                     .ok_or("host type is_not_sized evaluation is unresolved")?;
+                Ok(Value {
+                    ty: Ty::Bool,
+                    text: if result { "true" } else { "false" }.into(),
+                })
+            }
+            K::TypeHasField { subject, field } => {
+                let K::TypeValue(ty) = &subject.kind else {
+                    return Err("host type predicate requires a resolved Type value".into());
+                };
+                let name = self.resolve_field_name(field)?;
+                let result = self.resolve_named_field(ty, &name).is_ok();
                 Ok(Value {
                     ty: Ty::Bool,
                     text: if result { "true" } else { "false" }.into(),

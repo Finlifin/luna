@@ -361,6 +361,16 @@ impl Checker<'_, '_> {
                         }
                         mentions |= ty_mentions;
                     }
+                    n::TypePredicate::HasField { subject, field } => {
+                        let (s_ok, s_mentions) =
+                            term_in_scope(subject, type_scope, required_steps, span)?;
+                        let (f_ok, f_mentions) =
+                            term_in_scope(field, type_scope, required_steps, span)?;
+                        if !s_ok || !f_ok {
+                            return Ok(false);
+                        }
+                        mentions |= s_mentions | f_mentions;
+                    }
                     n::TypePredicate::Trait(req) => {
                         let (subject_ok, subject_mentions) =
                             term_in_scope(&req.subject, type_scope, required_steps, span)?;

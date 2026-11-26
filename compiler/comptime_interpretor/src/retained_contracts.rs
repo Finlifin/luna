@@ -18,7 +18,12 @@ impl Interpreter<'_> {
         }
         match predicate {
             P::Kind(ty, kind) => return Ok(self.published_kind(ty, *kind).map(P::Bool)),
-            P::Bool(_) | P::Equal(..) | P::IntLe(..) | P::NotSized(_) | P::Trait(_) => {
+            P::Bool(_)
+            | P::Equal(..)
+            | P::IntLe(..)
+            | P::NotSized(_)
+            | P::HasField { .. }
+            | P::Trait(_) => {
                 return Ok(None);
             }
             P::Not(_) | P::And(_) | P::Or(_) => {}
@@ -40,7 +45,12 @@ impl Interpreter<'_> {
                         fold(vm, item);
                     }
                 }
-                P::Bool(_) | P::Equal(..) | P::IntLe(..) | P::NotSized(_) | P::Trait(_) => {}
+                P::Bool(_)
+                | P::Equal(..)
+                | P::IntLe(..)
+                | P::NotSized(_)
+                | P::HasField { .. }
+                | P::Trait(_) => {}
             }
         }
         let mut local = predicate.clone();
@@ -141,6 +151,48 @@ impl Interpreter<'_> {
                     }
                     Err(nir::LayoutError::ComptimeOnly(_)) => return Err(ErrorKind::Type),
                     Err(_) => Unknown,
+                }
+            }
+            P::HasField { subject, field } => {
+                self.charge_copy_work(None, |fuel| {
+                    nir::copy_budget::charge_type_substitution(subject, &[], &[], fuel)?;
+                    nir::copy_budget::charge_type_substitution(field, &[], &[], fuel)
+                })
+                .map_err(|error| error.kind)?;
+                match (subject, field) {
+                    (Term::Record(fields), Term::Symbol(name)) => {
+                        if fields.iter().any(|(label, _)| label == name.as_ref()) {
+                            Satisfied
+                        } else {
+                            Rejected
+                        }
+                    }
+                    (Term::Nominal { declaration, .. }, Term::Symbol(name)) => {
+                        if let Some(world) = self.declaration_world {
+                            if let Some(struct_def) =
+                                world.structs.iter().find(|s| s.declaration == *declaration)
+                            {
+                                if struct_def
+                                    .fields
+                                    .iter()
+                                    .any(|(label, _)| label == name.as_ref())
+                                {
+                                    Satisfied
+                                } else {
+                                    Rejected
+                                }
+                            } else {
+                                Unknown
+                            }
+                        } else {
+                            Unknown
+                        }
+                    }
+                    _ => match predicate.trivial_truth() {
+                        Some(true) => Satisfied,
+                        Some(false) => Rejected,
+                        None => Unknown,
+                    },
                 }
             }
             P::Trait(requirement) => {

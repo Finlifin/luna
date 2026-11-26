@@ -362,6 +362,9 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::ConstructStruct { fields: value }
+            | K::EnumVariantIndex(value)
             | K::BitSlice { value, .. }
             | K::BitAssign { value, .. }
             | K::Field { value, .. }

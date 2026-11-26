@@ -35,6 +35,10 @@ impl Context {
                 Input::Formula(Formula::HasHeadShape(query)) => {
                     pending.push(Input::Term(&query.ty))
                 }
+                Input::Formula(Formula::HasField(query)) => {
+                    pending.push(Input::Term(&query.field));
+                    pending.push(Input::Term(&query.ty));
+                }
                 Input::Formula(Formula::RowContains(query)) => {
                     pending.push(Input::Term(&query.row));
                     match &query.label {

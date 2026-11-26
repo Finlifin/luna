@@ -1,0 +1,33 @@
+use primitives.{str, u32};
+use protocols.implicit_passing.{CallDescription, Context};
+
+{-
+    Centralized compiler-intrinsic bindings for built-in `ImplicitPassing`
+    sources. Kept private to the `builtin` package so `builtin.Context` and
+    `builtin.CallDescription` expose no public probing helpers.
+-}
+const implicit_caller_op: comptime fn(Context) -> str = .implicit_caller'builtin;
+const implicit_module_op: comptime fn(Context) -> str = .implicit_module'builtin;
+const implicit_package_op: comptime fn(Context) -> str = .implicit_package'builtin;
+const implicit_file_op: comptime fn(CallDescription) -> str = .implicit_file'builtin;
+const implicit_line_op: comptime fn(CallDescription) -> u32 = .implicit_line'builtin;
+
+pub pure comptime fn implicit_caller(context: Context) -> str {
+    implicit_caller_op(context)
+}
+
+pub pure comptime fn implicit_module(context: Context) -> str {
+    implicit_module_op(context)
+}
+
+pub pure comptime fn implicit_package(context: Context) -> str {
+    implicit_package_op(context)
+}
+
+pub pure comptime fn implicit_file(calling: CallDescription) -> str {
+    implicit_file_op(calling)
+}
+
+pub pure comptime fn implicit_line(calling: CallDescription) -> u32 {
+    implicit_line_op(calling)
+}

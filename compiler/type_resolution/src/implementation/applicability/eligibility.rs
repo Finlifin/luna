@@ -24,6 +24,30 @@ pub(super) fn subject_view(
     budget: Budget,
     head_budget: &mut Budget,
 ) -> Result<(Term, Option<Proof>), TypeAssessment> {
+    if let Term::FieldType { subject, field } = subject
+        && let Term::Symbol(name) = field.as_ref()
+        && let Some(resolved) = context.resolve_struct_field_type(subject, name.as_ref())
+    {
+        return subject_view(context, &resolved, budget, head_budget);
+    }
+    if let Term::TupleAppend { tuple, element } = subject {
+        let (resolved_tuple, _) = subject_view(context, tuple, budget, head_budget)?;
+        match resolved_tuple {
+            Term::Primitive(nir::Primitive::Void) | Term::Unit => {
+                return subject_view(
+                    context,
+                    &Term::Tuple(vec![(**element).clone()]),
+                    budget,
+                    head_budget,
+                );
+            }
+            Term::Tuple(mut items) => {
+                items.push((**element).clone());
+                return subject_view(context, &Term::Tuple(items), budget, head_budget);
+            }
+            _ => {}
+        }
+    }
     if context.is_tuple_type(subject)
         || context.is_list_type(subject)
         || !matches!(
@@ -33,6 +57,9 @@ pub(super) fn subject_view(
                 | Term::AssociatedType { .. }
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
         )
     {
         return Ok((subject.clone(), None));

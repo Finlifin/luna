@@ -954,6 +954,9 @@ fn has_open_comptime_call_input(term: &nir::ComptimeCall) -> bool {
             | Term::AssociatedTypeCall(_)
             | Term::ComptimeCall(_)
             | Term::DeferredErrorResult { .. }
+            | Term::FieldType { .. }
+            | Term::VariantFieldType { .. }
+            | Term::TupleAppend { .. }
             | Term::RuntimeField { .. } => return true,
             _ => {
                 let _ = node.visit_children(|child| {
@@ -1091,6 +1094,40 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                 self.normalize(errors, depth + 1)?,
                 self.normalize(result, depth + 1)?,
             ),
+            Term::FieldType { subject, field } => {
+                let subject = self.normalize(subject, depth + 1)?;
+                let field = self.normalize(field, depth + 1)?;
+                let candidate = Term::field_type(subject, field);
+                if let Term::FieldType {
+                    ref subject,
+                    ref field,
+                } = candidate
+                    && let Term::Symbol(name) = field.as_ref()
+                    && let Some(resolved) = self
+                        .environment
+                        .world()
+                        .context
+                        .resolve_struct_field_type(subject, name.as_ref())
+                {
+                    return self.normalize(&resolved, depth + 1);
+                }
+                candidate
+            }
+            Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                let subject = self.normalize(subject, depth + 1)?;
+                let variant = self.normalize(variant, depth + 1)?;
+                let field = self.normalize(field, depth + 1)?;
+                Term::variant_field_type(subject, variant, field)
+            }
+            Term::TupleAppend { tuple, element } => {
+                let tuple = self.normalize(tuple, depth + 1)?;
+                let element = self.normalize(element, depth + 1)?;
+                Term::tuple_append(tuple, element)
+            }
             Term::ComptimeCall(call) => {
                 let key_call = nir::ComptimeCall {
                     declaration: call.declaration,

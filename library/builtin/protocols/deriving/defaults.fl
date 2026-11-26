@@ -1,0 +1,32 @@
+use meta;
+use primitives.{Any, Symbol, Type};
+use protocols.traits.Default;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Default
+where
+    requires Type.predicates.is_struct(Self),
+{
+    fn default() -> Self {
+        const CODE: < |- Any > = do {
+            const NAMES = meta.reflection.struct_field_names(Self);
+            var acc: < |- Any > = '( () );
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    const fty = meta.structs.FieldType(Self, sym);
+                    let prev: < |- Any > = acc;
+                    acc = '(
+                        meta.structs.tuple_append(
+                            ~<prev>,
+                            fty.as(Default).default(),
+                        )
+                    );
+                }
+            }
+            let final_acc: < |- Any > = acc;
+            '( meta.structs.construct_struct(Self, ~<final_acc>) )
+        };
+        ~<CODE>
+    }
+}

@@ -984,6 +984,9 @@ where
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
                 | Term::Hole { .. }
         ) {
             let (resolved, used) = type_context.structural_view_metered(
@@ -1020,6 +1023,9 @@ where
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
                 | Term::Hole { .. }
         ) {
             let (resolved, used) = type_context.structural_view_metered(
@@ -1438,6 +1444,9 @@ impl Walker<'_> {
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
                 | Term::Hole { .. }
         ) {
             return Ok(None);
@@ -1507,6 +1516,9 @@ impl Walker<'_> {
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
                 | Term::Hole { .. }
         ) {
             return Ok(ty.clone());
@@ -6755,7 +6767,19 @@ impl Walker<'_> {
             | K::TypeEqual(..)
             | K::TypeKind { .. }
             | K::TypeNotSized { .. }
-            | K::TypeLayout { .. } => self.formation_expression(expr, state, depth),
+            | K::TypeLayout { .. }
+            | K::TypeHasField { .. }
+            | K::TypeFieldType { .. }
+            | K::StructFieldType { .. }
+            | K::FieldPtr { .. }
+            | K::FieldValue { .. }
+            | K::ComptimeFieldEntry { .. }
+            | K::NamedField { .. }
+            | K::ConstructStruct { .. }
+            | K::ConstructEnum { .. }
+            | K::EnumVariantIndex(_)
+            | K::EnumVariantFieldPtr { .. }
+            | K::TupleAppend { .. } => self.formation_expression(expr, state, depth),
             K::ErrorConvert { .. }
             | K::OptionalAbsent
             | K::OptionalPresent(_)
@@ -8069,6 +8093,9 @@ fn exportable_postcondition(
             | K::TypeKind { operand: a, .. }
             | K::TypeNotSized { operand: a }
             | K::TypeLayout { operand: a, .. }
+            | K::NamedField { value: a, .. }
+            | K::ConstructStruct { fields: a }
+            | K::EnumVariantIndex(a)
             | K::BitConvert(a)
             | K::UnsafeScope(a)
             | K::Discard(a) => work.push(a),

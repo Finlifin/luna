@@ -87,6 +87,7 @@ pub(super) fn charge_world_tables(
         safety_contracts: _,
         statics: _,
         global_runtime_deliveries,
+        reflection_spans: _,
     } = package;
     let cost = [
         volatile_storage.entry_count(),

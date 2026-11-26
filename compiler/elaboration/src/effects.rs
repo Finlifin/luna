@@ -332,6 +332,23 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             }
             Ok(())
         }
+        Term::FieldType { subject, field } => {
+            charge(subject, fuel, depth - 1)?;
+            charge(field, fuel, depth - 1)
+        }
+        Term::VariantFieldType {
+            subject,
+            variant,
+            field,
+        } => {
+            charge(subject, fuel, depth - 1)?;
+            charge(variant, fuel, depth - 1)?;
+            charge(field, fuel, depth - 1)
+        }
+        Term::TupleAppend { tuple, element } => {
+            charge(tuple, fuel, depth - 1)?;
+            charge(element, fuel, depth - 1)
+        }
     }
 }
 

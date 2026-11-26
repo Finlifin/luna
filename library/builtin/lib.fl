@@ -7,7 +7,7 @@ use numeric.{comparison, conversions, literals, math_intrinsics}
 use mem_impl.{slice, slice_ops};
 use protocols.capabilities.{effects as capability_effects, errors as capability_errors}
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
-use protocols.{conversion, hash as hash_protocol, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
+use protocols.{conversion, deriving as deriving_impl, hash as hash_protocol, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
 use range;
 use types.{equality, hashing, option, ordering, result, tuple}
 
@@ -65,6 +65,30 @@ pub use patterns.{
 }
 pub use primitives.*;
 pub use protocols.staging.{Splice, splice_auto};
+
+pub mod deriving {
+    pub mod clone {
+        pub use ..deriving_impl.clone.*;
+    }
+    pub mod copy {
+        pub use ..deriving_impl.copy.*;
+    }
+    pub mod debug {
+        pub use ..deriving_impl.debug.*;
+    }
+    pub mod defaults {
+        pub use ..deriving_impl.defaults.*;
+    }
+    pub mod eq {
+        pub use ..deriving_impl.eq.*;
+    }
+    pub mod hash {
+        pub use ..deriving_impl.hash.*;
+    }
+    pub mod ord {
+        pub use ..deriving_impl.ord.*;
+    }
+}
 pub use result.ErrorResultOps;
 pub use slice.Slice;
 pub use text_impl.bytes.TextBytes;

@@ -145,6 +145,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             implicit_passing_protocol: selectors.implicit_passing.map(str::to_owned),
             call_context_type: selectors.call_context.map(str::to_owned),
             call_description_type: selectors.call_description.map(str::to_owned),
+            source_span_type: selectors.source_span.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
             compound_arithmetic_protocols: selectors
                 .compound_arithmetic

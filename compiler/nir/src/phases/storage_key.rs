@@ -141,6 +141,9 @@ fn term_rank(term: &Term) -> u8 {
         Term::AssociatedTypeCall(_) => 53,
         Term::ComptimeCall(_) => 54,
         Term::DeferredErrorResult { .. } => 55,
+        Term::FieldType { .. } => 56,
+        Term::VariantFieldType { .. } => 57,
+        Term::TupleAppend { .. } => 58,
     }
 }
 
@@ -216,6 +219,40 @@ pub(super) fn cmp_term(a: &Term, b: &Term) -> Ordering {
                 result: br,
             },
         ) => cmp_term(ae, be).then_with(|| cmp_term(ar, br)),
+        (
+            Term::FieldType {
+                subject: asub,
+                field: af,
+            },
+            Term::FieldType {
+                subject: bsub,
+                field: bf,
+            },
+        ) => cmp_term(asub, bsub).then_with(|| cmp_term(af, bf)),
+        (
+            Term::VariantFieldType {
+                subject: asub,
+                variant: av,
+                field: af,
+            },
+            Term::VariantFieldType {
+                subject: bsub,
+                variant: bv,
+                field: bf,
+            },
+        ) => cmp_term(asub, bsub)
+            .then_with(|| cmp_term(av, bv))
+            .then_with(|| cmp_term(af, bf)),
+        (
+            Term::TupleAppend {
+                tuple: at,
+                element: ae,
+            },
+            Term::TupleAppend {
+                tuple: bt,
+                element: be,
+            },
+        ) => cmp_term(at, bt).then_with(|| cmp_term(ae, be)),
         (
             Term::Nominal {
                 declaration: ad,

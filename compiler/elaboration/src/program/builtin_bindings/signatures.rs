@@ -5,6 +5,9 @@ use super::*;
 pub(super) fn callable(
     name: &str,
     list_head: Option<DeclarationId>,
+    call_context: Option<DeclarationId>,
+    call_description: Option<DeclarationId>,
+    source_span: Option<DeclarationId>,
 ) -> Result<Option<Term>, &'static str> {
     if let Some(query) = text_query(name) {
         let signature = match query {
@@ -217,6 +220,42 @@ pub(super) fn callable(
         "reflect_callable" => (vec![p(P::Type)], p(P::Object)),
         "type_id" => (vec![p(P::Type)], p(P::U128)),
         "struct_field_types" | "record_field_types" => (vec![p(P::Type)], list(p(P::Type))?),
+        "struct_field_spans" | "record_field_spans" | "enum_variant_spans" => {
+            let Some(span_decl) = source_span else {
+                return Ok(None);
+            };
+            (
+                vec![p(P::Type)],
+                list(Term::Nominal {
+                    declaration: span_decl,
+                    arguments: vec![],
+                })?,
+            )
+        }
+        "declaration_span" => {
+            let Some(span_decl) = source_span else {
+                return Ok(None);
+            };
+            (
+                vec![p(P::Type)],
+                Term::Nominal {
+                    declaration: span_decl,
+                    arguments: vec![],
+                },
+            )
+        }
+        "enum_variant_field_spans" => {
+            let Some(span_decl) = source_span else {
+                return Ok(None);
+            };
+            (
+                vec![p(P::Type)],
+                list(list(Term::Nominal {
+                    declaration: span_decl,
+                    arguments: vec![],
+                })?)?,
+            )
+        }
         "struct_field_names"
         | "record_field_names"
         | "enum_variant_shapes"
@@ -229,6 +268,57 @@ pub(super) fn callable(
         "enum_bit_base_type" => (vec![p(P::Type)], Term::Optional(Box::new(p(P::Type)))),
         "enum_bit_masks" | "enum_bit_values" => (vec![p(P::Type)], list(p(P::Integer))?),
         "enum_bit_offsets" => (vec![p(P::Type)], list(list(p(P::Integer))?)?),
+        "implicit_caller" | "implicit_module" | "implicit_package" => {
+            let Some(context_decl) = call_context else {
+                return Ok(None);
+            };
+            (
+                vec![Term::Nominal {
+                    declaration: context_decl,
+                    arguments: vec![],
+                }],
+                p(P::Str),
+            )
+        }
+        "implicit_file" => {
+            let Some(desc_decl) = call_description else {
+                return Ok(None);
+            };
+            (
+                vec![Term::Nominal {
+                    declaration: desc_decl,
+                    arguments: vec![],
+                }],
+                p(P::Str),
+            )
+        }
+        "implicit_line" => {
+            let Some(desc_decl) = call_description else {
+                return Ok(None);
+            };
+            (
+                vec![Term::Nominal {
+                    declaration: desc_decl,
+                    arguments: vec![],
+                }],
+                p(P::U32),
+            )
+        }
+        "implicit_src" => {
+            let (Some(desc_decl), Some(span_decl)) = (call_description, source_span) else {
+                return Ok(None);
+            };
+            (
+                vec![Term::Nominal {
+                    declaration: desc_decl,
+                    arguments: vec![],
+                }],
+                Term::Nominal {
+                    declaration: span_decl,
+                    arguments: vec![],
+                },
+            )
+        }
         _ => return Ok(None),
     };
     Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {

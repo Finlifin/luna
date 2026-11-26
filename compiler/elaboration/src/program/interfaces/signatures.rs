@@ -291,6 +291,10 @@ fn lift(formula: &Formula, fuel: &mut usize, depth: usize) -> Option<Formula> {
         }),
         Formula::Kind(query) => Formula::kind(term(&query.ty)?, query.kind),
         Formula::NotSized(query) => Formula::not_sized(term(&query.ty)?),
+        Formula::HasField(query) => Formula::HasField(crate::ptc::HasFieldQuery {
+            ty: term(&query.ty)?,
+            field: term(&query.field)?,
+        }),
         Formula::HasHeadShape(query) => Formula::has_head_shape(term(&query.ty)?, query.head),
         Formula::RowContains(query) => {
             let label = match &query.label {

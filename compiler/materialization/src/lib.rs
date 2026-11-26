@@ -1286,9 +1286,11 @@ impl Builder<'_, '_> {
         }
         if let Some(identity) = self.world.runtime_function_identity(id) {
             if self.instances.is_some() {
-                return Err(
-                    "runtime function identity has no executable definition for IIR".into(),
-                );
+                return Err(format!(
+                    "runtime function identity {id:?} ({}) staged={} has no executable definition for IIR",
+                    identity.signature,
+                    self.staged_functions.contains_key(&(id, arguments.clone())),
+                ));
             }
             let domains = self
                 .world
@@ -1959,6 +1961,12 @@ impl Builder<'_, '_> {
                 crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
                 self.queue.push_back(Task::Type(ty.clone()));
             }
+            n::TypePredicate::HasField { subject, field } => {
+                crate::associated::charge_projection_copy(subject, &mut self.fuel)?;
+                crate::associated::charge_projection_copy(field, &mut self.fuel)?;
+                self.queue.push_back(Task::Type(subject.clone()));
+                self.queue.push_back(Task::Type(field.clone()));
+            }
             n::TypePredicate::Not(inner) => self.predicate_dependencies(inner, depth + 1)?,
             n::TypePredicate::And(items) | n::TypePredicate::Or(items) => {
                 for item in items {
@@ -2116,6 +2124,22 @@ impl Builder<'_, '_> {
                 let ty = self.normalized_type(ty)?;
                 Ok(Some(n::TypePredicate::NotSized(ty)))
             }
+            K::TypeHasField { subject, field } => {
+                let K::TypeValue(subject) = &subject.kind else {
+                    return Ok(None);
+                };
+                let field = match &field.kind {
+                    K::TypeValue(ty) => self.normalized_type(ty)?,
+                    K::ComptimeValue(val) if val.sort() == nir::Sort::Type => {
+                        self.normalized_type(val)?
+                    }
+                    K::ComptimeValue(val) => val.clone(),
+                    K::Literal(n::Literal::Symbol(sym)) => Term::Symbol(sym.clone().into()),
+                    _ => return Ok(None),
+                };
+                let subject = self.normalized_type(subject)?;
+                Ok(Some(n::TypePredicate::HasField { subject, field }))
+            }
             _ => Ok(None),
         }
     }
@@ -2142,7 +2166,10 @@ impl Builder<'_, '_> {
                 Some(false) => self.eval_static_if_condition(right, depth + 1),
                 None => Ok(None),
             },
-            K::TypeEqual(..) | K::TypeKind { .. } | K::TypeNotSized { .. } => {
+            K::TypeEqual(..)
+            | K::TypeKind { .. }
+            | K::TypeNotSized { .. }
+            | K::TypeHasField { .. } => {
                 let Some(predicate) = self.static_type_predicate_expr(condition, depth + 1)? else {
                     return Ok(None);
                 };
@@ -2446,6 +2473,7 @@ impl Builder<'_, '_> {
                 )?;
             self.register_quote_layouts(generated)?;
             dead_tails::prune_type_preparations(expression, &mut self.fuel)?;
+            staged::forward_symbol_aliases(expression, &mut self.fuel)?;
         }
         Ok(())
     }
@@ -3787,6 +3815,14 @@ impl Builder<'_, '_> {
             P::IntLe(a, b) => P::IntLe(a.clone(), b.clone()),
             P::Kind(ty, kind) => P::Kind(self.normalized_type(ty)?, *kind),
             P::NotSized(ty) => P::NotSized(self.normalized_type(ty)?),
+            P::HasField { subject, field } => P::HasField {
+                subject: self.normalized_type(subject)?,
+                field: if field.sort() == nir::Sort::Type {
+                    self.normalized_type(field)?
+                } else {
+                    field.clone()
+                },
+            },
             P::Not(inner) => P::Not(Box::new(self.normalized_predicate(inner, depth + 1)?)),
             P::And(items) | P::Or(items) => {
                 if items.len() > self.fuel {
@@ -4526,6 +4562,35 @@ impl Builder<'_, '_> {
                 children.push((**errors).clone());
                 children.push((**result).clone());
             }
+            Term::FieldType { subject, field } => {
+                let normalized = self.dispatch_type_view(&ty)?;
+                if normalized != ty {
+                    children.push(normalized);
+                }
+                children.push((**subject).clone());
+                children.push((**field).clone());
+            }
+            Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                let normalized = self.dispatch_type_view(&ty)?;
+                if normalized != ty {
+                    children.push(normalized);
+                }
+                children.push((**subject).clone());
+                children.push((**variant).clone());
+                children.push((**field).clone());
+            }
+            Term::TupleAppend { tuple, element } => {
+                let normalized = self.dispatch_type_view(&ty)?;
+                if normalized != ty {
+                    children.push(normalized);
+                }
+                children.push((**tuple).clone());
+                children.push((**element).clone());
+            }
             Term::ErrorResult { errors, result } => {
                 children.extend(errors.iter().cloned());
                 children.push((**result).clone());
@@ -4662,6 +4727,7 @@ impl Builder<'_, '_> {
                 | K::ObjectEdit { subject: value, .. }
                 | K::StructFieldNames(value)
                 | K::RecordFieldNames(value)
+                | K::ImplicitQuery { operand: value, .. }
                 | K::BitVecType(value)
                 | K::IntegerNegate(value)
                 | K::FloatNegate(value)
@@ -4679,6 +4745,16 @@ impl Builder<'_, '_> {
                 | K::TypeKind { operand: value, .. }
                 | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
+                | K::NamedField { value, .. }
+                | K::ConstructStruct { fields: value }
+                | K::EnumVariantIndex(value)
+                | K::StructFieldSpans(value)
+                | K::RecordFieldSpans(value)
+                | K::DeclarationSpan(value)
+                | K::EnumVariantSpans(value)
+                | K::EnumVariantFieldSpans(value)
+                | K::ComptimeEnumVariantIndex(value)
+                | K::ComptimeEnumVariantFieldValues(value)
                 | K::Not(value)
                 | K::Loop { body: value, .. } => pending.push((value, depth + 1)),
                 K::WritePointer {
@@ -4702,6 +4778,31 @@ impl Builder<'_, '_> {
                 | K::TemplateEqual(a, b)
                 | K::ScalarEqual(a, b)
                 | K::TypeEqual(a, b)
+                | K::TypeHasField {
+                    subject: a,
+                    field: b,
+                }
+                | K::TypeFieldType {
+                    subject: a,
+                    field: b,
+                }
+                | K::StructFieldType {
+                    subject: a,
+                    field: b,
+                }
+                | K::FieldPtr {
+                    pointer: a,
+                    field: b,
+                }
+                | K::FieldValue { value: a, field: b }
+                | K::ConstructEnum {
+                    variant: a,
+                    fields: b,
+                }
+                | K::TupleAppend {
+                    tuple: a,
+                    element: b,
+                }
                 | K::ListConcat(a, b)
                 | K::TypeListIndex(a, b)
                 | K::BitEqual(a, b)
@@ -5254,6 +5355,7 @@ impl Builder<'_, '_> {
             | K::ObjectEdit { subject: value, .. }
             | K::StructFieldNames(value)
             | K::RecordFieldNames(value)
+            | K::ImplicitQuery { operand: value, .. }
             | K::BitVecType(value)
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
@@ -5271,9 +5373,29 @@ impl Builder<'_, '_> {
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::ConstructStruct { fields: value }
+            | K::EnumVariantIndex(value)
+            | K::StructFieldSpans(value)
+            | K::RecordFieldSpans(value)
+            | K::DeclarationSpan(value)
+            | K::EnumVariantSpans(value)
+            | K::EnumVariantFieldSpans(value)
+            | K::ComptimeEnumVariantIndex(value)
+            | K::ComptimeEnumVariantFieldValues(value)
             | K::Not(value)
             | K::Loop { body: value, .. } => self.expr(value, depth + 1, comptime)?,
-            K::BitWindow { value, start, end } => {
+            K::BitWindow { value, start, end }
+            | K::EnumVariantFieldPtr {
+                pointer: value,
+                variant: start,
+                field: end,
+            }
+            | K::ComptimeFieldEntry {
+                value,
+                field: start,
+                ty: end,
+            } => {
                 self.expr(value, depth + 1, comptime)?;
                 self.expr(start, depth + 1, comptime)?;
                 self.expr(end, depth + 1, comptime)?;
@@ -5377,6 +5499,31 @@ impl Builder<'_, '_> {
             | K::TemplateEqual(a, b)
             | K::ScalarEqual(a, b)
             | K::TypeEqual(a, b)
+            | K::TypeHasField {
+                subject: a,
+                field: b,
+            }
+            | K::TypeFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::StructFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::FieldPtr {
+                pointer: a,
+                field: b,
+            }
+            | K::FieldValue { value: a, field: b }
+            | K::ConstructEnum {
+                variant: a,
+                fields: b,
+            }
+            | K::TupleAppend {
+                tuple: a,
+                element: b,
+            }
             | K::ListConcat(a, b)
             | K::TypeListIndex(a, b)
             | K::BitEqual(a, b)

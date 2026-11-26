@@ -64,6 +64,16 @@ impl GeneratedFunctions {
         Some(self.reservations[slot].1.declaration)
     }
 
+    pub(super) fn instance_owner(&self, id: DeclarationId) -> Option<OwnerId> {
+        (id.package == u64::MAX - 1).then(|| {
+            self.reservations
+                .iter()
+                .rev()
+                .find(|(_, inputs)| inputs.declaration == id)
+                .map(|(key, _)| key.owner)
+        })?
+    }
+
     pub(super) fn reserve(
         &mut self,
         key: InstanceKey,

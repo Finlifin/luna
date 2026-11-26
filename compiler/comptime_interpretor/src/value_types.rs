@@ -235,6 +235,9 @@ impl Interpreter<'_> {
                     | Term::AssociatedTypeCall(_)
                     | Term::ComptimeCall(_)
                     | Term::DeferredErrorResult { .. }
+                    | Term::FieldType { .. }
+                    | Term::VariantFieldType { .. }
+                    | Term::TupleAppend { .. }
             )
             && !matches!(value, Value::AbstractValue { .. })
         {
@@ -321,6 +324,119 @@ impl Interpreter<'_> {
                 None => Err(ErrorKind::Type),
             }
         })
+    }
+
+    pub(super) fn resolve_projected_shape_type(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, ErrorKind> {
+        let index_of = |term: &Term| -> Option<usize> {
+            match term {
+                Term::Integer(int) => int.to_u128().ok().and_then(|v| usize::try_from(v).ok()),
+                Term::BitVec(bv) if bv.width() <= 64 => {
+                    let w0 = bv.words().first().copied().unwrap_or(0) as u64;
+                    let w1 = bv.words().get(1).copied().unwrap_or(0) as u64;
+                    usize::try_from(((w1 as u128) << 32) | (w0 as u128)).ok()
+                }
+                _ => None,
+            }
+        };
+        let admission_err = |err: nir::NominalAdmissionError| match err {
+            nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+            nir::NominalAdmissionError::Invalid(_) => ErrorKind::UnmaterializedDispatch,
+        };
+        match ty {
+            Term::FieldType { subject, field } => {
+                if let Term::Symbol(name) = field.as_ref() {
+                    if let Term::Record(fields) = subject.as_ref()
+                        && let Some((_, field_ty)) =
+                            fields.iter().find(|(n, _)| n.as_str() == name.as_ref())
+                    {
+                        nir::copy_budget::charge_type_substitution(field_ty, &[], &[], fuel)
+                            .map_err(|err| match err {
+                                nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                    ErrorKind::StepsExhausted
+                                }
+                                nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                    ErrorKind::DepthExhausted
+                                }
+                            })?;
+                        return Ok(field_ty.clone());
+                    }
+                    if let Term::Nominal {
+                        declaration,
+                        arguments,
+                    } = subject.as_ref()
+                        && let Some(def) = self.structs.get(declaration)
+                        && let Some((_, raw_field_ty)) =
+                            def.fields.iter().find(|(n, _)| n.as_str() == name.as_ref())
+                    {
+                        let mut instantiated = nir::normal_forms::instantiate_value_fields_checked(
+                            &def.type_parameters,
+                            &def.parameter_types,
+                            arguments,
+                            std::iter::once(raw_field_ty),
+                            fuel,
+                        )
+                        .map_err(admission_err)?;
+                        if let Some(field_ty) = instantiated.pop() {
+                            return Ok(field_ty);
+                        }
+                    }
+                }
+                Ok(ty.clone())
+            }
+            Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                if let Term::Nominal {
+                    declaration,
+                    arguments,
+                } = subject.as_ref()
+                    && let Some(v_idx) = index_of(variant)
+                    && let Some(f_idx) = index_of(field)
+                    && let Some(def) = self.enums.get(declaration)
+                    && let Some(variant_def) = def.variants.get(v_idx)
+                    && let Some(raw_field_ty) = variant_def.fields.get(f_idx)
+                {
+                    let mut instantiated = nir::normal_forms::instantiate_value_fields_checked(
+                        &def.type_parameters,
+                        &def.parameter_types,
+                        arguments,
+                        std::iter::once(raw_field_ty),
+                        fuel,
+                    )
+                    .map_err(admission_err)?;
+                    if let Some(field_ty) = instantiated.pop() {
+                        return Ok(field_ty);
+                    }
+                }
+                Ok(ty.clone())
+            }
+            Term::TupleAppend { tuple, element } => {
+                if let Term::Tuple(items) = tuple.as_ref() {
+                    let mut next = items.clone();
+                    next.push((**element).clone());
+                    nir::copy_budget::charge_type_substitution(
+                        &Term::Tuple(next.clone()),
+                        &[],
+                        &[],
+                        fuel,
+                    )
+                    .map_err(|err| match err {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                    })?;
+                    return Ok(Term::Tuple(next));
+                }
+                Ok(ty.clone())
+            }
+            _ => Ok(ty.clone()),
+        }
     }
 
     fn has_type_at(
@@ -485,10 +601,23 @@ impl Interpreter<'_> {
                 | Term::AssociatedTypeCall(_)
                 | Term::ComptimeCall(_)
                 | Term::DeferredErrorResult { .. }
+                | Term::FieldType { .. }
+                | Term::VariantFieldType { .. }
+                | Term::TupleAppend { .. }
         ) {
             return checks
-                .observe(|fuel| selected_types::view(ty, &self.associated_values, fuel))
-                .is_some_and(|ty| self.has_type_at(value, &ty, depth + 1, checks));
+                .observe(|fuel| {
+                    let viewed = selected_types::view(ty, &self.associated_values, fuel)?;
+                    self.resolve_projected_shape_type(&viewed, fuel)
+                })
+                .is_some_and(|resolved| {
+                    if resolved == *ty {
+                        checks.failure = Some(ErrorKind::UnmaterializedDispatch);
+                        false
+                    } else {
+                        self.has_type_at(value, &resolved, depth + 1, checks)
+                    }
+                });
         }
         if matches!(ty, Term::Nominal { .. }) && !self.associated_values.is_empty() {
             let Some(selected) =

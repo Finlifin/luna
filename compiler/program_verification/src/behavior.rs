@@ -750,7 +750,9 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     }
                     cursor = inner;
                 }
-                K::PointerAnonymousField { pointer: inner, .. } => cursor = inner,
+                K::PointerAnonymousField { pointer: inner, .. }
+                | K::FieldPtr { pointer: inner, .. }
+                | K::EnumVariantFieldPtr { pointer: inner, .. } => cursor = inner,
                 _ => break,
             }
         }
@@ -978,8 +980,29 @@ impl<'a, 'b> Analyzer<'a, 'b> {
 
             K::PointerField { pointer, .. }
             | K::PointerAnonymousField { pointer, .. }
+            | K::FieldPtr { pointer, .. }
             | K::NewtypeConvert(pointer)
             | K::UnsafeScope(pointer) => self.visit_expr(pointer, next),
+
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            } => {
+                let _ = self.visit_expr(variant, next)?;
+                let _ = self.visit_expr(field, next)?;
+                self.visit_expr(pointer, next)
+            }
+
+            K::EnumVariantIndex(pointer) => {
+                let origin = self.visit_expr(pointer, next)?;
+                if self.pointer_access_is_volatile(pointer, &pointer.ty) {
+                    self.mark_volatile(Some(&origin));
+                } else {
+                    self.mark_read(&origin);
+                }
+                Some(PtrOrigin::default())
+            }
 
             K::Field {
                 value: pointer,
@@ -999,7 +1022,20 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                 self.visit_expr(pointer, next)
             }
 
-            K::AnonymousField { value: pointer, .. } => self.visit_expr(pointer, next),
+            K::AnonymousField { value: pointer, .. }
+            | K::NamedField { value: pointer, .. }
+            | K::ConstructStruct { fields: pointer } => self.visit_expr(pointer, next),
+
+            K::ConstructEnum { variant, fields } => {
+                let _ = self.visit_expr(variant, next)?;
+                self.visit_expr(fields, next)
+            }
+
+            K::TupleAppend { tuple, element } => {
+                let mut combined = self.visit_expr(tuple, next)?;
+                combined.join(&self.visit_expr(element, next)?);
+                Some(combined)
+            }
 
             K::ReadPointer(pointer) => {
                 let origin = self.visit_expr(pointer, next)?;

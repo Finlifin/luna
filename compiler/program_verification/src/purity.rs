@@ -3440,6 +3440,46 @@ impl<'a> Analysis<'a> {
             K::TypeLayout { operand, .. } => {
                 matches!(operand.kind, K::TypeValue(_)) && self.copy_type(&value.ty)
             }
+            K::TypeHasField { subject, field }
+            | K::TypeFieldType { subject, field }
+            | K::StructFieldType { subject, field } => {
+                matches!(subject.kind, K::TypeValue(_))
+                    && self.expression(field, private, returns, depth + 1)
+                    && self.copy_type(&value.ty)
+            }
+            K::FieldPtr { pointer, field } => {
+                self.expression(pointer, private, returns, depth + 1)
+                    && self.expression(field, private, returns, depth + 1)
+            }
+            K::EnumVariantIndex(pointer) => {
+                self.expression(pointer, private, returns, depth + 1) && self.copy_type(&value.ty)
+            }
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            }
+            | K::ComptimeFieldEntry {
+                value: pointer,
+                field: variant,
+                ty: field,
+            } => {
+                self.expression(pointer, private, returns, depth + 1)
+                    && self.expression(variant, private, returns, depth + 1)
+                    && self.expression(field, private, returns, depth + 1)
+            }
+            K::ConstructStruct { fields } => self.expression(fields, private, returns, depth + 1),
+            K::ConstructEnum { variant, fields } => {
+                self.expression(variant, private, returns, depth + 1)
+                    && self.expression(fields, private, returns, depth + 1)
+            }
+            K::TupleAppend { tuple, element } => {
+                self.expression(tuple, private, returns, depth + 1)
+                    && self.expression(element, private, returns, depth + 1)
+            }
+            K::NamedField { value: inner, .. } => {
+                self.expression(inner, private, returns, depth + 1) && self.copy_type(&value.ty)
+            }
             K::TextQuery { subject, query } => {
                 // This primitive consumes an immutable text observation and
                 // returns scalar data; it does not copy arbitrary input owners.

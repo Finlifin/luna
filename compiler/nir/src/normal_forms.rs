@@ -411,7 +411,10 @@ pub fn supported_input_type_in_scope(
             Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
             | Term::ComptimeCall(_)
-            | Term::DeferredErrorResult { .. } => {
+            | Term::DeferredErrorResult { .. }
+            | Term::FieldType { .. }
+            | Term::VariantFieldType { .. }
+            | Term::TupleAppend { .. } => {
                 // Declaration-side projections are symbolic domains, just as
                 // a prior Type input is. Selection must resolve the actual
                 // value representation before admitting a completed input.

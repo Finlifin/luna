@@ -1,0 +1,15 @@
+use bindings;
+use definitions.enums;
+
+{- Type-safe enum variant inspection, field projection, and structural construction. -}
+pub use bindings.{
+    VariantFieldType,
+    comptime_construct_enum,
+    comptime_enum_variant_field_values,
+    comptime_enum_variant_index,
+    construct_enum,
+    enum_variant_field_ptr,
+    enum_variant_index,
+    to_usize,
+};
+pub use enums.EnumBuilder;

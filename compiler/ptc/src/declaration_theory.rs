@@ -9,6 +9,12 @@ use std::{
 /// A head can carry identity authority before its declaration category is known.
 pub type NominalConstructors = BTreeMap<DeclarationId, Option<nir::NominalKind>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructFieldSummary {
+    pub binders: Vec<nir::DeclarationParameter>,
+    pub fields: Vec<(String, nir::Term)>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclarationTheory {
     pub(super) constructors: ConstructorContracts,
@@ -17,6 +23,8 @@ pub struct DeclarationTheory {
     pub(super) list_inference_heads: Arc<BTreeSet<DeclarationId>>,
     /// Nullary nominal field summaries awaiting dependent sized-nominal promotion.
     pending_sized_nominals: Arc<Vec<(DeclarationId, Vec<nir::Term>)>>,
+    /// Checked struct field summaries for `has_field` and `FieldType`.
+    pub struct_fields: Arc<BTreeMap<DeclarationId, StructFieldSummary>>,
 }
 
 /// Constructor rules used by proof search and replay. List inference hints
@@ -110,6 +118,17 @@ impl DeclarationTheory {
                 return Err(nir::normal_forms::ValidationError::Invalid(
                     "duplicate nominal declaration identity",
                 ));
+            }
+            if let D::Struct(s) = definition
+                && let Ok(binders) = s.parameter_binders()
+            {
+                Arc::make_mut(&mut theory.struct_fields).insert(
+                    declaration,
+                    StructFieldSummary {
+                        binders,
+                        fields: s.fields.clone(),
+                    },
+                );
             }
         }
         if formed != package.formed_nullary_nominals.len() {
@@ -253,6 +272,17 @@ impl Context {
     ) {
         let (kind, id) = definition.identity();
         self.admit_nominal_kind(id, kind);
+        if let nir::normal_forms::NominalValueDeclaration::Struct(s) = definition
+            && let Ok(binders) = s.parameter_binders()
+        {
+            Arc::make_mut(&mut self.theory.struct_fields).insert(
+                id,
+                StructFieldSummary {
+                    binders,
+                    fields: s.fields.clone(),
+                },
+            );
+        }
         self.theory.formed_nominals.admit_checked(definition);
         match crate::not_sized::evaluate_definition(
             definition,

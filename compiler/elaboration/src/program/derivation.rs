@@ -558,12 +558,6 @@ pub(super) fn expand<'h>(
                 .iter()
                 .map(|(owner, _)| *owner)
                 .chain(subject_capture.iter().map(|(owner, _)| *owner))
-                .chain(
-                    execution
-                        .filter(|_| request.clause_params.is_empty())
-                        .iter()
-                        .map(|(owner, _)| *owner),
-                )
                 .chain(inputs.iter().map(|(_, owner, _)| *owner))
                 .chain(locals.iter().map(|(_, owner, _)| *owner))
                 .chain(owners.iter().map(|(_, owner, _)| *owner))
@@ -691,6 +685,12 @@ pub(super) fn expand<'h>(
                     )?
                 }
             };
+            let mut exec_definitions = mapping.clone();
+            if !request.clause_params.is_empty() {
+                for &fresh in exec_clause_defs.values() {
+                    exec_definitions.insert(fresh, fresh);
+                }
+            }
             let mut exec_draft = function_templates::execution_draft(
                 source,
                 arena,
@@ -703,12 +703,12 @@ pub(super) fn expand<'h>(
                 local_bindings,
                 &combined_computations,
                 &exported,
-                &mapping,
+                &exec_definitions,
                 span,
                 fuel,
             )?;
+            extra_module_items.push((source.root_mod, execution_owner));
             if !request.clause_params.is_empty() {
-                extra_module_items.push((source.root_mod, execution_owner));
                 clauses::attach_execution_clauses(
                     source,
                     arena,

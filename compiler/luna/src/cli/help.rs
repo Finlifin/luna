@@ -61,7 +61,7 @@ const BINDINGS: &str = "Compiler binding overrides:
   --literal-into-protocol, --implies-protocol, --comptime-implies-protocol,
   --deref-protocol, --deref-mut-protocol,
   --reference-protocol, --implicit-passing-protocol, --call-context-type,
-  --call-description-type, --iterator-protocol, --into-iterator-protocol,
+  --call-description-type, --source-span-type, --iterator-protocol, --into-iterator-protocol,
   --variadic-collector-protocol, --try-variadic-collector-protocol,
   --extended-variadic-collector-protocol,
   --add-protocol, --sub-protocol, --mul-protocol, --div-protocol,

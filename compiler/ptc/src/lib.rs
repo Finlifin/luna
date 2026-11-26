@@ -48,8 +48,10 @@ mod not_sized;
 
 pub use not_sized::NotSizedQuery;
 
+mod has_field;
 mod head_shape;
 
+pub use has_field::HasFieldQuery;
 pub use head_shape::HeadShapeQuery;
 
 mod rows;
@@ -76,6 +78,7 @@ pub enum Atom {
     Kind(KindQuery),
     NotSized(NotSizedQuery),
     HasHeadShape(HeadShapeQuery),
+    HasField(HasFieldQuery),
     RowContains(RowContainsQuery),
     RowSubset(RowSubsetQuery),
     RowDisjoint(RowDisjointQuery),
@@ -92,6 +95,7 @@ pub enum Formula {
     Kind(KindQuery),
     NotSized(NotSizedQuery),
     HasHeadShape(HeadShapeQuery),
+    HasField(HasFieldQuery),
     RowContains(RowContainsQuery),
     RowSubset(RowSubsetQuery),
     RowDisjoint(RowDisjointQuery),
@@ -108,6 +112,10 @@ impl Formula {
             P::Trait(requirement) => Self::Trait(requirement.into()),
             P::Kind(ty, kind) => Self::kind(ty.clone(), *kind),
             P::NotSized(ty) => Self::not_sized(ty.clone()),
+            P::HasField { subject, field } => Self::HasField(HasFieldQuery {
+                ty: subject.clone(),
+                field: field.clone(),
+            }),
             P::Bool(true) => Self::True,
             P::Bool(false) => Self::False,
             P::Equal(a, b) => Self::equal(a.clone(), b.clone()),
@@ -182,6 +190,11 @@ impl Formula {
                 | Self::NotSized(NotSizedQuery { ty })
                 | Self::HasHeadShape(HeadShapeQuery { ty, .. }) => {
                     if term_has_bound_or_hole(ty) {
+                        return true;
+                    }
+                }
+                Self::HasField(HasFieldQuery { ty, field }) => {
+                    if term_has_bound_or_hole(ty) || term_has_bound_or_hole(field) {
                         return true;
                     }
                 }
@@ -839,6 +852,10 @@ impl Context {
                     Input::Formula(Formula::HasHeadShape(query)) => {
                         pending.push(Input::Term(&query.ty))
                     }
+                    Input::Formula(Formula::HasField(query)) => {
+                        pending.push(Input::Term(&query.field));
+                        pending.push(Input::Term(&query.ty));
+                    }
                     Input::Formula(Formula::RowContains(query)) => {
                         pending.push(Input::Term(&query.row));
                         match &query.label {
@@ -956,6 +973,14 @@ impl Context {
     /// rely on a particular caller's local premises (even a false premise).
     pub fn theory_context(&self) -> Self {
         self.theory.clone().into_context()
+    }
+
+    pub fn resolve_struct_field_type(&self, ty: &Term, field: &str) -> Option<Term> {
+        has_field::resolve_field_type(&self.theory, ty, field)
+    }
+
+    pub fn has_field_known(&self, ty: &Term, field: &str) -> Option<bool> {
+        has_field::has_field_known(&self.theory, ty, field)
     }
 
     pub fn prove(&self, goal: Formula, mut budget: Budget) -> Outcome {
@@ -1136,6 +1161,10 @@ fn visit_input_terms(
             Input::Formula(Formula::HasHeadShape(query)) => {
                 pending.push((Input::Term(&query.ty), depth + 1))
             }
+            Input::Formula(Formula::HasField(query)) => {
+                pending.push((Input::Term(&query.ty), depth + 1));
+                pending.push((Input::Term(&query.field), depth + 1));
+            }
             Input::Formula(Formula::RowContains(query)) => {
                 pending.push((Input::Term(&query.row), depth + 1));
                 match &query.label {
@@ -1159,6 +1188,10 @@ fn visit_input_terms(
             }
             Input::Predicate(P::Kind(ty, _) | P::NotSized(ty)) => {
                 pending.push((Input::Term(ty), depth + 1))
+            }
+            Input::Predicate(P::HasField { subject, field }) => {
+                pending.push((Input::Term(subject), depth + 1));
+                pending.push((Input::Term(field), depth + 1));
             }
             Input::Formula(Formula::Trait(query)) => {
                 if query.arguments.len().saturating_add(1) > room {
@@ -1273,6 +1306,19 @@ fn subterms(term: &Term) -> Vec<&Term> {
         Term::DeferredErrorResult { errors, result } => {
             vec![errors.as_ref(), result.as_ref()]
         }
+        Term::FieldType { subject, field } => {
+            vec![subject.as_ref(), field.as_ref()]
+        }
+        Term::VariantFieldType {
+            subject,
+            variant,
+            field,
+        } => {
+            vec![subject.as_ref(), variant.as_ref(), field.as_ref()]
+        }
+        Term::TupleAppend { tuple, element } => {
+            vec![tuple.as_ref(), element.as_ref()]
+        }
         Term::Computation { effects, result } => effects
             .iter()
             .flat_map(|operation| operation.arguments.iter())
@@ -1360,6 +1406,13 @@ fn has_bound(term: &Term) -> bool {
         Term::ClosureValue { ty, captures, .. } => has_bound(ty) || captures.iter().any(has_bound),
         Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
         Term::DeferredErrorResult { errors, result } => has_bound(errors) || has_bound(result),
+        Term::FieldType { subject, field } => has_bound(subject) || has_bound(field),
+        Term::VariantFieldType {
+            subject,
+            variant,
+            field,
+        } => has_bound(subject) || has_bound(variant) || has_bound(field),
+        Term::TupleAppend { tuple, element } => has_bound(tuple) || has_bound(element),
         Term::Computation { effects, result } => {
             has_bound(result)
                 || effects
@@ -1479,6 +1532,22 @@ fn validate_atom_inputs(
                 .ty
                 .check_scope(scope)
                 .map_err(|e| format!("invalid HasHeadShape type: {e:?}"))?;
+        }
+        Formula::HasField(query) => {
+            if query.ty.sort() != Sort::Type {
+                return Err("HasField requires a Type subject".into());
+            }
+            if query.field.sort() != Sort::ComptimeValue {
+                return Err("HasField requires a Symbol field name".into());
+            }
+            query
+                .ty
+                .check_scope(scope)
+                .map_err(|e| format!("invalid HasField subject: {e:?}"))?;
+            query
+                .field
+                .check_scope(scope)
+                .map_err(|e| format!("invalid HasField field: {e:?}"))?;
         }
         Formula::IntCongruent(query) => {
             query.validate()?;
@@ -1619,6 +1688,14 @@ fn collect_in_theory(
                 atoms.push(atom);
             }
         }
+        Formula::HasField(query) => {
+            terms.insert(&query.ty);
+            terms.insert(&query.field);
+            let atom = Atom::HasField(query.clone());
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
+        }
         Formula::RowContains(query) => {
             terms.insert(&query.row);
             match &query.label {
@@ -1662,6 +1739,62 @@ fn collect_in_theory(
         }
         _ => {}
     }
+    if depth == 0 {
+        // Pre-populate concrete resolved field types when FieldType projections
+        // coexist with records/structs and symbols in the term pool.
+        let snapshot: Vec<Term> = terms.nodes.clone();
+        let mut to_insert = Vec::new();
+        for node in &snapshot {
+            if let Term::FieldType { subject, field } = node
+                && let Term::Symbol(name) = field.as_ref()
+                && let Some(resolved) =
+                    has_field::resolve_field_type(theory, subject, name.as_ref())
+            {
+                to_insert.push(resolved);
+            } else if let Term::FieldType { .. } = node {
+                for cand in &snapshot {
+                    if matches!(cand, Term::Record(_) | Term::Nominal { .. }) {
+                        for sym in &snapshot {
+                            if let Term::Symbol(name) = sym
+                                && let Some(resolved) =
+                                    has_field::resolve_field_type(theory, cand, name.as_ref())
+                            {
+                                to_insert.push(resolved);
+                            }
+                        }
+                    }
+                }
+            } else if let Term::TupleAppend { tuple, element } = node {
+                let mut cur_tuple = tuple.as_ref().clone();
+                let mut elements = vec![element.as_ref().clone()];
+                let mut steps = 0usize;
+                while let Term::TupleAppend {
+                    tuple: inner,
+                    element: inner_elem,
+                } = &cur_tuple
+                    && steps < 64
+                {
+                    steps += 1;
+                    elements.push(inner_elem.as_ref().clone());
+                    cur_tuple = inner.as_ref().clone();
+                }
+                elements.reverse();
+                match cur_tuple {
+                    Term::Primitive(Primitive::Void) | Term::Unit => {
+                        to_insert.push(Term::Tuple(elements));
+                    }
+                    Term::Tuple(mut items) => {
+                        items.extend(elements);
+                        to_insert.push(Term::Tuple(items));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for term in to_insert {
+            terms.insert(&term);
+        }
+    }
     Ok(())
 }
 
@@ -1673,6 +1806,7 @@ fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> O
         Formula::Kind(query) => atom_value(&Atom::Kind(query.clone())),
         Formula::NotSized(query) => atom_value(&Atom::NotSized(query.clone())),
         Formula::HasHeadShape(query) => atom_value(&Atom::HasHeadShape(query.clone())),
+        Formula::HasField(query) => atom_value(&Atom::HasField(query.clone())),
         Formula::RowContains(query) => atom_value(&Atom::RowContains(query.clone())),
         Formula::RowSubset(query) => atom_value(&Atom::RowSubset(query.clone())),
         Formula::RowDisjoint(query) => atom_value(&Atom::RowDisjoint(query.clone())),
@@ -1718,6 +1852,7 @@ fn evaluate_metered(
         Formula::Kind(query) => Some(atom_value(&Atom::Kind(query.clone()))),
         Formula::NotSized(query) => Some(atom_value(&Atom::NotSized(query.clone()))),
         Formula::HasHeadShape(query) => Some(atom_value(&Atom::HasHeadShape(query.clone()))),
+        Formula::HasField(query) => Some(atom_value(&Atom::HasField(query.clone()))),
         Formula::RowContains(query) => Some(atom_value(&Atom::RowContains(query.clone()))),
         Formula::RowSubset(query) => Some(atom_value(&Atom::RowSubset(query.clone()))),
         Formula::RowDisjoint(query) => Some(atom_value(&Atom::RowDisjoint(query.clone()))),
@@ -1798,7 +1933,7 @@ fn constructor(term: &Term) -> Option<Head> {
 fn tuple_normal_elements<'a>(
     context: &Context,
     term: &'a Term,
-) -> Option<(DeclarationId, &'a [Term])> {
+) -> Option<(DeclarationId, &'a Term, &'a [Term])> {
     let Term::NormalForm {
         head,
         sort: Sort::Type,
@@ -1810,16 +1945,19 @@ fn tuple_normal_elements<'a>(
     if !context.is_tuple_head(*head) {
         return None;
     }
-    nir::normal_forms::type_list_fields_with_layouts(arguments, &|id| {
+    let elements = nir::normal_forms::type_list_fields_with_layouts(arguments, &|id| {
         context.theory.list_inference_heads.contains(&id)
-    })
-    .map(|elements| (*head, elements))
+    })?;
+    let [Term::NominalValue { ty: domain, .. }] = arguments.as_slice() else {
+        return None;
+    };
+    Some((*head, domain.as_ref(), elements))
 }
 
 fn constructor_in_context(context: &Context, term: &Term) -> Option<Head> {
     constructor(term).or_else(|| {
         tuple_normal_elements(context, term)
-            .map(|(head, elements)| Head::NormalTuple(head, elements.len()))
+            .map(|(head, _, elements)| Head::NormalTuple(head, elements.len()))
     })
 }
 
@@ -2052,7 +2190,11 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
             && a.type_arguments.len() == b.type_arguments.len()
             && a.arguments.len() == b.arguments.len();
     }
-    if let (Term::DeferredErrorResult { .. }, Term::DeferredErrorResult { .. }) = (a, b) {
+    if let (Term::DeferredErrorResult { .. }, Term::DeferredErrorResult { .. })
+    | (Term::FieldType { .. }, Term::FieldType { .. })
+    | (Term::VariantFieldType { .. }, Term::VariantFieldType { .. })
+    | (Term::TupleAppend { .. }, Term::TupleAppend { .. }) = (a, b)
+    {
         return true;
     }
     // Type identity changes inside immutable tuple inputs lift forward through
@@ -2315,10 +2457,15 @@ impl Search<'_> {
                         if ha != hb {
                             return Ok(None);
                         }
-                        if let (Some((_, elements_a)), Some((_, elements_b))) = (
+                        if let (Some((_, domain_a, elements_a)), Some((_, domain_b, elements_b))) = (
                             tuple_normal_elements(self.context, ta),
                             tuple_normal_elements(self.context, tb),
                         ) {
+                            if let (Some(&da), Some(&db)) =
+                                (self.terms.ids.get(domain_a), self.terms.ids.get(domain_b))
+                            {
+                                changed |= classes.merge(da, db);
+                            }
                             for (ea, eb) in elements_a.iter().zip(elements_b) {
                                 if let (Some(&ca), Some(&cb)) =
                                     (self.terms.ids.get(ea), self.terms.ids.get(eb))
@@ -2356,10 +2503,14 @@ impl Search<'_> {
                             }
                         }
                     }
-                } else if let (Some((ha, elements_a)), Some((hb, elements_b))) = (
+                } else if let (Some((ha, domain_a, elements_a)), Some((hb, domain_b, elements_b))) = (
                     tuple_normal_elements(self.context, ta),
                     tuple_normal_elements(self.context, tb),
                 ) && ha == hb
+                    && matches!(
+                        (self.terms.ids.get(domain_a), self.terms.ids.get(domain_b)),
+                        (Some(&da), Some(&db)) if classes.root(da) == classes.root(db)
+                    )
                     && elements_a.len() == elements_b.len()
                     && elements_a.iter().zip(elements_b).all(|(ea, eb)| {
                         matches!(
@@ -2380,6 +2531,50 @@ impl Search<'_> {
                     changed |= classes.merge(a, b);
                 } else if self.computation_congruent(a, b, &classes, assignment)? {
                     changed |= classes.merge(a, b);
+                }
+            }
+            for id in 0..self.terms.nodes.len() {
+                match &self.terms.nodes[id] {
+                    Term::FieldType { subject, field } => {
+                        let subj_root = classes.root(self.terms.ids[subject]);
+                        let field_root = classes.root(self.terms.ids[field]);
+                        for ty_id in classes.ordered_members(subj_root, &mut self.steps)? {
+                            for f_id in classes.ordered_members(field_root, &mut self.steps)? {
+                                if let Term::Symbol(name) = &self.terms.nodes[f_id]
+                                    && let Some(resolved) = has_field::resolve_field_type(
+                                        &self.context.theory,
+                                        &self.terms.nodes[ty_id],
+                                        name.as_ref(),
+                                    )
+                                    && let Some(&resolved_id) = self.terms.ids.get(&resolved)
+                                {
+                                    changed |= classes.merge(id, resolved_id);
+                                }
+                            }
+                        }
+                    }
+                    Term::TupleAppend { tuple, element } => {
+                        let tuple_root = classes.root(self.terms.ids[tuple]);
+                        for tup_id in classes.ordered_members(tuple_root, &mut self.steps)? {
+                            let candidate = match &self.terms.nodes[tup_id] {
+                                Term::Primitive(Primitive::Void) | Term::Unit => {
+                                    Some(Term::Tuple(vec![(**element).clone()]))
+                                }
+                                Term::Tuple(items) => {
+                                    let mut next = items.clone();
+                                    next.push((**element).clone());
+                                    Some(Term::Tuple(next))
+                                }
+                                _ => None,
+                            };
+                            if let Some(candidate) = candidate
+                                && let Some(&cand_id) = self.terms.ids.get(&candidate)
+                            {
+                                changed |= classes.merge(id, cand_id);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             if !changed {
@@ -2499,6 +2694,36 @@ impl Search<'_> {
                 }
             }
             head_shapes.push((query, *value));
+        }
+        // `HasField` checks field membership across EUF equivalence classes and enforces congruence.
+        let mut seen_fields: Vec<(usize, usize, bool)> = Vec::new();
+        for (atom, value) in self.atoms.iter().zip(assignment) {
+            let (Atom::HasField(query), Some(value)) = (atom, value) else {
+                continue;
+            };
+            let ty_root = classes.root(self.terms.ids[&query.ty]);
+            let field_root = classes.root(self.terms.ids[&query.field]);
+            for ty_id in classes.ordered_members(ty_root, &mut self.steps)? {
+                for f_id in classes.ordered_members(field_root, &mut self.steps)? {
+                    self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                    if let Term::Symbol(name) = &self.terms.nodes[f_id]
+                        && let Some(actual) = has_field::has_field_known(
+                            &self.context.theory,
+                            &self.terms.nodes[ty_id],
+                            name.as_ref(),
+                        )
+                        && actual != *value
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+            for &(other_ty, other_field, other_val) in &seen_fields {
+                if other_ty == ty_root && other_field == field_root && other_val != *value {
+                    return Ok(None);
+                }
+            }
+            seen_fields.push((ty_root, field_root, *value));
         }
         // A16–A18 row predicates (`RowContains`, `RowSubset`, `RowDisjoint`).
         if !self.check_row_atoms(classes, assignment)? {
@@ -2711,15 +2936,21 @@ fn model_atom(
             }
             other => head_shape::evaluate_term(other, query.head),
         },
+        Atom::HasField(query) => {
+            let ty = substitute_types(&query.ty, types, bound_types, applications, fuel, theory)?;
+            let Term::Symbol(name) = &query.field else {
+                return None;
+            };
+            has_field::has_field_known(theory, &ty, name.as_ref())
+        }
         Atom::RowContains(query) => {
-            let row =
-                substitute_types(&query.row, types, bound_types, applications, fuel, nominal)?;
+            let row = substitute_types(&query.row, types, bound_types, applications, fuel, theory)?;
             if !closed_type(&row, nominal) {
                 return None;
             }
             let label = match &query.label {
                 RowLabel::Error(ty) => {
-                    let ty = substitute_types(ty, types, bound_types, applications, fuel, nominal)?;
+                    let ty = substitute_types(ty, types, bound_types, applications, fuel, theory)?;
                     if !closed_type(&ty, nominal) {
                         return None;
                     }
@@ -2737,7 +2968,7 @@ fn model_atom(
                                 bound_types,
                                 applications,
                                 fuel,
-                                nominal,
+                                theory,
                             )?;
                             if !closed_type(&s, nominal) {
                                 return None;
@@ -2755,15 +2986,9 @@ fn model_atom(
         }
         Atom::RowSubset(query) => {
             let left =
-                substitute_types(&query.left, types, bound_types, applications, fuel, nominal)?;
-            let right = substitute_types(
-                &query.right,
-                types,
-                bound_types,
-                applications,
-                fuel,
-                nominal,
-            )?;
+                substitute_types(&query.left, types, bound_types, applications, fuel, theory)?;
+            let right =
+                substitute_types(&query.right, types, bound_types, applications, fuel, theory)?;
             if !closed_type(&left, nominal) || !closed_type(&right, nominal) {
                 return None;
             }
@@ -2771,15 +2996,9 @@ fn model_atom(
         }
         Atom::RowDisjoint(query) => {
             let left =
-                substitute_types(&query.left, types, bound_types, applications, fuel, nominal)?;
-            let right = substitute_types(
-                &query.right,
-                types,
-                bound_types,
-                applications,
-                fuel,
-                nominal,
-            )?;
+                substitute_types(&query.left, types, bound_types, applications, fuel, theory)?;
+            let right =
+                substitute_types(&query.right, types, bound_types, applications, fuel, theory)?;
             if !closed_type(&left, nominal) || !closed_type(&right, nominal) {
                 return None;
             }
@@ -2802,7 +3021,7 @@ fn model_atom(
             } else {
                 evaluate_kind_with_synthetic(
                     query.kind,
-                    &substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?,
+                    &substitute_types(&query.ty, types, bound_types, applications, fuel, theory)?,
                     nominal,
                     tuple_heads,
                     synthetic_nominals,
@@ -2810,7 +3029,7 @@ fn model_atom(
             }
         }
         Atom::NotSized(query) => {
-            let ty = substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?;
+            let ty = substitute_types(&query.ty, types, bound_types, applications, fuel, theory)?;
             if let Term::Nominal {
                 declaration,
                 arguments,
@@ -2827,8 +3046,8 @@ fn model_atom(
             }
         }
         Atom::TypeEqual(atom) => {
-            let a = substitute_types(&atom.0, types, bound_types, applications, fuel, nominal)?;
-            let b = substitute_types(&atom.1, types, bound_types, applications, fuel, nominal)?;
+            let a = substitute_types(&atom.0, types, bound_types, applications, fuel, theory)?;
+            let b = substitute_types(&atom.1, types, bound_types, applications, fuel, theory)?;
             if !closed_type(&a, nominal) || !closed_type(&b, nominal) {
                 return None;
             }
@@ -3084,8 +3303,9 @@ fn substitute_types(
     bound_types: &BTreeMap<TypeBinder, Term>,
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
-    nominal: &NominalConstructors,
+    theory: &DeclarationTheory,
 ) -> Option<Term> {
+    let nominal = &theory.constructors.nominal_constructors;
     let Some(remaining) = fuel.get().checked_sub(1) else {
         fuel.set(0);
         return None;
@@ -3115,6 +3335,30 @@ fn substitute_types(
             fuel,
         );
     }
+    if let Term::FieldType { subject, field } = term {
+        let subject = substitute_types(subject, types, bound_types, applications, fuel, theory)?;
+        let field = substitute_types(field, types, bound_types, applications, fuel, theory)?;
+        let Term::Symbol(name) = &field else {
+            return None;
+        };
+        let resolved = has_field::resolve_field_type(theory, &subject, name.as_ref())?;
+        model_applications::charge(&resolved, fuel)?;
+        return Some(resolved);
+    }
+    if let Term::TupleAppend { tuple, element } = term {
+        let tuple = substitute_types(tuple, types, bound_types, applications, fuel, theory)?;
+        let element = substitute_types(element, types, bound_types, applications, fuel, theory)?;
+        let resolved = match tuple {
+            Term::Primitive(Primitive::Void) | Term::Unit => Term::Tuple(vec![element]),
+            Term::Tuple(mut items) => {
+                items.push(element);
+                Term::Tuple(items)
+            }
+            _ => return None,
+        };
+        model_applications::charge(&resolved, fuel)?;
+        return Some(resolved);
+    }
     if let Term::NormalForm {
         head,
         sort: Sort::Type,
@@ -3123,7 +3367,7 @@ fn substitute_types(
     {
         let arguments = arguments
             .iter()
-            .map(|arg| substitute_types(arg, types, bound_types, applications, fuel, nominal))
+            .map(|arg| substitute_types(arg, types, bound_types, applications, fuel, theory))
             .collect::<Option<Vec<_>>>()?;
         // Child substitution charged each ground argument before hashing it.
         return model_applications::copy(applications.get(&(*head, arguments))?, fuel);
@@ -3136,7 +3380,7 @@ fn substitute_types(
         fuel.set(remaining);
     }
     let value = rebuild(term, nominal, &mut |child| {
-        substitute_types(child, types, bound_types, applications, fuel, nominal)
+        substitute_types(child, types, bound_types, applications, fuel, theory)
     })?;
     model_applications::charge(&value, fuel)?;
     Some(value)
@@ -3151,6 +3395,7 @@ impl fmt::Display for Atom {
             Self::Kind(query) => query.fmt(f),
             Self::NotSized(query) => query.fmt(f),
             Self::HasHeadShape(query) => query.fmt(f),
+            Self::HasField(query) => query.fmt(f),
             Self::RowContains(query) => query.fmt(f),
             Self::RowSubset(query) => query.fmt(f),
             Self::RowDisjoint(query) => query.fmt(f),
@@ -3176,6 +3421,7 @@ impl fmt::Display for Formula {
             Self::Kind(query) => query.fmt(f),
             Self::NotSized(query) => query.fmt(f),
             Self::HasHeadShape(query) => query.fmt(f),
+            Self::HasField(query) => query.fmt(f),
             Self::RowContains(query) => query.fmt(f),
             Self::RowSubset(query) => query.fmt(f),
             Self::RowDisjoint(query) => query.fmt(f),

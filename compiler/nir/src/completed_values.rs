@@ -24,6 +24,9 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 .saturating_add(method.method_arguments.len()),
             Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
             Term::DeferredErrorResult { .. } => 2,
+            Term::FieldType { .. } => 2,
+            Term::VariantFieldType { .. } => 3,
+            Term::TupleAppend { .. } => 2,
             Term::Computation { effects, .. } => {
                 charge(fuel, effects.len())?;
                 effects.iter().fold(1usize, |width, operation| {
@@ -81,6 +84,23 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             Term::DeferredErrorResult { errors, result } => {
                 children.push(errors.as_ref());
                 children.push(result.as_ref());
+            }
+            Term::FieldType { subject, field } => {
+                children.push(subject.as_ref());
+                children.push(field.as_ref());
+            }
+            Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                children.push(subject.as_ref());
+                children.push(variant.as_ref());
+                children.push(field.as_ref());
+            }
+            Term::TupleAppend { tuple, element } => {
+                children.push(tuple.as_ref());
+                children.push(element.as_ref());
             }
             Term::Computation { effects, result } => {
                 children.push(result.as_ref());

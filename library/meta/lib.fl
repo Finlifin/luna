@@ -18,16 +18,20 @@ use data.{
     object,
     optional,
     patterns as data_patterns,
+    resources,
     set,
     text,
 }
-use definitions.{enums, newtypes, structs}
+use definitions.{enums as enum_builders, newtypes, structs as struct_builders}
+use deriving_impl;
+use enums_impl;
 use formatting;
 use macros_impl;
 use numeric.{conversions, equality, ordering, scalar_math}
 use ops_impl;
 use range;
-use reflection.structure;
+use reflection_impl.structure;
+use structs_impl;
 use types.equality as type_equality;
 
 pub use ast_impl.*;
@@ -49,9 +53,10 @@ pub use code_types.{
     Substitution,
 }
 pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFrom, ComptimeTryInto}
-pub use enums.*;
+pub use enum_builders.*;
 pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
+pub use formatting.debug.ComptimeDebug;
 pub use formatting.display.ComptimeDisplay;
 pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
 pub use integer.*;
@@ -79,10 +84,23 @@ pub use optional.ComptimeOptionalOps;
 pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
 pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
 pub use range.ComptimeRangeBounds;
+pub use resources.ComptimeClone;
 pub use set.Set;
-pub use structs.*;
+pub use struct_builders.*;
 pub use structure.*;
 pub use text.{ComptimeTextBytes, str_from_char}
+
+pub mod structs {
+    pub use structs_impl.*;
+}
+
+pub mod enums {
+    pub use enums_impl.*;
+}
+
+pub mod reflection {
+    pub use structure.*;
+}
 
 pub mod ops {
     pub use ops_impl.*;
@@ -94,6 +112,33 @@ pub mod ast {
 
 pub mod macros {
     pub use macros_impl.*;
+}
+
+pub mod deriving {
+    pub mod clone {
+        pub use ..deriving_impl.clone.*;
+    }
+    pub mod debug {
+        pub use ..deriving_impl.debug.*;
+    }
+    pub mod defaults {
+        pub use ..deriving_impl.defaults.*;
+    }
+    pub mod display {
+        pub use ..deriving_impl.display.*;
+    }
+    pub mod eq {
+        pub use ..deriving_impl.eq.*;
+    }
+    pub mod hash {
+        pub use ..deriving_impl.hash.*;
+    }
+    pub mod ord {
+        pub use ..deriving_impl.ord.*;
+    }
+    pub mod to_tokens {
+        pub use ..deriving_impl.to_tokens.*;
+    }
 }
 
 pub mod math {
@@ -150,6 +195,7 @@ pub mod convert {
 }
 
 pub mod fmt {
+    pub use formatting.debug.ComptimeDebug;
     pub use formatting.display.ComptimeDisplay;
     pub use formatting.helpers.*;
 }
@@ -164,6 +210,7 @@ pub mod prelude {
     pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
+    pub use formatting.debug.ComptimeDebug;
     pub use formatting.display.ComptimeDisplay;
     pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
     pub use ops_impl.{
@@ -187,5 +234,6 @@ pub mod prelude {
     pub use ordering.{ComptimeOrd, ComptimeTotalOrd}
     pub use data_patterns.{ComptimeListPatternView, ComptimeStableListPatternView}
     pub use range.ComptimeRangeBounds;
+    pub use resources.ComptimeClone;
     pub use text.ComptimeTextBytes;
 }

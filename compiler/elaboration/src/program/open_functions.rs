@@ -186,6 +186,7 @@ pub(super) struct Definition {
     default_dependencies: BTreeMap<usize, BTreeSet<usize>>,
     regions: CheckedRegions,
     checked: bool,
+    requires_open_instance: bool,
 }
 
 impl Definition {
@@ -197,7 +198,12 @@ impl Definition {
             default_dependencies: BTreeMap::new(),
             regions: CheckedRegions::default(),
             checked: false,
+            requires_open_instance: true,
         }
+    }
+
+    pub(super) fn requires_open_instance(&self) -> bool {
+        self.requires_open_instance
     }
 
     pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
@@ -1079,6 +1085,7 @@ impl Checker<'_, '_> {
                 // Type patterns need the original type identity, not
                 // merely an abstract value with the domain Type.
                 if staged_alias || binding.comptime {
+                    self.open_definition_needs_instance = true;
                     self.describe_staged_binding_region(expr, expected, locals, returns, depth + 1)?
                 } else {
                     self.with_staged_input(self.in_staged_input || staged_alias, |this| {
@@ -1130,59 +1137,79 @@ impl Checker<'_, '_> {
         } else {
             annotation.unwrap_or(actual)
         };
+        let mut closed_const_value: Option<n::Expr> = None;
         if binding.comptime
             && !pending_input
             && !pending_formation
             && plain
             && let D::Known(domain) = &ty
-            && (*domain == p(P::Type)
-                || self.is_type_list_type(domain)
-                || matches!(domain.callable_signature(), Term::Function { .. }))
         {
-            // An unconditional Type alias needs the same definition-
-            // side evidence as a guarded/destructured const. Retain
-            // known structure without executing an open invocation.
-            // An annotation alone does not establish the initializer's
-            // identity; pending member inputs are rechecked per instance.
-            let input = self.with_staged_input(true, |this| this.expr(init, Some(domain)))?;
-            self.with_staged_input(true, |this| {
-                this.check_open_fragment(&input, init.span, false)
-            })?;
-            let pattern = self.pattern(&binding.pattern, domain)?;
-            if matches!(input.kind, K::Function(_) | K::FunctionInstance { .. }) {
-                if let n::Pattern::Binding { binding: id, inner } = &pattern {
-                    if matches!(**inner, n::Pattern::Wild) {
-                        constants::charge_copy(&input, &mut self.required_steps, expr.span)?;
-                        self.generator_data.insert(*id, Some(input.clone()));
+            let special_domain = *domain == p(P::Type)
+                || self.is_type_list_type(domain)
+                || matches!(domain.callable_signature(), Term::Function { .. });
+            if special_domain {
+                // An unconditional Type alias needs the same definition-
+                // side evidence as a guarded/destructured const. Retain
+                // known structure without executing an open invocation.
+                // An annotation alone does not establish the initializer's
+                // identity; pending member inputs are rechecked per instance.
+                let input = self.with_staged_input(true, |this| this.expr(init, Some(domain)))?;
+                self.with_staged_input(true, |this| {
+                    this.check_open_fragment(&input, init.span, false)
+                })?;
+                let pattern = self.pattern(&binding.pattern, domain)?;
+                if matches!(input.kind, K::Function(_) | K::FunctionInstance { .. }) {
+                    if let n::Pattern::Binding { binding: id, inner } = &pattern {
+                        if matches!(**inner, n::Pattern::Wild) {
+                            constants::charge_copy(&input, &mut self.required_steps, expr.span)?;
+                            self.generator_data.insert(*id, Some(input.clone()));
+                        }
                     }
                 }
-            }
-            for (id, value) in self.known_pattern_types(&pattern, &input, expr.span)? {
-                self.generator_data.insert(id, Some(value));
-            }
-            let mut formed = &input;
-            while let K::Block {
-                result: Some(result),
-                ..
-            }
-            | K::CheckTypeAlias {
-                body: Some(result), ..
-            } = &formed.kind
+                for (id, value) in self.known_pattern_types(&pattern, &input, expr.span)? {
+                    self.generator_data.insert(id, Some(value));
+                }
+                let mut formed = &input;
+                while let K::Block {
+                    result: Some(result),
+                    ..
+                }
+                | K::CheckTypeAlias {
+                    body: Some(result), ..
+                } = &formed.kind
+                {
+                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                        error(expr.span, "constant formation evidence budget exhausted")
+                    })?;
+                    formed = result;
+                }
+                if matches!(formed.kind, K::NominalType { .. })
+                    && let n::Pattern::Binding { binding: id, inner } = &pattern
+                    && matches!(**inner, n::Pattern::Wild)
+                    && !self.generator_data.contains_key(id)
+                {
+                    // The container head is known even when its value
+                    // inputs await invocation. Retain its checked formation
+                    // for member routing, without claiming a completed Type.
+                    self.generator_data.insert(*id, Some(input));
+                }
+            } else if !binding.mutable
+                && !staged_alias
+                && !self.contains_inline_control(init)?
+                && matches!(
+                    binding.pattern.kind,
+                    hir::pattern::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None)
+                )
+                && let Ok(input) =
+                    self.with_staged_input(true, |this| this.expr(init, Some(domain)))
+                && self
+                    .with_staged_input(true, |this| {
+                        this.check_open_fragment(&input, init.span, false)
+                    })
+                    .is_ok()
+                && let Some((const_expr, _)) = self.try_evaluate_open_closed_expr(init, &input)?
             {
-                self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                    error(expr.span, "constant formation evidence budget exhausted")
-                })?;
-                formed = result;
-            }
-            if matches!(formed.kind, K::NominalType { .. })
-                && let n::Pattern::Binding { binding: id, inner } = &pattern
-                && matches!(**inner, n::Pattern::Wild)
-                && !self.generator_data.contains_key(id)
-            {
-                // The container head is known even when its value
-                // inputs await invocation. Retain its checked formation
-                // for member routing, without claiming a completed Type.
-                self.generator_data.insert(*id, Some(input));
+                closed_const_value = Some(const_expr);
             }
         }
         match &binding.pattern.kind {
@@ -1191,10 +1218,17 @@ impl Checker<'_, '_> {
                 if let D::Known(ty) = &ty {
                     self.locals.insert(id, ty.clone());
                 }
-                if self.in_staged_input || staged_alias || binding.comptime {
+                if closed_const_value.is_none()
+                    && (self.in_staged_input || staged_alias || binding.comptime)
+                {
+                    self.open_definition_needs_instance = true;
                     self.open_staged_locals.insert(id);
                 }
+                if let Some(const_expr) = closed_const_value {
+                    self.generator_data.insert(id, Some(const_expr));
+                }
                 if member_origin {
+                    self.open_definition_needs_instance = true;
                     self.open_member_locals.insert(id);
                 } else {
                     self.open_member_locals.remove(&id);
@@ -2412,7 +2446,12 @@ impl Checker<'_, '_> {
                 // A signature template has no executable body. Its annotation,
                 // default and contract checks above still apply; each instance
                 // independently checks its supplied body in the inherited domain.
-                return Ok((default_types, default_dependencies, CheckedRegions::default()));
+                return Ok((
+                    default_types,
+                    default_dependencies,
+                    CheckedRegions::default(),
+                    true,
+                ));
             };
             let body = this
                 .package
@@ -2454,6 +2493,18 @@ impl Checker<'_, '_> {
                 D::Known(ty) => Some(ty.clone()),
                 D::Unknown => None,
             };
+            this.open_definition_needs_instance = sig.modifiers.is_comptime
+                || sig.modifiers.is_quote
+                || sig.modifiers.is_normal_form_head
+                || sig.modifiers.is_function_template
+                || this.package.function_template_bodies.contains_key(&owner)
+                || this.default_behavior_functions.contains(&owner)
+                || definition
+                    .parameters
+                    .iter()
+                    .any(|(sort, ann)| *sort != Sort::Runtime || !matches!(ann, Annotation::Known(_)))
+                || !matches!(definition.result, Annotation::Known(_))
+                || matches!(&declared_result, D::Unknown);
             let check_body = |this: &mut Self| -> Result<(), Error> {
                 this.describe_open_expression(
                     body.value,
@@ -2531,7 +2582,11 @@ impl Checker<'_, '_> {
                             source: source(item.span),
                             declaration: decl_id,
                             name: format!("{} [ordinary]", item.ident.name),
-                            phase: n::FunctionPhase::Runtime,
+                            phase: if sig.modifiers.is_comptime {
+                                n::FunctionPhase::Comptime
+                            } else {
+                                n::FunctionPhase::Runtime
+                            },
                             pure: sig.modifiers.is_pure,
                             is_unsafe: sig.modifiers.is_unsafe,
                             inline: false,
@@ -2571,14 +2626,16 @@ impl Checker<'_, '_> {
                 default_types,
                 default_dependencies,
                 std::mem::take(&mut this.definition_refinements.regions),
+                this.open_definition_needs_instance,
             ))
         });
         self.active_open_definitions.remove(&owner);
-        let (default_types, default_dependencies, regions) = checked?;
+        let (default_types, default_dependencies, regions, requires_open_instance) = checked?;
         definition.default_types = default_types;
         definition.default_dependencies = default_dependencies;
         definition.regions = regions;
         definition.checked = true;
+        definition.requires_open_instance = requires_open_instance;
         Ok(definition)
     }
 
@@ -3020,6 +3077,7 @@ impl Checker<'_, '_> {
                     return Err(error(expr.span, "expected inline loop expression"));
                 };
                 if let H::TakeTupleEnumerate(input) = iter.kind {
+                    self.open_definition_needs_instance = true;
                     return self.describe_open_tuple_iteration(
                         value,
                         input,
@@ -3031,6 +3089,7 @@ impl Checker<'_, '_> {
                     );
                 }
                 if let H::TakeTupleIndexed(input) = iter.kind {
+                    self.open_definition_needs_instance = true;
                     return self.describe_open_tuple_iteration(
                         value,
                         input,
@@ -3044,7 +3103,7 @@ impl Checker<'_, '_> {
                 let H::Range {
                     start: Some(start),
                     end: Some(end),
-                    ..
+                    inclusive,
                 } = iter.kind
                 else {
                     return Err(error(
@@ -3064,50 +3123,84 @@ impl Checker<'_, '_> {
                     })?;
                 }
                 let saved = self.locals.clone();
+                let saved_data = self.generator_data.clone();
                 let staged = self.open_staged_locals.clone();
                 let staged_members = self.open_member_locals.clone();
                 let immutable = self.immutable.clone();
                 let context = self.context.clone();
+                let saved_facts = self.input_facts.clone();
                 self.control.loops.push(local(value.hir_id));
-                let checked = (|| {
-                    self.immutable.extend(pattern_binding_ids(pat));
-                    let pattern =
-                        self.with_staged_input(true, |this| this.pattern(pat, &p(P::Integer)))?;
-                    let mut body_locals = locals.clone();
-                    for (id, ty) in &self.locals {
-                        body_locals.insert(*id, D::Known(ty.clone()));
-                        if !saved.contains_key(id) {
-                            self.open_staged_locals.insert(*id);
+                let unrolled = self.try_describe_closed_open_inline_for(
+                    pat,
+                    guard,
+                    inclusive,
+                    start,
+                    end,
+                    body,
+                    locals,
+                    returns,
+                    depth,
+                    &saved,
+                    &saved_data,
+                    &staged,
+                    &staged_members,
+                    &immutable,
+                    &context,
+                    &saved_facts,
+                );
+                let checked = match unrolled {
+                    Ok(Some(())) => Ok(D::Known(p(P::Void))),
+                    Err(err) => Err(err),
+                    Ok(None) => (|| {
+                        self.open_definition_needs_instance = true;
+                        self.locals = saved.clone();
+                        self.generator_data = saved_data.clone();
+                        self.open_staged_locals = staged.clone();
+                        self.open_member_locals = staged_members.clone();
+                        self.immutable = immutable.clone();
+                        self.context = context.clone();
+                        self.input_facts = saved_facts.clone();
+                        self.immutable.extend(pattern_binding_ids(pat));
+                        let pattern =
+                            self.with_staged_input(true, |this| this.pattern(pat, &p(P::Integer)))?;
+                        let mut body_locals = locals.clone();
+                        for (id, ty) in &self.locals {
+                            body_locals.insert(*id, D::Known(ty.clone()));
+                            if !saved.contains_key(id) {
+                                self.open_staged_locals.insert(*id);
+                            }
                         }
-                    }
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let observations = nir::visit::pattern_observations(&pattern, &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    for observation in observations.map_err(|e| error(pat.span, e))? {
-                        self.with_staged_input(true, |this| {
-                            this.check_open_fragment(observation, pat.span, false)
-                        })?;
-                    }
-                    if let Some(guard) = guard {
-                        self.with_staged_input(true, |this| {
-                            this.describe_open_expression(
-                                guard,
-                                &mut body_locals.clone(),
-                                returns,
-                                Some(&D::Known(p(P::Bool))),
-                                depth + 1,
-                            )
-                        })?;
-                    }
-                    self.describe_open_block(body, &mut body_locals, returns, None, depth + 1)
-                })();
+                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let observations = nir::visit::pattern_observations(&pattern, &mut fuel);
+                        self.required_steps -= (before - fuel) as u64;
+                        for observation in observations.map_err(|e| error(pat.span, e))? {
+                            self.with_staged_input(true, |this| {
+                                this.check_open_fragment(observation, pat.span, false)
+                            })?;
+                        }
+                        if let Some(guard) = guard {
+                            self.with_staged_input(true, |this| {
+                                this.describe_open_expression(
+                                    guard,
+                                    &mut body_locals.clone(),
+                                    returns,
+                                    Some(&D::Known(p(P::Bool))),
+                                    depth + 1,
+                                )
+                            })?;
+                        }
+                        self.describe_open_block(body, &mut body_locals, returns, None, depth + 1)
+                    })(),
+                };
                 self.control.loops.pop();
                 self.locals = saved;
+                self.generator_data = saved_data;
                 self.open_staged_locals = staged;
                 self.open_member_locals = staged_members;
                 self.immutable = immutable;
                 self.context = context;
+                self.input_facts = saved_facts;
                 checked?;
                 D::Known(p(P::Void))
             }
@@ -3170,10 +3263,16 @@ impl Checker<'_, '_> {
                         "required comptime computation cannot read a runtime parameter",
                     ));
                 }
+                let is_closed_staged_const = self.immutable.contains(&local(*id))
+                    && self
+                        .generator_data
+                        .get(&local(*id))
+                        .is_some_and(Option::is_some);
                 if self.in_staged_input
                     && matches!(expr.kind, H::ResolvedLocal(..))
                     && !self.open_staged_locals.contains(&local(*id))
                     && !self.input_facts.is_staged(&local(*id))
+                    && !is_closed_staged_const
                     && !self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(|item|
                         matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime))
                 {
@@ -3424,6 +3523,54 @@ impl Checker<'_, '_> {
                         depth + 1,
                     )?;
                     D::Known(p(P::Bool))
+                } else if let Some((lhs, rhs)) = self.type_predicate_eq_call(expr)? {
+                    self.describe_open_expression(
+                        lhs,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    self.describe_open_expression(
+                        rhs,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    D::Known(p(P::Bool))
+                } else if let Some((subject, field)) = self.type_predicate_has_field_call(expr)? {
+                    self.describe_open_expression(
+                        subject,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    self.describe_open_expression(
+                        field,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Symbol))),
+                        depth + 1,
+                    )?;
+                    D::Known(p(P::Bool))
+                } else if let Some((subject, field)) = self.type_predicate_field_type_call(expr)? {
+                    self.describe_open_expression(
+                        subject,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    self.describe_open_expression(
+                        field,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Symbol))),
+                        depth + 1,
+                    )?;
+                    D::Known(Term::Optional(Box::new(p(P::Type))))
                 } else if let Some((_, arg, field)) = self.type_layout_query_call(expr)? {
                     self.describe_open_expression(
                         arg,
@@ -3719,6 +3866,37 @@ impl Checker<'_, '_> {
                 } = self.with_staged_input(staged, |this| {
                     this.describe_open_boolean(condition, locals, returns, depth + 1)
                 })?;
+                if inline_if
+                    && !self.contains_inline_control(condition)?
+                    && let Ok(checked_cond) =
+                        self.with_staged_input(true, |this| this.expr(condition, Some(&p(P::Bool))))
+                    && let Ok(Some((_, comptime_interpretor::Value::Bool(taken)))) =
+                        self.try_evaluate_open_closed_expr(condition, &checked_cond)
+                {
+                    let selected = if taken {
+                        let yes = self.describe_open_block(
+                            yes,
+                            locals,
+                            returns,
+                            if no.is_some() { expected } else { None },
+                            depth + 1,
+                        )?;
+                        if no.is_none() && !matches!(&yes, D::Known(ty) if is_never(ty)) {
+                            D::Known(p(P::Void))
+                        } else {
+                            yes
+                        }
+                    } else if let Some(no) = no {
+                        self.describe_open_expression(no, locals, returns, expected, depth + 1)?
+                    } else {
+                        D::Known(p(P::Void))
+                    };
+                    self.require_description(&selected, expected, expr.span)?;
+                    return Ok(selected);
+                }
+                if inline_if {
+                    self.open_definition_needs_instance = true;
+                }
                 self.required_steps = self
                     .required_steps
                     .checked_sub((self.open_loop_transfers.len() as u64).saturating_mul(4))
@@ -4644,6 +4822,9 @@ impl Checker<'_, '_> {
             let inline_when = self
                 .inline_selection
                 .is_some_and(|(id, _)| id == expr.hir_id);
+            if inline_when {
+                self.open_definition_needs_instance = true;
+            }
             for arm in arms {
                 self.locals = saved_locals.clone();
                 self.required_steps = self
@@ -4836,6 +5017,12 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
+        if self
+            .inline_selection
+            .is_some_and(|(id, _)| id == expr.hir_id)
+        {
+            self.open_definition_needs_instance = true;
+        }
         if self.scan_body_requirement(value, |_, node| {
             Ok(matches!(node.kind, H::InlineControl(_))
                 || matches!(node.kind, H::Let(binding) if binding.comptime))
@@ -5040,6 +5227,220 @@ impl Checker<'_, '_> {
         self.open_staged_locals = saved_staged;
         self.open_member_locals = saved_staged_members;
         outcome
+    }
+
+    fn try_evaluate_open_closed_expr(
+        &mut self,
+        source_expr: &Expr<'_>,
+        checked: &n::Expr,
+    ) -> Result<Option<(n::Expr, comptime_interpretor::Value)>, Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let free = nir::free_bindings::collect(checked, &mut fuel)
+            .map_err(|reason| error(source_expr.span, reason))?;
+        self.required_steps -= (before - fuel) as u64;
+        for id in &free {
+            if !self.immutable.contains(id)
+                || self.open_staged_locals.contains(id)
+                || self.open_member_locals.contains(id)
+                || !self.generator_data.get(id).is_some_and(Option::is_some)
+            {
+                return Ok(None);
+            }
+        }
+        struct ClosedSubst<'a> {
+            generator_data: &'a BTreeMap<n::LocalId, Option<n::Expr>>,
+            has_rigid_type: bool,
+            has_rigid_non_type: bool,
+            span: Span,
+        }
+        impl nir::program::Rewriter for ClosedSubst<'_> {
+            type Error = Error;
+
+            fn ty(&mut self, ty: &mut Term) -> Result<(), Self::Error> {
+                let rigid = ty
+                    .rigid_parameters()
+                    .map_err(|cause| error(self.span, cause.to_string()))?;
+                for sort in rigid.values() {
+                    if *sort == Sort::Type {
+                        self.has_rigid_type = true;
+                    } else {
+                        self.has_rigid_non_type = true;
+                    }
+                }
+                Ok(())
+            }
+
+            fn expression(&mut self, expr: &mut n::Expr) -> Result<bool, Self::Error> {
+                if let K::Local(id) = expr.kind
+                    && let Some(Some(known)) = self.generator_data.get(&id)
+                {
+                    *expr = known.clone();
+                }
+                Ok(true)
+            }
+        }
+        let mut substituted = checked.clone();
+        let mut rewriter = ClosedSubst {
+            generator_data: &self.generator_data,
+            has_rigid_type: false,
+            has_rigid_non_type: false,
+            span: source_expr.span,
+        };
+        substituted.rewrite_with(&mut rewriter)?;
+        let has_rigid_type = rewriter.has_rigid_type;
+        let has_rigid_non_type = rewriter.has_rigid_non_type;
+        if has_rigid_non_type {
+            return Ok(None);
+        }
+        match self.required_normal_input(source_expr, substituted, vec![]) {
+            Ok((value, actual_ty)) => {
+                let expr =
+                    self.materialize_local_constant(value.clone(), actual_ty, source_expr.span)?;
+                Ok(Some((expr, value)))
+            }
+            Err(_) if has_rigid_type => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_describe_closed_open_inline_for(
+        &mut self,
+        pat: &hir::pattern::Pattern<'_>,
+        guard: Option<&Expr<'_>>,
+        inclusive: bool,
+        start: &Expr<'_>,
+        end: &Expr<'_>,
+        body: &hir::expr::Block<'_>,
+        locals: &BTreeMap<n::LocalId, D>,
+        returns: Option<&D>,
+        depth: usize,
+        saved: &local_bindings::Bindings<n::LocalId, Term>,
+        saved_data: &BTreeMap<n::LocalId, Option<n::Expr>>,
+        staged: &BTreeSet<n::LocalId>,
+        staged_members: &BTreeSet<n::LocalId>,
+        immutable: &BTreeSet<n::LocalId>,
+        context: &crate::ptc::Context,
+        saved_facts: &input_facts::State,
+    ) -> Result<Option<()>, Error> {
+        if !matches!(pat.kind, hir::pattern::PatternKind::Binding(_, _, None)) {
+            return Ok(None);
+        }
+        let Ok(start_checked) =
+            self.with_staged_input(true, |this| this.expr(start, Some(&p(P::Integer))))
+        else {
+            return Ok(None);
+        };
+        let Ok(end_checked) =
+            self.with_staged_input(true, |this| this.expr(end, Some(&p(P::Integer))))
+        else {
+            return Ok(None);
+        };
+        let Some((_, comptime_interpretor::Value::Integer(mut current))) =
+            self.try_evaluate_open_closed_expr(start, &start_checked)?
+        else {
+            return Ok(None);
+        };
+        let Some((_, comptime_interpretor::Value::Integer(end_val))) =
+            self.try_evaluate_open_closed_expr(end, &end_checked)?
+        else {
+            return Ok(None);
+        };
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let count = (|| {
+            let difference = end_val.subtract(&current, &mut budget)?;
+            if inclusive {
+                difference.add(&comptime_runtime::Integer::from_u128(1), &mut budget)
+            } else {
+                Ok(difference)
+            }
+        })();
+        self.required_steps -= (before - budget.steps) as u64;
+        let count = count.map_err(|e| error(pat.span, e.to_string()))?;
+        let count = if count <= comptime_runtime::Integer::from_u128(0) {
+            0
+        } else {
+            usize::try_from(
+                count
+                    .to_u128()
+                    .map_err(|_| error(pat.span, "inline range expansion budget exhausted"))?,
+            )
+            .map_err(|_| error(pat.span, "inline range expansion budget exhausted"))?
+        };
+        if count > 100_000 || count as u64 > self.required_steps {
+            return Err(error(pat.span, "inline range expansion budget exhausted"));
+        }
+        if count == 0 {
+            return Ok(Some(()));
+        }
+        for idx in 0..count {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(pat.span, "inline range expansion budget exhausted"))?;
+            self.locals = saved.clone();
+            self.generator_data = saved_data.clone();
+            self.open_staged_locals = staged.clone();
+            self.open_member_locals = staged_members.clone();
+            self.immutable = immutable.clone();
+            self.context = context.clone();
+            self.input_facts = saved_facts.clone();
+            let iter_expr = self.materialize_local_constant(
+                comptime_interpretor::Value::Integer(current.clone()),
+                p(P::Integer),
+                pat.span,
+            )?;
+            if idx + 1 < count {
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut budget = comptime_runtime::Budget {
+                    steps: before,
+                    max_limbs: 4096,
+                };
+                let next = current
+                    .add(&comptime_runtime::Integer::from_u128(1), &mut budget)
+                    .map_err(|e| error(pat.span, e.to_string()))?;
+                self.required_steps -= (before - budget.steps) as u64;
+                current = next;
+            }
+            self.with_staged_input(true, |this| this.pattern(pat, &p(P::Integer)))?;
+            let ids = pattern_binding_ids(pat);
+            let [pat_id] = ids.as_slice() else {
+                return Ok(None);
+            };
+            self.immutable.insert(*pat_id);
+            self.generator_data.insert(*pat_id, Some(iter_expr));
+            let mut body_locals = locals.clone();
+            body_locals.insert(*pat_id, D::Known(p(P::Integer)));
+            if let Some(guard) = guard {
+                let guard_eval = match self
+                    .with_staged_input(true, |this| this.expr(guard, Some(&p(P::Bool))))
+                {
+                    Ok(checked) => self.try_evaluate_open_closed_expr(guard, &checked)?,
+                    Err(_) => None,
+                };
+                if let Some((_, comptime_interpretor::Value::Bool(false))) = guard_eval {
+                    continue;
+                }
+                if guard_eval.is_none() {
+                    self.with_staged_input(true, |this| {
+                        this.describe_open_expression(
+                            guard,
+                            &mut body_locals.clone(),
+                            returns,
+                            Some(&D::Known(p(P::Bool))),
+                            depth + 1,
+                        )
+                    })?;
+                }
+            }
+            self.describe_open_block(body, &mut body_locals, returns, None, depth + 1)?;
+        }
+        Ok(Some(()))
     }
 
     fn describe_open_tuple_iteration(
@@ -5299,6 +5700,7 @@ impl Checker<'_, '_> {
         // The guard is described after installing its candidate environment;
         // it may call a function whose domain depends on a staged binding.
         let mut constant_input = None;
+        let mut evaluated_const = None;
         let value = if binding.comptime {
             let init = binding
                 .init
@@ -5315,8 +5717,14 @@ impl Checker<'_, '_> {
             self.with_staged_input(true, |this| {
                 this.check_open_fragment(&input, init.span, false)
             })?;
+            evaluated_const = self.try_evaluate_open_closed_expr(init, &input)?;
             let input_type = input.ty.clone();
-            constant_input = Some(input);
+            constant_input = Some(
+                evaluated_const
+                    .as_ref()
+                    .map(|(expr, _)| expr.clone())
+                    .unwrap_or(input),
+            );
             let mut checked = None;
             self.with_open_operand(input_type, init.span, |this, placeholder| {
                 let binding = hir::decl::LetDecl {
@@ -5364,13 +5772,25 @@ impl Checker<'_, '_> {
         }
         let staged_bindings =
             subject_pattern_bindings(pattern, &mut self.required_steps, expr.span)?;
-        for id in pattern_binding_ids(&binding.pattern) {
-            if let Some(ty) = self.locals.get(&id) {
-                locals.insert(id, D::Known(ty.clone()));
-                if self.in_staged_input || binding.comptime || staged_bindings.contains(&id) {
-                    self.open_staged_locals.insert(id);
+        let binding_ids = pattern_binding_ids(&binding.pattern);
+        let closed_const_binding = matches!(
+            (&binding.pattern.kind, binding_ids.as_slice()),
+            (hir::pattern::PatternKind::Binding(_, _, None), [_])
+        ) && evaluated_const.is_some();
+        for id in &binding_ids {
+            if let Some(ty) = self.locals.get(id) {
+                locals.insert(*id, D::Known(ty.clone()));
+                if !closed_const_binding
+                    && (self.in_staged_input || binding.comptime || staged_bindings.contains(id))
+                {
+                    self.open_staged_locals.insert(*id);
                 }
             }
+        }
+        if closed_const_binding && let Some((const_expr, _)) = evaluated_const {
+            let id = binding_ids[0];
+            self.immutable.insert(id);
+            self.generator_data.insert(id, Some(const_expr));
         }
         if let Some(guard) = binding.guard {
             self.with_staged_input(self.in_staged_input || binding.comptime, |this| {
@@ -5480,6 +5900,9 @@ impl Checker<'_, '_> {
             let result = self.describe_known_region(expr, expected);
             self.describing_open_call = saved_call;
             self.describing_open_spread = saved;
+            if matches!(result, Ok(D::Unknown)) {
+                self.open_definition_needs_instance = true;
+            }
             return result;
         };
         let Some(owner) = self.package.definition_owner(def_id) else {
@@ -5632,6 +6055,9 @@ impl Checker<'_, '_> {
             let result = self.describe_known_region(expr, expected);
             self.describing_open_call = saved_call;
             self.describing_open_spread = saved;
+            if matches!(result, Ok(D::Unknown)) {
+                self.open_definition_needs_instance = true;
+            }
             return result;
         };
         let owner = self
@@ -5650,6 +6076,9 @@ impl Checker<'_, '_> {
             let result = self.describe_known_region(expr, expected);
             self.describing_open_call = saved_call;
             self.describing_open_spread = saved;
+            if matches!(result, Ok(D::Unknown)) {
+                self.open_definition_needs_instance = true;
+            }
             return result;
         }
         self.ensure_signature(owner, callee.span)?;
@@ -5720,6 +6149,9 @@ impl Checker<'_, '_> {
             let result = self.describe_known_region(expr, expected);
             self.describing_open_call = saved_call;
             self.describing_open_spread = saved;
+            if matches!(result, Ok(D::Unknown)) {
+                self.open_definition_needs_instance = true;
+            }
             return result;
         }
         if self.open_functions.contains_key(&owner) && !self.type_parameters[&owner].is_empty() {
@@ -5750,7 +6182,10 @@ impl Checker<'_, '_> {
                 self.describing_open_call = saved_open_call;
                 match partial? {
                     Some(OpenClauseInference::Ready(arguments, _, _)) => arguments,
-                    Some(OpenClauseInference::Pending(description)) => return Ok(description),
+                    Some(OpenClauseInference::Pending(description)) => {
+                        self.open_definition_needs_instance = true;
+                        return Ok(description);
+                    }
                     None => {
                         let saved = std::mem::replace(&mut self.describing_open_call, true);
                         let arguments = self.function_clause_arguments(expr, owner, explicit);
@@ -5771,7 +6206,10 @@ impl Checker<'_, '_> {
                     Some((locals, returns, depth)),
                 )? {
                     OpenClauseInference::Ready(arguments, _, _) => arguments,
-                    OpenClauseInference::Pending(description) => return Ok(description),
+                    OpenClauseInference::Pending(description) => {
+                        self.open_definition_needs_instance = true;
+                        return Ok(description);
+                    }
                 }
             };
             self.check_type_application(owner, &arguments, expr.span)?;
@@ -5783,6 +6221,9 @@ impl Checker<'_, '_> {
             let result =
                 self.describe_open_signature_call(expr, owner, sig, args, locals, returns, depth);
             self.alias_substitution = saved;
+            if matches!(result, Ok(D::Unknown)) {
+                self.open_definition_needs_instance = true;
+            }
             return result;
         }
         if !self.type_parameters[&owner].is_empty() {
@@ -6269,7 +6710,10 @@ impl Checker<'_, '_> {
         for route in &routes {
             let (sort, ty) = &parameters[route.parameter];
             let expected = match substitute_description(ty, &symbols, expr.span)? {
-                D::Known(ty) => D::Known(self.observe_call_type(&ty, expr)?),
+                D::Known(ty) => {
+                    let ty = self.resolve_ptc_associated_calls(&ty, expr.span)?;
+                    D::Known(self.observe_call_type(&ty, expr)?)
+                }
                 D::Unknown => D::Unknown,
             };
             if route.is_collected() {
@@ -6359,7 +6803,10 @@ impl Checker<'_, '_> {
         }
         self.admit_open_type_requirements(owner, &symbols, false, expr.span)?;
         let result = match substitute_description(&result, &symbols, expr.span)? {
-            D::Known(ty) => D::Known(self.observe_call_type(&ty, expr)?),
+            D::Known(ty) => {
+                let ty = self.resolve_ptc_associated_calls(&ty, expr.span)?;
+                D::Known(self.observe_call_type(&ty, expr)?)
+            }
             D::Unknown => D::Unknown,
         };
         Ok(if diverges {
@@ -7083,6 +7530,66 @@ impl Checker<'_, '_> {
         self.resolve_ptc_associated_calls_inner(ty, span, 0)
     }
 
+    fn resolve_variant_field_type(
+        &self,
+        subject: &Term,
+        variant: &Term,
+        field: &Term,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = subject
+        else {
+            return Ok(None);
+        };
+        let Some(enum_def) = self.enums.get(declaration) else {
+            return Ok(None);
+        };
+        let to_index = |term: &Term| -> Option<usize> {
+            match term {
+                Term::Integer(int) => int.to_u128().ok().and_then(|v| usize::try_from(v).ok()),
+                Term::BitVec(bv) => {
+                    let mut value = 0u128;
+                    for (index, &word) in bv.words().iter().enumerate() {
+                        if index >= 4 {
+                            return None;
+                        }
+                        value |= u128::from(word) << (index * 32);
+                    }
+                    usize::try_from(value).ok()
+                }
+                _ => None,
+            }
+        };
+        let (Some(v_idx), Some(f_idx)) = (to_index(variant), to_index(field)) else {
+            return Ok(None);
+        };
+        let Some(raw_ty) = enum_def
+            .variants
+            .get(v_idx)
+            .and_then(|v| v.fields.get(f_idx))
+        else {
+            return Ok(None);
+        };
+        if enum_def.type_parameters.is_empty() {
+            return Ok(Some(raw_ty.clone()));
+        }
+        let frames = [enum_def
+            .parameter_types
+            .iter()
+            .map(Sort::of_comptime_domain)
+            .collect()];
+        Ok(Some(self.instantiate_input_types_in_scope(
+            raw_ty,
+            &enum_def.type_parameters,
+            arguments,
+            &frames,
+            span,
+        )?))
+    }
+
     fn resolve_ptc_associated_calls_inner(
         &mut self,
         ty: &Term,
@@ -7090,9 +7597,16 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<Term, Error> {
         if depth >= 64
-            || !ty
-                .structural_terms()
-                .any(|term| matches!(term, Term::AssociatedTypeCall(_)))
+            || !ty.structural_terms().any(|term| {
+                matches!(
+                    term,
+                    Term::AssociatedTypeCall(_)
+                        | Term::FieldType { .. }
+                        | Term::VariantFieldType { .. }
+                        | Term::TupleAppend { .. }
+                        | Term::ComptimeCall(_)
+                )
+            })
         {
             return Ok(ty.clone());
         }
@@ -7176,6 +7690,134 @@ impl Checker<'_, '_> {
                     return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
                 }
                 Ok(term)
+            }
+            Term::ComptimeCall(call)
+                if self.pure_field_type_builtin_wrapper(call.declaration)
+                    == Some("struct_field_type")
+                    && call.arguments.len() == 2 =>
+            {
+                let subject = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[0]),
+                    span,
+                    depth + 1,
+                )?;
+                let field = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[1]),
+                    span,
+                    depth + 1,
+                )?;
+                if let Term::Symbol(name) = &field
+                    && let Some(resolved) = self
+                        .context
+                        .resolve_struct_field_type(&subject, name.as_ref())
+                {
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                Ok(Term::field_type(subject, field))
+            }
+            Term::ComptimeCall(call)
+                if self.pure_field_type_builtin_wrapper(call.declaration)
+                    == Some("variant_field_type")
+                    && call.arguments.len() == 3 =>
+            {
+                let subject = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[0]),
+                    span,
+                    depth + 1,
+                )?;
+                let variant = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[1]),
+                    span,
+                    depth + 1,
+                )?;
+                let field = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[2]),
+                    span,
+                    depth + 1,
+                )?;
+                if let Some(resolved) =
+                    self.resolve_variant_field_type(&subject, &variant, &field, span)?
+                {
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                Ok(Term::variant_field_type(subject, variant, field))
+            }
+            Term::ComptimeCall(call)
+                if self.pure_field_type_builtin_wrapper(call.declaration)
+                    == Some("tuple_append_type")
+                    && call.arguments.len() == 2 =>
+            {
+                let tuple = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[0]),
+                    span,
+                    depth + 1,
+                )?;
+                let element = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, &call.arguments[1]),
+                    span,
+                    depth + 1,
+                )?;
+                Ok(self.resolve_tuple_append_type(tuple, element))
+            }
+            Term::TupleAppend { tuple, element } => {
+                let tuple = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, tuple),
+                    span,
+                    depth + 1,
+                )?;
+                let element = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, element),
+                    span,
+                    depth + 1,
+                )?;
+                Ok(self.resolve_tuple_append_type(tuple, element))
+            }
+            Term::FieldType { subject, field } => {
+                let subject = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, subject),
+                    span,
+                    depth + 1,
+                )?;
+                let field = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, field),
+                    span,
+                    depth + 1,
+                )?;
+                if let Term::Symbol(name) = &field
+                    && let Some(resolved) = self
+                        .context
+                        .resolve_struct_field_type(&subject, name.as_ref())
+                {
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                Ok(Term::field_type(subject, field))
+            }
+            Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                let subject = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, subject),
+                    span,
+                    depth + 1,
+                )?;
+                let variant = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, variant),
+                    span,
+                    depth + 1,
+                )?;
+                let field = self.resolve_ptc_associated_calls_inner(
+                    &narrow_term(self, field),
+                    span,
+                    depth + 1,
+                )?;
+                if let Some(resolved) =
+                    self.resolve_variant_field_type(&subject, &variant, &field, span)?
+                {
+                    return Ok(self.structural_type(&resolved, span).unwrap_or(resolved));
+                }
+                Ok(Term::variant_field_type(subject, variant, field))
             }
             Term::Pointer(inner) => Ok(Term::Pointer(Box::new(
                 self.resolve_ptc_associated_calls_inner(inner, span, depth + 1)?,
@@ -7871,12 +8513,7 @@ impl Checker<'_, '_> {
             // An associated equality can await a later input's subject type.
             // Keep that obligation pending while collecting evidence, then
             // resolve established projections before finishing the candidate.
-            candidate
-                .refine_type_views_metered(
-                    |ty, budget| self.callable_input_view_metered(ty, budget),
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(expr.span, e))?;
+            self.refine_call_views(&mut candidate, expr.span)?;
             self.settle_function_defaults(
                 owner,
                 &generic,
@@ -8328,7 +8965,9 @@ impl Checker<'_, '_> {
                 CallUse::DefinitionBehavior,
             )
         };
-        result.map(Some)
+        let mut call = result?;
+        call.ty = self.resolve_ptc_associated_calls(&call.ty, expr.span)?;
+        Ok(Some(call))
     }
 
     pub(super) fn explicit_open_function_call(
@@ -8822,6 +9461,7 @@ impl Checker<'_, '_> {
         let result = self.admit_type_data(result, expr.span, |_| expected.cloned().ok_or_else(|| context_error(
                 expr.span, "gradual result requires a concrete delivery domain; no result context was supplied",
             )))?;
+        let result = self.resolve_ptc_associated_calls(&result, expr.span)?;
         let result = self.observe_call_type(&result, expr)?;
         let result = self.simplify_deferred_error_result(&result, expr.span)?;
         let signature = Term::Function {

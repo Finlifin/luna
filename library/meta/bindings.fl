@@ -1,5 +1,23 @@
 use List;
-use builtin.{Integer, Symbol, Type, isize, u128, usize}
+use ast_impl.span.SourceSpan;
+use builtin.{
+    CallDescription,
+    Integer,
+    Symbol,
+    Type,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+}
 use numeric.bindings.{
     integer_div_trunc as compiler_comptime_integer_div_trunc,
     integer_rem_trunc as compiler_comptime_integer_rem_trunc,
@@ -17,6 +35,16 @@ const compiler_to_usize: comptime fn(Integer) -> usize = .comptime_integer_conve
 const compiler_from_usize: comptime fn(usize) -> Integer = .comptime_integer_convert'builtin;
 const compiler_to_isize: comptime fn(Integer) -> isize = .comptime_integer_convert'builtin;
 const compiler_from_isize: comptime fn(isize) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_u8: comptime fn(u8) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_u16: comptime fn(u16) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_u32: comptime fn(u32) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_u64: comptime fn(u64) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_u128: comptime fn(u128) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_i8: comptime fn(i8) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_i16: comptime fn(i16) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_i32: comptime fn(i32) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_i64: comptime fn(i64) -> Integer = .comptime_integer_convert'builtin;
+const compiler_from_i128: comptime fn(i128) -> Integer = .comptime_integer_convert'builtin;
 pub const compiler_object_length: comptime fn(Object) -> Integer = .object_length'builtin;
 pub const compiler_object_key: comptime fn(Object, Integer) -> ?Symbol = .object_key'builtin;
 pub const CompilerObjectEntryType: comptime fn(Object, Integer) -> Type =
@@ -124,6 +152,46 @@ pub pure comptime fn to_isize(value: Integer) -> isize {
 
 pub pure comptime fn from_isize(value: isize) -> Integer {
     compiler_from_isize(value)
+}
+
+pub pure comptime fn from_u8(value: u8) -> Integer {
+    compiler_from_u8(value)
+}
+
+pub pure comptime fn from_u16(value: u16) -> Integer {
+    compiler_from_u16(value)
+}
+
+pub pure comptime fn from_u32(value: u32) -> Integer {
+    compiler_from_u32(value)
+}
+
+pub pure comptime fn from_u64(value: u64) -> Integer {
+    compiler_from_u64(value)
+}
+
+pub pure comptime fn from_u128(value: u128) -> Integer {
+    compiler_from_u128(value)
+}
+
+pub pure comptime fn from_i8(value: i8) -> Integer {
+    compiler_from_i8(value)
+}
+
+pub pure comptime fn from_i16(value: i16) -> Integer {
+    compiler_from_i16(value)
+}
+
+pub pure comptime fn from_i32(value: i32) -> Integer {
+    compiler_from_i32(value)
+}
+
+pub pure comptime fn from_i64(value: i64) -> Integer {
+    compiler_from_i64(value)
+}
+
+pub pure comptime fn from_i128(value: i128) -> Integer {
+    compiler_from_i128(value)
 }
 
 pub const div_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_div_trunc;
@@ -307,4 +375,165 @@ pub const BuildNewtype: comptime fn(Symbol, Type) -> Type = CompilerBuildNewtype
 
 pub pure comptime fn NewtypeRepresentation(subject: Type) -> Type {
     CompilerNewtypeRepresentation(subject)
+}
+
+const compiler_implicit_src: comptime fn(CallDescription) -> SourceSpan = .implicit_src'builtin;
+const compiler_struct_field_spans: comptime fn(Type) -> List<SourceSpan> =
+    .struct_field_spans'builtin;
+const compiler_record_field_spans: comptime fn(Type) -> List<SourceSpan> =
+    .record_field_spans'builtin;
+const compiler_declaration_span: comptime fn(Type) -> SourceSpan = .declaration_span'builtin;
+const compiler_enum_variant_spans: comptime fn(Type) -> List<SourceSpan> =
+    .enum_variant_spans'builtin;
+const compiler_enum_variant_field_spans: comptime fn(Type) -> List<List<SourceSpan>> =
+    .enum_variant_field_spans'builtin;
+
+pub pure comptime fn implicit_src(calling: CallDescription) -> SourceSpan {
+    compiler_implicit_src(calling)
+}
+
+pub pure comptime fn struct_field_spans(subject: Type) -> List<SourceSpan> {
+    compiler_struct_field_spans(subject)
+}
+
+pub pure comptime fn record_field_spans(subject: Type) -> List<SourceSpan> {
+    compiler_record_field_spans(subject)
+}
+
+pub pure comptime fn declaration_span(subject: Type) -> SourceSpan {
+    compiler_declaration_span(subject)
+}
+
+pub pure comptime fn enum_variant_spans(subject: Type) -> List<SourceSpan> {
+    compiler_enum_variant_spans(subject)
+}
+
+pub pure comptime fn enum_variant_field_spans(subject: Type) -> List<List<SourceSpan>> {
+    compiler_enum_variant_field_spans(subject)
+}
+
+pub pure comptime fn FieldType(comptime S: Type, comptime name: Symbol) -> Type
+where
+    requires Type.predicates.has_field(S, name),
+{
+    .struct_field_type'builtin(S, name)
+}
+
+pub pure comptime fn VariantFieldType(
+    comptime E: Type,
+    comptime v: usize,
+    comptime f: usize,
+) -> Type {
+    .variant_field_type'builtin(E, v, f)
+}
+
+pub pure comptime fn TupleAppend(comptime T: Type, comptime E: Type) -> Type {
+    .tuple_append_type'builtin(T, E)
+}
+
+pub pure fn field_ptr(
+    ptr: *S,
+    comptime name: Symbol,
+) -> *FieldType(S, name)
+where
+    S: Type,
+    requires Type.predicates.has_field(S, name),
+{
+    .field_ptr'builtin(ptr, name)
+}
+
+pub pure comptime fn field_value(
+    value: S,
+    comptime name: Symbol,
+) -> FieldType(S, name)
+where
+    S: Type,
+    requires Type.predicates.has_field(S, name),
+{
+    .field_value'builtin(value, name)
+}
+
+pub fn tuple_append(tuple: T, element: E) -> TupleAppend(T, E)
+where
+    T: Type,
+    E: Type,
+{
+    .tuple_append'builtin(tuple, element)
+}
+
+pub pure comptime fn comptime_tuple_append(tuple: T, element: E) -> TupleAppend(T, E)
+where
+    T: Type,
+    E: Type,
+{
+    .tuple_append'builtin(tuple, element)
+}
+
+pub fn construct_struct(comptime S: Type, fields: F) -> S
+where
+    F: Type,
+{
+    .construct_struct'builtin(S, fields)
+}
+
+pub pure comptime fn comptime_construct_struct(comptime S: Type, fields: F) -> S
+where
+    F: Type,
+{
+    .construct_struct'builtin(S, fields)
+}
+
+pub fn enum_variant_index(ptr: *E) -> usize
+where
+    E: Type,
+{
+    .enum_variant_index'builtin(ptr)
+}
+
+pub fn enum_variant_field_ptr(
+    comptime E: Type,
+    ptr: *E,
+    comptime v: usize,
+    comptime f: usize,
+) -> ?*VariantFieldType(E, v, f) {
+    .enum_variant_field_ptr'builtin(E, ptr, v, f)
+}
+
+pub fn construct_enum(comptime E: Type, comptime v: usize, fields: F) -> E
+where
+    F: Type,
+{
+    .construct_enum'builtin(E, v, fields)
+}
+
+pub pure comptime fn comptime_construct_enum(comptime E: Type, comptime v: usize, fields: F) -> E
+where
+    F: Type,
+{
+    .construct_enum'builtin(E, v, fields)
+}
+
+pub pure comptime fn comptime_enum_variant_index(value: E) -> Integer
+where
+    E: Type,
+{
+    .comptime_enum_variant_index'builtin(value)
+}
+
+pub pure comptime fn comptime_enum_variant_field_values(value: E) -> Object
+where
+    E: Type,
+{
+    .comptime_enum_variant_field_values'builtin(value)
+}
+
+pub pure comptime fn comptime_field_entry(
+    value: S,
+    name: Symbol,
+    field_ty: Type,
+) -> Object
+where
+    S: Type,
+{
+    .comptime_field_entry'builtin(value, name, field_ty)
 }

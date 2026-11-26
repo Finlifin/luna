@@ -115,6 +115,10 @@ pub(super) fn predicate(
         P::IntLe(a, b) => P::IntLe(a.clone(), b.clone()),
         P::Kind(ty, kind) => P::Kind(normalize(ty, values, fuel, depth + 1)?, *kind),
         P::NotSized(ty) => P::NotSized(normalize(ty, values, fuel, depth + 1)?),
+        P::HasField { subject, field } => P::HasField {
+            subject: normalize(subject, values, fuel, depth + 1)?,
+            field: normalize(field, values, fuel, depth + 1)?,
+        },
         P::Not(inner) => P::Not(Box::new(predicate(inner, values, fuel, depth + 1)?)),
         P::And(items) | P::Or(items) => {
             if items.len() > *fuel {
@@ -142,6 +146,7 @@ fn normalize(
     walk(ty, &mut values, fuel, depth)
 }
 
+#[inline(never)]
 fn walk_many<'p, L: Lookup<'p>>(
     items: &[Term],
     values: &mut L,
@@ -157,16 +162,39 @@ fn walk_many<'p, L: Lookup<'p>>(
         .collect()
 }
 
-fn walk<'p, L: Lookup<'p>>(
+#[inline(never)]
+fn walk_associated<'p, L: Lookup<'p>>(
+    origin: &nir::AssociatedTypeOrigin,
+    arguments: &[Term],
+    subject: &Term,
+    values: &mut L,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, L::Failure> {
+    let interface = InterfaceInstance {
+        declaration: origin.interface,
+        arguments: walk_many(arguments, values, fuel, depth + 1)?,
+    };
+    let subject = walk(subject, values, fuel, depth + 1)?;
+    let body = values.resolve((interface, subject, origin.member), fuel)?;
+    let value = body.expression();
+    if value.ty != Term::Primitive(Primitive::Type) {
+        return Err(ErrorKind::Type.into());
+    }
+    let K::TypeValue(ty) = &value.kind else {
+        return Err(ErrorKind::Type.into());
+    };
+    charge_copy(ty, fuel)?;
+    walk(ty, values, fuel, depth + 1)
+}
+
+#[inline(never)]
+fn walk_compound<'p, L: Lookup<'p>>(
     ty: &Term,
     values: &mut L,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, L::Failure> {
-    if depth >= 64 {
-        return Err(ErrorKind::DepthExhausted.into());
-    }
-    *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
     Ok(match ty {
         Term::ErrorResult { errors, result } => {
             let observed_errors = walk_many(errors, values, fuel, depth + 1)?;
@@ -198,27 +226,6 @@ fn walk<'p, L: Lookup<'p>>(
                 .collect::<Result<Vec<_>, L::Failure>>()?;
             Term::computation(operations, walk(result, values, fuel, depth + 1)?)
         }
-        Term::AssociatedType {
-            origin,
-            arguments,
-            subject,
-        } => {
-            let interface = InterfaceInstance {
-                declaration: origin.interface,
-                arguments: walk_many(arguments, values, fuel, depth + 1)?,
-            };
-            let subject = walk(subject, values, fuel, depth + 1)?;
-            let body = values.resolve((interface, subject, origin.member), fuel)?;
-            let value = body.expression();
-            if value.ty != Term::Primitive(Primitive::Type) {
-                return Err(ErrorKind::Type.into());
-            }
-            let K::TypeValue(ty) = &value.kind else {
-                return Err(ErrorKind::Type.into());
-            };
-            charge_copy(ty, fuel)?;
-            walk(ty, values, fuel, depth + 1)?
-        }
         Term::AssociatedTypeCall(call) => {
             Term::AssociatedTypeCall(Box::new(nir::AssociatedTypeCall {
                 origin: call.origin.clone(),
@@ -237,29 +244,23 @@ fn walk<'p, L: Lookup<'p>>(
             walk(errors, values, fuel, depth + 1)?,
             walk(result, values, fuel, depth + 1)?,
         ),
-        Term::Nominal {
-            declaration,
-            arguments,
-        } => Term::Nominal {
-            declaration: *declaration,
-            arguments: walk_many(arguments, values, fuel, depth + 1)?,
-        },
-        Term::TraitObject {
-            interface,
-            arguments,
-        } => Term::TraitObject {
-            interface: *interface,
-            arguments: walk_many(arguments, values, fuel, depth + 1)?,
-        },
-        Term::NormalForm {
-            head,
-            sort,
-            arguments,
-        } => Term::NormalForm {
-            head: *head,
-            sort: *sort,
-            arguments: walk_many(arguments, values, fuel, depth + 1)?,
-        },
+        Term::FieldType { subject, field } => Term::field_type(
+            walk(subject, values, fuel, depth + 1)?,
+            walk(field, values, fuel, depth + 1)?,
+        ),
+        Term::VariantFieldType {
+            subject,
+            variant,
+            field,
+        } => Term::variant_field_type(
+            walk(subject, values, fuel, depth + 1)?,
+            walk(variant, values, fuel, depth + 1)?,
+            walk(field, values, fuel, depth + 1)?,
+        ),
+        Term::TupleAppend { tuple, element } => Term::tuple_append(
+            walk(tuple, values, fuel, depth + 1)?,
+            walk(element, values, fuel, depth + 1)?,
+        ),
         Term::MethodValue(method) => Term::MethodValue(Box::new(TraitMethodIdentity {
             interface: InterfaceInstance {
                 declaration: method.interface.declaration,
@@ -269,27 +270,11 @@ fn walk<'p, L: Lookup<'p>>(
             member: method.member,
             method_arguments: walk_many(&method.method_arguments, values, fuel, depth + 1)?,
         })),
-        Term::FunctionValue {
-            declaration,
-            arguments,
-        } => Term::FunctionValue {
-            declaration: *declaration,
-            arguments: walk_many(arguments, values, fuel, depth + 1)?,
-        },
-        Term::ClosureSnapshot { factory, arguments } => Term::ClosureSnapshot {
-            factory: *factory,
-            arguments: walk_many(arguments, values, fuel, depth + 1)?,
-        },
         Term::ClosureValue { ty, body, captures } => Term::ClosureValue {
             ty: Box::new(walk(ty, values, fuel, depth + 1)?),
             body: body.clone(),
             captures: walk_many(captures, values, fuel, depth + 1)?,
         },
-        Term::Tuple(items) => Term::Tuple(walk_many(items, values, fuel, depth + 1)?),
-        Term::TupleValue(items) => Term::TupleValue(walk_many(items, values, fuel, depth + 1)?),
-        Term::ClosureContextValue(items) => {
-            Term::ClosureContextValue(walk_many(items, values, fuel, depth + 1)?)
-        }
         Term::ContextualClosure { context, signature } => Term::contextual_closure(
             walk(context, values, fuel, depth + 1)?,
             walk(signature, values, fuel, depth + 1)?,
@@ -363,25 +348,6 @@ fn walk<'p, L: Lookup<'p>>(
                     .collect::<Result<_, L::Failure>>()?,
             )
         }
-        Term::Optional(inner) => Term::Optional(Box::new(walk(inner, values, fuel, depth + 1)?)),
-        Term::RuntimeField { base, index } => Term::RuntimeField {
-            base: Box::new(walk(base, values, fuel, depth + 1)?),
-            index: *index,
-        },
-        Term::Pointer(inner) => Term::Pointer(Box::new(walk(inner, values, fuel, depth + 1)?)),
-        Term::Lift(inner) => Term::Lift(Box::new(walk(inner, values, fuel, depth + 1)?)),
-        Term::NormalFormFunction(inner, collector) => {
-            Term::NormalFormFunction(Box::new(walk(inner, values, fuel, depth + 1)?), *collector)
-        }
-        Term::ComptimeFunction(inner) => {
-            Term::ComptimeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
-        }
-        Term::UnsafeFunction(inner) => {
-            Term::UnsafeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
-        }
-        Term::PureFunction(inner) => {
-            Term::PureFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
-        }
         Term::Closure {
             environment,
             signature,
@@ -405,6 +371,104 @@ fn walk<'p, L: Lookup<'p>>(
                     .collect::<Result<_, L::Failure>>()?,
                 result: Box::new(walk(result, values, fuel, depth + 1)?),
             }
+        }
+        _ => unreachable!(),
+    })
+}
+
+#[inline(never)]
+fn walk<'p, L: Lookup<'p>>(
+    ty: &Term,
+    values: &mut L,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, L::Failure> {
+    if depth >= 64 {
+        return Err(ErrorKind::DepthExhausted.into());
+    }
+    *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
+    Ok(match ty {
+        Term::AssociatedType {
+            origin,
+            arguments,
+            subject,
+        } => return walk_associated(origin, arguments, subject, values, fuel, depth),
+        Term::ErrorResult { .. }
+        | Term::Computation { .. }
+        | Term::AssociatedTypeCall(_)
+        | Term::ComptimeCall(_)
+        | Term::DeferredErrorResult { .. }
+        | Term::FieldType { .. }
+        | Term::VariantFieldType { .. }
+        | Term::TupleAppend { .. }
+        | Term::MethodValue(_)
+        | Term::ClosureValue { .. }
+        | Term::ContextualClosure { .. }
+        | Term::ListConcat { .. }
+        | Term::Record(_)
+        | Term::OptionalValue { .. }
+        | Term::ErrorValue { .. }
+        | Term::NominalValue { .. }
+        | Term::RecordValue(_)
+        | Term::Closure { .. }
+        | Term::Function { .. } => return walk_compound(ty, values, fuel, depth),
+        Term::Nominal {
+            declaration,
+            arguments,
+        } => Term::Nominal {
+            declaration: *declaration,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
+        Term::TraitObject {
+            interface,
+            arguments,
+        } => Term::TraitObject {
+            interface: *interface,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
+        Term::NormalForm {
+            head,
+            sort,
+            arguments,
+        } => Term::NormalForm {
+            head: *head,
+            sort: *sort,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
+        Term::FunctionValue {
+            declaration,
+            arguments,
+        } => Term::FunctionValue {
+            declaration: *declaration,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
+        Term::ClosureSnapshot { factory, arguments } => Term::ClosureSnapshot {
+            factory: *factory,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
+        Term::Tuple(items) => Term::Tuple(walk_many(items, values, fuel, depth + 1)?),
+        Term::TupleValue(items) => Term::TupleValue(walk_many(items, values, fuel, depth + 1)?),
+        Term::ClosureContextValue(items) => {
+            Term::ClosureContextValue(walk_many(items, values, fuel, depth + 1)?)
+        }
+        Term::Optional(inner) => Term::Optional(Box::new(walk(inner, values, fuel, depth + 1)?)),
+        Term::RuntimeField { base, index } => Term::RuntimeField {
+            base: Box::new(walk(base, values, fuel, depth + 1)?),
+            index: *index,
+        },
+        Term::Pointer(inner) => Term::Pointer(Box::new(walk(inner, values, fuel, depth + 1)?)),
+        Term::Lift(inner) => Term::Lift(Box::new(walk(inner, values, fuel, depth + 1)?)),
+        Term::NormalFormFunction(inner, collector) => {
+            Term::NormalFormFunction(Box::new(walk(inner, values, fuel, depth + 1)?), *collector)
+        }
+        Term::ComptimeFunction(inner) => {
+            Term::ComptimeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
+        }
+        Term::UnsafeFunction(inner) => {
+            Term::UnsafeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
+        }
+        Term::PureFunction(inner) => {
+            Term::PureFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
         }
         Term::Primitive(_)
         | Term::ClosureContextType

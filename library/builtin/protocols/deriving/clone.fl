@@ -1,0 +1,73 @@
+use meta;
+use primitives.{Any, Symbol, Type, usize};
+use protocols.resources.Clone;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Clone
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    fn clone(*self) -> Self {
+        inline if Type.predicates.is_struct(Self) {
+            const CODE: < src: *Self |- Any > = do {
+                const NAMES = meta.reflection.struct_field_names(Self);
+                var acc: < src: *Self |- Any > = '( () );
+                inline for i in 0..NAMES.length() {
+                    const sym: Symbol = NAMES[i];
+                    inline if Type.predicates.has_field(Self, sym) {
+                        let prev: < src: *Self |- Any > = acc;
+                        acc = '(
+                            meta.structs.tuple_append(
+                                ~[src = src]<prev>,
+                                meta.structs.field_ptr(src, sym).*.as(Clone).clone(),
+                            )
+                        );
+                    }
+                }
+                let final_acc: < src: *Self |- Any > = acc;
+                '( meta.structs.construct_struct(Self, ~[src = src]<final_acc>) )
+            };
+            let src_ptr = self;
+            ~[src = src_ptr]<CODE>
+        } else {
+            const VF_TYPES = meta.reflection.enum_variant_field_types(Self);
+            let lv = meta.enums.enum_variant_index(self);
+            inline for v in 0..VF_TYPES.length() {
+                const V_U: usize = meta.enums.to_usize(v);
+                if lv == V_U {
+                    const BUILD_VARIANT: < src: *Self |- Any > = do {
+                        var acc: < src: *Self |- Any > = '( () );
+                        const FIELD_COUNT = VF_TYPES[v].length();
+                        inline if FIELD_COUNT > 0 {
+                            inline for f in 0..FIELD_COUNT {
+                                const F_U: usize = meta.enums.to_usize(f);
+                                let prev: < src: *Self |- Any > = acc;
+                                acc = '(
+                                    meta.structs.tuple_append(
+                                        ~[src = src]<prev>,
+                                        (
+                                            meta.enums.enum_variant_field_ptr(
+                                                Self,
+                                                src,
+                                                V_U,
+                                                F_U,
+                                            ) match {
+                                                fp? => fp.*.as(Clone).clone(),
+                                                null => while true {},
+                                            }
+                                        ),
+                                    )
+                                );
+                            }
+                        }
+                        let final_acc: < src: *Self |- Any > = acc;
+                        '( meta.enums.construct_enum(Self, V_U, ~[src = src]<final_acc>) )
+                    };
+                    let src_ptr = self;
+                    return ~[src = src_ptr]<BUILD_VARIANT>;
+                }
+            }
+            while true {}
+        }
+    }
+}

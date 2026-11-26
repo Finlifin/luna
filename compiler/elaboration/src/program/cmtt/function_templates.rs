@@ -49,6 +49,7 @@ impl Checker<'_, '_> {
         };
         let saved_locals = self.locals.clone();
         let saved_code = self.code_values.clone();
+        let saved_any_result = std::mem::take(&mut self.any_result_code_locals);
         let saved_checking = self.checking_code_generator;
         // The supplied runtime body belongs to this generated function. Check
         // its requests in that function's declared row, not the environment of
@@ -118,6 +119,7 @@ impl Checker<'_, '_> {
         })();
         self.locals = saved_locals;
         self.code_values = saved_code;
+        self.any_result_code_locals = saved_any_result;
         self.checking_code_generator = saved_checking;
         self.effect_environment = saved_effects;
         checked

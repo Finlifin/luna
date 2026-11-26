@@ -830,6 +830,9 @@ pub fn concrete_payload(ty: &Term) -> bool {
                     | Term::AssociatedTypeCall(_)
                     | Term::ComptimeCall(_)
                     | Term::DeferredErrorResult { .. }
+                    | Term::FieldType { .. }
+                    | Term::VariantFieldType { .. }
+                    | Term::TupleAppend { .. }
                     | Term::ListConcat { .. }
             )
         })

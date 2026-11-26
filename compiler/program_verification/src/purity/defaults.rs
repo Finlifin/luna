@@ -292,6 +292,26 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::ComptimeFunctionInstance { .. }
         | K::StructFieldNames(_)
         | K::RecordFieldNames(_)
+        | K::ImplicitQuery { .. }
+        | K::TypeHasField { .. }
+        | K::TypeFieldType { .. }
+        | K::StructFieldType { .. }
+        | K::FieldPtr { .. }
+        | K::FieldValue { .. }
+        | K::ComptimeFieldEntry { .. }
+        | K::NamedField { .. }
+        | K::ConstructStruct { .. }
+        | K::ConstructEnum { .. }
+        | K::EnumVariantIndex(_)
+        | K::EnumVariantFieldPtr { .. }
+        | K::TupleAppend { .. }
+        | K::StructFieldSpans(_)
+        | K::RecordFieldSpans(_)
+        | K::DeclarationSpan(_)
+        | K::EnumVariantSpans(_)
+        | K::EnumVariantFieldSpans(_)
+        | K::ComptimeEnumVariantIndex(_)
+        | K::ComptimeEnumVariantFieldValues(_)
         | K::ListConcat(..)
         | K::TypeListIndex(..)
         | K::NominalType { .. }

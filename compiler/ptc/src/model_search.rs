@@ -35,7 +35,9 @@ impl Search<'_> {
                 } | Term::Bound {
                     sort: Sort::Type,
                     ..
-                }
+                } | Term::FieldType { .. }
+                    | Term::VariantFieldType { .. }
+                    | Term::TupleAppend { .. }
             ) && !model_applications::admitted(term, self.context)
             {
                 representatives.entry(classes.root(id)).or_insert(id);

@@ -94,7 +94,10 @@ impl Checker<'_, '_> {
     ) -> Result<CallableViewInput<'t>, nir::NominalAdmissionError> {
         // This view is also used for complete interface argument vectors.
         // A finished scalar index has no associated Type projection to solve.
-        if signature.is_structural_index_value() || !self.interfaces_ready {
+        if signature.sort() != nir::Sort::Type
+            || signature.is_structural_index_value()
+            || !self.interfaces_ready
+        {
             crate::associated::charge_projection_copy(signature, &mut budget.steps)?;
             return Ok(CallableViewInput::Unchanged(signature.clone()));
         }

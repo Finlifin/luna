@@ -1,0 +1,62 @@
+use builtin.{Symbol, Type, bool, usize};
+use enums_impl as enums;
+use numeric.equality.ComptimeEq;
+use reflection_impl.structure.{enum_variant_field_types, struct_field_names};
+use structs_impl as structs;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for ComptimeEq
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    comptime fn eq(self, other: Self) -> bool {
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = struct_field_names(Self);
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    let lhs = structs.field_value(self, sym);
+                    let rhs = structs.field_value(other, sym);
+                    if not lhs.as(ComptimeEq).eq(rhs) {
+                        return false;
+                    }
+                }
+            }
+            true
+        } else {
+            const VF_TYPES = enum_variant_field_types(Self);
+            let lv = enums.comptime_enum_variant_index(self);
+            let rv = enums.comptime_enum_variant_index(other);
+            if lv != rv {
+                return false;
+            }
+            let lvals = enums.comptime_enum_variant_field_values(self);
+            let rvals = enums.comptime_enum_variant_field_values(other);
+            inline for v in 0..VF_TYPES.length() {
+                if lv == v {
+                    const V_USIZE: usize = enums.to_usize(v);
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        inline for f in 0..FIELD_COUNT {
+                            const F_USIZE: usize = enums.to_usize(f);
+                            const fty = enums.VariantFieldType(Self, V_USIZE, F_USIZE);
+                            let eq_ok = lvals.value<fty>(f) match {
+                                l? =>
+                                    rvals.value<fty>(f) match {
+                                        r? => l.as(ComptimeEq).eq(r),
+                                        null => false,
+                                    },
+                                null => false,
+                            };
+                            if not eq_ok {
+                                return false;
+                            }
+                        }
+                    }
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}

@@ -408,6 +408,34 @@ fn loop_may_transfer(
                 }
                 K::ScalarEqual(left, right)
                 | K::TypeEqual(left, right)
+                | K::TypeHasField {
+                    subject: left,
+                    field: right,
+                }
+                | K::TypeFieldType {
+                    subject: left,
+                    field: right,
+                }
+                | K::StructFieldType {
+                    subject: left,
+                    field: right,
+                }
+                | K::FieldPtr {
+                    pointer: left,
+                    field: right,
+                }
+                | K::FieldValue {
+                    value: left,
+                    field: right,
+                }
+                | K::ConstructEnum {
+                    variant: left,
+                    fields: right,
+                }
+                | K::TupleAppend {
+                    tuple: left,
+                    element: right,
+                }
                 | K::BitEqual(left, right)
                 | K::BitConcat(left, right)
                 | K::IntegerBinary { left, right, .. }
@@ -420,8 +448,30 @@ fn loop_may_transfer(
                 }
                 K::TypeKind { operand, .. }
                 | K::TypeNotSized { operand }
-                | K::TypeLayout { operand, .. } => {
+                | K::TypeLayout { operand, .. }
+                | K::NamedField { value: operand, .. }
+                | K::ConstructStruct { fields: operand }
+                | K::EnumVariantIndex(operand) => {
                     pending.push(operand);
+                    return Ok(false);
+                }
+                K::EnumVariantFieldPtr {
+                    pointer,
+                    variant,
+                    field,
+                }
+                | K::ComptimeFieldEntry {
+                    value: pointer,
+                    field: variant,
+                    ty: field,
+                } => {
+                    pending.push(pointer);
+                    if !is_never(&pointer.ty) {
+                        pending.push(variant);
+                        if !is_never(&variant.ty) {
+                            pending.push(field);
+                        }
+                    }
                     return Ok(false);
                 }
                 K::And(left, right) | K::Or(left, right) => {

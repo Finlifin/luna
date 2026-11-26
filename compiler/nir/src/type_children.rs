@@ -15,6 +15,23 @@ macro_rules! visit_children {
                 $visit(errors)?;
                 $visit(result)?;
             }
+            Self::FieldType { subject, field } => {
+                $visit(subject)?;
+                $visit(field)?;
+            }
+            Self::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                $visit(subject)?;
+                $visit(variant)?;
+                $visit(field)?;
+            }
+            Self::TupleAppend { tuple, element } => {
+                $visit(tuple)?;
+                $visit(element)?;
+            }
             Self::Computation { effects, result } => {
                 $visit(result)?;
                 for operation in effects {

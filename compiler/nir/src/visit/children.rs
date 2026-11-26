@@ -244,6 +244,17 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::ObjectEdit { subject: value, .. }
             | K::StructFieldNames(value)
             | K::RecordFieldNames(value)
+            | K::ImplicitQuery { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::ConstructStruct { fields: value }
+            | K::EnumVariantIndex(value)
+            | K::StructFieldSpans(value)
+            | K::RecordFieldSpans(value)
+            | K::DeclarationSpan(value)
+            | K::EnumVariantSpans(value)
+            | K::EnumVariantFieldSpans(value)
+            | K::ComptimeEnumVariantIndex(value)
+            | K::ComptimeEnumVariantFieldValues(value)
             | K::BitVecType(value)
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
@@ -298,10 +309,50 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                 );
                 push!(work, fuel, Node::Expr(value));
             }
-            K::BitWindow { value, start, end } => {
+            K::BitWindow { value, start, end }
+            | K::EnumVariantFieldPtr {
+                pointer: value,
+                variant: start,
+                field: end,
+            }
+            | K::ComptimeFieldEntry {
+                value,
+                field: start,
+                ty: end,
+            } => {
                 push!(work, fuel, Node::Expr(value));
                 push!(work, fuel, Node::Expr(start));
                 push!(work, fuel, Node::Expr(end));
+            }
+            K::TypeHasField {
+                subject: left,
+                field: right,
+            }
+            | K::TypeFieldType {
+                subject: left,
+                field: right,
+            }
+            | K::StructFieldType {
+                subject: left,
+                field: right,
+            }
+            | K::FieldPtr {
+                pointer: left,
+                field: right,
+            }
+            | K::FieldValue {
+                value: left,
+                field: right,
+            }
+            | K::ConstructEnum {
+                variant: left,
+                fields: right,
+            }
+            | K::TupleAppend {
+                tuple: left,
+                element: right,
+            } => {
+                extend!(work, fuel, [Node::Expr(right), Node::Expr(left)]);
             }
             K::Match { value, arms } => {
                 work::charge_entries(fuel, arms.len())?;

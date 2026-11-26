@@ -427,79 +427,60 @@ impl<'a> Resolver<'a> {
         self.tree.def_names.get(&def_id).map(|s| s.as_str())
     }
 
-    /// Collect definitions lexically accessible from `from_scope`, skipping
-    /// modules whose enclosing module chain is inaccessible from `from_scope`.
+    /// Collect definitions reachable from `from_scope` through accessible module
+    /// paths (including public re-exports of modules) and accessible entries.
     pub fn accessible_definitions(&self, from_scope: ScopeId) -> Vec<DefId> {
         use crate::binding::BindingKind;
         use crate::scope::ScopeKind;
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet, VecDeque};
 
         let tree = self.scope_tree();
-        let from_ancestors: HashSet<ScopeId> =
-            tree.ancestors(from_scope).map(|scope| scope.id).collect();
-        let module_accessible = |scope_id: ScopeId| -> bool {
-            for ancestor in tree.ancestors(scope_id) {
-                if from_ancestors.contains(&ancestor.id) || ancestor.kind == ScopeKind::Root {
-                    return true;
-                }
-                if ancestor.kind != ScopeKind::Module {
-                    continue;
-                }
-                let Some(parent_id) = ancestor.parent else {
-                    continue;
-                };
-                let Some(parent) = tree.get(parent_id) else {
-                    return false;
-                };
-                let mut found = false;
-                let mut accessible = false;
-                for binding in parent
-                    .items
-                    .declarations()
-                    .values()
-                    .chain(parent.items.glob_candidates.values().flatten())
-                {
-                    if matches!(binding.kind, BindingKind::Definition(def, _) if def == ancestor.owner_def)
-                    {
-                        found = true;
-                        if binding.accessible(tree, from_scope) {
-                            accessible = true;
-                            break;
-                        }
-                    }
-                }
-                if found && !accessible {
-                    return false;
-                }
-            }
-            true
-        };
+        let scope_by_owner: HashMap<DefId, ScopeId> = tree
+            .iter()
+            .filter(|scope| matches!(scope.kind, ScopeKind::Module | ScopeKind::Package))
+            .map(|scope| (scope.owner_def, scope.id))
+            .collect();
 
-        let mut visible = Vec::new();
-        for scope in tree.iter() {
-            if !matches!(
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        for scope in tree.ancestors(from_scope) {
+            if matches!(
                 scope.kind,
                 ScopeKind::Module | ScopeKind::Package | ScopeKind::Root
-            ) || !module_accessible(scope.id)
+            ) && visited.insert(scope.id)
             {
+                queue.push_back(scope.id);
+            }
+        }
+        for scope in tree.iter() {
+            if matches!(scope.kind, ScopeKind::Package | ScopeKind::Root)
+                && visited.insert(scope.id)
+            {
+                queue.push_back(scope.id);
+            }
+        }
+
+        let mut visible = Vec::new();
+        while let Some(scope_id) = queue.pop_front() {
+            let Some(scope) = tree.get(scope_id) else {
                 continue;
-            }
-            for binding in scope.items.declarations().values() {
-                if let BindingKind::Definition(def_id, _) = binding.kind {
-                    if binding.accessible(tree, from_scope) {
-                        visible.push(def_id);
-                    }
-                }
-            }
-            for name in scope.items.glob_candidates.keys() {
-                if scope.items.ambiguous_glob(*name) {
+            };
+            let glob_entries = scope
+                .items
+                .glob_candidates
+                .iter()
+                .filter(|(name, _)| !scope.items.ambiguous_glob(**name))
+                .filter_map(|(name, _)| scope.items.unique_glob(*name));
+            for binding in scope.items.declarations().values().chain(glob_entries) {
+                if !binding.accessible(tree, from_scope) {
                     continue;
                 }
-                if let Some(binding) = scope.items.unique_glob(*name) {
-                    if let BindingKind::Definition(def_id, _) = binding.kind {
-                        if binding.accessible(tree, from_scope) {
-                            visible.push(def_id);
-                        }
+                if let BindingKind::Definition(def_id, _) = binding.kind {
+                    visible.push(def_id);
+                    if let Some(&child_scope) = scope_by_owner.get(&def_id)
+                        && visited.insert(child_scope)
+                    {
+                        queue.push_back(child_scope);
                     }
                 }
             }

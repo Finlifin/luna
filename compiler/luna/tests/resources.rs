@@ -1511,6 +1511,7 @@ fn compile_in_with_resources(
             implicit_passing_protocol: None,
             call_context_type: None,
             call_description_type: None,
+            source_span_type: None,
             arithmetic_protocols: Default::default(),
             compound_arithmetic_protocols: Default::default(),
             comptime_compound_arithmetic_protocols: Default::default(),

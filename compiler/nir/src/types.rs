@@ -475,6 +475,23 @@ pub enum Term {
         errors: Box<Term>,
         result: Box<Term>,
     },
+    /// Symbolic field type projection (`meta.structs.FieldType(S, name)`).
+    /// Reduces directly when `subject` is a closed record and `field` is a `Symbol`.
+    FieldType {
+        subject: Box<Term>,
+        field: Box<Term>,
+    },
+    /// Symbolic enum variant field type projection (`meta.enums.VariantFieldType(E, v, f)`).
+    VariantFieldType {
+        subject: Box<Term>,
+        variant: Box<Term>,
+        field: Box<Term>,
+    },
+    /// Symbolic tuple append (`TupleAppend(T, elem)`), reducing when `tuple` is closed.
+    TupleAppend {
+        tuple: Box<Term>,
+        element: Box<Term>,
+    },
     /// Scoped effect occurrences in order. Repetition records handler layers,
     /// not the number of requests. Use `computation` to join nested prefixes.
     Computation {
@@ -710,6 +727,45 @@ impl Term {
         }
     }
 
+    /// Symbolic field type projection that simplifies eagerly on closed records.
+    pub fn field_type(subject: Term, field: Term) -> Self {
+        if let (Self::Record(fields), Self::Symbol(name)) = (&subject, &field)
+            && let Some((_, ty)) = fields.iter().find(|(label, _)| label == name.as_ref())
+        {
+            return ty.clone();
+        }
+        Self::FieldType {
+            subject: Box::new(subject),
+            field: Box::new(field),
+        }
+    }
+
+    /// Symbolic variant field type projection.
+    pub fn variant_field_type(subject: Term, variant: Term, field: Term) -> Self {
+        Self::VariantFieldType {
+            subject: Box::new(subject),
+            variant: Box::new(variant),
+            field: Box::new(field),
+        }
+    }
+
+    /// Symbolic tuple append that simplifies eagerly when `tuple` is closed.
+    pub fn tuple_append(tuple: Term, element: Term) -> Self {
+        match tuple {
+            Self::Unit | Self::Primitive(Primitive::Unit | Primitive::Void) => {
+                Self::Tuple(vec![element])
+            }
+            Self::Tuple(mut items) => {
+                items.push(element);
+                Self::Tuple(items)
+            }
+            other => Self::TupleAppend {
+                tuple: Box::new(other),
+                element: Box::new(element),
+            },
+        }
+    }
+
     /// Rebuild a frozen result after substituting or resolving its components.
     /// An exposed inner result may flatten only with matching domain evidence.
     /// Callers meter component traversal before invoking this constructor.
@@ -824,6 +880,9 @@ impl Term {
                     | Self::AssociatedTypeCall(_)
                     | Self::ComptimeCall(_)
                     | Self::DeferredErrorResult { .. }
+                    | Self::FieldType { .. }
+                    | Self::VariantFieldType { .. }
+                    | Self::TupleAppend { .. }
                     | Self::NormalForm { .. }
             ) && matches!(
                 value.as_ref(),
@@ -861,6 +920,23 @@ impl Term {
                 Self::DeferredErrorResult { errors, result } => {
                     pending.push(*errors);
                     pending.push(*result);
+                }
+                Self::FieldType { subject, field } => {
+                    pending.push(*subject);
+                    pending.push(*field);
+                }
+                Self::VariantFieldType {
+                    subject,
+                    variant,
+                    field,
+                } => {
+                    pending.push(*subject);
+                    pending.push(*variant);
+                    pending.push(*field);
+                }
+                Self::TupleAppend { tuple, element } => {
+                    pending.push(*tuple);
+                    pending.push(*element);
                 }
                 Self::Computation { effects, result } => {
                     pending.push(*result);
@@ -1798,19 +1874,80 @@ impl Term {
         nesting: u32,
         leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
     ) -> Result<Term, TypeError> {
-        let many = |terms: &[Term], leaf: &mut _| {
-            terms
-                .iter()
-                .map(|t| t.rewrite(nesting, leaf))
-                .collect::<Result<Vec<_>, _>>()
-        };
+        // Split variant families into #[inline(never)] helpers so unoptimized debug
+        // frames stay small on deeply nested recursive types.
+        match self {
+            Self::ErrorResult { .. }
+            | Self::DeferredErrorResult { .. }
+            | Self::FieldType { .. }
+            | Self::VariantFieldType { .. }
+            | Self::TupleAppend { .. }
+            | Self::Computation { .. }
+            | Self::AssociatedType { .. }
+            | Self::AssociatedTypeCall(_)
+            | Self::ComptimeCall(_) => self.rewrite_symbolic(nesting, leaf),
+            Self::Nominal { .. }
+            | Self::TraitObject { .. }
+            | Self::ClosureSnapshot { .. }
+            | Self::ClosureValue { .. }
+            | Self::MethodValue(_)
+            | Self::FunctionValue { .. }
+            | Self::NormalForm { .. }
+            | Self::ClosureContextValue(_)
+            | Self::ContextualClosure { .. }
+            | Self::Closure { .. } => self.rewrite_callable_or_nominal(nesting, leaf),
+            Self::Tuple(_)
+            | Self::Record(_)
+            | Self::OptionalValue { .. }
+            | Self::ErrorValue { .. }
+            | Self::NominalValue { .. }
+            | Self::RecordValue(_)
+            | Self::TupleValue(_)
+            | Self::ListConcat { .. } => self.rewrite_aggregate_or_value(nesting, leaf),
+            Self::ComptimeFunction(_)
+            | Self::NormalFormFunction(_, _)
+            | Self::UnsafeFunction(_)
+            | Self::PureFunction(_)
+            | Self::Optional(_)
+            | Self::RuntimeField { .. }
+            | Self::Pointer(_)
+            | Self::Lift(_)
+            | Self::Function { .. } => self.rewrite_wrapper_or_function(nesting, leaf),
+            _ => leaf(self, nesting),
+        }
+    }
+
+    #[inline(never)]
+    fn rewrite_symbolic(
+        &self,
+        nesting: u32,
+        leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
+    ) -> Result<Term, TypeError> {
         Ok(match self {
-            Self::ErrorResult { errors, result } => {
-                Self::error_result(many(errors, leaf)?, result.rewrite(nesting, leaf)?)
-            }
+            Self::ErrorResult { errors, result } => Self::error_result(
+                rewrite_many(errors, nesting, leaf)?,
+                result.rewrite(nesting, leaf)?,
+            ),
             Self::DeferredErrorResult { errors, result } => Self::deferred_error_result(
                 errors.rewrite(nesting, leaf)?,
                 result.rewrite(nesting, leaf)?,
+            ),
+            Self::FieldType { subject, field } => Self::field_type(
+                subject.rewrite(nesting, leaf)?,
+                field.rewrite(nesting, leaf)?,
+            ),
+            Self::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => Self::variant_field_type(
+                subject.rewrite(nesting, leaf)?,
+                variant.rewrite(nesting, leaf)?,
+                field.rewrite(nesting, leaf)?,
+            ),
+            Self::TupleAppend { tuple, element } => Self::tuple_append(
+                tuple.rewrite(nesting, leaf)?,
+                element.rewrite(nesting, leaf)?,
             ),
             Self::Computation { effects, result } => Self::computation(
                 effects
@@ -1818,7 +1955,7 @@ impl Term {
                     .map(|operation| {
                         Ok(crate::effects::Operation {
                             declaration: operation.declaration,
-                            arguments: many(&operation.arguments, leaf)?,
+                            arguments: rewrite_many(&operation.arguments, nesting, leaf)?,
                         })
                     })
                     .collect::<Result<Vec<_>, TypeError>>()?,
@@ -1830,61 +1967,72 @@ impl Term {
                 subject,
             } => Self::AssociatedType {
                 origin: origin.clone(),
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
                 subject: Box::new(subject.rewrite(nesting, leaf)?),
             },
             Self::AssociatedTypeCall(call) => {
                 Self::AssociatedTypeCall(Box::new(AssociatedTypeCall {
                     origin: call.origin.clone(),
-                    arguments: many(&call.arguments, leaf)?,
+                    arguments: rewrite_many(&call.arguments, nesting, leaf)?,
                     subject: call.subject.rewrite(nesting, leaf)?,
-                    call_arguments: many(&call.call_arguments, leaf)?,
+                    call_arguments: rewrite_many(&call.call_arguments, nesting, leaf)?,
                 }))
             }
             Self::ComptimeCall(call) => Self::ComptimeCall(Box::new(ComptimeCall {
                 declaration: call.declaration,
-                type_arguments: many(&call.type_arguments, leaf)?,
-                arguments: many(&call.arguments, leaf)?,
+                type_arguments: rewrite_many(&call.type_arguments, nesting, leaf)?,
+                arguments: rewrite_many(&call.arguments, nesting, leaf)?,
                 ty: call.ty.rewrite(nesting, leaf)?,
             })),
+            _ => unreachable!("symbolic term variant"),
+        })
+    }
+
+    #[inline(never)]
+    fn rewrite_callable_or_nominal(
+        &self,
+        nesting: u32,
+        leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
+    ) -> Result<Term, TypeError> {
+        Ok(match self {
             Self::Nominal {
                 declaration,
                 arguments,
             } => Self::Nominal {
                 declaration: *declaration,
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
             },
             Self::TraitObject {
                 interface,
                 arguments,
             } => Self::TraitObject {
                 interface: *interface,
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
             },
             Self::ClosureSnapshot { factory, arguments } => Self::ClosureSnapshot {
                 factory: *factory,
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
             },
             Self::ClosureValue { ty, body, captures } => Self::ClosureValue {
                 ty: Box::new(ty.rewrite(nesting, leaf)?),
                 body: body.clone(),
-                captures: many(captures, leaf)?,
+                captures: rewrite_many(captures, nesting, leaf)?,
             },
             Self::MethodValue(method) => Self::MethodValue(Box::new(crate::TraitMethodIdentity {
                 interface: crate::program::InterfaceInstance {
                     declaration: method.interface.declaration,
-                    arguments: many(&method.interface.arguments, leaf)?,
+                    arguments: rewrite_many(&method.interface.arguments, nesting, leaf)?,
                 },
                 subject: method.subject.rewrite(nesting, leaf)?,
                 member: method.member,
-                method_arguments: many(&method.method_arguments, leaf)?,
+                method_arguments: rewrite_many(&method.method_arguments, nesting, leaf)?,
             })),
             Self::FunctionValue {
                 declaration,
                 arguments,
             } => Self::FunctionValue {
                 declaration: *declaration,
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
             },
             Self::NormalForm {
                 head,
@@ -1893,9 +2041,11 @@ impl Term {
             } => Self::NormalForm {
                 head: *head,
                 sort: *sort,
-                arguments: many(arguments, leaf)?,
+                arguments: rewrite_many(arguments, nesting, leaf)?,
             },
-            Self::ClosureContextValue(fields) => Self::ClosureContextValue(many(fields, leaf)?),
+            Self::ClosureContextValue(fields) => {
+                Self::ClosureContextValue(rewrite_many(fields, nesting, leaf)?)
+            }
             Self::ContextualClosure { context, signature } => Self::contextual_closure(
                 context.rewrite(nesting, leaf)?,
                 signature.rewrite(nesting, leaf)?,
@@ -1904,10 +2054,21 @@ impl Term {
                 environment,
                 signature,
             } => Self::Closure {
-                environment: many(environment, leaf)?,
+                environment: rewrite_many(environment, nesting, leaf)?,
                 signature: Box::new(signature.rewrite(nesting, leaf)?),
             },
-            Self::Tuple(items) => Self::Tuple(many(items, leaf)?),
+            _ => unreachable!("callable or nominal term variant"),
+        })
+    }
+
+    #[inline(never)]
+    fn rewrite_aggregate_or_value(
+        &self,
+        nesting: u32,
+        leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
+    ) -> Result<Term, TypeError> {
+        Ok(match self {
+            Self::Tuple(items) => Self::Tuple(rewrite_many(items, nesting, leaf)?),
             Self::Record(fields) => Self::Record(
                 fields
                     .iter()
@@ -1926,7 +2087,7 @@ impl Term {
                     return Err(TypeError::InvalidErrorValue);
                 };
                 Self::error_value(
-                    many(errors, leaf)?,
+                    rewrite_many(errors, nesting, leaf)?,
                     result.rewrite(nesting, leaf)?,
                     label
                         .as_ref()
@@ -1942,7 +2103,7 @@ impl Term {
             } => Self::NominalValue {
                 ty: Box::new(ty.rewrite(nesting, leaf)?),
                 variant: *variant,
-                fields: many(fields, leaf)?,
+                fields: rewrite_many(fields, nesting, leaf)?,
             },
             Self::RecordValue(fields) => Self::RecordValue(
                 fields
@@ -1950,10 +2111,22 @@ impl Term {
                     .map(|(name, ty)| Ok((name.clone(), ty.rewrite(nesting, leaf)?)))
                     .collect::<Result<_, TypeError>>()?,
             ),
-            Self::TupleValue(items) => Self::TupleValue(many(items, leaf)?),
-            Self::ListConcat { ty, parts } => {
-                Self::list_concat(ty.rewrite(nesting, leaf)?, many(parts, leaf)?)?
-            }
+            Self::TupleValue(items) => Self::TupleValue(rewrite_many(items, nesting, leaf)?),
+            Self::ListConcat { ty, parts } => Self::list_concat(
+                ty.rewrite(nesting, leaf)?,
+                rewrite_many(parts, nesting, leaf)?,
+            )?,
+            _ => unreachable!("aggregate or value term variant"),
+        })
+    }
+
+    #[inline(never)]
+    fn rewrite_wrapper_or_function(
+        &self,
+        nesting: u32,
+        leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
+    ) -> Result<Term, TypeError> {
+        Ok(match self {
             Self::ComptimeFunction(inner) => {
                 Self::ComptimeFunction(Box::new(inner.rewrite(nesting, leaf)?))
             }
@@ -1990,9 +2163,20 @@ impl Term {
                     result: Box::new(result.rewrite(inner, leaf)?),
                 }
             }
-            _ => leaf(self, nesting)?,
+            _ => unreachable!("wrapper or function term variant"),
         })
     }
+}
+
+fn rewrite_many(
+    terms: &[Term],
+    nesting: u32,
+    leaf: &mut impl FnMut(&Term, u32) -> Result<Term, TypeError>,
+) -> Result<Vec<Term>, TypeError> {
+    terms
+        .iter()
+        .map(|t| t.rewrite(nesting, leaf))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2566,6 +2750,30 @@ fn validate<'term>(
             require_sort(result, Sort::Type)?;
             validate(result, holes, frames, allow_free, core)?;
         }
+        Term::FieldType { subject, field } => {
+            require_sort(subject, Sort::Type)?;
+            validate(subject, holes, frames, allow_free, core)?;
+            require_sort(field, Sort::ComptimeValue)?;
+            validate(field, holes, frames, allow_free, core)?;
+        }
+        Term::VariantFieldType {
+            subject,
+            variant,
+            field,
+        } => {
+            require_sort(subject, Sort::Type)?;
+            validate(subject, holes, frames, allow_free, core)?;
+            require_sort(variant, Sort::ComptimeValue)?;
+            validate(variant, holes, frames, allow_free, core)?;
+            require_sort(field, Sort::ComptimeValue)?;
+            validate(field, holes, frames, allow_free, core)?;
+        }
+        Term::TupleAppend { tuple, element } => {
+            require_sort(tuple, Sort::Type)?;
+            validate(tuple, holes, frames, allow_free, core)?;
+            require_sort(element, Sort::Type)?;
+            validate(element, holes, frames, allow_free, core)?;
+        }
         Term::Computation { effects, result } => {
             require_sort(result, Sort::Type)?;
             validate(result, holes, frames, allow_free, core)?;
@@ -2999,6 +3207,19 @@ impl fmt::Display for Term {
                     f,
                     "(deferred-error-result-type (errors {errors}) (result {result}))"
                 )
+            }
+            Self::FieldType { subject, field } => {
+                write!(f, "(field-type {subject} {field})")
+            }
+            Self::VariantFieldType {
+                subject,
+                variant,
+                field,
+            } => {
+                write!(f, "(variant-field-type {subject} {variant} {field})")
+            }
+            Self::TupleAppend { tuple, element } => {
+                write!(f, "(tuple-append {tuple} {element})")
             }
             Self::Computation { effects, result } => {
                 f.write_str("(computation-type (effects")?;

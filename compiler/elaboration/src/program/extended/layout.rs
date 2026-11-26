@@ -68,6 +68,13 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| error(span, "duplicate property value slot"))?,
             );
         }
+        let record_key: Vec<String> = target_types.iter().map(|(name, _)| name.clone()).collect();
+        let record_spans: Vec<n::SourceRange> =
+            target_fields.iter().map(|field| field.source).collect();
+        self.reflection_spans
+            .record_fields
+            .entry(record_key)
+            .or_insert(record_spans);
         let packet = n::Expr {
             ty: Term::Record(target_types),
             source: source(span),

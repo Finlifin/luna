@@ -1,0 +1,77 @@
+use List;
+use ast_impl.to_tokens.ToTokens;
+use ast_impl.token.Token;
+use ast_impl.token_buffer.TokenBuffer;
+use builtin.{Symbol, Type, usize};
+use enums_impl as enums;
+use reflection_impl.structure.{enum_variant_field_types, enum_variant_paths, struct_field_names};
+use structs_impl as structs;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for ToTokens
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        var parts: List<TokenBuffer> = [];
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = struct_field_names(Self);
+            parts.append(TokenBuffer.from_token(Token.punct(.lbrace, "{")));
+            var wrote = false;
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    if wrote {
+                        parts.append(TokenBuffer.from_token(Token.punct(.comma, ",")));
+                    }
+                    wrote = true;
+                    parts.append(TokenBuffer.from_tokens([
+                        Token.ident(sym'tag_name).with_spacing(.joint),
+                        Token.punct(.colon, ":"),
+                    ]));
+                    parts.append(
+                        structs.field_value(self, sym).as(ToTokens).to_tokens(),
+                    );
+                }
+            }
+            parts.append(TokenBuffer.from_token(Token.punct(.rbrace, "}")));
+            TokenBuffer.concat_all(parts)
+        } else {
+            const V_PATHS = enum_variant_paths(Self);
+            const VF_TYPES = enum_variant_field_types(Self);
+            let v_idx = enums.comptime_enum_variant_index(self);
+            let fvals = enums.comptime_enum_variant_field_values(self);
+            inline for v in 0..VF_TYPES.length() {
+                if v_idx == v {
+                    const V_USIZE: usize = enums.to_usize(v);
+                    const V_PATH = V_PATHS[v];
+                    const V_NAME: Symbol = V_PATH[V_PATH.length() - 1];
+                    parts.append(TokenBuffer.from_tokens([
+                        Token.punct(.dot, ".").with_spacing(.joint),
+                        Token.ident(V_NAME'tag_name),
+                    ]));
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        parts.append(TokenBuffer.from_token(Token.punct(.lparen, "(")));
+                        inline for f in 0..FIELD_COUNT {
+                            const F_USIZE: usize = enums.to_usize(f);
+                            const fty = enums.VariantFieldType(Self, V_USIZE, F_USIZE);
+                            inline if f > 0 {
+                                parts.append(TokenBuffer.from_token(Token.punct(.comma, ",")));
+                            }
+                            fvals.value<fty>(f) match {
+                                fv? => {
+                                    parts.append(fv.as(ToTokens).to_tokens());
+                                },
+                                null => {},
+                            }
+                        }
+                        parts.append(TokenBuffer.from_token(Token.punct(.rparen, ")")));
+                    }
+                    return TokenBuffer.concat_all(parts);
+                }
+            }
+            TokenBuffer.empty()
+        }
+    }
+}

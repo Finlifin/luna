@@ -25,8 +25,57 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
         "        self.value.* = true; self.value.*",
     );
     let source = format!(
-        "{PRIMITIVES} mod builtin {{ {PRIMITIVES} }} mod resources {{ {RESOURCES} }} use resources.*;
-        mod patterns {{ {} {} }} use patterns.*;
+        "{PRIMITIVES} mod resources {{ {RESOURCES} }} use resources.*;
+        mod bindings {{
+            use primitives.{{str, u64, u8}};
+            pub fn str_byte_length(_s: str) -> u64 {{ 0 }}
+            pub pure comptime fn str_byte_length_comptime(_s: str) -> u64 {{ 0 }}
+            pub pure comptime fn str_byte_comptime(_s: str, _i: u64) -> ?u8 {{ null }}
+            pub fn str_slice(_s: str, _a: u64, _b: u64) -> ?str {{ null }}
+            pub pure comptime fn str_slice_comptime(_s: str, _a: u64, _b: u64) -> ?str {{ null }}
+        }}
+        mod text_impl {{
+            pub mod bytes {{
+                use primitives.{{str, u64, u8}};
+                pub trait TextBytes {{
+                    fn byte_length(*self) -> u64;
+                    fn byte(*self, i: u64) -> ?u8;
+                    fn slice(*self, a: u64, b: u64) -> ?str;
+                    fn starts_with(*self, prefix: str) -> bool;
+                    fn ends_with(*self, suffix: str) -> bool;
+                }}
+                impl TextBytes for str {{
+                    fn byte_length(*self) -> u64 {{ 0 }}
+                    fn byte(*self, _i: u64) -> ?u8 {{ null }}
+                    fn slice(*self, _a: u64, _b: u64) -> ?str {{ null }}
+                    fn starts_with(*self, _prefix: str) -> bool {{ false }}
+                    fn ends_with(*self, _suffix: str) -> bool {{ false }}
+                }}
+            }}
+        }}
+        mod numeric {{
+            pub mod equality {{
+                use primitives.bool;
+                pub pure comptime trait ComptimeEq {{
+                    comptime fn eq(self, rhs: Self) -> bool;
+                }}
+            }}
+        }}
+        mod builtin_patterns {{ {} }}
+        mod builtin {{
+            {PRIMITIVES}
+            pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
+            pub use builtin_patterns.{{ConcatPatternView, StableConcatPatternView}};
+        }}
+        mod meta_patterns {{
+            use builtin.List;
+            {}
+        }}
+        mod patterns {{
+            pub use builtin_patterns.ListPatternView;
+            pub use meta_patterns.ComptimeListPatternView;
+        }}
+        use patterns.*;
         {fixture}
         fn run()->bool {{exact(Repeated {{length:2,value:false}})}}",
         support::with_attrs(include_str!(
@@ -48,8 +97,9 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
         luna::protocols::type_constructors::Selectors {
             copy: Some("input.resources.Copy"),
             drop: Some("input.resources.Drop"),
-            list_pattern: Some("input.patterns.ListPatternView"),
-            comptime_list_pattern: Some("input.patterns.ComptimeListPatternView"),
+            list_pattern: Some("input.builtin_patterns.ListPatternView"),
+            comptime_list_pattern: Some("input.meta_patterns.ComptimeListPatternView"),
+            meta_list: Some("input.builtin.List"),
             ..Default::default()
         },
         Some(target),

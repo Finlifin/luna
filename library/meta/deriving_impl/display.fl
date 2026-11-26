@@ -1,0 +1,72 @@
+use builtin.{Symbol, Type, str, usize};
+use data.text.ComptimeTextBytes;
+use enums_impl as enums;
+use formatting.display.ComptimeDisplay;
+use reflection_impl.structure.{enum_variant_field_types, enum_variant_paths, struct_field_names};
+use structs_impl as structs;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for ComptimeDisplay
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    comptime fn fmt(self, .format: str = "") -> str {
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = struct_field_names(Self);
+            var out = "{";
+            var wrote = false;
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    if wrote {
+                        out = out.as(ComptimeTextBytes).concat(", ");
+                    }
+                    wrote = true;
+                    out = out
+                        .as(ComptimeTextBytes)
+                        .concat(sym'tag_name)
+                        .as(ComptimeTextBytes)
+                        .concat(": ")
+                        .as(ComptimeTextBytes)
+                        .concat(structs.field_value(self, sym).as(ComptimeDisplay).fmt());
+                }
+            }
+            out.as(ComptimeTextBytes).concat("}")
+        } else {
+            const V_PATHS = enum_variant_paths(Self);
+            const VF_TYPES = enum_variant_field_types(Self);
+            let v_idx = enums.comptime_enum_variant_index(self);
+            let fvals = enums.comptime_enum_variant_field_values(self);
+            inline for v in 0..VF_TYPES.length() {
+                if v_idx == v {
+                    const V_USIZE: usize = enums.to_usize(v);
+                    const V_PATH = V_PATHS[v];
+                    const V_NAME: Symbol = V_PATH[V_PATH.length() - 1];
+                    var out = ".".as(ComptimeTextBytes).concat(V_NAME'tag_name);
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        out = out.as(ComptimeTextBytes).concat("(");
+                        inline for f in 0..FIELD_COUNT {
+                            const F_USIZE: usize = enums.to_usize(f);
+                            const fty = enums.VariantFieldType(Self, V_USIZE, F_USIZE);
+                            inline if f > 0 {
+                                out = out.as(ComptimeTextBytes).concat(", ");
+                            }
+                            fvals.value<fty>(f) match {
+                                fv? => {
+                                    out = out
+                                        .as(ComptimeTextBytes)
+                                        .concat(fv.as(ComptimeDisplay).fmt());
+                                },
+                                null => {},
+                            }
+                        }
+                        out = out.as(ComptimeTextBytes).concat(")");
+                    }
+                    return out;
+                }
+            }
+            "."
+        }
+    }
+}

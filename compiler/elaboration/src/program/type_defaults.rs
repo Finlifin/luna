@@ -659,7 +659,7 @@ impl<'h> Checker<'_, 'h> {
                 .map_err(|e| call_inference_error(span, e))?;
         }
         if !resolved.is_empty() {
-            self.refine_default_call_views(candidate, span)?;
+            self.refine_call_views(candidate, span)?;
         }
         for clause in pending {
             let slot = clause.slot;
@@ -724,20 +724,22 @@ impl<'h> Checker<'_, 'h> {
             // Settling a default can expose associated types in parameter and
             // result contexts. Refresh their evidence before checking delayed
             // arguments or finishing this candidate, including on retries.
-            self.refine_default_call_views(candidate, span)?;
+            self.refine_call_views(candidate, span)?;
         }
         Ok(resolved.len() == pending.len())
     }
 
-    fn refine_default_call_views(
-        &mut self,
+    pub(in crate::program) fn refine_call_views(
+        &self,
         candidate: &mut crate::calls::CallCandidate,
         span: Span,
     ) -> Result<(), Error> {
+        let mut budget = crate::ptc::Budget::default();
+        budget.steps = budget.steps.max(1_000_000);
         candidate
             .refine_type_views_metered(
                 |ty, budget| self.callable_input_view_metered(ty, budget),
-                crate::ptc::Budget::default(),
+                budget,
             )
             .map_err(|error| call_inference_error(span, error))
     }

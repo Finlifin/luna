@@ -1,0 +1,223 @@
+use List;
+use bindings;
+use builtin.{
+    Integer,
+    Symbol,
+    Type,
+    bool,
+    char,
+    i128,
+    i16,
+    i32,
+    i64,
+    i8,
+    isize,
+    str,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+    void,
+}
+use data.text.{ComptimeTextBytes, str_from_char};
+use formatting.display.ComptimeDisplay;
+use numeric.bindings as num_bindings;
+
+{-
+    Comptime developer-facing representation formatting using value-reference
+    `self` semantics (no comptime pointers).
+-}
+pub pure comptime trait ComptimeDebug {
+    comptime fn fmt(self, .format: str = "") -> str;
+}
+
+pure comptime fn push_escaped_byte(acc: str, byte: u8, quote_byte: u8) -> str {
+    if byte == 0 {
+        acc.as(ComptimeTextBytes).concat("\\0")
+    } else if byte == 9 {
+        acc.as(ComptimeTextBytes).concat("\\t")
+    } else if byte == 10 {
+        acc.as(ComptimeTextBytes).concat("\\n")
+    } else if byte == 13 {
+        acc.as(ComptimeTextBytes).concat("\\r")
+    } else if byte == 92 {
+        acc.as(ComptimeTextBytes).concat("\\\\")
+    } else if byte == quote_byte {
+        if quote_byte == 34 {
+            acc.as(ComptimeTextBytes).concat("\\\"")
+        } else {
+            acc.as(ComptimeTextBytes).concat("\\'")
+        }
+    } else {
+        let ch: char = num_bindings.try_u32_to_char(byte'bitvec.as(u32)) match {
+            c? => c,
+            null => '?',
+        };
+        acc.as(ComptimeTextBytes).concat(str_from_char(ch))
+    }
+}
+
+comptime impl ComptimeDebug for bool {
+    comptime fn fmt(self, .format: str = "") -> str {
+        if self { "true" } else { "false" }
+    }
+}
+
+comptime impl ComptimeDebug for void {
+    comptime fn fmt(self, .format: str = "") -> str {
+        "()"
+    }
+}
+
+comptime impl ComptimeDebug for u8 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for u16 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for u32 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for u64 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for u128 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for usize {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for i8 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for i16 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for i32 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for i64 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for i128 {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for isize {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for Integer {
+    comptime fn fmt(self, .format: str = "") -> str {
+        self.as(ComptimeDisplay).fmt()
+    }
+}
+
+comptime impl ComptimeDebug for char {
+    comptime fn fmt(self, .format: str = "") -> str {
+        "'".as(ComptimeTextBytes).concat(str_from_char(self)).as(ComptimeTextBytes).concat("'")
+    }
+}
+
+comptime impl ComptimeDebug for str {
+    comptime fn fmt(self, .format: str = "") -> str {
+        var out = "\"";
+        let len = self.as(ComptimeTextBytes).byte_length();
+        var idx: u64 = 0;
+        while idx < len {
+            let b = self.as(ComptimeTextBytes).byte(idx) match {
+                v? => v,
+                null => break,
+            };
+            out = push_escaped_byte(out, b, 34);
+            idx = idx + 1;
+        }
+        out.as(ComptimeTextBytes).concat("\"")
+    }
+}
+
+comptime impl ComptimeDebug for Symbol {
+    comptime fn fmt(self, .format: str = "") -> str {
+        ".".as(ComptimeTextBytes).concat(self'tag_name)
+    }
+}
+
+comptime impl ComptimeDebug for List<T>
+where
+    T :- ComptimeDebug,
+{
+    comptime fn fmt(self, .format: str = "") -> str {
+        var out = "[";
+        let count = self.length();
+        var i: Integer = 0;
+        while i < count {
+            if i > 0 {
+                out = out.as(ComptimeTextBytes).concat(", ");
+            }
+            out = out.as(ComptimeTextBytes).concat(self[i].as(ComptimeDebug).fmt());
+            i = i + 1;
+        }
+        out.as(ComptimeTextBytes).concat("]")
+    }
+}
+
+comptime impl ComptimeDebug for ?T
+where
+    T :- ComptimeDebug,
+{
+    comptime fn fmt(self, .format: str = "") -> str {
+        self match {
+            value? => value.as(ComptimeDebug).fmt().as(ComptimeTextBytes).concat("?"),
+            null => "null",
+        }
+    }
+}
+
+comptime impl ComptimeDebug for !E T
+where
+    E :- ComptimeDebug,
+    T :- ComptimeDebug,
+{
+    comptime fn fmt(self, .format: str = "") -> str {
+        self match {
+            value! => value.as(ComptimeDebug).fmt().as(ComptimeTextBytes).concat("!"),
+            error err => "error ".as(ComptimeTextBytes).concat(err.as(ComptimeDebug).fmt()),
+        }
+    }
+}

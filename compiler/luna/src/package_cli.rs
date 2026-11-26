@@ -260,6 +260,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--implicit-passing-protocol"
                 | "--call-context-type"
                 | "--call-description-type"
+                | "--source-span-type"
                 | "--add-protocol"
                 | "--sub-protocol"
                 | "--mul-protocol"
@@ -836,6 +837,7 @@ impl Request {
                 implicit_passing: options.implicit_passing_protocol.as_deref(),
                 call_context: options.call_context_type.as_deref(),
                 call_description: options.call_description_type.as_deref(),
+                source_span: options.source_span_type.as_deref(),
                 arithmetic: std::array::from_fn(|i| options.arithmetic_protocols[i].as_deref()),
                 compound_arithmetic: std::array::from_fn(|i| {
                     options.compound_arithmetic_protocols[i].as_deref()

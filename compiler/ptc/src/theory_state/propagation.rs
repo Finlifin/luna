@@ -49,11 +49,13 @@ impl Search<'_> {
             Trait((nir::DeclarationId, Vec<usize>)),
             Kind(usize, TypeKind),
             NotSized(usize),
+            HasField(usize, usize),
         }
         let mut unequal = BTreeSet::new();
         let mut traits = BTreeMap::new();
         let mut kinds = Vec::new();
         let mut not_sized = BTreeMap::new();
+        let mut has_fields = BTreeMap::new();
         let mut integers = Vec::new();
         let mut pending = Vec::new();
         for (index, (atom, value)) in self.atoms.iter().zip(assignment).enumerate() {
@@ -116,6 +118,19 @@ impl Search<'_> {
                     }
                     continue;
                 }
+                Atom::HasField(query) => {
+                    let ty_root = state
+                        .classes
+                        .metered_root(self.terms.ids[&query.ty], fuel)?;
+                    let field_root = state
+                        .classes
+                        .metered_root(self.terms.ids[&query.field], fuel)?;
+                    if let Some(value) = value {
+                        has_fields.insert((ty_root, field_root), *value);
+                        continue;
+                    }
+                    Query::HasField(ty_root, field_root)
+                }
                 Atom::IntCongruent(_)
                 | Atom::HasHeadShape(_)
                 | Atom::RowContains(_)
@@ -177,6 +192,30 @@ impl Search<'_> {
                                     return None;
                                 }
                                 crate::not_sized::NotSizedStatus::Unknown => {}
+                            }
+                        }
+                    }
+                    inferred
+                }
+                Query::HasField(ty_root, field_root) => {
+                    let mut inferred = has_fields.get(&(ty_root, field_root)).copied();
+                    if inferred.is_none() {
+                        for ty_id in state.classes.ordered_members(ty_root, fuel).ok()? {
+                            for f_id in state.classes.ordered_members(field_root, fuel).ok()? {
+                                charge(fuel, 1)?;
+                                if let nir::Term::Symbol(name) = &self.terms.nodes[f_id]
+                                    && let Some(value) = crate::has_field::has_field_known(
+                                        &self.context.theory,
+                                        &self.terms.nodes[ty_id],
+                                        name.as_ref(),
+                                    )
+                                {
+                                    inferred = Some(value);
+                                    break;
+                                }
+                            }
+                            if inferred.is_some() {
+                                break;
                             }
                         }
                     }

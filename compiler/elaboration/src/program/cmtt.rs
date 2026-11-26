@@ -190,17 +190,25 @@ impl Checker<'_, '_> {
             .map(|annotation| self.is_any_type_expr(annotation))
             .transpose()?
             .unwrap_or(false);
-        let value = (|| {
+        let (value, any_result_ty) = (|| {
             let interface = match decl.ty {
                 Some(_) if is_any_ty => None,
                 Some(annotation) => Some(self.code_interface(annotation)?),
                 None => None,
             };
-            self.code_value(initializer, interface.as_ref(), 0)
-        })();
+            let any_result_ty = is_any_ty
+                || interface
+                    .as_ref()
+                    .is_some_and(|iface| iface.result == Term::AnyType);
+            let value = self.code_value(initializer, interface.as_ref(), 0)?;
+            Ok::<_, Error>((value, any_result_ty))
+        })()
+        .inspect_err(|_| {
+            self.in_code_body = in_code;
+            self.locals = saved_locals.clone();
+        })?;
         self.in_code_body = in_code;
         self.locals = saved_locals;
-        let value = value?;
         if let Some(expected) = expected {
             self.require(&p(P::Void), expected, decl.span)?;
         }
@@ -212,6 +220,11 @@ impl Checker<'_, '_> {
             }
             if is_any_ty && mutable {
                 self.locals.insert(id, Term::AnyType);
+            }
+            if any_result_ty {
+                self.any_result_code_locals.insert(id);
+            } else {
+                self.any_result_code_locals.remove(&id);
             }
             self.pattern_codes.remove(&id);
             self.generator_data.remove(&id);

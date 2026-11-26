@@ -36,6 +36,11 @@ fn operation(name: &str) -> bool {
             | "struct_field_names"
             | "record_field_types"
             | "record_field_names"
+            | "struct_field_spans"
+            | "record_field_spans"
+            | "declaration_span"
+            | "enum_variant_spans"
+            | "enum_variant_field_spans"
             | "reflect_callable"
             | "type_id"
             | "enum_group_paths"
@@ -55,6 +60,12 @@ fn operation(name: &str) -> bool {
             | "build_enum_paths"
             | "build_symbol_enum_paths"
             | "build_bits_enum_paths"
+            | "implicit_caller"
+            | "implicit_module"
+            | "implicit_package"
+            | "implicit_file"
+            | "implicit_line"
+            | "implicit_src"
     )
 }
 
@@ -231,9 +242,14 @@ impl Checker<'_, '_> {
                         }
                         return Ok(Some((name, owner, None)));
                     }
-                    let mut signature =
-                        signatures::callable(name.as_str(), self.protocols.meta_list)
-                            .map_err(|message| error(span, message))?;
+                    let mut signature = signatures::callable(
+                        name.as_str(),
+                        self.protocols.meta_list,
+                        self.protocols.call_context,
+                        self.protocols.call_description,
+                        self.protocols.source_span,
+                    )
+                    .map_err(|message| error(span, message))?;
                     if !annotations.is_empty() {
                         let mut expected = signature.clone();
                         for (annotated_owner, annotation) in annotations.into_iter().rev() {
@@ -246,6 +262,17 @@ impl Checker<'_, '_> {
                             let actual = self.binding_annotation(annotated_owner, annotation);
                             self.active_signatures.remove(&annotated_owner);
                             let actual = actual?;
+                            if annotated_owner == owner
+                                && expected.is_none()
+                                && self.validate_implicit_query_fallback(
+                                    name.as_str(),
+                                    &actual,
+                                    annotation.span,
+                                )
+                            {
+                                expected = Some(actual.clone());
+                                signature = Some(actual.clone());
+                            }
                             if annotated_owner == owner
                                 && matches!(
                                     name.as_str(),
@@ -308,6 +335,109 @@ impl Checker<'_, '_> {
                 }
                 _ => return Ok(None),
             }
+        }
+    }
+
+    fn is_source_span_term(&mut self, ty: &Term, span: Span) -> bool {
+        let _ = self.ensure_nominal_type(ty, span);
+        let Term::Nominal {
+            declaration: out_decl,
+            arguments: out_args,
+        } = ty
+        else {
+            return false;
+        };
+        if !out_args.is_empty() {
+            return false;
+        }
+        let Some(out_def) = self.structs.get(out_decl) else {
+            return false;
+        };
+        out_def.fields.as_slice()
+            == [
+                ("file".to_string(), p(P::Str)),
+                ("start".to_string(), p(P::Usize)),
+                ("end".to_string(), p(P::Usize)),
+                ("expansion_id".to_string(), p(P::Isize)),
+            ]
+    }
+
+    fn unwrap_meta_list_elem<'t>(&self, ty: &'t Term) -> Option<&'t Term> {
+        let Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments,
+        } = ty
+        else {
+            return None;
+        };
+        if Some(*head) != self.protocols.meta_list {
+            return None;
+        }
+        let [elem] = arguments.as_slice() else {
+            return None;
+        };
+        Some(elem)
+    }
+
+    fn validate_implicit_query_fallback(&mut self, name: &str, actual: &Term, span: Span) -> bool {
+        let Term::ComptimeFunction(inner) = actual else {
+            return false;
+        };
+        let Term::Function { parameters, result } = inner.as_ref() else {
+            return false;
+        };
+        let [param] = parameters.as_slice() else {
+            return false;
+        };
+        if param.sort != Sort::Runtime {
+            return false;
+        }
+        match name {
+            "declaration_span" => {
+                return param.ty == p(P::Type) && self.is_source_span_term(result, span);
+            }
+            "struct_field_spans" | "record_field_spans" | "enum_variant_spans" => {
+                return param.ty == p(P::Type)
+                    && self
+                        .unwrap_meta_list_elem(result)
+                        .cloned()
+                        .is_some_and(|elem| self.is_source_span_term(&elem, span));
+            }
+            "enum_variant_field_spans" => {
+                return param.ty == p(P::Type)
+                    && self
+                        .unwrap_meta_list_elem(result)
+                        .and_then(|inner| self.unwrap_meta_list_elem(inner))
+                        .cloned()
+                        .is_some_and(|elem| self.is_source_span_term(&elem, span));
+            }
+            _ => {}
+        }
+        let _ = self.ensure_nominal_type(&param.ty, span);
+        let Term::Nominal {
+            declaration: input_decl,
+            arguments: input_args,
+        } = &param.ty
+        else {
+            return false;
+        };
+        if !input_args.is_empty() {
+            return false;
+        }
+        let Some(input_def) = self.structs.get(input_decl) else {
+            return false;
+        };
+        match name {
+            "implicit_caller" | "implicit_module" | "implicit_package" => {
+                input_def.fields.len() == 3
+                    && input_def.fields.iter().all(|(_, ty)| *ty == p(P::Str))
+                    && **result == p(P::Str)
+            }
+            "implicit_file" => input_def.fields.is_empty() && **result == p(P::Str),
+            "implicit_line" => input_def.fields.is_empty() && **result == p(P::U32),
+            "implicit_src" => input_def.fields.is_empty() && self.is_source_span_term(result, span),
+            _ => false,
         }
     }
 }

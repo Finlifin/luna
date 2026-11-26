@@ -1,0 +1,9 @@
+use primitives.Type;
+use protocols.resources.{Clone, Copy};
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Copy
+where
+    requires Self :- Clone,
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{}

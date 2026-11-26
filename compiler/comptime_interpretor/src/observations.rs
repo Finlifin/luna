@@ -88,10 +88,20 @@ impl Interpreter<'_> {
             K::ReflectCallable(operand) => (O::CallableReflection, operand.as_ref()),
             K::TypeId(operand) => (O::TypeId, operand.as_ref()),
             K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
+            K::StructFieldSpans(operand) => (O::StructFieldSpans, operand.as_ref()),
+            K::RecordFieldSpans(operand) => (O::RecordFieldSpans, operand.as_ref()),
+            K::DeclarationSpan(operand) => (O::DeclarationSpan, operand.as_ref()),
+            K::EnumVariantSpans(operand) => (O::EnumVariantSpans, operand.as_ref()),
+            K::EnumVariantFieldSpans(operand) => (O::EnumVariantFieldSpans, operand.as_ref()),
+            K::ComptimeEnumVariantIndex(operand) => (O::ComptimeEnumVariantIndex, operand.as_ref()),
+            K::ComptimeEnumVariantFieldValues(operand) => {
+                (O::ComptimeEnumVariantFieldValues, operand.as_ref())
+            }
             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
             K::TypeLayout { query, operand } => (O::TypeLayout(*query), operand.as_ref()),
+            K::ImplicitQuery { kind, operand } => (O::ImplicitQuery(*kind), operand.as_ref()),
             _ => unreachable!("observation dispatcher"),
         };
         let observation = Observation {
@@ -115,6 +125,15 @@ impl Interpreter<'_> {
         let input: &Term = observation.input.borrow();
         let output: &Term = observation.output.borrow();
         match observation.kind {
+            O::StructFieldSpans
+            | O::RecordFieldSpans
+            | O::DeclarationSpan
+            | O::EnumVariantSpans
+            | O::EnumVariantFieldSpans
+            | O::ComptimeEnumVariantIndex
+            | O::ComptimeEnumVariantFieldValues => {
+                self.check_field_reflection_observation(observation.kind, input, output, source)?
+            }
             O::EnumStructure(nir::program::EnumStructureQuery::BitEncoding(query)) => {
                 use nir::program::EnumBitQuery as B;
                 if !self.comptime_only {
@@ -293,6 +312,38 @@ impl Interpreter<'_> {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
+            O::ImplicitQuery(kind) => {
+                use nir::program::ImplicitQueryKind as IQ;
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let never = Term::Primitive(Primitive::Never);
+                if *input == never {
+                    if *output != never {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    return Ok(());
+                }
+                if !matches!(
+                    input,
+                    Term::Nominal { arguments, .. } if arguments.is_empty()
+                ) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                let valid = match kind {
+                    IQ::Caller | IQ::Module | IQ::Package | IQ::File => {
+                        *output == Term::Primitive(Primitive::Str)
+                    }
+                    IQ::Line => *output == Term::Primitive(Primitive::U32),
+                    IQ::SourceSpan => matches!(
+                        output,
+                        Term::Nominal { arguments, .. } if arguments.is_empty()
+                    ),
+                };
+                if !valid {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
         }
         Ok(())
     }
@@ -424,6 +475,15 @@ impl Interpreter<'_> {
             O::CallableReflection => self.observe_callable(value, source),
             O::TypeId => self.observe_type_id(value, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
+            O::StructFieldSpans
+            | O::RecordFieldSpans
+            | O::DeclarationSpan
+            | O::EnumVariantSpans
+            | O::EnumVariantFieldSpans
+            | O::ComptimeEnumVariantIndex
+            | O::ComptimeEnumVariantFieldValues => {
+                self.observe_field_reflection_query(observation.kind, value, output, Some(source))
+            }
             O::EnumName => {
                 self.check_value_type(&value, input, Some(source))?;
                 self.retain_residual(observation.operand_source, &value)?;
@@ -567,6 +627,61 @@ impl Interpreter<'_> {
                 }
             }
             O::TypeLayout(query) => self.observe_type_layout(query, value, source),
+            O::ImplicitQuery(kind) => {
+                use nir::program::ImplicitQueryKind as IQ;
+                let Some(site) = self.implicit_call_site.clone() else {
+                    return Err(self.failure(ErrorKind::MissingImplicitCallSite, Some(source)));
+                };
+                match kind {
+                    IQ::Caller | IQ::Module | IQ::Package => {
+                        let Value::Record { fields, .. } = value else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        let idx = match kind {
+                            IQ::Package => 0,
+                            IQ::Module => 1,
+                            IQ::Caller => 2,
+                            _ => unreachable!(),
+                        };
+                        let Some(Value::String(s)) = fields.get(idx) else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        Ok(Value::String(Arc::clone(s)))
+                    }
+                    IQ::File | IQ::Line | IQ::SourceSpan => {
+                        let Value::Record { fields, .. } = value else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        if !fields.is_empty() {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        }
+                        match kind {
+                            IQ::File => Ok(Value::String(site.file)),
+                            IQ::Line => Ok(Value::UnsignedInteger(u128::from(site.line))),
+                            IQ::SourceSpan => {
+                                let Term::Nominal {
+                                    declaration,
+                                    arguments,
+                                } = output
+                                else {
+                                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                                };
+                                Ok(Value::Record {
+                                    arguments: arguments.clone(),
+                                    declaration: *declaration,
+                                    fields: vec![
+                                        Value::String(site.file),
+                                        Value::UnsignedInteger(u128::from(site.byte_start)),
+                                        Value::UnsignedInteger(u128::from(site.byte_end)),
+                                        Value::SignedInteger(site.expansion_id),
+                                    ],
+                                })
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
         }
     }
 

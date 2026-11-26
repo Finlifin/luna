@@ -77,6 +77,8 @@ impl Checker<'_, '_> {
         let saved_range_infos = std::mem::take(&mut self.range_pattern_infos);
         let saved_bitvec_infos = std::mem::take(&mut self.bitvec_pattern_infos);
         let saved_owner = self.signature_owner.replace(owner);
+        let saved_open_needs_instance =
+            std::mem::replace(&mut self.open_definition_needs_instance, false);
         let saved_instance = std::mem::replace(&mut self.open_instance, instance);
         let saved_instance_capabilities = self.open_instance_capabilities.take();
         let saved_inline = self.inline_selection.take();
@@ -140,6 +142,7 @@ impl Checker<'_, '_> {
         self.range_pattern_infos = saved_range_infos;
         self.bitvec_pattern_infos = saved_bitvec_infos;
         self.signature_owner = saved_owner;
+        self.open_definition_needs_instance = saved_open_needs_instance;
         self.open_instance = saved_instance;
         self.open_instance_capabilities = saved_instance_capabilities;
         self.inline_selection = saved_inline;

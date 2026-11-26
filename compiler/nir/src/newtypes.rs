@@ -347,6 +347,10 @@ pub fn validate_in(
                 TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => {
                     validate_contract_capture(ty, &parameters, fuel)?;
                 }
+                TypePredicate::HasField { subject, field } => {
+                    validate_contract_capture(subject, &parameters, fuel)?;
+                    validate_contract_capture(field, &parameters, fuel)?;
+                }
                 TypePredicate::Trait(capability) => {
                     validate_contract_capture(&capability.subject, &parameters, fuel)?;
                     metadata_spend(fuel, capability.interface_arguments.len())?;

@@ -111,12 +111,7 @@ impl Checker<'_, '_> {
                     .constrain_result_context(context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(span, e))?;
             }
-            candidate
-                .refine_type_views_metered(
-                    |ty, budget| self.callable_input_view_metered(ty, budget),
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(span, e))?;
+            self.refine_call_views(&mut candidate, span)?;
             self.settle_function_defaults(
                 plan_owner,
                 &binders,

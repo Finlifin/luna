@@ -993,3 +993,107 @@ pub(super) fn forward_template_aliases(
 
 #[cfg(test)]
 mod source_tests;
+
+/// Forward immutable Symbol bindings into field-access operands after staged
+/// calls and quotes expand so downstream verifiers and LLVM lowering see the
+/// resolved Symbol constant directly.
+pub(super) fn forward_symbol_aliases(
+    expression: &mut n::Expr,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut unavailable = BTreeSet::new();
+    let mut declarations = Vec::new();
+    iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
+        if matches!(
+            expr.kind,
+            K::Assign { .. } | K::AddressOf(_) | K::ConstAddress { .. } | K::Closure { .. }
+        ) {
+            unavailable.extend(nir::free_bindings::collect(expr, fuel)?);
+            return Ok(false);
+        }
+        if let K::Let { binding, value } = &expr.kind
+            && value.ty == Term::Primitive(nir::Primitive::Symbol)
+        {
+            declarations.push((*binding, value.as_ref().clone()));
+        }
+        Ok(true)
+    })?;
+    let mut values: BTreeMap<n::LocalId, n::Expr> = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for (binding, initializer) in &declarations {
+            *fuel = fuel.checked_sub(1).ok_or("symbol alias budget exhausted")?;
+            if unavailable.contains(binding) || values.contains_key(binding) {
+                continue;
+            }
+            let mut inner = initializer;
+            while let K::Block {
+                statements,
+                result: Some(res),
+            }
+            | K::CallPreparation {
+                statements,
+                result: Some(res),
+            } = &inner.kind
+                && statements.is_empty()
+            {
+                inner = res;
+            }
+            let resolved = match &inner.kind {
+                K::Literal(n::Literal::Symbol(_))
+                | K::ComptimeValue(Term::Symbol(_))
+                | K::TypeValue(Term::Symbol(_)) => Some(inner.clone()),
+                K::Local(source) => values.get(source).cloned(),
+                _ => None,
+            };
+            if let Some(value) = resolved {
+                values.insert(*binding, value);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if values.is_empty() {
+        return Ok(());
+    }
+    iir::visit::expression_mut_pruned(expression, fuel, |expr, _fuel| {
+        if matches!(expr.kind, K::Closure { .. }) {
+            return Ok(false);
+        }
+        let field_slot = match &mut expr.kind {
+            K::FieldPtr { field, .. }
+            | K::FieldValue { field, .. }
+            | K::TypeHasField { field, .. }
+            | K::TypeFieldType { field, .. }
+            | K::StructFieldType { field, .. }
+            | K::ComptimeFieldEntry { field, .. } => Some(field.as_mut()),
+            _ => None,
+        };
+        if let Some(slot) = field_slot {
+            let mut cursor: &n::Expr = slot;
+            while let K::Block {
+                statements,
+                result: Some(res),
+            }
+            | K::CallPreparation {
+                statements,
+                result: Some(res),
+            } = &cursor.kind
+                && statements.is_empty()
+            {
+                cursor = res;
+            }
+            if let K::Local(id) = cursor.kind
+                && let Some(resolved) = values.get(&id)
+            {
+                let source = slot.source;
+                *slot = resolved.clone();
+                slot.source = source;
+            }
+        }
+        Ok(true)
+    })
+}

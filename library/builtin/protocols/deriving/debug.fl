@@ -1,0 +1,65 @@
+use meta;
+use primitives.{Symbol, Type, bool, usize, void};
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Debug
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void
+    where
+        W: Type,
+        requires W :- ByteWriter,
+    {
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = meta.reflection.struct_field_names(Self);
+            output.write_str("{")!;
+            var wrote = false;
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    if wrote {
+                        output.write_str(", ")!;
+                    }
+                    wrote = true;
+                    output.write_str(sym'tag_name)!;
+                    output.write_str(": ")!;
+                    meta.structs.field_ptr(self, sym).as(Debug).write_debug(output)!;
+                }
+            }
+            output.write_str("}")
+        } else {
+            const V_PATHS = meta.reflection.enum_variant_paths(Self);
+            const VF_TYPES = meta.reflection.enum_variant_field_types(Self);
+            let lv = meta.enums.enum_variant_index(self);
+            inline for v in 0..VF_TYPES.length() {
+                const V_U: usize = meta.enums.to_usize(v);
+                if lv == V_U {
+                    const V_PATH = V_PATHS[v];
+                    const V_NAME: Symbol = V_PATH[V_PATH.length() - 1];
+                    output.write_str(".")!;
+                    output.write_str(V_NAME'tag_name)!;
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        output.write_str("(")!;
+                        inline for f in 0..FIELD_COUNT {
+                            const F_U: usize = meta.enums.to_usize(f);
+                            inline if f > 0 {
+                                output.write_str(", ")!;
+                            }
+                            meta.enums.enum_variant_field_ptr(Self, self, V_U, F_U) match {
+                                fp? => fp.as(Debug).write_debug(output)!,
+                                null => {},
+                            }
+                        }
+                        output.write_str(")")!;
+                    }
+                    return;
+                }
+            }
+            output.write_str(".")
+        }
+    }
+}

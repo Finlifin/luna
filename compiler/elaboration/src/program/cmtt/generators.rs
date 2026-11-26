@@ -478,6 +478,7 @@ impl Checker<'_, '_> {
         let saved_schema_step = self.generator_schema_step.take();
         let saved_cells = std::mem::take(&mut self.generator_cells);
         let saved_patterns = std::mem::take(&mut self.pattern_codes);
+        let saved_any_result = std::mem::take(&mut self.any_result_code_locals);
         let saved_pattern_quote = self.pattern_quote_pending.take();
         let saved = (
             std::mem::take(&mut self.locals),
@@ -500,6 +501,7 @@ impl Checker<'_, '_> {
         self.generator_schema_step = saved_schema_step;
         self.generator_cells = saved_cells;
         self.pattern_codes = saved_patterns;
+        self.any_result_code_locals = saved_any_result;
         self.pattern_quote_pending = saved_pattern_quote;
         (
             self.locals,
@@ -1987,6 +1989,7 @@ impl Checker<'_, '_> {
             .map(|(_, cell)| cell.value())
             .collect::<Vec<_>>();
         let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
+        let saved_any_result = self.any_result_code_locals.clone();
         let mut saved = (
             self.locals.clone(),
             self.code_values.clone(),
@@ -1995,6 +1998,7 @@ impl Checker<'_, '_> {
             self.pattern_codes.clone(),
         );
         let result = action(self);
+        self.any_result_code_locals = saved_any_result;
         if result.is_ok() {
             saved.1.retain_assignments(&self.code_values);
             saved.4.retain_assignments(&self.pattern_codes);
@@ -2338,12 +2342,17 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         if let Some(previous) = self.code_values.shared(&id).cloned() {
+            let any_result = self.any_result_code_locals.contains(&id);
             let expected = Interface {
                 infer_context: true,
                 context: BTreeMap::new(),
                 ports: BTreeMap::new(),
                 defaults: BTreeMap::new(),
-                result: previous.result.clone(),
+                result: if any_result {
+                    Term::AnyType
+                } else {
+                    previous.result.clone()
+                },
             };
             let code = self.code_value(value, Some(&expected), depth)?;
             let work = code
@@ -2446,7 +2455,11 @@ impl Checker<'_, '_> {
                 id,
                 Arc::new(ExpressionCode {
                     body,
-                    result: previous.result.clone(),
+                    result: if any_result {
+                        code.result.clone()
+                    } else {
+                        previous.result.clone()
+                    },
                     context: previous.context.clone(),
                     ports: previous.ports.clone(),
                     defaults,

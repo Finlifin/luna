@@ -239,6 +239,10 @@ impl ImplementationHead {
                 Visit::Formula(Formula::Kind(query)) => work.push(Visit::Term(&query.ty)),
                 Visit::Formula(Formula::NotSized(query)) => work.push(Visit::Term(&query.ty)),
                 Visit::Formula(Formula::HasHeadShape(query)) => work.push(Visit::Term(&query.ty)),
+                Visit::Formula(Formula::HasField(query)) => {
+                    work.push(Visit::Term(&query.ty));
+                    work.push(Visit::Term(&query.field));
+                }
                 Visit::Formula(Formula::RowContains(query)) => {
                     work.push(Visit::Term(&query.row));
                     match &query.label {
@@ -561,6 +565,23 @@ pub(super) fn validate(
             Work::Term(Term::DeferredErrorResult { errors, result }) => {
                 pending.push((Work::Term(errors), depth + 1));
                 pending.push((Work::Term(result), depth + 1));
+            }
+            Work::Term(Term::FieldType { subject, field }) => {
+                pending.push((Work::Term(subject), depth + 1));
+                pending.push((Work::Term(field), depth + 1));
+            }
+            Work::Term(Term::VariantFieldType {
+                subject,
+                variant,
+                field,
+            }) => {
+                pending.push((Work::Term(subject), depth + 1));
+                pending.push((Work::Term(variant), depth + 1));
+                pending.push((Work::Term(field), depth + 1));
+            }
+            Work::Term(Term::TupleAppend { tuple, element }) => {
+                pending.push((Work::Term(tuple), depth + 1));
+                pending.push((Work::Term(element), depth + 1));
             }
             Work::Term(Term::OptionalValue { ty, value }) => {
                 pending.push((Work::Term(ty), depth + 1));
@@ -1028,7 +1049,7 @@ impl ImplementationHead {
             }
         }
         let allowance =
-            remaining / (8 + self.interface_arguments.len() * 4 + self.requirements.len() * 2);
+            remaining / (7 + self.interface_arguments.len() + self.requirements.len() * 2);
         if allowance == 0 {
             return Err(TypeAssessment::BudgetExhausted);
         }
@@ -1870,14 +1891,26 @@ impl Index {
         // closed-head exclusions before dividing fuel among unresolved heads;
         // unrelated scalar implementations must not consume inference slots.
         let mut excluded = BTreeMap::new();
+        let mut refute_budget = Budget {
+            steps: budget.steps / 4,
+            max_depth: budget.max_depth,
+        };
+        let refute_reserved = refute_budget.steps;
         for id in &candidates.declarations {
-            if let Some(proof) = self.entries[id]
-                .head
-                .refute_closed_subject_metered(subject, context, budget)
-            {
+            if refute_budget.steps == 0 {
+                break;
+            }
+            if let Some(proof) = self.entries[id].head.refute_closed_subject_metered(
+                subject,
+                context,
+                &mut refute_budget,
+            ) {
                 excluded.insert(*id, proof);
             }
         }
+        budget.steps = budget
+            .steps
+            .saturating_sub(refute_reserved - refute_budget.steps);
         let candidate_budget = Budget {
             // Search has already charged its actual work above. Unused search
             // allowance belongs to the remaining candidate budget.

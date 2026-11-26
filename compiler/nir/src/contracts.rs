@@ -339,6 +339,16 @@ pub fn remap_predicate_metered(
             | K::TypeKind { operand: v, .. }
             | K::TypeNotSized { operand: v }
             | K::TypeLayout { operand: v, .. }
+            | K::NamedField { value: v, .. }
+            | K::ConstructStruct { fields: v }
+            | K::EnumVariantIndex(v)
+            | K::StructFieldSpans(v)
+            | K::RecordFieldSpans(v)
+            | K::DeclarationSpan(v)
+            | K::EnumVariantSpans(v)
+            | K::EnumVariantFieldSpans(v)
+            | K::ComptimeEnumVariantIndex(v)
+            | K::ComptimeEnumVariantFieldValues(v)
             | K::UnsafeScope(v)
             | K::Discard(v)
             | K::RequirePredicate(v)
@@ -357,6 +367,31 @@ pub fn remap_predicate_metered(
             | K::BitIndex(a, b)
             | K::And(a, b)
             | K::Or(a, b)
+            | K::TypeHasField {
+                subject: a,
+                field: b,
+            }
+            | K::TypeFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::StructFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::FieldPtr {
+                pointer: a,
+                field: b,
+            }
+            | K::FieldValue { value: a, field: b }
+            | K::ConstructEnum {
+                variant: a,
+                fields: b,
+            }
+            | K::TupleAppend {
+                tuple: a,
+                element: b,
+            }
             | K::IntegerBinary {
                 left: a, right: b, ..
             }
@@ -366,7 +401,17 @@ pub fn remap_predicate_metered(
                 pending.push(a);
                 pending.push(b);
             }
-            K::BitWindow { value, start, end } => {
+            K::BitWindow { value, start, end }
+            | K::EnumVariantFieldPtr {
+                pointer: value,
+                variant: start,
+                field: end,
+            }
+            | K::ComptimeFieldEntry {
+                value,
+                field: start,
+                ty: end,
+            } => {
                 pending.push(value);
                 pending.push(start);
                 pending.push(end);

@@ -575,6 +575,9 @@ impl PreparedRequired {
         if let Some(form) = reader.and_then(|reader| reader.attributes) {
             interpreter = interpreter.with_attribute_source(form);
         }
+        if let Some(site) = reader.and_then(|reader| reader.implicit_call_site) {
+            interpreter = interpreter.with_implicit_call_site(site.clone());
+        }
         if let Some(service) = builder {
             interpreter = interpreter.with_definition_service(service);
         }

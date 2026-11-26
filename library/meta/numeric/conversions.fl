@@ -4,6 +4,7 @@ use builtin.{
     Type,
     bool,
     char,
+    compiler,
     i128,
     i16,
     i32,
@@ -42,6 +43,84 @@ pub pure comptime trait ComptimeTryFrom where Source {
 
 pub pure comptime trait ComptimeDefault {
     pure comptime fn default() -> Self;
+}
+
+comptime impl ComptimeDefault for bool {
+    pure comptime fn default() -> Self {
+        false
+    }
+}
+
+comptime impl ComptimeDefault for u8 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for u16 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for u32 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for u64 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for u128 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for usize {
+    pure comptime fn default() -> Self {
+        compiler.integer_to_usize(0)
+    }
+}
+
+comptime impl ComptimeDefault for i8 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for i16 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for i32 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for i64 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for i128 {
+    pure comptime fn default() -> Self {
+        0
+    }
+}
+
+comptime impl ComptimeDefault for isize {
+    pure comptime fn default() -> Self {
+        compiler.integer_to_isize(0)
+    }
 }
 
 comptime impl ComptimeFrom<T> for T where T {

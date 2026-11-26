@@ -30,6 +30,9 @@ pub(crate) fn evaluate_term(ty: &Term, head: DeclarationId) -> Option<bool> {
         | Term::AssociatedTypeCall(_)
         | Term::ComptimeCall(_)
         | Term::DeferredErrorResult { .. }
+        | Term::FieldType { .. }
+        | Term::VariantFieldType { .. }
+        | Term::TupleAppend { .. }
         | Term::ClosureContextType
         | Term::ClosureContextValue(_)
         | Term::ContextualClosure { .. }

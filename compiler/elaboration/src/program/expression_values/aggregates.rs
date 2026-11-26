@@ -36,7 +36,8 @@ impl Checker<'_, '_> {
             H::Tuple(items) => return self.check_tuple_fields(expr, items, expected),
             H::Range { .. } => return self.range_value_expression(expr, expected),
             H::InlineControl(value)
-                if matches!(value.kind, H::If(..) | H::When(..) | H::Match(..))
+                if (matches!(value.kind, H::If(cond, _, _) if !self.is_type_assumption(cond))
+                    || matches!(value.kind, H::When(..) | H::Match(..)))
                     && self.closed_comptime_control_body() =>
             {
                 // This body executes wholly at comptime. Keep typed branch
@@ -255,6 +256,11 @@ impl Checker<'_, '_> {
                 }
                 n::TypePredicate::Kind(term, _) | n::TypePredicate::NotSized(term) => {
                     if term_is_open(term) {
+                        return true;
+                    }
+                }
+                n::TypePredicate::HasField { subject, field } => {
+                    if term_is_open(subject) || term_is_open(field) {
                         return true;
                     }
                 }

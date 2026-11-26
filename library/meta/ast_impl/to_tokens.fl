@@ -15,7 +15,25 @@ use ast_impl.nodes.{
 }
 use ast_impl.token.Token;
 use ast_impl.token_buffer.TokenBuffer;
-use builtin.{Integer, Symbol, bool, str}
+use bindings;
+use builtin.{
+    Integer,
+    Symbol,
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    str,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+}
 
 {-
     Conversion protocol for values spliced into `{{ ... }}` via `$id` / `${expr}`.
@@ -140,6 +158,78 @@ comptime impl ToTokens for Integer {
         } else {
             TokenBuffer.from_token(Token.int_literal(self))
         }
+    }
+}
+
+comptime impl ToTokens for u8 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_u8(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for u16 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_u16(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for u32 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_u32(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for u64 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_u64(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for u128 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_u128(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for usize {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_usize(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for i8 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_i8(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for i16 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_i16(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for i32 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_i32(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for i64 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_i64(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for i128 {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_i128(self).as(ToTokens).to_tokens()
+    }
+}
+
+comptime impl ToTokens for isize {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        bindings.from_isize(self).as(ToTokens).to_tokens()
     }
 }
 

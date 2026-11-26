@@ -1,0 +1,70 @@
+use meta;
+use numeric.comparison.{Eq, Ord, Order};
+use primitives.{Symbol, Type, usize};
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Ord
+where
+    requires Self :- Eq,
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    fn cmp(*self, other: *Self) -> Order {
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = meta.reflection.struct_field_names(Self);
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    let lhs = meta.structs.field_ptr(self, sym);
+                    let rhs = meta.structs.field_ptr(other, sym);
+                    let ord = lhs.as(Ord).cmp(rhs);
+                    ord match {
+                        .less => return .less,
+                        .greater => return .greater,
+                        .equal => {},
+                    }
+                }
+            }
+            .equal
+        } else {
+            const VF_TYPES = meta.reflection.enum_variant_field_types(Self);
+            let lv = meta.enums.enum_variant_index(self);
+            let rv = meta.enums.enum_variant_index(other);
+            if lv < rv {
+                return .less;
+            }
+            if lv > rv {
+                return .greater;
+            }
+            inline for v in 0..VF_TYPES.length() {
+                const V_U: usize = meta.enums.to_usize(v);
+                if lv == V_U {
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        inline for f in 0..FIELD_COUNT {
+                            const F_U: usize = meta.enums.to_usize(f);
+                            let lopt = meta.enums.enum_variant_field_ptr(Self, self, V_U, F_U);
+                            let ropt = meta.enums.enum_variant_field_ptr(Self, other, V_U, F_U);
+                            lopt match {
+                                lp? =>
+                                    ropt match {
+                                        rp? => {
+                                            let ord = lp.as(Ord).cmp(rp);
+                                            ord match {
+                                                .less => return .less,
+                                                .greater => return .greater,
+                                                .equal => {},
+                                            }
+                                        },
+                                        null => {},
+                                    },
+                                null => {},
+                            }
+                        }
+                    }
+                    return .equal;
+                }
+            }
+            .equal
+        }
+    }
+}

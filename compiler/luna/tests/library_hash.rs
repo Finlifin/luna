@@ -186,6 +186,7 @@ mod protocols {{
             }}
         }}
     }}
+    pub mod ops {{ {ops} }}
     pub mod patterns {{ {patterns} }}
     pub mod hash {{ {hash} }}
     pub mod conversion {{ {conversion} }}
@@ -203,12 +204,31 @@ pub use mem_impl.slice.Slice;
 pub mod builtin {{
     pub use primitives.*;
     pub use comparison.{{Order, TotalFloat, TotalOrd}};
+    pub use protocols.ops.VariadicCollector;
     pub use traits.{{ConversionErr, InfallibleErr}};
+    pub struct Context {{
+        package_name_val: str,
+        module_path_val: str,
+        callable_name_val: str,
+    }}
+    pub struct CallDescription {{}}
     pub mod compiler {{ pub use bindings.*; }}
 }}
 mod meta {{
     use builtin;
+    use builtin.VariadicCollector;
     pub const List: pure comptime fn<T: builtin.Type> -> builtin.Type = .List'builtin;
+    mod ast_impl {{
+        pub mod span {{
+            use builtin.{{isize, str, usize}};
+            pub struct SourceSpan {{
+                file: str,
+                start: usize,
+                end: usize,
+                expansion_id: isize,
+            }}
+        }}
+    }}
     mod types {{
         pub mod bindings {{ {meta_types_bindings} }}
     }}
@@ -220,10 +240,12 @@ mod meta {{
         pub mod ordering {{ {meta_ord} }}
         pub mod conversions {{ {meta_conv} }}
     }}
+    mod ops_impl {{ {meta_ops_impl} }}
     mod data {{
         pub mod integer {{ {meta_integer} }}
         pub mod list {{ {meta_list} }}
         pub mod hashing {{ {meta_hash} }}
+        pub mod text {{ {meta_text} }}
     }}
     mod integer {{ pub use data.integer.*; }}
     pub use data.hashing.{{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher}};
@@ -295,6 +317,7 @@ impl TestFnvBuild {{
             "../../../library/builtin/protocols/patterns.fl"
         )),
         hash = support::with_attrs(include_str!("../../../library/builtin/protocols/hash.fl")),
+        ops = support::with_attrs(include_str!("../../../library/builtin/protocols/ops.fl")),
         conversion = support::with_attrs(include_str!(
             "../../../library/builtin/protocols/conversion.fl"
         )),
@@ -309,6 +332,8 @@ impl TestFnvBuild {{
         meta_integer = include_str!("../../../library/meta/data/integer.fl"),
         meta_list = include_str!("../../../library/meta/data/list.fl"),
         meta_hash = include_str!("../../../library/meta/data/hashing.fl"),
+        meta_text = include_str!("../../../library/meta/data/text.fl"),
+        meta_ops_impl = include_str!("../../../library/meta/ops_impl.fl"),
     )
 }
 
@@ -340,17 +365,37 @@ mod protocols {{
             }}
         }}
     }}
+    pub mod ops {{ {ops} }}
     pub mod conversion {{ {conversion} }}
 }}
 pub mod builtin {{
     pub use primitives.*;
     pub use comparison.{{Order, TotalFloat, TotalOrd}};
+    pub use protocols.ops.VariadicCollector;
     pub use protocols.conversion.{{ConversionErr, InfallibleErr}};
+    pub struct Context {{
+        package_name_val: str,
+        module_path_val: str,
+        callable_name_val: str,
+    }}
+    pub struct CallDescription {{}}
     pub mod compiler {{ pub use bindings.*; }}
 }}
 mod meta {{
     use builtin;
+    use builtin.VariadicCollector;
     pub const List: pure comptime fn<T: builtin.Type> -> builtin.Type = .List'builtin;
+    mod ast_impl {{
+        pub mod span {{
+            use builtin.{{isize, str, usize}};
+            pub struct SourceSpan {{
+                file: str,
+                start: usize,
+                end: usize,
+                expansion_id: isize,
+            }}
+        }}
+    }}
     mod types {{
         pub mod bindings {{ {meta_types_bindings} }}
     }}
@@ -362,10 +407,12 @@ mod meta {{
         pub mod ordering {{ {meta_ord} }}
         pub mod conversions {{ {meta_conv} }}
     }}
+    mod ops_impl {{ {meta_ops_impl} }}
     mod data {{
         pub mod integer {{ {meta_integer} }}
         pub mod list {{ {meta_list} }}
         pub mod hashing {{ {meta_hash} }}
+        pub mod text {{ {meta_text} }}
     }}
     mod integer {{ pub use data.integer.*; }}
     pub use data.hashing.{{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher}};
@@ -381,6 +428,7 @@ pub use meta.{{ComptimeBuildHasher, ComptimeEq, ComptimeHash, ComptimeHasher, De
             "../../../library/builtin/numeric/comparison.fl"
         )),
         resources = include!("support/resources_source.rs"),
+        ops = support::with_attrs(include_str!("../../../library/builtin/protocols/ops.fl")),
         conversion = support::with_attrs(include_str!(
             "../../../library/builtin/protocols/conversion.fl"
         )),
@@ -394,6 +442,8 @@ pub use meta.{{ComptimeBuildHasher, ComptimeEq, ComptimeHash, ComptimeHasher, De
         meta_integer = include_str!("../../../library/meta/data/integer.fl"),
         meta_list = include_str!("../../../library/meta/data/list.fl"),
         meta_hash = include_str!("../../../library/meta/data/hashing.fl"),
+        meta_text = include_str!("../../../library/meta/data/text.fl"),
+        meta_ops_impl = include_str!("../../../library/meta/ops_impl.fl"),
     )
 }
 

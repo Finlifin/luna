@@ -1364,6 +1364,29 @@ impl fmt::Display for EnumStructureQuery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImplicitQueryKind {
+    Caller,
+    Module,
+    Package,
+    File,
+    Line,
+    SourceSpan,
+}
+
+impl fmt::Display for ImplicitQueryKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Caller => "caller",
+            Self::Module => "module",
+            Self::Package => "package",
+            Self::File => "file",
+            Self::Line => "line",
+            Self::SourceSpan => "source-span",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DynCast {
     pub interface: InterfaceInstance,
@@ -1465,6 +1488,63 @@ pub enum ExprKind {
     RecordFieldNames(Box<Expr>),
     ReflectCallable(Box<Expr>),
     TypeId(Box<Expr>),
+    ImplicitQuery {
+        kind: ImplicitQueryKind,
+        operand: Box<Expr>,
+    },
+    TypeHasField {
+        subject: Box<Expr>,
+        field: Box<Expr>,
+    },
+    TypeFieldType {
+        subject: Box<Expr>,
+        field: Box<Expr>,
+    },
+    StructFieldType {
+        subject: Box<Expr>,
+        field: Box<Expr>,
+    },
+    FieldPtr {
+        pointer: Box<Expr>,
+        field: Box<Expr>,
+    },
+    FieldValue {
+        value: Box<Expr>,
+        field: Box<Expr>,
+    },
+    ComptimeFieldEntry {
+        value: Box<Expr>,
+        field: Box<Expr>,
+        ty: Box<Expr>,
+    },
+    NamedField {
+        value: Box<Expr>,
+        name: String,
+    },
+    ConstructStruct {
+        fields: Box<Expr>,
+    },
+    ConstructEnum {
+        variant: Box<Expr>,
+        fields: Box<Expr>,
+    },
+    EnumVariantIndex(Box<Expr>),
+    EnumVariantFieldPtr {
+        pointer: Box<Expr>,
+        variant: Box<Expr>,
+        field: Box<Expr>,
+    },
+    TupleAppend {
+        tuple: Box<Expr>,
+        element: Box<Expr>,
+    },
+    StructFieldSpans(Box<Expr>),
+    RecordFieldSpans(Box<Expr>),
+    DeclarationSpan(Box<Expr>),
+    EnumVariantSpans(Box<Expr>),
+    EnumVariantFieldSpans(Box<Expr>),
+    ComptimeEnumVariantIndex(Box<Expr>),
+    ComptimeEnumVariantFieldValues(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
     /// Compiler-private packet: definition name and representation Type.
@@ -2440,6 +2520,18 @@ pub struct Package {
     pub safety_contracts: SafetyContracts,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
     pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
+    /// Source declaration and field spans retained for checked comptime reflection.
+    pub reflection_spans: ReflectionSpans,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReflectionSpans {
+    pub structs: std::collections::BTreeMap<DeclarationId, SourceRange>,
+    pub struct_fields: std::collections::BTreeMap<DeclarationId, Vec<SourceRange>>,
+    pub record_fields: std::collections::BTreeMap<Vec<String>, Vec<SourceRange>>,
+    pub enums: std::collections::BTreeMap<DeclarationId, SourceRange>,
+    pub enum_variants: std::collections::BTreeMap<DeclarationId, Vec<SourceRange>>,
+    pub enum_variant_fields: std::collections::BTreeMap<DeclarationId, Vec<Vec<SourceRange>>>,
 }
 
 /// Acquired cleanup accesses, expressed relative to one residual invocation's inputs.
@@ -4029,6 +4121,64 @@ impl fmt::Display for ExprKind {
             }
             Self::StructFieldNames(subject) => write!(f, "(struct-field-names {subject})"),
             Self::RecordFieldNames(subject) => write!(f, "(record-field-names {subject})"),
+            Self::ImplicitQuery { kind, operand } => {
+                write!(f, "(implicit-query {kind} {operand})")
+            }
+            Self::TypeHasField { subject, field } => {
+                write!(f, "(type-has-field {subject} {field})")
+            }
+            Self::TypeFieldType { subject, field } => {
+                write!(f, "(type-field-type {subject} {field})")
+            }
+            Self::StructFieldType { subject, field } => {
+                write!(f, "(struct-field-type {subject} {field})")
+            }
+            Self::FieldPtr { pointer, field } => {
+                write!(f, "(field-ptr {pointer} {field})")
+            }
+            Self::FieldValue { value, field } => {
+                write!(f, "(field-value {value} {field})")
+            }
+            Self::ComptimeFieldEntry { value, field, ty } => {
+                write!(f, "(comptime-field-entry {value} {field} {ty})")
+            }
+            Self::NamedField { value, name } => {
+                write!(f, "(named-field {value} ")?;
+                string(f, name)?;
+                f.write_str(")")
+            }
+            Self::ConstructStruct { fields } => {
+                write!(f, "(construct-struct {fields})")
+            }
+            Self::ConstructEnum { variant, fields } => {
+                write!(f, "(construct-enum {variant} {fields})")
+            }
+            Self::EnumVariantIndex(pointer) => {
+                write!(f, "(enum-variant-index {pointer})")
+            }
+            Self::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            } => {
+                write!(f, "(enum-variant-field-ptr {pointer} {variant} {field})")
+            }
+            Self::TupleAppend { tuple, element } => {
+                write!(f, "(tuple-append {tuple} {element})")
+            }
+            Self::StructFieldSpans(subject) => write!(f, "(struct-field-spans {subject})"),
+            Self::RecordFieldSpans(subject) => write!(f, "(record-field-spans {subject})"),
+            Self::DeclarationSpan(subject) => write!(f, "(declaration-span {subject})"),
+            Self::EnumVariantSpans(subject) => write!(f, "(enum-variant-spans {subject})"),
+            Self::EnumVariantFieldSpans(subject) => {
+                write!(f, "(enum-variant-field-spans {subject})")
+            }
+            Self::ComptimeEnumVariantIndex(value) => {
+                write!(f, "(comptime-enum-variant-index {value})")
+            }
+            Self::ComptimeEnumVariantFieldValues(value) => {
+                write!(f, "(comptime-enum-variant-field-values {value})")
+            }
             Self::ListConcat(left, right) => write!(f, "(list-concat {left} {right})"),
             Self::TypeListIndex(values, index) => {
                 write!(f, "(type-list-index (values {values}) (index {index}))")
@@ -4467,6 +4617,26 @@ impl Expr {
                     | ExprKind::ComptimeFunctionInstance { .. }
                     | ExprKind::StructFieldNames(_)
                     | ExprKind::RecordFieldNames(_)
+                    | ExprKind::ImplicitQuery { .. }
+                    | ExprKind::TypeHasField { .. }
+                    | ExprKind::TypeFieldType { .. }
+                    | ExprKind::StructFieldType { .. }
+                    | ExprKind::FieldPtr { .. }
+                    | ExprKind::FieldValue { .. }
+                    | ExprKind::ComptimeFieldEntry { .. }
+                    | ExprKind::NamedField { .. }
+                    | ExprKind::ConstructStruct { .. }
+                    | ExprKind::ConstructEnum { .. }
+                    | ExprKind::EnumVariantIndex(_)
+                    | ExprKind::EnumVariantFieldPtr { .. }
+                    | ExprKind::TupleAppend { .. }
+                    | ExprKind::StructFieldSpans(_)
+                    | ExprKind::RecordFieldSpans(_)
+                    | ExprKind::DeclarationSpan(_)
+                    | ExprKind::EnumVariantSpans(_)
+                    | ExprKind::EnumVariantFieldSpans(_)
+                    | ExprKind::ComptimeEnumVariantIndex(_)
+                    | ExprKind::ComptimeEnumVariantFieldValues(_)
                     | ExprKind::BitVecType(_)
                     | ExprKind::IntegerNegate(_)
                     | ExprKind::FloatNegate(_)
@@ -4586,6 +4756,17 @@ impl Expr {
                 | ExprKind::ObjectEdit { subject: value, .. }
                 | ExprKind::StructFieldNames(value)
                 | ExprKind::RecordFieldNames(value)
+                | ExprKind::ImplicitQuery { operand: value, .. }
+                | ExprKind::NamedField { value, .. }
+                | ExprKind::ConstructStruct { fields: value }
+                | ExprKind::EnumVariantIndex(value)
+                | ExprKind::StructFieldSpans(value)
+                | ExprKind::RecordFieldSpans(value)
+                | ExprKind::DeclarationSpan(value)
+                | ExprKind::EnumVariantSpans(value)
+                | ExprKind::EnumVariantFieldSpans(value)
+                | ExprKind::ComptimeEnumVariantIndex(value)
+                | ExprKind::ComptimeEnumVariantFieldValues(value)
                 | ExprKind::BitVecType(value)
                 | ExprKind::IntegerNegate(value)
                 | ExprKind::FloatNegate(value)
@@ -4627,6 +4808,31 @@ impl Expr {
                 | ExprKind::TypeEqual(a, b)
                 | ExprKind::ListConcat(a, b)
                 | ExprKind::TypeListIndex(a, b)
+                | ExprKind::TypeHasField {
+                    subject: a,
+                    field: b,
+                }
+                | ExprKind::TypeFieldType {
+                    subject: a,
+                    field: b,
+                }
+                | ExprKind::StructFieldType {
+                    subject: a,
+                    field: b,
+                }
+                | ExprKind::FieldPtr {
+                    pointer: a,
+                    field: b,
+                }
+                | ExprKind::FieldValue { value: a, field: b }
+                | ExprKind::ConstructEnum {
+                    variant: a,
+                    fields: b,
+                }
+                | ExprKind::TupleAppend {
+                    tuple: a,
+                    element: b,
+                }
                 | ExprKind::BitEqual(a, b)
                 | ExprKind::BitConcat(a, b)
                 | ExprKind::BitIndex(a, b)
@@ -4638,6 +4844,20 @@ impl Expr {
                 ExprKind::BitWindow { value, start, end } => {
                     work.push(Work::Expr(end));
                     work.push(Work::Expr(start));
+                    work.push(Work::Expr(value));
+                }
+                ExprKind::EnumVariantFieldPtr {
+                    pointer,
+                    variant,
+                    field,
+                } => {
+                    work.push(Work::Expr(field));
+                    work.push(Work::Expr(variant));
+                    work.push(Work::Expr(pointer));
+                }
+                ExprKind::ComptimeFieldEntry { value, field, ty } => {
+                    work.push(Work::Expr(ty));
+                    work.push(Work::Expr(field));
                     work.push(Work::Expr(value));
                 }
                 ExprKind::If {
@@ -5092,6 +5312,17 @@ impl Expr {
             | ExprKind::ObjectEdit { subject: value, .. }
             | ExprKind::StructFieldNames(value)
             | ExprKind::RecordFieldNames(value)
+            | ExprKind::ImplicitQuery { operand: value, .. }
+            | ExprKind::NamedField { value, .. }
+            | ExprKind::ConstructStruct { fields: value }
+            | ExprKind::EnumVariantIndex(value)
+            | ExprKind::StructFieldSpans(value)
+            | ExprKind::RecordFieldSpans(value)
+            | ExprKind::DeclarationSpan(value)
+            | ExprKind::EnumVariantSpans(value)
+            | ExprKind::EnumVariantFieldSpans(value)
+            | ExprKind::ComptimeEnumVariantIndex(value)
+            | ExprKind::ComptimeEnumVariantFieldValues(value)
             | ExprKind::BitVecType(value)
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
@@ -5133,6 +5364,31 @@ impl Expr {
             | ExprKind::TypeEqual(a, b)
             | ExprKind::ListConcat(a, b)
             | ExprKind::TypeListIndex(a, b)
+            | ExprKind::TypeHasField {
+                subject: a,
+                field: b,
+            }
+            | ExprKind::TypeFieldType {
+                subject: a,
+                field: b,
+            }
+            | ExprKind::StructFieldType {
+                subject: a,
+                field: b,
+            }
+            | ExprKind::FieldPtr {
+                pointer: a,
+                field: b,
+            }
+            | ExprKind::FieldValue { value: a, field: b }
+            | ExprKind::ConstructEnum {
+                variant: a,
+                fields: b,
+            }
+            | ExprKind::TupleAppend {
+                tuple: a,
+                element: b,
+            }
             | ExprKind::BitEqual(a, b)
             | ExprKind::BitConcat(a, b)
             | ExprKind::BitIndex(a, b)
@@ -5140,6 +5396,20 @@ impl Expr {
             | ExprKind::Or(a, b) => {
                 (a).rewrite_with(rewriter)?;
                 (b).rewrite_with(rewriter)?;
+            }
+            ExprKind::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            }
+            | ExprKind::ComptimeFieldEntry {
+                value: pointer,
+                field: variant,
+                ty: field,
+            } => {
+                pointer.rewrite_with(rewriter)?;
+                variant.rewrite_with(rewriter)?;
+                field.rewrite_with(rewriter)?;
             }
             ExprKind::BitWindow { value, start, end } => {
                 value.rewrite_with(rewriter)?;
@@ -5294,6 +5564,7 @@ pub enum TypePredicate {
     IntLe(crate::IntegerTerm, crate::IntegerTerm),
     Kind(Term, crate::TypeKind),
     NotSized(Term),
+    HasField { subject: Term, field: Term },
     Not(Box<TypePredicate>),
     And(Vec<TypePredicate>),
     Or(Vec<TypePredicate>),
@@ -5324,6 +5595,10 @@ impl TypePredicate {
             ),
             Self::Kind(ty, kind) => Self::Kind(transform(ty)?, *kind),
             Self::NotSized(ty) => Self::NotSized(transform(ty)?),
+            Self::HasField { subject, field } => Self::HasField {
+                subject: transform(subject)?,
+                field: transform(field)?,
+            },
             Self::Not(inner) => Self::Not(Box::new(
                 inner.try_map_types_with_invalid_integer(transform, invalid_integer)?,
             )),
@@ -5367,6 +5642,22 @@ impl TypePredicate {
                 TypePredicate::Bool(value) => Some(*value),
                 TypePredicate::Trait(_) => None,
                 TypePredicate::Kind(..) | TypePredicate::NotSized(_) => None,
+                TypePredicate::HasField { subject, field } => match (subject, field) {
+                    (Term::Record(fields), Term::Symbol(name)) => {
+                        Some(fields.iter().any(|(label, _)| label == name.as_ref()))
+                    }
+                    (
+                        Term::Primitive(_)
+                        | Term::Tuple(_)
+                        | Term::Function { .. }
+                        | Term::Pointer(_)
+                        | Term::Optional(_)
+                        | Term::ErrorResult { .. }
+                        | Term::Computation { .. },
+                        Term::Symbol(_),
+                    ) => Some(false),
+                    _ => None,
+                },
                 TypePredicate::Equal(left, right) => (left == right).then_some(true),
                 TypePredicate::IntLe(left, right) => {
                     (left.variable == right.variable).then_some(left.offset <= right.offset)
@@ -5408,6 +5699,10 @@ impl TypePredicate {
                     }
                 }
                 Self::Kind(ty, _) | Self::NotSized(ty) => terms.push(ty),
+                Self::HasField { subject, field } => {
+                    terms.push(subject);
+                    terms.push(field);
+                }
                 Self::Not(p) => predicates.push(p),
                 Self::And(ps) | Self::Or(ps) => predicates.extend(ps),
                 Self::Bool(_) => {}
@@ -5463,6 +5758,7 @@ impl fmt::Display for TypePredicate {
             Self::IntLe(a, b) => write!(f, "(int-le {a} {b})"),
             Self::Kind(ty, kind) => write!(f, "(kind {kind} {ty})"),
             Self::NotSized(ty) => write!(f, "(not-sized {ty})"),
+            Self::HasField { subject, field } => write!(f, "(has-field {subject} {field})"),
             Self::Not(p) => write!(f, "(not {p})"),
             Self::And(ps) | Self::Or(ps) => {
                 f.write_str(if matches!(self, Self::And(_)) {

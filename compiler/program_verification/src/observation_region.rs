@@ -285,6 +285,18 @@ pub(super) fn check(
             | K::TypeKind { .. }
             | K::TypeNotSized { .. }
             | K::TypeLayout { .. }
+            | K::TypeHasField { .. }
+            | K::TypeFieldType { .. }
+            | K::StructFieldType { .. }
+            | K::FieldPtr { .. }
+            | K::FieldValue { .. }
+            | K::ComptimeFieldEntry { .. }
+            | K::NamedField { .. }
+            | K::ConstructStruct { .. }
+            | K::ConstructEnum { .. }
+            | K::EnumVariantIndex(_)
+            | K::EnumVariantFieldPtr { .. }
+            | K::TupleAppend { .. }
             | K::BitSlice { .. }
             | K::BitWindow { .. }
             | K::And(..)

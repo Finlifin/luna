@@ -248,7 +248,7 @@ impl Interpreter<'_> {
         Ok(Value::UnsignedInteger(id))
     }
 
-    fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
+    pub(super) fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {
         let ty = self.selected_type_view(ty, None)?;
         self.check_type_description(&ty, None)?;
         self.admit_type(&ty, 0)?;

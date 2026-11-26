@@ -216,34 +216,47 @@ impl<'h> Frame<'h> {
                     self.state = State::Inferring(condition, search);
                     return self.advance_search(checker, None);
                 }
-                if let Some(else_expr) = no
-                    && self.selection == Some(usize::from(true))
-                    && checker.dependent_signature_instantiation
-                    && checker.is_type_assumption(source_condition)
-                {
+                let prune_type_dead = checker.is_type_assumption(source_condition)
+                    && (checker.dependent_signature_instantiation
+                        || (!checker.checking_open_behavior
+                            && self
+                                .ambient
+                                .as_ref()
+                                .is_none_or(|ambient| !ambient.suppressed)));
+                if self.selection == Some(usize::from(true)) && prune_type_dead {
                     let dead_yes = CheckedBlock::Ordinary(n::Expr {
                         ty: p(P::Never),
                         source: source(yes.span),
                         kind: K::Unit,
                     });
-                    let destination = if checker.dependent_result_instantiation {
-                        Destination::ordinary(
-                            checker,
-                            OrdinaryTail {
-                                expected: None,
-                                partial: None,
-                                input: None,
-                            },
-                            else_expr.span,
-                        )?
-                    } else {
-                        self.destination.clone()
-                    };
-                    self.enter_branch(checker, &condition, false, Some(else_expr.hir_id))?;
-                    let destination =
-                        self.simplify_branch_destination(checker, destination, else_expr.span)?;
-                    self.state = State::Else(condition, dead_yes, destination.clone());
-                    return Ok(Step::Child(Request::expression(else_expr, destination)));
+                    if let Some(else_expr) = no {
+                        let destination = if checker.dependent_result_instantiation {
+                            Destination::ordinary(
+                                checker,
+                                OrdinaryTail {
+                                    expected: None,
+                                    partial: None,
+                                    input: None,
+                                },
+                                else_expr.span,
+                            )?
+                        } else {
+                            self.destination.clone()
+                        };
+                        self.enter_branch(checker, &condition, false, Some(else_expr.hir_id))?;
+                        let destination =
+                            self.simplify_branch_destination(checker, destination, else_expr.span)?;
+                        self.state = State::Else(condition, dead_yes, destination.clone());
+                        return Ok(Step::Child(Request::expression(else_expr, destination)));
+                    }
+                    let dead_yes = dead_yes.ordinary(self.source.span)?;
+                    return self.finish_ordinary(
+                        checker,
+                        condition,
+                        dead_yes,
+                        None,
+                        &Destination::statement(),
+                    );
                 }
                 self.enter_branch(checker, &condition, true, yes.expr.map(|tail| tail.hir_id))?;
                 let destination = match &self.destination {
@@ -291,8 +304,13 @@ impl<'h> Frame<'h> {
                     );
                 };
                 if self.selection == Some(usize::from(false))
-                    && checker.dependent_signature_instantiation
                     && checker.is_type_assumption(source_condition)
+                    && (checker.dependent_signature_instantiation
+                        || (!checker.checking_open_behavior
+                            && self
+                                .ambient
+                                .as_ref()
+                                .is_none_or(|ambient| !ambient.suppressed)))
                 {
                     self.join_selected_exits(&condition, value.selected_exit(), false);
                     let dead_no = n::Expr {

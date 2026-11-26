@@ -1,9 +1,18 @@
-use primitives.{Integer, Symbol, Type, str, u32, usize};
+use implicit_bindings.{
+    implicit_caller,
+    implicit_file,
+    implicit_line,
+    implicit_module,
+    implicit_package,
+};
+use primitives.{Symbol, Type, str, u32};
 use staging.Splice;
 
 {-
     Compile-time call-site metadata and implicit argument passing protocol.
     Uses only primitive types so `builtin` stays free of `meta` dependencies.
+    `Context` carries only compiler-populated identity fields and exposes no
+    public constructors or probing getters; `CallDescription` stays empty.
 -}
 pub struct Context {
     package_name_val: str,
@@ -11,98 +20,7 @@ pub struct Context {
     callable_name_val: str,
 }
 
-impl Context {
-    pub pure comptime fn new(
-        package_name: str,
-        module_path: str,
-        callable_name: str,
-    ) -> Context {
-        Context {
-            package_name_val: package_name,
-            module_path_val: module_path,
-            callable_name_val: callable_name,
-        }
-    }
-
-    pub pure comptime fn package_name(self) -> str {
-        self.package_name_val
-    }
-
-    pub pure comptime fn module_path(self) -> str {
-        self.module_path_val
-    }
-
-    pub pure comptime fn callable_name(self) -> str {
-        self.callable_name_val
-    }
-}
-
-pub struct CallDescription {
-    callee_name_val: str,
-    param_name_val: Symbol,
-    call_file_val: str,
-    call_line_val: u32,
-    call_column_val: u32,
-    call_byte_start_val: usize,
-    call_byte_end_val: usize,
-    expansion_id_val: Integer,
-}
-
-impl CallDescription {
-    pub pure comptime fn new(
-        callee_name: str,
-        param_name: Symbol,
-        call_file: str,
-        call_line: u32,
-        call_column: u32,
-        call_byte_start: usize,
-        call_byte_end: usize,
-        expansion_id: Integer,
-    ) -> CallDescription {
-        CallDescription {
-            callee_name_val: callee_name,
-            param_name_val: param_name,
-            call_file_val: call_file,
-            call_line_val: call_line,
-            call_column_val: call_column,
-            call_byte_start_val: call_byte_start,
-            call_byte_end_val: call_byte_end,
-            expansion_id_val: expansion_id,
-        }
-    }
-
-    pub pure comptime fn callee_name(self) -> str {
-        self.callee_name_val
-    }
-
-    pub pure comptime fn param_name(self) -> Symbol {
-        self.param_name_val
-    }
-
-    pub pure comptime fn call_file(self) -> str {
-        self.call_file_val
-    }
-
-    pub pure comptime fn call_line(self) -> u32 {
-        self.call_line_val
-    }
-
-    pub pure comptime fn call_column(self) -> u32 {
-        self.call_column_val
-    }
-
-    pub pure comptime fn call_byte_start(self) -> usize {
-        self.call_byte_start_val
-    }
-
-    pub pure comptime fn call_byte_end(self) -> usize {
-        self.call_byte_end_val
-    }
-
-    pub pure comptime fn expansion_id(self) -> Integer {
-        self.expansion_id_val
-    }
-}
+pub struct CallDescription {}
 
 pub trait ImplicitPassing
 where
@@ -125,7 +43,7 @@ impl ImplicitPassing<.__caller__> for str {
         callee: Context,
         calling: CallDescription,
     ) -> < |- str > {
-        let caller_name = caller.callable_name();
+        let caller_name = implicit_caller(caller);
         '( caller_name )
     }
 }
@@ -138,7 +56,7 @@ impl ImplicitPassing<.__module__> for str {
         callee: Context,
         calling: CallDescription,
     ) -> < |- str > {
-        let mod_path = caller.module_path();
+        let mod_path = implicit_module(caller);
         '( mod_path )
     }
 }
@@ -151,7 +69,7 @@ impl ImplicitPassing<.__package__> for str {
         callee: Context,
         calling: CallDescription,
     ) -> < |- str > {
-        let pkg_name = caller.package_name();
+        let pkg_name = implicit_package(caller);
         '( pkg_name )
     }
 }
@@ -164,7 +82,7 @@ impl ImplicitPassing<.__file__> for str {
         callee: Context,
         calling: CallDescription,
     ) -> < |- str > {
-        let file_name = calling.call_file();
+        let file_name = implicit_file(calling);
         '( file_name )
     }
 }
@@ -177,7 +95,7 @@ impl ImplicitPassing<.__line__> for u32 {
         callee: Context,
         calling: CallDescription,
     ) -> < |- u32 > {
-        let line_no = calling.call_line();
+        let line_no = implicit_line(calling);
         '( line_no )
     }
 }

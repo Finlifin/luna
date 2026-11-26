@@ -1,5 +1,6 @@
 #[path = "support/build_libraries.rs"]
 mod build_libraries;
+
 use build_libraries::{comptime_intrinsics, supporting_dependencies, supporting_libraries};
 use luna::{
     build_context::{Error, Host, INPUT_VERSION, PackageBuild, Query, Snapshot, Target, Value},
@@ -18,6 +19,7 @@ fn sources() -> Vec<SourcePackage> {
         })
         .collect()
 }
+
 fn input(identity: u64, mode: &str) -> PackageBuild {
     PackageBuild {
         identity,
@@ -34,9 +36,11 @@ fn input(identity: u64, mode: &str) -> PackageBuild {
         },
     }
 }
+
 fn definition(package: u64) -> DeclarationId {
     DeclarationId { package, local: 42 }
 }
+
 fn snapshot(inputs: Vec<PackageBuild>) -> Snapshot {
     Snapshot::new(INPUT_VERSION, &sources(), inputs).unwrap()
 }
@@ -242,6 +246,7 @@ fn with_libraries(mut args: Vec<String>, builtin: &std::path::Path) -> Vec<Strin
 }
 
 struct SourceFixture(std::path::PathBuf);
+
 impl SourceFixture {
     fn new(app: &str, dependency: &str) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -259,9 +264,11 @@ impl SourceFixture {
         .unwrap();
         Self(dir)
     }
+
     fn builtin_entry(&self) -> std::path::PathBuf {
         build_libraries::builtin_entry(&self.0)
     }
+
     fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
         let mut protocols = elaboration::program::Protocols::default();
         protocols.build_modes = modes
@@ -270,6 +277,7 @@ impl SourceFixture {
             .collect();
         self.compile_configured(&protocols, None)
     }
+
     fn compile_configured(
         &self,
         protocols: &elaboration::program::Protocols,
@@ -338,6 +346,7 @@ impl SourceFixture {
         .map(|(artifact, _)| artifact)
     }
 }
+
 impl Drop for SourceFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -737,7 +746,7 @@ fn real_sysroot_target_branches_execute_at_o0_and_o3() {
         let report = luna::testing::run_native_report_filtered(
             &package,
             100,
-            100_000,
+            1_000_000,
             Some(&bindings),
             None,
             &luna::host::Toolchain {
@@ -1361,7 +1370,7 @@ fn real_sysroot_metadata_materializes_at_o0_and_o3() {
         let report = luna::testing::run_native_report_filtered(
             &package,
             100,
-            100_000,
+            1_000_000,
             Some(&bindings),
             None,
             &luna::host::Toolchain {

@@ -41,6 +41,7 @@ mod default_code;
 mod dynamic_instances;
 mod environment;
 mod field_access;
+mod field_ops;
 mod function_inputs;
 mod function_instances;
 
@@ -600,6 +601,15 @@ impl Default for Budget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImplicitCallSite {
+    pub file: Arc<str>,
+    pub line: u32,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub expansion_id: i128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     FunctionInputRejected(Box<FunctionInputRejection>),
     InvalidDefinition(DefinitionBuildError),
@@ -643,6 +653,7 @@ pub enum ErrorKind {
     InvalidEffectEnvironment,
     EffectControlTransfer,
     EffectValueConsumed,
+    MissingImplicitCallSite,
 }
 
 impl From<comptime_runtime::Error> for ErrorKind {
@@ -700,6 +711,10 @@ impl fmt::Display for Error {
                 write!(f, "interpretation phase: {}", reason.message)?
             }
             ErrorKind::FunctionInputRejected(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::MissingImplicitCallSite => write!(
+                f,
+                "implicit call-site intrinsic requires an active ImplicitPassing resolution context"
+            )?,
             _ => write!(f, "interpretation {:?}", self.kind)?,
         }
         if self.kind == ErrorKind::StepsExhausted {
@@ -895,6 +910,7 @@ pub struct Interpreter<'a> {
     method_resolver: Option<&'a MethodResolver<'a>>,
     associated_resolver: Option<&'a AssociatedResolver<'a>>,
     attribute_resolver: Option<source_values::Resolver<'a>>,
+    implicit_call_site: Option<ImplicitCallSite>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
     method_parameters: Arc<BTreeMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
@@ -1763,6 +1779,11 @@ impl<'a> Interpreter<'a> {
         self
     }
 
+    pub fn with_implicit_call_site(mut self, site: ImplicitCallSite) -> Self {
+        self.implicit_call_site = Some(site);
+        self
+    }
+
     /// Resolve invocation-demanded methods in this source VM's frozen world.
     pub fn with_method_resolver(mut self, resolver: &'a MethodResolver<'a>) -> Self {
         self.method_resolver = Some(resolver);
@@ -2547,6 +2568,54 @@ impl<'a> Interpreter<'a> {
                         .map_err(|kind| self.failure(kind, Some(expr.source)))?,
                 )
             }
+            K::FieldPtr { pointer, field } => {
+                if self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+                }
+                let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                let Value::Symbol(name) = value!(self.eval(field, environment)) else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                let Term::Pointer(pointee) = &expr.ty else {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                };
+                let subject = self.reflection_type(&pointer.pointee)?;
+                let index = if self.graph.is_some()
+                    && let Term::Nominal { .. } = &subject
+                {
+                    let Some(ConcreteNominal::Struct(definition)) =
+                        self.concrete_nominal_metered(&subject)?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidPointer, Some(expr.source)));
+                    };
+                    let Some((index, _)) = definition
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (field_name, _))| field_name == name.as_ref())
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidPointer, Some(expr.source)));
+                    };
+                    index
+                } else {
+                    let Some((index, _)) =
+                        self.resolve_field_in_type(&subject, &name, expr.source)?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidPointer, Some(expr.source)));
+                    };
+                    index
+                };
+                let projected = match &subject {
+                    Term::Record(_) => pointer.project_anonymous(&name, index, (**pointee).clone()),
+                    Term::Nominal { declaration, .. } => {
+                        pointer.project(*declaration, index, (**pointee).clone())
+                    }
+                    _ => Err(ErrorKind::Type),
+                };
+                Value::Pointer(projected.map_err(|kind| self.failure(kind, Some(expr.source)))?)
+            }
             K::ReadPointer(pointer) => {
                 let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -2805,7 +2874,24 @@ impl<'a> Interpreter<'a> {
             | K::RecordFieldNames(_)
             | K::ReflectCallable(_)
             | K::TypeId(_)
-            | K::TypeLayout { .. } => self.eval_observation(expr, environment),
+            | K::TypeLayout { .. }
+            | K::ImplicitQuery { .. }
+            | K::StructFieldSpans(_)
+            | K::RecordFieldSpans(_)
+            | K::DeclarationSpan(_)
+            | K::EnumVariantSpans(_)
+            | K::EnumVariantFieldSpans(_)
+            | K::ComptimeEnumVariantIndex(_)
+            | K::ComptimeEnumVariantFieldValues(_) => self.eval_observation(expr, environment),
+            K::TypeHasField { .. }
+            | K::TypeFieldType { .. }
+            | K::StructFieldType { .. }
+            | K::FieldValue { .. }
+            | K::ComptimeFieldEntry { .. }
+            | K::NamedField { .. }
+            | K::ConstructStruct { .. }
+            | K::ConstructEnum { .. }
+            | K::TupleAppend { .. } => self.eval_field_operation_expr(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),
             K::BitVecType(..) => self.eval_bit_vec_type(expr, environment),
@@ -2819,6 +2905,7 @@ impl<'a> Interpreter<'a> {
             | K::ReadPointer(_)
             | K::PointerAnonymousField { .. }
             | K::PointerField { .. }
+            | K::FieldPtr { .. }
             | K::WritePointer { .. } => self.eval_pointer(expr, environment),
             K::TraitMethod { .. } => self.eval_trait_method(expr, environment, false),
             K::AssociatedValue { .. } => self.eval_associated_value(expr),
@@ -2865,7 +2952,12 @@ impl<'a> Interpreter<'a> {
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),
             K::Call { .. } => self.eval_call(expr, environment),
-            K::ConstAddress { .. } | K::StaticAddress(_) | K::DynCast(_) | K::DynCall(_) => {
+            K::ConstAddress { .. }
+            | K::StaticAddress(_)
+            | K::DynCast(_)
+            | K::DynCall(_)
+            | K::EnumVariantIndex(_)
+            | K::EnumVariantFieldPtr { .. } => {
                 return Err(self.failure(
                     if self.comptime_only {
                         ErrorKind::PhaseMismatch
@@ -3414,7 +3506,16 @@ impl<'a> Interpreter<'a> {
                 ) => {}
             Err(error) => return Err(error),
         }
-        let ty = self.selected_type_view(ty, Some(source))?;
+        let mut ty = self.selected_type_view(ty, Some(source))?;
+        for _ in 0..128 {
+            let next = self.query_descriptions(Some(source), |vm, fuel| {
+                vm.resolve_projected_shape_type(&ty, fuel)
+            })?;
+            if next == ty {
+                break;
+            }
+            ty = self.selected_type_view(&next, Some(source))?;
+        }
         self.check_type_description(&ty, Some(source))?;
         Ok(Value::Type(ty))
     }

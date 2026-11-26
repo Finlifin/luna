@@ -805,6 +805,10 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
             ),
             P::Kind(ty, kind) => P::Kind(self.instantiate(ty, fuel)?, *kind),
             P::NotSized(ty) => P::NotSized(self.instantiate(ty, fuel)?),
+            P::HasField { subject, field } => P::HasField {
+                subject: self.instantiate(subject, fuel)?,
+                field: self.instantiate(field, fuel)?,
+            },
             P::Not(inner) => P::Not(Box::new(self.predicate(inner, fuel, depth + 1)?)),
             P::And(parts) | P::Or(parts) => {
                 let parts = parts

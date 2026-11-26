@@ -1,4 +1,5 @@
 use List;
+use ast_impl.span.SourceSpan;
 use bindings;
 use bindings.Object;
 use builtin.{Integer, Symbol, Type, bool, u128}
@@ -8,6 +9,7 @@ use builtin.{Integer, Symbol, Type, bool, u128}
     neither field access nor layout permission and does not unfold opaque heads.
     Enum paths consist of Symbol segments, not encoded discriminants.
 -}
+pub use bindings.declaration_span;
 pub use bindings.enum_bit_base_type;
 pub use bindings.enum_bit_masks;
 pub use bindings.enum_bit_offsets;
@@ -16,14 +18,297 @@ pub use bindings.enum_bit_width;
 pub use bindings.enum_group_paths;
 pub use bindings.enum_symbol_values;
 pub use bindings.enum_variant_field_names;
+pub use bindings.enum_variant_field_spans;
 pub use bindings.enum_variant_field_types;
 pub use bindings.enum_variant_paths;
 pub use bindings.enum_variant_shapes;
+pub use bindings.enum_variant_spans;
 pub use bindings.record_field_names;
+pub use bindings.record_field_spans;
 pub use bindings.record_field_types;
 pub use bindings.struct_field_names;
+pub use bindings.struct_field_spans;
 pub use bindings.struct_field_types;
 pub use bindings.type_id;
+
+{- Structured reflection failures returned by reflect_struct, reflect_record, and reflect_enum. -}
+pub enum ReflectErr {
+    NotStruct,
+    NotRecord,
+    NotEnum,
+    GenericTemplate,
+    MissingField,
+    InvalidVariant,
+    ComptimeOnlyType,
+}
+
+{- Declaration-order field descriptor for structs, anonymous records, and enum variants. -}
+pub struct FieldInfo {
+    raw_name: ?Symbol,
+    raw_index: Integer,
+    raw_field_type: Type,
+    raw_span: SourceSpan,
+}
+
+impl FieldInfo {
+    pub pure comptime fn FieldType(self) -> Type {
+        self.raw_field_type
+    }
+
+    pub pure comptime fn name(self) -> ?Symbol {
+        self.raw_name
+    }
+
+    pub pure comptime fn index(self) -> Integer {
+        self.raw_index
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.raw_span
+    }
+
+    pub pure comptime fn field_type(self) -> Type {
+        self.raw_field_type
+    }
+}
+
+pub struct RecordInfo {
+    raw_subject: Type,
+    raw_fields: List<FieldInfo>,
+    raw_span: SourceSpan,
+}
+
+impl RecordInfo {
+    pub pure comptime fn subject(self) -> Type {
+        self.raw_subject
+    }
+
+    pub pure comptime fn fields(self) -> List<FieldInfo> {
+        self.raw_fields
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.raw_span
+    }
+}
+
+pub struct StructInfo {
+    raw_subject: Type,
+    raw_fields: List<FieldInfo>,
+    raw_span: SourceSpan,
+}
+
+impl StructInfo {
+    pub pure comptime fn subject(self) -> Type {
+        self.raw_subject
+    }
+
+    pub pure comptime fn fields(self) -> List<FieldInfo> {
+        self.raw_fields
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.raw_span
+    }
+}
+
+pub enum VariantKind {
+    unit,
+    tuple,
+    named,
+}
+
+pub enum EnumEncoding {
+    ordinary,
+    symbol_enum,
+    fixed_bits,
+}
+
+pub struct VariantInfo {
+    raw_path: List<Symbol>,
+    raw_name: Symbol,
+    raw_index: Integer,
+    raw_kind: VariantKind,
+    raw_fields: List<FieldInfo>,
+    raw_span: SourceSpan,
+}
+
+impl VariantInfo {
+    pub pure comptime fn path(self) -> List<Symbol> {
+        self.raw_path
+    }
+
+    pub pure comptime fn name(self) -> Symbol {
+        self.raw_name
+    }
+
+    pub pure comptime fn index(self) -> Integer {
+        self.raw_index
+    }
+
+    pub pure comptime fn kind(self) -> VariantKind {
+        self.raw_kind
+    }
+
+    pub pure comptime fn fields(self) -> List<FieldInfo> {
+        self.raw_fields
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.raw_span
+    }
+}
+
+pub struct EnumInfo {
+    raw_subject: Type,
+    raw_groups: List<List<Symbol>>,
+    raw_variants: List<VariantInfo>,
+    raw_encoding: EnumEncoding,
+    raw_span: SourceSpan,
+}
+
+impl EnumInfo {
+    pub pure comptime fn subject(self) -> Type {
+        self.raw_subject
+    }
+
+    pub pure comptime fn groups(self) -> List<List<Symbol>> {
+        self.raw_groups
+    }
+
+    pub pure comptime fn variants(self) -> List<VariantInfo> {
+        self.raw_variants
+    }
+
+    pub pure comptime fn encoding(self) -> EnumEncoding {
+        self.raw_encoding
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.raw_span
+    }
+}
+
+pure comptime fn build_field_list(
+    names: List<Symbol>,
+    types: List<Type>,
+    spans: List<SourceSpan>,
+    fallback_span: SourceSpan,
+) -> List<FieldInfo> {
+    var fields: List<FieldInfo> = [];
+    let count = types.length();
+    inline for index in 0..count {
+        let span = spans.get(index) match {
+            s? => s,
+            null => fallback_span,
+        };
+        fields.append(FieldInfo {
+            raw_name: names.get(index),
+            raw_index: index,
+            raw_field_type: types[index],
+            raw_span: span,
+        });
+    }
+    fields
+}
+
+pub pure comptime fn reflect_record(subject: Type) -> !ReflectErr RecordInfo {
+    if not Type.predicates.is_anonymous_record(subject) {
+        return error ReflectErr.NotRecord;
+    }
+    let decl_span = bindings.declaration_span(subject);
+    let names = bindings.record_field_names(subject);
+    let types = bindings.record_field_types(subject);
+    let spans = bindings.record_field_spans(subject);
+    RecordInfo {
+        raw_subject: subject,
+        raw_fields: build_field_list(names, types, spans, decl_span),
+        raw_span: decl_span,
+    }
+}
+
+pub pure comptime fn reflect_struct(subject: Type) -> !ReflectErr StructInfo {
+    if not Type.predicates.is_struct(subject) {
+        return error ReflectErr.NotStruct;
+    }
+    let decl_span = bindings.declaration_span(subject);
+    let names = bindings.struct_field_names(subject);
+    let types = bindings.struct_field_types(subject);
+    let spans = bindings.struct_field_spans(subject);
+    StructInfo {
+        raw_subject: subject,
+        raw_fields: build_field_list(names, types, spans, decl_span),
+        raw_span: decl_span,
+    }
+}
+
+pub pure comptime fn reflect_enum(subject: Type) -> !ReflectErr EnumInfo {
+    if not Type.predicates.is_enum(subject) {
+        return error ReflectErr.NotEnum;
+    }
+    let decl_span = bindings.declaration_span(subject);
+    let groups = bindings.enum_group_paths(subject);
+    let paths = bindings.enum_variant_paths(subject);
+    let shapes = bindings.enum_variant_shapes(subject);
+    let names = bindings.enum_variant_field_names(subject);
+    let types = bindings.enum_variant_field_types(subject);
+    let v_spans = bindings.enum_variant_spans(subject);
+    let vf_spans = bindings.enum_variant_field_spans(subject);
+    var variants: List<VariantInfo> = [];
+    let vcount = paths.length();
+    inline for v in 0..vcount {
+        let path = paths[v];
+        let vname = path.last() match {
+            sym? => sym,
+            null => .unknown,
+        };
+        let shape = shapes[v];
+        let kind = if shape == .unit {
+            VariantKind.unit
+        } else if shape == .tuple {
+            VariantKind.tuple
+        } else {
+            VariantKind.named
+        };
+        let vspan = v_spans.get(v) match {
+            s? => s,
+            null => decl_span,
+        };
+        let fspans = vf_spans.get(v) match {
+            ls? => ls,
+            null => [],
+        };
+        variants.append(VariantInfo {
+            raw_path: path,
+            raw_name: vname,
+            raw_index: v,
+            raw_kind: kind,
+            raw_fields: build_field_list(names[v], types[v], fspans, vspan),
+            raw_span: vspan,
+        });
+    }
+    EnumInfo {
+        raw_subject: subject,
+        raw_groups: groups,
+        raw_variants: variants,
+        raw_encoding: EnumEncoding.ordinary,
+        raw_span: decl_span,
+    }
+}
+
+pub pure comptime fn enum_variant_index(value: E) -> Integer
+where
+    E: Type,
+{
+    bindings.comptime_enum_variant_index(value)
+}
+
+pub pure comptime fn enum_variant_field_values(value: E) -> Object
+where
+    E: Type,
+{
+    bindings.comptime_enum_variant_field_values(value)
+}
 
 {-
     Observation of an applied callable Type without exposing closure

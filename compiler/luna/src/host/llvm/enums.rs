@@ -1080,6 +1080,642 @@ impl Emitter<'_> {
         self.label(&end);
         Ok(self.load(&result))
     }
+
+    pub(super) fn construct_enum(
+        &mut self,
+        source: nir::program::SourceRange,
+        variant_expr: &Expr,
+        fields_expr: &Expr,
+        ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let variant_val = self.expr(variant_expr, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let tuple_val = self.expr(fields_expr, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let evaluated = self.extract_tuple_values(&tuple_val)?;
+        if let K::Literal(nir::program::Literal::UnsignedInteger(raw)) = &variant_expr.kind {
+            if let Ok(index) = usize::try_from(*raw) {
+                return self.variant_from_values(source, index, evaluated, ty, false);
+            }
+        }
+        let enum_ty = repr(self.graph, ty, self.checked)?;
+        let Ty::Enum(layout) = enum_ty.clone() else {
+            return Err("host construct_enum requires an enum type".into());
+        };
+        let Ty::Int(tag_bits, _) = variant_val.ty else {
+            return Err("host construct_enum variant index must be an integer".into());
+        };
+        let result_slot = self.slot(enum_ty);
+        let end = self.fresh();
+        for index in 0..layout.names.len() {
+            let expected_tys = match &layout.repr {
+                EnumRepr::Symbol(_) | EnumRepr::Unit { .. } => Vec::new(),
+                EnumRepr::SingleVariant { fields, .. } if index == 0 => fields.clone(),
+                EnumRepr::SingleVariant { .. } => continue,
+                EnumRepr::Niche {
+                    data_variant,
+                    data_fields,
+                    ..
+                } => {
+                    if index == *data_variant {
+                        data_fields.clone()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                EnumRepr::FixedBits { fields, .. } => {
+                    fields[index].iter().map(|(_, fty)| fty.clone()).collect()
+                }
+                EnumRepr::TaggedUnion { fields, .. } => fields[index].clone(),
+            };
+            if expected_tys.len() != evaluated.len()
+                || !expected_tys
+                    .iter()
+                    .zip(evaluated.iter())
+                    .all(|(a, b)| *a == b.ty)
+            {
+                continue;
+            }
+            let found = self.fresh();
+            let next = self.fresh();
+            let cond = self.instruction(
+                Ty::Bool,
+                format!("icmp eq i{tag_bits} {}, {index}", variant_val.text),
+            );
+            self.line(format!(
+                "br i1 {}, label %{found}, label %{next}",
+                cond.text
+            ));
+            self.label(&found);
+            let constructed =
+                self.variant_from_values(source, index, evaluated.clone(), ty, false)?;
+            self.store(&result_slot, &constructed)?;
+            self.branch(&end);
+            self.label(&next);
+        }
+        self.line("unreachable");
+        self.terminated = true;
+        self.label(&end);
+        Ok(self.load(&result_slot))
+    }
+
+    fn variant_from_values(
+        &mut self,
+        source: nir::program::SourceRange,
+        index: usize,
+        evaluated: Vec<Value>,
+        ty: &Term,
+        finish_prepared: bool,
+    ) -> Result<Value, String> {
+        let ty = repr(self.graph, ty, self.checked)?;
+        let Ty::Enum(layout) = ty.clone() else {
+            return Err("host variant has no enum representation".into());
+        };
+        if index >= layout.names.len() {
+            return Err("host variant index out of range".into());
+        }
+        match &layout.repr {
+            EnumRepr::Symbol(symbols) => {
+                if !evaluated.is_empty() {
+                    return Err("host Symbol enum cannot carry payloads".into());
+                }
+                let symbol = symbols
+                    .get(index)
+                    .ok_or("host Symbol variant index out of range")?;
+                let mut value = self.text_literal(symbol, Ty::String)?;
+                value.ty = ty;
+                Ok(value)
+            }
+            EnumRepr::Unit { width } => {
+                if !evaluated.is_empty() {
+                    return Err("host unit enum cannot carry payloads".into());
+                }
+                if finish_prepared {
+                    self.finish_prepared_construction(source)?;
+                }
+                Ok(Value {
+                    ty,
+                    text: if *width == 0 {
+                        "zeroinitializer".into()
+                    } else {
+                        index.to_string()
+                    },
+                })
+            }
+            EnumRepr::SingleVariant {
+                unwrapped,
+                carrier,
+                fields: expected,
+            } => {
+                if index != 0 || evaluated.len() != expected.len() {
+                    return Err("host enum payload count mismatch".into());
+                }
+                if finish_prepared {
+                    self.finish_prepared_construction(source)?;
+                }
+                if *unwrapped {
+                    let single = evaluated.into_iter().next().unwrap();
+                    Ok(Value {
+                        ty,
+                        text: if *carrier == Ty::Unit {
+                            "zeroinitializer".into()
+                        } else {
+                            single.text
+                        },
+                    })
+                } else {
+                    let rec = build_record_from_values(self, carrier.clone(), evaluated);
+                    Ok(Value { ty, text: rec.text })
+                }
+            }
+            EnumRepr::Niche {
+                data_variant,
+                unwrapped,
+                data_fields,
+                carrier,
+                niche,
+            } => {
+                if index != *data_variant {
+                    if !evaluated.is_empty() {
+                        return Err("host enum payload count mismatch".into());
+                    }
+                    if finish_prepared {
+                        self.finish_prepared_construction(source)?;
+                    }
+                    let ord = if index < *data_variant {
+                        index
+                    } else {
+                        index - 1
+                    };
+                    let code = niche.start + ord as u64;
+                    return self.emit_niche_value(ty, carrier, niche, code);
+                }
+                if evaluated.len() != data_fields.len() {
+                    return Err("host enum payload count mismatch".into());
+                }
+                if finish_prepared {
+                    self.finish_prepared_construction(source)?;
+                }
+                let raw = if *unwrapped {
+                    evaluated.into_iter().next().unwrap()
+                } else {
+                    let rec_ty = Ty::Record(std::sync::Arc::new(data_fields.clone()));
+                    build_record_from_values(self, rec_ty, evaluated)
+                };
+                let carried = if niche.widened_bool {
+                    self.emit_widen_bool_at_path(raw, carrier, &niche.llvm_path)?
+                } else {
+                    raw
+                };
+                Ok(Value {
+                    ty,
+                    text: carried.text,
+                })
+            }
+            EnumRepr::FixedBits {
+                width,
+                codes,
+                fields: all_fields,
+                ..
+            } => {
+                let code = codes.get(index).ok_or("host variant index out of range")?;
+                let payload = all_fields
+                    .get(index)
+                    .ok_or("host enum payload layout missing")?;
+                if evaluated.len() != payload.len() {
+                    return Err("host enum payload count mismatch".into());
+                }
+                let width = *width;
+                let mut result = Value {
+                    ty: ty.clone(),
+                    text: code.to_string(),
+                };
+                for (field, (start, _expected)) in evaluated.into_iter().zip(payload.iter()) {
+                    if bit_width(&field.ty) == Some(0) {
+                        continue;
+                    }
+                    let mut bits = self.to_bits(field)?;
+                    let Ty::Int(bits_width, _) = bits.ty else {
+                        unreachable!()
+                    };
+                    if bits_width < width {
+                        bits = self.instruction(
+                            Ty::Int(width, false),
+                            format!("zext i{bits_width} {} to i{width}", bits.text),
+                        );
+                    }
+                    if *start > 0 {
+                        bits = self.instruction(
+                            Ty::Int(width, false),
+                            format!("shl i{width} {}, {start}", bits.text),
+                        );
+                    }
+                    result = self.instruction(
+                        ty.clone(),
+                        format!("or i{width} {}, {}", result.text, bits.text),
+                    );
+                }
+                if finish_prepared {
+                    self.finish_prepared_construction(source)?;
+                }
+                Ok(result)
+            }
+            EnumRepr::TaggedUnion {
+                tag_bits,
+                payload_size,
+                fields: all_fields,
+                ..
+            } => {
+                let tag_bits = *tag_bits;
+                let payload_size = *payload_size;
+                let payload = all_fields
+                    .get(index)
+                    .ok_or("host enum payload layout missing")?;
+                if evaluated.len() != payload.len() {
+                    return Err("host enum payload count mismatch".into());
+                }
+                let variant_llvm = layout
+                    .variant_record_ty(index)
+                    .ok_or("host enum payload layout missing")?
+                    .llvm();
+                if evaluated.is_empty()
+                    || payload_size == 0
+                    || evaluated.iter().all(|v| v.ty == Ty::Unit)
+                {
+                    let result = self.instruction(
+                        ty.clone(),
+                        format!(
+                            "insertvalue {} zeroinitializer, i{tag_bits} {index}, 0",
+                            ty.llvm()
+                        ),
+                    );
+                    if finish_prepared {
+                        self.finish_prepared_construction(source)?;
+                    }
+                    return Ok(result);
+                }
+                let slot = self.slot(ty.clone());
+                self.store(
+                    &slot,
+                    &Value {
+                        ty: ty.clone(),
+                        text: "zeroinitializer".into(),
+                    },
+                )?;
+                let tag_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr {}, ptr {}, i32 0, i32 0",
+                        ty.llvm(),
+                        slot.pointer
+                    ),
+                );
+                self.line(format!("store i{tag_bits} {index}, ptr {}", tag_ptr.text));
+                let payload_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr {}, ptr {}, i32 0, i32 1",
+                        ty.llvm(),
+                        slot.pointer
+                    ),
+                );
+                for (field_index, value) in evaluated.iter().enumerate() {
+                    if value.ty == Ty::Unit {
+                        continue;
+                    }
+                    let field_ptr = self.instruction(
+                        Ty::Pointer,
+                        format!(
+                            "getelementptr {variant_llvm}, ptr {}, i32 0, i32 {field_index}",
+                            payload_ptr.text
+                        ),
+                    );
+                    let field_slot = Slot::new(
+                        value.ty.clone(),
+                        field_ptr.text,
+                        matches!(value.ty, Ty::PackedRecord(_)).then_some(1),
+                    );
+                    self.store(&field_slot, value)?;
+                }
+                if finish_prepared {
+                    self.finish_prepared_construction(source)?;
+                }
+                Ok(self.load(&slot))
+            }
+        }
+    }
+
+    pub(super) fn enum_variant_index(
+        &mut self,
+        pointer: &Expr,
+        result_ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let pointee = pointers::pointee(&pointer.ty)?;
+        let ptr_val = self.expr(pointer, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let usize_ty = repr(self.graph, result_ty, self.checked)?;
+        let Ty::Int(usize_bits, false) = usize_ty else {
+            return Err("host enum_variant_index result must be unsigned usize".into());
+        };
+        let enum_ty = repr(self.graph, pointee, self.checked)?;
+        let Ty::Enum(layout) = &enum_ty else {
+            return Err("host enum_variant_index operand must point to an enum".into());
+        };
+        match &layout.repr {
+            EnumRepr::Unit { width: 0 } | EnumRepr::SingleVariant { .. } => Ok(Value {
+                ty: usize_ty,
+                text: "0".into(),
+            }),
+            EnumRepr::Unit { width } => {
+                let tag = self.load(&Slot::new(Ty::Int(*width, false), ptr_val.text, None));
+                if *width == usize_bits {
+                    Ok(tag)
+                } else if *width < usize_bits {
+                    Ok(self.instruction(
+                        usize_ty,
+                        format!("zext i{width} {} to i{usize_bits}", tag.text),
+                    ))
+                } else {
+                    Ok(self.instruction(
+                        usize_ty,
+                        format!("trunc i{width} {} to i{usize_bits}", tag.text),
+                    ))
+                }
+            }
+            EnumRepr::TaggedUnion { tag_bits, .. } => {
+                let tag_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr {}, ptr {}, i32 0, i32 0",
+                        enum_ty.llvm(),
+                        ptr_val.text
+                    ),
+                );
+                let tag = self.load(&Slot::new(Ty::Int(*tag_bits, false), tag_ptr.text, None));
+                if *tag_bits == usize_bits {
+                    Ok(tag)
+                } else if *tag_bits < usize_bits {
+                    Ok(self.instruction(
+                        usize_ty,
+                        format!("zext i{tag_bits} {} to i{usize_bits}", tag.text),
+                    ))
+                } else {
+                    Ok(self.instruction(
+                        usize_ty,
+                        format!("trunc i{tag_bits} {} to i{usize_bits}", tag.text),
+                    ))
+                }
+            }
+            EnumRepr::Symbol(_) | EnumRepr::Niche { .. } | EnumRepr::FixedBits { .. } => {
+                let slot = self.pointer_slot(&ptr_val, pointee)?;
+                let loaded = self.load(&slot);
+                let result = self.slot(usize_ty.clone());
+                let end = self.fresh();
+                for index in 0..layout.names.len() {
+                    let found = self.fresh();
+                    let next = self.fresh();
+                    let cond = self.variant_condition(&loaded, index)?;
+                    self.line(format!(
+                        "br i1 {}, label %{found}, label %{next}",
+                        cond.text
+                    ));
+                    self.label(&found);
+                    self.store(
+                        &result,
+                        &Value {
+                            ty: usize_ty.clone(),
+                            text: index.to_string(),
+                        },
+                    )?;
+                    self.branch(&end);
+                    self.label(&next);
+                }
+                self.line("unreachable");
+                self.terminated = true;
+                self.label(&end);
+                Ok(self.load(&result))
+            }
+        }
+    }
+
+    pub(super) fn enum_variant_field_ptr(
+        &mut self,
+        pointer: &Expr,
+        variant_expr: &Expr,
+        field_expr: &Expr,
+        result_ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let pointee = pointers::pointee(&pointer.ty)?;
+        let ptr_val = self.expr(pointer, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let var_val = self.expr(variant_expr, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let fld_val = self.expr(field_expr, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        let opt_ty = repr(self.graph, result_ty, self.checked)?;
+        let enum_ty = repr(self.graph, pointee, self.checked)?;
+        let Ty::Enum(layout) = &enum_ty else {
+            return Err("host enum_variant_field_ptr requires a pointer to enum".into());
+        };
+        let Ty::Int(var_bits, _) = var_val.ty else {
+            return Err("host enum_variant_field_ptr variant index must be integer".into());
+        };
+        let Ty::Int(fld_bits, _) = fld_val.ty else {
+            return Err("host enum_variant_field_ptr field index must be integer".into());
+        };
+        let const_v = match &variant_expr.kind {
+            K::Literal(nir::program::Literal::UnsignedInteger(v)) => usize::try_from(*v).ok(),
+            _ => None,
+        };
+        let const_f = match &field_expr.kind {
+            K::Literal(nir::program::Literal::UnsignedInteger(f)) => usize::try_from(*f).ok(),
+            _ => None,
+        };
+        let result_slot = self.slot(opt_ty.clone());
+        let end = self.fresh();
+
+        // Emit tag checks lazily depending on EnumRepr.
+        let mut loaded_enum = None;
+        let mut loaded_tag = None;
+        for v_idx in 0..layout.names.len() {
+            if const_v.is_some_and(|v| v != v_idx) {
+                continue;
+            }
+            let field_tys: Vec<Ty> = match &layout.repr {
+                EnumRepr::Symbol(_) | EnumRepr::Unit { .. } => Vec::new(),
+                EnumRepr::SingleVariant { fields, .. } if v_idx == 0 => fields.clone(),
+                EnumRepr::SingleVariant { .. } => Vec::new(),
+                EnumRepr::Niche {
+                    data_variant,
+                    data_fields,
+                    ..
+                } if v_idx == *data_variant => data_fields.clone(),
+                EnumRepr::Niche { .. } => Vec::new(),
+                EnumRepr::TaggedUnion { fields, .. } => fields[v_idx].clone(),
+                EnumRepr::FixedBits { .. } => {
+                    return Err(
+                        "host enum_variant_field_ptr cannot address packed bit fields".into(),
+                    );
+                }
+            };
+            if field_tys.is_empty() {
+                continue;
+            }
+            for (f_idx, field_ty) in field_tys.iter().enumerate() {
+                if const_f.is_some_and(|f| f != f_idx) {
+                    continue;
+                }
+                let tag_cond = match &layout.repr {
+                    EnumRepr::SingleVariant { .. } => Value {
+                        ty: Ty::Bool,
+                        text: "true".into(),
+                    },
+                    EnumRepr::TaggedUnion { tag_bits, .. } => {
+                        let tag = if let Some(tag) = loaded_tag.clone() {
+                            tag
+                        } else {
+                            let tag_ptr = self.instruction(
+                                Ty::Pointer,
+                                format!(
+                                    "getelementptr {}, ptr {}, i32 0, i32 0",
+                                    enum_ty.llvm(),
+                                    ptr_val.text
+                                ),
+                            );
+                            let t = self.load(&Slot::new(
+                                Ty::Int(*tag_bits, false),
+                                tag_ptr.text,
+                                None,
+                            ));
+                            loaded_tag = Some(t.clone());
+                            t
+                        };
+                        self.instruction(
+                            Ty::Bool,
+                            format!("icmp eq i{tag_bits} {}, {v_idx}", tag.text),
+                        )
+                    }
+                    EnumRepr::Niche { .. } => {
+                        let val = if let Some(val) = loaded_enum.clone() {
+                            val
+                        } else {
+                            let slot = self.pointer_slot(&ptr_val, pointee)?;
+                            let v = self.load(&slot);
+                            loaded_enum = Some(v.clone());
+                            v
+                        };
+                        self.variant_condition(&val, v_idx)?
+                    }
+                    EnumRepr::Symbol(_) | EnumRepr::Unit { .. } | EnumRepr::FixedBits { .. } => {
+                        unreachable!()
+                    }
+                };
+                let mut cond = tag_cond;
+                if const_v.is_none() {
+                    let v_eq = self.instruction(
+                        Ty::Bool,
+                        format!("icmp eq i{var_bits} {}, {v_idx}", var_val.text),
+                    );
+                    cond =
+                        self.instruction(Ty::Bool, format!("and i1 {}, {}", cond.text, v_eq.text));
+                }
+                if const_f.is_none() {
+                    let f_eq = self.instruction(
+                        Ty::Bool,
+                        format!("icmp eq i{fld_bits} {}, {f_idx}", fld_val.text),
+                    );
+                    cond =
+                        self.instruction(Ty::Bool, format!("and i1 {}, {}", cond.text, f_eq.text));
+                }
+                let matched = self.fresh();
+                let next = self.fresh();
+                self.line(format!(
+                    "br i1 {}, label %{matched}, label %{next}",
+                    cond.text
+                ));
+                self.label(&matched);
+                let raw_ptr = match &layout.repr {
+                    EnumRepr::SingleVariant {
+                        unwrapped, carrier, ..
+                    }
+                    | EnumRepr::Niche {
+                        unwrapped, carrier, ..
+                    } => {
+                        if *unwrapped || *field_ty == Ty::Unit {
+                            Value {
+                                ty: Ty::Pointer,
+                                text: ptr_val.text.clone(),
+                            }
+                        } else {
+                            self.instruction(
+                                Ty::Pointer,
+                                format!(
+                                    "getelementptr {}, ptr {}, i32 0, i32 {f_idx}",
+                                    carrier.llvm(),
+                                    ptr_val.text
+                                ),
+                            )
+                        }
+                    }
+                    EnumRepr::TaggedUnion { payload_size, .. } => {
+                        if *payload_size == 0 || *field_ty == Ty::Unit {
+                            Value {
+                                ty: Ty::Pointer,
+                                text: ptr_val.text.clone(),
+                            }
+                        } else {
+                            let payload_ptr = self.instruction(
+                                Ty::Pointer,
+                                format!(
+                                    "getelementptr {}, ptr {}, i32 0, i32 1",
+                                    enum_ty.llvm(),
+                                    ptr_val.text
+                                ),
+                            );
+                            let variant_llvm = layout
+                                .variant_record_ty(v_idx)
+                                .ok_or("host enum payload layout missing")?
+                                .llvm();
+                            self.instruction(
+                                Ty::Pointer,
+                                format!(
+                                    "getelementptr {variant_llvm}, ptr {}, i32 0, i32 {f_idx}",
+                                    payload_ptr.text
+                                ),
+                            )
+                        }
+                    }
+                    EnumRepr::Symbol(_) | EnumRepr::Unit { .. } | EnumRepr::FixedBits { .. } => {
+                        unreachable!()
+                    }
+                };
+                let present = self.optional_present_value(&opt_ty, raw_ptr)?;
+                self.store(&result_slot, &present)?;
+                self.branch(&end);
+                self.label(&next);
+            }
+        }
+        let absent = self.optional_absent_value(&opt_ty)?;
+        self.store(&result_slot, &absent)?;
+        self.branch(&end);
+        self.label(&end);
+        Ok(self.load(&result_slot))
+    }
 }
 
 #[cfg(test)]

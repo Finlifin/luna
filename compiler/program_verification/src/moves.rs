@@ -49,6 +49,53 @@ pub enum Delivery {
     Copy,
 }
 
+fn resolve_concrete_field_index_by_name(
+    package: Option<&Package>,
+    subject_ty: &Term,
+    field_name: &str,
+) -> Option<usize> {
+    match completion_type(subject_ty) {
+        Term::Record(fields) => fields.iter().position(|(name, _)| name == field_name),
+        Term::Nominal { declaration, .. } => package?
+            .structs
+            .iter()
+            .find(|def| def.declaration == *declaration)?
+            .fields
+            .iter()
+            .position(|(name, _)| name == field_name),
+        _ => None,
+    }
+}
+
+fn resolve_concrete_field_index(
+    package: Option<&Package>,
+    pointer_ty: &Term,
+    field: &Expr,
+) -> Option<usize> {
+    let field_name = match &field.kind {
+        K::TypeValue(Term::Symbol(name)) | K::ComptimeValue(Term::Symbol(name)) => name.as_ref(),
+        K::Literal(nir::program::Literal::Symbol(name)) => name.as_str(),
+        _ => return None,
+    };
+    let Term::Pointer(pointee) = completion_type(pointer_ty) else {
+        return None;
+    };
+    resolve_concrete_field_index_by_name(package, pointee, field_name)
+}
+
+fn resolve_tuple_len(package: Option<&Package>, ty: &Term) -> Option<usize> {
+    match completion_type(ty) {
+        Term::Primitive(nir::Primitive::Unit) => Some(0),
+        Term::Tuple(fields) => Some(fields.len()),
+        Term::NormalForm { .. } => package?
+            .normal_forms
+            .iter()
+            .find_map(|head| head.tuple_elements(ty))
+            .map(|fields| fields.len()),
+        _ => None,
+    }
+}
+
 impl fmt::Display for Delivery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -9085,7 +9132,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 self.check_pointer_observation(pointer, flow, depth + 1)
             }
-            K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. } => {
+            K::PointerAnonymousField { pointer, .. }
+            | K::PointerField { pointer, .. }
+            | K::FieldPtr { pointer, .. } => {
                 self.check_pointer_observation(pointer, flow, depth + 1)
             }
             K::If {
@@ -9701,6 +9750,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::EnumVariantIndex(value)
             | K::BitSlice { value, .. } => self.observe_guard(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {
                 self.observe_guard(value, flow, depth + 1)?;
@@ -10906,6 +10957,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         target
                     })
                     .collect())
+            }
+            K::FieldPtr { pointer, field } => {
+                let targets = self.observed_pointer_targets(pointer, flow, depth + 1)?;
+                self.pointer_work(&targets, value.source)?;
+                if let Some(index) = resolve_concrete_field_index(self.package, &pointer.ty, field)
+                {
+                    Ok(targets
+                        .into_iter()
+                        .map(|mut target| {
+                            target.fields.push(index);
+                            target
+                        })
+                        .collect())
+                } else {
+                    Ok(targets)
+                }
             }
             K::ReadPointer(pointer) => {
                 let slots = self.observed_pointer_targets(pointer, flow, depth + 1)?;
@@ -13332,6 +13399,79 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(Some(result))
     }
 
+    pub(super) fn require_target_available(
+        &mut self,
+        flow: &Flow,
+        target: &Place,
+        read_value: bool,
+        source: SourceRange,
+    ) -> Result<Result<(), crate::ownership::Error>, Error> {
+        let initial = if read_value {
+            flow.state.require_present(target)
+        } else {
+            flow.state.require_place(target)
+        };
+        if initial != Err(crate::ownership::Error::MissingPlace) {
+            return Ok(initial);
+        }
+        let Some(root_ty) = flow.types.get(&target.root).cloned() else {
+            return Ok(initial);
+        };
+        let mut current = completion_type(&root_ty).clone();
+        for (depth, &index) in target.fields.iter().enumerate() {
+            let is_enum = matches!(current, Term::Optional(_) | Term::ErrorResult { .. })
+                || matches!(
+                    &current,
+                    Term::Nominal { declaration, .. }
+                        if self.package.is_some_and(|pkg| {
+                            pkg.enums.iter().any(|e| e.declaration == *declaration)
+                        })
+                );
+            if is_enum {
+                let owner = Place {
+                    root: target.root,
+                    fields: target.fields[..depth].to_vec(),
+                };
+                let owner_check = flow.state.require_present(&owner);
+                if owner_check.is_err() {
+                    return Ok(owner_check);
+                }
+                let variants = self.owned_variant_fields(&current, source)?;
+                let mut valid = false;
+                for variant in variants {
+                    if let Some(field_ty) = variant.get(index) {
+                        let tail = &target.fields[depth + 1..];
+                        if tail.is_empty()
+                            || owned_field_type(
+                                self.package,
+                                field_ty,
+                                tail,
+                                &mut self.fuel,
+                                source,
+                            )
+                            .is_ok()
+                        {
+                            valid = true;
+                            break;
+                        }
+                    }
+                }
+                return Ok(if valid {
+                    Ok(())
+                } else {
+                    Err(crate::ownership::Error::MissingPlace)
+                });
+            }
+            let Ok(next) =
+                owned_field_type(self.package, &current, &[index], &mut self.fuel, source)
+            else {
+                return Ok(initial);
+            };
+            current = completion_type(&next).clone();
+        }
+        Ok(initial)
+    }
+
     fn memory_accesses(
         &mut self,
         accesses: &[super::memory::Access],
@@ -13355,10 +13495,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let checked = if guarded {
                     // map_memory_target checked the complete containing enum.
                     Ok(())
-                } else if access.read_value {
-                    flow.state.require_present(&target)
                 } else {
-                    flow.state.require_place(&target)
+                    self.require_target_available(flow, &target, access.read_value, source)?
                 };
                 checked.map_err(|reason| {
                     error(
@@ -14202,6 +14340,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     })
                     .collect())
             }
+            K::FieldPtr { pointer, field } => {
+                let targets = self.pointer_target(pointer, flow, depth + 1)?;
+                self.pointer_work(&targets, expr.source)?;
+                if let Some(index) = resolve_concrete_field_index(self.package, &pointer.ty, field)
+                {
+                    Ok(targets
+                        .into_iter()
+                        .map(|mut target| {
+                            target.fields.push(index);
+                            target
+                        })
+                        .collect())
+                } else {
+                    Ok(targets)
+                }
+            }
             K::Block {
                 statements,
                 result: Some(result),
@@ -14698,12 +14852,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             BTreeMap<Vec<usize>, Callable>,
         )> = None;
         for target in &targets {
-            flow.state.require_present(target).map_err(|reason| {
-                error(
-                    expr.source,
-                    format!("aggregate read target unavailable: {reason:?}"),
-                )
-            })?;
+            self.require_target_available(flow, target, true, expr.source)?
+                .map_err(|reason| {
+                    error(
+                        expr.source,
+                        format!("aggregate read target unavailable: {reason:?}"),
+                    )
+                })?;
             let actual = flow
                 .types
                 .get(&target.root)
@@ -14894,6 +15049,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::OptionalPresent(_)
                 | K::OptionalAbsent
                 | K::Variant { .. }
+                | K::EnumVariantFieldPtr { .. }
+                | K::ComptimeFieldEntry { .. }
+                | K::ConstructStruct { .. }
+                | K::ConstructEnum { .. }
+                | K::TupleAppend { .. }
                 | K::DynCast(_)
                 | K::DynCall(_)
                 | K::ErrorConvert { .. }
@@ -15469,12 +15629,44 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         })
                         .collect();
                     for target in &targets {
-                        flow.state.require_place(target).map_err(|e| {
-                            error(
-                                expr.source,
-                                format!("field pointer target unavailable: {e:?}"),
-                            )
-                        })?;
+                        self.require_target_available(flow, target, false, expr.source)?
+                            .map_err(|e| {
+                                error(
+                                    expr.source,
+                                    format!("field pointer target unavailable: {e:?}"),
+                                )
+                            })?;
+                    }
+                    return Ok(Some(targets));
+                }
+                K::FieldPtr { pointer, field } => {
+                    let result = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+                    self.expr(field, flow, depth + 1)?;
+                    if !flow.live {
+                        return Ok(None);
+                    }
+                    let targets = result.ok_or_else(|| {
+                        error(expr.source, "field pointer provenance is not established")
+                    })?;
+                    self.pointer_work(&targets, expr.source)?;
+                    let index = resolve_concrete_field_index(self.package, &pointer.ty, field);
+                    let targets: BTreeSet<_> = targets
+                        .into_iter()
+                        .map(|mut place| {
+                            if let Some(index) = index {
+                                place.fields.push(index);
+                            }
+                            place
+                        })
+                        .collect();
+                    for target in &targets {
+                        self.require_target_available(flow, target, false, expr.source)?
+                            .map_err(|e| {
+                                error(
+                                    expr.source,
+                                    format!("field pointer target unavailable: {e:?}"),
+                                )
+                            })?;
                     }
                     return Ok(Some(targets));
                 }
@@ -15637,6 +15829,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::OptionalPresent(_)
                 | K::OptionalAbsent
                 | K::Variant { .. }
+                | K::EnumVariantFieldPtr { .. }
+                | K::ComptimeFieldEntry { .. }
+                | K::ConstructStruct { .. }
+                | K::ConstructEnum { .. }
+                | K::TupleAppend { .. }
                 | K::DynCast(_)
                 | K::DynCall(_)
                 | K::ErrorConvert { .. }

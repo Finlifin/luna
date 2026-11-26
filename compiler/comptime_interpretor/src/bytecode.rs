@@ -1989,6 +1989,19 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.complete_type_not_sized_value(operand, source)?);
                 }
+                Op::FieldOperation {
+                    destination,
+                    op,
+                    operands,
+                    ty,
+                } => {
+                    let mut values = Vec::with_capacity(operands.len());
+                    for slot in operands {
+                        values.push(frame.slots[*slot].take().ok_or_else(missing)?);
+                    }
+                    frame.slots[*destination] =
+                        Some(self.complete_field_operation(op, values, ty, source)?);
+                }
                 Op::PrepareObjectAccess(access) => {
                     use comptime_compiler::objects::ObjectOperation;
                     match access.operation {

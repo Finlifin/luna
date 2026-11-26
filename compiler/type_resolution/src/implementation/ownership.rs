@@ -172,6 +172,9 @@ fn local_identity(
             | Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
             | Term::ComptimeCall(_)
+            | Term::FieldType { .. }
+            | Term::VariantFieldType { .. }
+            | Term::TupleAppend { .. }
             | Term::Rigid { .. }
             | Term::Bound { .. }
             | Term::Hole { .. }

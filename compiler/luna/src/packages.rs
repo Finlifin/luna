@@ -935,6 +935,7 @@ fn all_resolved_protocols_in(
         protocols.implicit_passing,
         protocols.call_context,
         protocols.call_description,
+        protocols.source_span,
         protocols.splice,
         protocols.meta_list,
         protocols.tuple,

@@ -59,6 +59,7 @@ pub struct Selectors<'a> {
     pub implicit_passing: Option<&'a str>,
     pub call_context: Option<&'a str>,
     pub call_description: Option<&'a str>,
+    pub source_span: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub compound_arithmetic: [Option<&'a str>; 5],
     pub comptime_compound_arithmetic: [Option<&'a str>; 5],
@@ -135,6 +136,7 @@ impl Selectors<'_> {
                 self.implicit_passing,
                 self.call_context,
                 self.call_description,
+                self.source_span,
                 self.splice,
                 self.meta_list,
                 self.tuple,
@@ -705,6 +707,7 @@ pub(crate) fn resolve_source(
             selectors.call_description,
             &mut result.call_description,
         ),
+        ("SourceSpan", selectors.source_span, &mut result.source_span),
     ] {
         let Some(selector) = selector else {
             continue;
@@ -875,6 +878,7 @@ pub(crate) struct SysrootBindings {
     implicit_passing: Option<String>,
     call_context: Option<String>,
     call_description: Option<String>,
+    source_span: Option<String>,
     arithmetic: [Option<String>; 7],
     compound_arithmetic: [Option<String>; 5],
     comptime_compound_arithmetic: [Option<String>; 5],
@@ -1006,6 +1010,7 @@ impl SysrootBindings {
                 "implicit-passing-protocol" => &mut result.implicit_passing,
                 "call-context-type" => &mut result.call_context,
                 "call-description-type" => &mut result.call_description,
+                "source-span-type" => &mut result.source_span,
                 "clone-protocol" => &mut result.clone,
                 "copy-protocol" => &mut result.copy,
                 "default-protocol" => &mut result.default_trait,
@@ -1476,6 +1481,13 @@ impl SysrootBindings {
                     .then_some(self.call_description.as_deref())
                     .flatten()
             }),
+            source_span: explicit.source_span.or_else(|| {
+                identities
+                    .source_span
+                    .is_none()
+                    .then_some(self.source_span.as_deref())
+                    .flatten()
+            }),
             arithmetic: std::array::from_fn(|index| {
                 explicit.arithmetic[index].or_else(|| {
                     identities.arithmetic[index]
@@ -1918,6 +1930,7 @@ mod stage_tests {
             implicit_passing_protocol: None,
             call_context_type: None,
             call_description_type: None,
+            source_span_type: None,
             arithmetic_protocols: Default::default(),
             compound_arithmetic_protocols: Default::default(),
             comptime_compound_arithmetic_protocols: Default::default(),

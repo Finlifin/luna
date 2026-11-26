@@ -570,6 +570,9 @@ fn scan<'a>(
                 | K::TypeKind { operand: value, .. }
                 | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
+                | K::NamedField { value, .. }
+                | K::ConstructStruct { fields: value }
+                | K::EnumVariantIndex(value)
                 | K::Not(value)
                 | K::Loop { body: value, .. } => work.push(Work::Expr(value, context.clone())),
                 K::BitUpdate {

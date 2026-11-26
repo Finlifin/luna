@@ -165,7 +165,7 @@ impl Checker<'_, '_> {
             "is_struct" => nir::TypeKind::Nominal(nir::NominalKind::Struct),
             "is_enum" => nir::TypeKind::Nominal(nir::NominalKind::Enum),
             "is_newtype" => nir::TypeKind::Nominal(nir::NominalKind::Newtype),
-            "is_record" => nir::TypeKind::Record,
+            "is_record" | "is_anonymous_record" => nir::TypeKind::Record,
             "is_union" => nir::TypeKind::Union,
             "is_module" => nir::TypeKind::Module,
             "is_tuple" => nir::TypeKind::Tuple,
@@ -217,7 +217,10 @@ impl Checker<'_, '_> {
         if !self.is_metatype_namespace_receiver(base)? {
             return Ok(None);
         }
-        if pred_name.name.as_str() == "is_not_sized" {
+        if matches!(
+            pred_name.name.as_str(),
+            "is_not_sized" | "eq" | "has_field" | "FieldType"
+        ) {
             return Ok(None);
         }
         let Some(kind) = Self::parse_type_predicate_kind(pred_name.name.as_str()) else {
@@ -291,6 +294,92 @@ impl Checker<'_, '_> {
         Ok(Some(*arg))
     }
 
+    pub(super) fn syntactic_type_predicate_pair_with<'h>(
+        expr: &Expr<'h>,
+        pred: &str,
+        is_metatype: &impl Fn(&Expr<'_>) -> bool,
+    ) -> Option<(&'h Expr<'h>, &'h Expr<'h>)> {
+        let H::Application(callee, args) = &expr.kind else {
+            return None;
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return None;
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return None;
+        };
+        if namespace.name.as_str() != "predicates"
+            || pred_name.name.as_str() != pred
+            || !is_metatype(base)
+        {
+            return None;
+        }
+        let [Arg::Positional(first), Arg::Positional(second)] = *args else {
+            return None;
+        };
+        Some((*first, *second))
+    }
+
+    fn type_predicate_pair_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+        pred: &str,
+        error_msg: &str,
+    ) -> Result<Option<(&'h Expr<'h>, &'h Expr<'h>)>, Error> {
+        let H::Application(callee, args) = &expr.kind else {
+            return Ok(None);
+        };
+        let H::Projection(namespace_expr, pred_name) = &callee.kind else {
+            return Ok(None);
+        };
+        let H::Projection(base, namespace) = &namespace_expr.kind else {
+            return Ok(None);
+        };
+        if namespace.name.as_str() != "predicates" || pred_name.name.as_str() != pred {
+            return Ok(None);
+        }
+        if !self.is_metatype_namespace_receiver(base)? {
+            return Ok(None);
+        }
+        let [Arg::Positional(first), Arg::Positional(second)] = *args else {
+            return Err(error(expr.span, error_msg));
+        };
+        Ok(Some((*first, *second)))
+    }
+
+    pub(super) fn type_predicate_eq_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<(&'h Expr<'h>, &'h Expr<'h>)>, Error> {
+        self.type_predicate_pair_call(
+            expr,
+            "eq",
+            "Type.predicates.eq requires exactly two positional Type arguments",
+        )
+    }
+
+    pub(super) fn type_predicate_has_field_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<(&'h Expr<'h>, &'h Expr<'h>)>, Error> {
+        self.type_predicate_pair_call(
+            expr,
+            "has_field",
+            "Type.predicates.has_field requires (Type, Symbol) positional arguments",
+        )
+    }
+
+    pub(super) fn type_predicate_field_type_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<(&'h Expr<'h>, &'h Expr<'h>)>, Error> {
+        self.type_predicate_pair_call(
+            expr,
+            "FieldType",
+            "Type.predicates.FieldType requires (Type, Symbol) positional arguments",
+        )
+    }
+
     /// Parse a mathematical `Integer` difference term (`x + c` or `c`) for PTC A12 `IntLe`.
     /// Machine integer parameters and runtime expressions are strictly excluded.
     pub(super) fn parse_ptc_integer_term(
@@ -319,6 +408,37 @@ impl Checker<'_, '_> {
                     return None;
                 }
                 inner.offset.checked_neg().map(nir::IntegerTerm::constant)
+            }
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                let binding = local(*id);
+                if let Some((Term::Integer(int), _)) = self.input_facts.value_identity(&binding) {
+                    return int.to_i128().ok().map(nir::IntegerTerm::constant);
+                }
+                if self.immutable.contains(&binding)
+                    && let Some(Some(known)) = self.generator_data.get(&binding)
+                {
+                    return match &known.kind {
+                        K::ComptimeValue(Term::Integer(int)) => {
+                            int.to_i128().ok().map(nir::IntegerTerm::constant)
+                        }
+                        K::Literal(n::Literal::Integer(spelling)) => {
+                            let mut budget = comptime_runtime::Budget::default();
+                            comptime_runtime::Integer::parse_literal(spelling, &mut budget)
+                                .ok()?
+                                .to_i128()
+                                .ok()
+                                .map(nir::IntegerTerm::constant)
+                        }
+                        K::Literal(n::Literal::SignedInteger(value)) => {
+                            i128::try_from(*value).ok().map(nir::IntegerTerm::constant)
+                        }
+                        K::Literal(n::Literal::UnsignedInteger(value)) => {
+                            i128::try_from(*value).ok().map(nir::IntegerTerm::constant)
+                        }
+                        _ => None,
+                    };
+                }
+                None
             }
             H::ResolvedClauseParam(_, id) => {
                 let declaration = DeclarationId {
@@ -1881,6 +2001,45 @@ impl Checker<'_, '_> {
                 return Ok(splicing::Operand::projected(projected, is_source));
             }
             let Some((declaration, arguments)) = self.struct_layout_head(&shape) else {
+                let field_sym = Term::Symbol(field.name.as_str().into());
+                let has_field_pred = n::TypePredicate::HasField {
+                    subject: shape.clone(),
+                    field: field_sym.clone(),
+                };
+                if self
+                    .establish_type_requirement(&has_field_pred, field.span)
+                    .is_ok()
+                {
+                    let field_ty = Term::field_type(shape.clone(), field_sym);
+                    let mut projected = if pointer_projection {
+                        let ptr_expr = n::Expr {
+                            source: source(expr.span),
+                            ty: Term::Pointer(Box::new(field_ty)),
+                            kind: K::FieldPtr {
+                                pointer: Box::new(value),
+                                field: Box::new(n::Expr {
+                                    source: source(field.span),
+                                    ty: p(P::Symbol),
+                                    kind: K::Literal(n::Literal::Symbol(field.name.to_string())),
+                                }),
+                            },
+                        };
+                        self.contextual_field_read(ptr_expr, expected, expr.span)?
+                    } else {
+                        n::Expr {
+                            source: source(expr.span),
+                            ty: field_ty,
+                            kind: K::NamedField {
+                                value: Box::new(value),
+                                name: field.name.to_string(),
+                            },
+                        }
+                    };
+                    if let Some(expected) = expected {
+                        self.require(&projected.ty, expected, expr.span)?;
+                    }
+                    return Ok(splicing::Operand::projected(projected, is_source));
+                }
                 return Err(error(
                     expr.span,
                     "field projection requires a supported struct",

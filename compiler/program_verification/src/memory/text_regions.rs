@@ -3188,6 +3188,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             K::PointerField { .. } | K::PointerAnonymousField { .. } => {
                 self.transfer_pointer_field(expr, locals, returned, next)
             }
+            K::FieldPtr { .. } => self.transfer_field_ptr(expr, locals, returned, next),
+            K::FieldValue { .. } => self.transfer_field_value(expr, locals, returned, next),
+            K::EnumVariantFieldPtr { .. } => {
+                self.transfer_enum_variant_field_ptr(expr, locals, returned, next)
+            }
             K::ReadPointer { .. } => self.transfer_read_pointer(expr, locals, returned, next),
             K::WritePointer { .. } => self.transfer_write_pointer(expr, locals, returned, next),
             K::SymbolName { .. } | K::EnumName { .. } => {
@@ -3196,6 +3201,9 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             K::Tuple { .. } | K::Record { .. } | K::AnonymousRecord { .. } => {
                 self.transfer_tuple(expr, locals, returned, next)
             }
+            K::TupleAppend { .. } => self.transfer_tuple_append(expr, locals, returned, next),
+            K::ConstructStruct { fields } => self.expr(fields, locals, returned, next),
+            K::ConstructEnum { .. } => self.transfer_construct_enum(expr, locals, returned, next),
             K::Variant { .. } => self.transfer_variant(expr, locals, returned, next),
             K::OptionalAbsent => Ok(empty),
             K::OptionalPresent(value) => self
@@ -3245,6 +3253,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
+            | K::EnumVariantIndex(value)
             | K::BitAssign { value, .. }
             | K::BitSlice { value, .. } => Ok(self
                 .expr(value, locals, returned, next)?

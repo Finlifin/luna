@@ -336,6 +336,12 @@ pub enum Op {
         destination: Register,
         operand: Register,
     },
+    FieldOperation {
+        destination: Register,
+        op: observations::FieldOp,
+        operands: Vec<Register>,
+        ty: Arc<Term>,
+    },
     PrepareObjectAccess(Arc<objects::ObjectAccess>),
     ObjectAccess {
         destination: Register,
@@ -1049,6 +1055,18 @@ impl fmt::Display for Program {
                     destination,
                     operand,
                 } => write!(f, "(type-not-sized %{destination} %{operand})")?,
+                Op::FieldOperation {
+                    destination,
+                    op,
+                    operands,
+                    ty,
+                } => {
+                    write!(f, "(field-operation %{destination} ({op}) (type {ty})")?;
+                    for operand in operands {
+                        write!(f, " %{operand}")?;
+                    }
+                    write!(f, ")")?;
+                }
                 Op::PrepareObjectAccess(access) => write!(f, "(prepare-object-access {access})")?,
                 Op::ObjectAccess {
                     destination,
@@ -1857,7 +1875,15 @@ fn compile_root<'a>(
                     | K::ReflectCallable(_)
                     | K::TypeId(_)
                     | K::EnumStructure { .. }
-                    | K::TypeLayout { .. } => {
+                    | K::TypeLayout { .. }
+                    | K::ImplicitQuery { .. }
+                    | K::StructFieldSpans(_)
+                    | K::RecordFieldSpans(_)
+                    | K::DeclarationSpan(_)
+                    | K::EnumVariantSpans(_)
+                    | K::EnumVariantFieldSpans(_)
+                    | K::ComptimeEnumVariantIndex(_)
+                    | K::ComptimeEnumVariantFieldValues(_) => {
                         use observations::{Kind as O, Observation};
                         let (kind, operand) = match &expr.kind {
                             K::NewtypeRepresentation(operand) => {
@@ -1890,6 +1916,22 @@ fn compile_root<'a>(
                             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
                             K::TypeLayout { query, operand } => {
                                 (O::TypeLayout(*query), operand.as_ref())
+                            }
+                            K::ImplicitQuery { kind, operand } => {
+                                (O::ImplicitQuery(*kind), operand.as_ref())
+                            }
+                            K::StructFieldSpans(operand) => (O::StructFieldSpans, operand.as_ref()),
+                            K::RecordFieldSpans(operand) => (O::RecordFieldSpans, operand.as_ref()),
+                            K::DeclarationSpan(operand) => (O::DeclarationSpan, operand.as_ref()),
+                            K::EnumVariantSpans(operand) => (O::EnumVariantSpans, operand.as_ref()),
+                            K::EnumVariantFieldSpans(operand) => {
+                                (O::EnumVariantFieldSpans, operand.as_ref())
+                            }
+                            K::ComptimeEnumVariantIndex(operand) => {
+                                (O::ComptimeEnumVariantIndex, operand.as_ref())
+                            }
+                            K::ComptimeEnumVariantFieldValues(operand) => {
+                                (O::ComptimeEnumVariantFieldValues, operand.as_ref())
                             }
                             _ => unreachable!(),
                         };
@@ -2625,6 +2667,109 @@ fn compile_root<'a>(
                                 operation,
                             },
                         );
+                    }
+                    K::TypeHasField { subject, field }
+                    | K::TypeFieldType { subject, field }
+                    | K::StructFieldType { subject, field } => {
+                        let op = match &expr.kind {
+                            K::TypeHasField { .. } => observations::FieldOp::TypeHasField,
+                            K::TypeFieldType { .. } => observations::FieldOp::TypeFieldType,
+                            K::StructFieldType { .. } => observations::FieldOp::StructFieldType,
+                            _ => unreachable!(),
+                        };
+                        let s_slot = fresh();
+                        let f_slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::FieldOperation {
+                                destination: dst,
+                                op,
+                                operands: vec![s_slot, f_slot],
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
+                        work.push(Work::Expression(field, f_slot));
+                        emit(&mut work, Op::TypeIdentity(s_slot));
+                        work.push(Work::Expression(subject, s_slot));
+                    }
+                    K::ComptimeFieldEntry {
+                        value,
+                        field,
+                        ty: field_ty,
+                    } => {
+                        let v_slot = fresh();
+                        let f_slot = fresh();
+                        let t_slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::FieldOperation {
+                                destination: dst,
+                                op: observations::FieldOp::ComptimeFieldEntry,
+                                operands: vec![v_slot, f_slot, t_slot],
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
+                        work.push(Work::Expression(field_ty, t_slot));
+                        work.push(Work::Expression(field, f_slot));
+                        work.push(Work::Expression(value, v_slot));
+                    }
+                    K::FieldValue {
+                        value: left,
+                        field: right,
+                    }
+                    | K::ConstructEnum {
+                        variant: left,
+                        fields: right,
+                    }
+                    | K::TupleAppend {
+                        tuple: left,
+                        element: right,
+                    } => {
+                        let op = match &expr.kind {
+                            K::FieldValue { .. } => observations::FieldOp::FieldValue,
+                            K::ConstructEnum { .. } => observations::FieldOp::ConstructEnum,
+                            K::TupleAppend { .. } => observations::FieldOp::TupleAppend,
+                            _ => unreachable!(),
+                        };
+                        let l_slot = fresh();
+                        let r_slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::FieldOperation {
+                                destination: dst,
+                                op,
+                                operands: vec![l_slot, r_slot],
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
+                        work.push(Work::Expression(right, r_slot));
+                        work.push(Work::Expression(left, l_slot));
+                    }
+                    K::NamedField { value, name } => {
+                        let slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::FieldOperation {
+                                destination: dst,
+                                op: observations::FieldOp::NamedField(Arc::from(name.as_str())),
+                                operands: vec![slot],
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
+                        work.push(Work::Expression(value, slot));
+                    }
+                    K::ConstructStruct { fields } => {
+                        let slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::FieldOperation {
+                                destination: dst,
+                                op: observations::FieldOp::ConstructStruct,
+                                operands: vec![slot],
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
+                        work.push(Work::Expression(fields, slot));
                     }
                     K::TypeEqual(left, right) => {
                         let left_slot = fresh();
@@ -3488,6 +3633,9 @@ fn compile_root<'a>(
                     | K::WritePointer { .. }
                     | K::PointerAnonymousField { .. }
                     | K::PointerField { .. }
+                    | K::FieldPtr { .. }
+                    | K::EnumVariantIndex(_)
+                    | K::EnumVariantFieldPtr { .. }
                     | K::BitWritePointer { .. }
                     | K::EffectResume(_)
                     | K::EffectHandle { .. }

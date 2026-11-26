@@ -285,6 +285,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     | "--implicit-passing-protocol"
                     | "--call-context-type"
                     | "--call-description-type"
+                    | "--source-span-type"
                     | "--iterator-protocol"
                     | "--into-iterator-protocol"
                     | "--variadic-collector-protocol"

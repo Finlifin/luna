@@ -250,12 +250,23 @@ impl Checker<'_, '_> {
 /// boundary changes type facts, not runtime input facts or lexical bindings.
 pub(super) struct TypeConditionScope {
     parent: Option<crate::ptc::Context>,
+    restored_type: Option<(n::LocalId, Option<Term>)>,
 }
 
 impl TypeConditionScope {
     pub(super) fn leave(self, checker: &mut Checker<'_, '_>) {
         if let Some(parent) = self.parent {
             checker.context = parent;
+        }
+        if let Some((binding, previous)) = self.restored_type {
+            match previous {
+                Some(ty) => {
+                    checker.input_facts.types.insert(binding, ty);
+                }
+                None => {
+                    checker.input_facts.types.remove(&binding);
+                }
+            }
         }
     }
 }
@@ -341,6 +352,16 @@ fn classify_refinement<'a>(
             }
             _ if Checker::syntactic_type_predicate_kind_with(expr, &is_metatype)
                 .is_some_and(|(_, arg)| type_operand(arg)) =>
+            {
+                observed = true
+            }
+            _ if Checker::syntactic_type_predicate_pair_with(expr, "eq", &is_metatype)
+                .is_some_and(|(a, b)| type_operand(a) && type_operand(b)) =>
+            {
+                observed = true
+            }
+            _ if Checker::syntactic_type_predicate_pair_with(expr, "has_field", &is_metatype)
+                .is_some_and(|(s, _)| type_operand(s)) =>
             {
                 observed = true
             }
@@ -914,7 +935,66 @@ impl Checker<'_, '_> {
             K::TypeValue(ty) => Some(ty),
             _ => None,
         };
-        self.enter_observed_pattern_type_facts(pattern, observed, span)
+        let mut scope = self.enter_observed_pattern_type_facts(pattern, observed, span)?;
+        if let K::TypeFieldType { subject, field } = &value.kind {
+            let mut inner_pat = pattern;
+            while let n::Pattern::Binding { inner, .. }
+            | n::Pattern::Remap { pattern: inner, .. }
+            | n::Pattern::Guard { pattern: inner, .. } = inner_pat
+            {
+                inner_pat = inner;
+            }
+            if let n::Pattern::OptionalPresent(present_inner) = inner_pat {
+                let mut steps = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = steps;
+                let s_ty = self
+                    .observed_condition_type_value(subject, &mut steps)
+                    .map_err(|m| error(span, m))?;
+                let f_ty = match &field.kind {
+                    K::Literal(n::Literal::Symbol(sym)) => Some(Term::Symbol(sym.as_str().into())),
+                    _ => self
+                        .observed_condition_type_value(field, &mut steps)
+                        .map_err(|m| error(span, m))?,
+                };
+                self.required_steps -= (before - steps) as u64;
+                if let (Some(subject_ty), Some(field_ty)) = (s_ty, f_ty) {
+                    let fact = crate::ptc::Formula::HasField(crate::ptc::HasFieldQuery {
+                        ty: subject_ty.clone(),
+                        field: field_ty.clone(),
+                    });
+                    let mut budget = crate::ptc::Budget::default();
+                    if self.context.validate_formula(&fact, &mut budget).is_ok() {
+                        if scope.parent.is_none() {
+                            scope.parent = Some(self.context.clone());
+                        }
+                        self.context.assume(fact);
+                    }
+                    let mut binder = None;
+                    let mut cursor = present_inner.as_ref();
+                    loop {
+                        match cursor {
+                            n::Pattern::Binding { binding, inner } => {
+                                if binder.is_none() {
+                                    binder = Some(*binding);
+                                }
+                                if matches!(inner.as_ref(), n::Pattern::Wild) {
+                                    break;
+                                }
+                                cursor = inner;
+                            }
+                            n::Pattern::Remap { pattern: inner, .. } => cursor = inner,
+                            _ => break,
+                        }
+                    }
+                    if let Some(binding) = binder {
+                        let resolved_field_ty = Term::field_type(subject_ty, field_ty);
+                        let prev = self.input_facts.types.insert(binding, resolved_field_ty);
+                        scope.restored_type = Some((binding, prev));
+                    }
+                }
+            }
+        }
+        Ok(scope)
     }
 
     pub(super) fn under_observed_pattern_type_facts<R>(
@@ -937,12 +1017,16 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<TypeConditionScope, Error> {
         let Some(fact) = self.checked_pattern_type_fact(pattern, observed, span)? else {
-            return Ok(TypeConditionScope { parent: None });
+            return Ok(TypeConditionScope {
+                parent: None,
+                restored_type: None,
+            });
         };
         let parent = self.context.clone();
         self.context.assume(fact);
         Ok(TypeConditionScope {
             parent: Some(parent),
+            restored_type: None,
         })
     }
 
@@ -994,6 +1078,42 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn observed_condition_symbol_value(
+        &self,
+        expr: &n::Expr,
+        fuel: &mut usize,
+    ) -> Result<Option<Term>, String> {
+        if let K::Literal(n::Literal::Symbol(sym)) = &expr.kind {
+            return Ok(Some(Term::Symbol(sym.as_str().into())));
+        }
+        if let K::ComptimeValue(val) = &expr.kind
+            && val.sort() == Sort::ComptimeValue
+            && val.check_scope(self.context.scope()).is_ok()
+        {
+            nir::type_computations::charge_term(val, fuel).map_err(|e| e.to_string())?;
+            return Ok(Some(val.clone()));
+        }
+        let mut budget = comptime_runtime::Budget {
+            steps: *fuel,
+            max_limbs: 4096,
+        };
+        let before = budget.steps;
+        let observed = self
+            .normal_input_hint(expr, &mut budget)
+            .map_err(|failure| failure.to_string())?;
+        *fuel -= before - budget.steps;
+        match observed {
+            Some(val)
+                if val.sort() == Sort::ComptimeValue
+                    && val.check_scope(self.context.scope()).is_ok() =>
+            {
+                nir::type_computations::charge_term(&val, fuel).map_err(|e| e.to_string())?;
+                Ok(Some(val))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn condition_type_fact(
         &self,
         condition: &n::Expr,
@@ -1010,10 +1130,9 @@ impl Checker<'_, '_> {
             .ok_or("type condition budget exhausted")?;
         let full = match &condition.kind {
             K::TypeEqual(left, right) => {
-                match (
-                    self.observed_condition_type_value(left, fuel)?,
-                    self.observed_condition_type_value(right, fuel)?,
-                ) {
+                let l = self.observed_condition_type_value(left, fuel)?;
+                let r = self.observed_condition_type_value(right, fuel)?;
+                match (l, r) {
                     (Some(left), Some(right)) => Some(F::equal(left, right)),
                     _ => None,
                 }
@@ -1027,6 +1146,16 @@ impl Checker<'_, '_> {
             K::TypeNotSized { operand } => self
                 .observed_condition_type_value(operand, fuel)?
                 .map(F::not_sized),
+            K::TypeHasField { subject, field } => {
+                let subj = self.observed_condition_type_value(subject, fuel)?;
+                let fld = self.observed_condition_symbol_value(field, fuel)?;
+                match (subj, fld) {
+                    (Some(s), Some(f)) => {
+                        Some(F::HasField(crate::ptc::HasFieldQuery { ty: s, field: f }))
+                    }
+                    _ => None,
+                }
+            }
             K::Not(value) => return self.condition_type_fact(value, !positive, fuel, depth + 1),
             // Normal completion delivers the tail's Boolean. Prefix statements
             // remain in the program; immutable TypeValue facts do not depend on
@@ -1116,7 +1245,10 @@ impl Checker<'_, '_> {
             self.context.assume(fact);
             parent
         });
-        TypeConditionScope { parent }
+        TypeConditionScope {
+            parent,
+            restored_type: None,
+        }
     }
 
     pub(super) fn assume_source_type_condition(
@@ -1190,6 +1322,65 @@ impl Checker<'_, '_> {
                 return Ok(Some(if positive { fact } else { fact.negate() }));
             }
             match (&source_expr.kind, &checked.kind) {
+                (
+                    H::Application(_, args),
+                    K::TypeHasField {
+                        subject,
+                        field: checked_field,
+                    },
+                ) => {
+                    let subject_arg = args.first().and_then(|arg| match arg {
+                        Arg::Positional(e) | Arg::Named(_, e) => Some(*e),
+                        _ => None,
+                    });
+                    let field_arg = args.last().and_then(|arg| match arg {
+                        Arg::Positional(e) | Arg::Named(_, e) => Some(*e),
+                        _ => None,
+                    });
+                    let mut budget = comptime_runtime::Budget {
+                        steps: *fuel,
+                        max_limbs: 4096,
+                    };
+                    let subject_term = match self.observe_normal_input_in(
+                        subject,
+                        0,
+                        &mut budget,
+                        &BTreeMap::new(),
+                    ) {
+                        Ok(term) => Some(term),
+                        Err(_) if self.in_unselected_inline || self.checking_open_behavior => {
+                            subject_arg.and_then(|arg| self.type_expr(arg).ok())
+                        }
+                        Err(_) => None,
+                    };
+                    let field_term = match self.observe_normal_input_in(
+                        checked_field,
+                        0,
+                        &mut budget,
+                        &BTreeMap::new(),
+                    ) {
+                        Ok(term) => Some(term),
+                        Err(_) if self.in_unselected_inline || self.checking_open_behavior => {
+                            field_arg.and_then(|arg| self.symbol_type_term(arg).ok())
+                        }
+                        Err(_) => None,
+                    };
+                    if let (Some(ty), Some(field)) = (subject_term, field_term)
+                        && ty.sort() == Sort::Type
+                        && field.sort() == Sort::ComptimeValue
+                    {
+                        let fact = F::HasField(crate::ptc::HasFieldQuery { ty, field });
+                        let mut ptc_budget = crate::ptc::Budget {
+                            steps: *fuel,
+                            max_depth: 128,
+                        };
+                        self.context
+                            .validate_formula(&fact, &mut ptc_budget)
+                            .map_err(|e| error(source_expr.span, e.to_string()))?;
+                        *fuel = ptc_budget.steps;
+                        return Ok(Some(if positive { fact } else { fact.negate() }));
+                    }
+                }
                 (H::Unary(UnOp::Not, inner), K::Not(c_inner)) => {
                     return self.condition_source_type_fact(
                         Some(inner),
@@ -1277,6 +1468,29 @@ impl Checker<'_, '_> {
                 self.type_parameters
                     .values()
                     .any(|parameters| parameters.contains(&declaration))
+            }
+            H::Application(callee, args) => {
+                if Self::syntactic_type_predicate_pair_with(expr, "FieldType", &|base| {
+                    self.is_metatype_base(base)
+                })
+                .is_some_and(|(subject, _)| self.refinement_type_operand(subject))
+                {
+                    return true;
+                }
+                if let H::ResolvedDef { def_id, .. } = callee.kind
+                    && let Some(callee_owner) = self.package.definition_owner(def_id)
+                    && self
+                        .pure_field_type_builtin_wrapper(declaration(
+                            self.package,
+                            &self.package_identities,
+                            callee_owner,
+                        ))
+                        .is_some()
+                    && let Some(Arg::Positional(subject)) = args.first()
+                {
+                    return self.refinement_type_operand(subject);
+                }
+                self.is_type_head(expr)
             }
             _ => self.is_type_head(expr),
         }

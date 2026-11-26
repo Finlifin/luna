@@ -1910,6 +1910,9 @@ impl<'a> PhaseContext<'a> {
                                 | crate::Term::AssociatedTypeCall(_)
                                 | crate::Term::ComptimeCall(_)
                                 | crate::Term::DeferredErrorResult { .. }
+                                | crate::Term::FieldType { .. }
+                                | crate::Term::VariantFieldType { .. }
+                                | crate::Term::TupleAppend { .. }
                                 | crate::Term::Rigid { .. }
                                 | crate::Term::NormalForm { .. }
                                 | crate::Term::Bound { .. }
@@ -2047,7 +2050,16 @@ impl<'a> PhaseContext<'a> {
                         | K::RecordFieldTypes(value)
                         | K::RecordFieldNames(value)
                         | K::ReflectCallable(value)
-                        | K::TypeId(value) => {
+                        | K::TypeId(value)
+                        | K::ImplicitQuery { operand: value, .. }
+                        | K::NamedField { value, .. }
+                        | K::StructFieldSpans(value)
+                        | K::RecordFieldSpans(value)
+                        | K::DeclarationSpan(value)
+                        | K::EnumVariantSpans(value)
+                        | K::EnumVariantFieldSpans(value)
+                        | K::ComptimeEnumVariantIndex(value)
+                        | K::ComptimeEnumVariantFieldValues(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,
@@ -2055,6 +2067,9 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                             work.push(Work::Expr(value, false, true), inspection_fuel)?;
+                        }
+                        K::ConstructStruct { fields: value } | K::EnumVariantIndex(value) => {
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
                         }
                         K::AddressOf(value)
                         | K::ConstAddress { value, .. }
@@ -2152,6 +2167,31 @@ impl<'a> PhaseContext<'a> {
                         | K::TemplateEqual(a, b)
                         | K::ScalarEqual(a, b)
                         | K::TypeEqual(a, b)
+                        | K::TypeHasField {
+                            subject: a,
+                            field: b,
+                        }
+                        | K::TypeFieldType {
+                            subject: a,
+                            field: b,
+                        }
+                        | K::StructFieldType {
+                            subject: a,
+                            field: b,
+                        }
+                        | K::FieldPtr {
+                            pointer: a,
+                            field: b,
+                        }
+                        | K::FieldValue { value: a, field: b }
+                        | K::ConstructEnum {
+                            variant: a,
+                            fields: b,
+                        }
+                        | K::TupleAppend {
+                            tuple: a,
+                            element: b,
+                        }
                         | K::ListConcat(a, b)
                         | K::TypeListIndex(a, b)
                         | K::BitEqual(a, b)
@@ -2160,6 +2200,20 @@ impl<'a> PhaseContext<'a> {
                         | K::Or(a, b) => {
                             work.push(Work::Expr(a, false, ct), inspection_fuel)?;
                             work.push(Work::Expr(b, false, ct), inspection_fuel)?;
+                        }
+                        K::EnumVariantFieldPtr {
+                            pointer,
+                            variant,
+                            field,
+                        }
+                        | K::ComptimeFieldEntry {
+                            value: pointer,
+                            field: variant,
+                            ty: field,
+                        } => {
+                            work.push(Work::Expr(pointer, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(variant, false, ct), inspection_fuel)?;
+                            work.push(Work::Expr(field, false, ct), inspection_fuel)?;
                         }
                         K::BitWritePointer {
                             pointer,

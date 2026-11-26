@@ -1070,6 +1070,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         implicit_passing_protocol: None,
         call_context_type: None,
         call_description_type: None,
+        source_span_type: None,
         arithmetic_protocols: Default::default(),
         compound_arithmetic_protocols: Default::default(),
         comptime_compound_arithmetic_protocols: Default::default(),

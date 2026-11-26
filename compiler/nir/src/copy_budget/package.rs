@@ -112,6 +112,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         safety_contracts,
         runtime_domains,
         global_runtime_deliveries,
+        reflection_spans,
     } = package;
     let mut meter = Meter {
         fuel,
@@ -300,6 +301,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         safety_contracts: safety_contracts.clone(),
         runtime_domains: runtime_domains.clone(),
         global_runtime_deliveries: global_runtime_deliveries.clone(),
+        reflection_spans: reflection_spans.clone(),
     })
 }
 

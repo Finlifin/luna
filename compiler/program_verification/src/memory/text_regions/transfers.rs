@@ -1584,4 +1584,263 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             Ok(outcome.1)
         }
     }
+
+    #[inline(never)]
+    pub(super) fn transfer_field_ptr(
+        &mut self,
+        expr: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::FieldPtr { pointer, field } = &expr.kind else {
+            unreachable!("checked text transfer variant")
+        };
+        let Some(mut value) = self.expr(pointer, locals, returned, next)? else {
+            return Ok(None);
+        };
+        if self.expr(field, locals, returned, next)?.is_none() {
+            return Ok(None);
+        }
+        let Some(target) = value.places.get_mut(&vec![]).and_then(Option::as_mut) else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor pointer target is unknown".into());
+        };
+        let Term::Pointer(pointee) = strip_computation(&pointer.ty) else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor field pointer requires pointer base".into());
+        };
+        let Some(index) = mem_resolve_struct_or_record_field(
+            Some(self.package),
+            strip_computation(pointee),
+            field,
+        ) else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor field pointer index is unknown".into());
+        };
+        for (root, mut path) in std::mem::take(target) {
+            charge(self.fuel, path.len().saturating_add(1))?;
+            path.push(index);
+            target.insert((root, path));
+        }
+        Ok(Some(value))
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_field_value(
+        &mut self,
+        expr: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::FieldValue { value, field } = &expr.kind else {
+            unreachable!("checked text transfer variant")
+        };
+        let Some(regions) = self.expr(value, locals, returned, next)? else {
+            return Ok(None);
+        };
+        if self.expr(field, locals, returned, next)?.is_none() {
+            return Ok(None);
+        }
+        let Some(index) = mem_resolve_struct_or_record_field(
+            Some(self.package),
+            strip_computation(&value.ty),
+            field,
+        ) else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text field value index is unknown".into());
+        };
+        Ok(Some(project(regions, &[index], self.fuel)?))
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_tuple_append(
+        &mut self,
+        expr: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::TupleAppend { tuple, element } = &expr.kind else {
+            unreachable!("checked text transfer variant")
+        };
+        let Some(regions) = self.expr(tuple, locals, returned, next)? else {
+            return Ok(None);
+        };
+        let Some(elem_regions) = self.expr(element, locals, returned, next)? else {
+            return Ok(None);
+        };
+        let Some(prefix_len) =
+            mem_resolve_tuple_length(Some(self.package), strip_computation(&tuple.ty))
+        else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err(format!(
+                "text tuple append prefix length is unknown for {}",
+                tuple.ty
+            ));
+        };
+        let mut merged = Some(regions);
+        merge(
+            &mut merged,
+            Some(prefix(elem_regions, &[prefix_len], self.fuel)?),
+            self.fuel,
+        )?;
+        Ok(merged)
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_construct_enum(
+        &mut self,
+        expr: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::ConstructEnum { variant, fields } = &expr.kind else {
+            unreachable!("checked text transfer variant")
+        };
+        if self.expr(variant, locals, returned, next)?.is_none() {
+            return Ok(None);
+        }
+        let Some(fields_regions) = self.expr(fields, locals, returned, next)? else {
+            return Ok(None);
+        };
+        if let Some(index) = mem_constant_usize(variant) {
+            return Ok(Some(prefix(
+                fields_regions,
+                &[VARIANT_FIELD, index],
+                self.fuel,
+            )?));
+        }
+        if fields_regions.text.is_empty()
+            && fields_regions.code.is_empty()
+            && fields_regions.places.is_empty()
+        {
+            return Ok(Some(Regions::new()));
+        }
+        let variants = owned_variant_fields(Some(self.package), &expr.ty, self.fuel)?;
+        let field_count =
+            mem_resolve_tuple_length(Some(self.package), strip_computation(&fields.ty));
+        let mut merged = Some(Regions::new());
+        for (index, variant_fields) in variants.iter().enumerate() {
+            if field_count.is_some_and(|count| variant_fields.len() != count) {
+                continue;
+            }
+            merge(
+                &mut merged,
+                Some(prefix(
+                    fields_regions.clone(),
+                    &[VARIANT_FIELD, index],
+                    self.fuel,
+                )?),
+                self.fuel,
+            )?;
+        }
+        Ok(merged)
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_enum_variant_field_ptr(
+        &mut self,
+        expr: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let K::EnumVariantFieldPtr {
+            pointer,
+            variant,
+            field,
+        } = &expr.kind
+        else {
+            unreachable!("checked text transfer variant")
+        };
+        let Some(value) = self.expr(pointer, locals, returned, next)? else {
+            return Ok(None);
+        };
+        if self.expr(variant, locals, returned, next)?.is_none() {
+            return Ok(None);
+        }
+        if self.expr(field, locals, returned, next)?.is_none() {
+            return Ok(None);
+        }
+        let Some(targets) = value
+            .places
+            .get(&vec![])
+            .and_then(Option::as_ref)
+            .filter(|targets| !targets.is_empty())
+        else {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor pointer target is unknown".into());
+        };
+        let const_v = mem_constant_usize(variant);
+        let const_f = mem_constant_usize(field);
+        let mut out_targets = BTreeSet::new();
+        if let (Some(v_idx), Some(f_idx)) = (const_v, const_f) {
+            for (root, path) in targets {
+                charge(self.fuel, path.len().saturating_add(3))?;
+                let mut next_path = path.clone();
+                next_path.extend([VARIANT_FIELD, v_idx, f_idx]);
+                out_targets.insert((*root, next_path));
+            }
+        } else {
+            let Term::Pointer(pointee) = strip_computation(&pointer.ty) else {
+                if !self.type_may_hold_text_or_callable(&expr.ty)? {
+                    return Ok(Some(Regions::new()));
+                }
+                return Err(
+                    "text descriptor enum variant field pointer requires pointer base".into(),
+                );
+            };
+            let variants = owned_variant_fields(Some(self.package), pointee, self.fuel)?;
+            for (v_idx, variant_fields) in variants.iter().enumerate() {
+                if const_v.is_some_and(|v| v != v_idx) {
+                    continue;
+                }
+                for (f_idx, _) in variant_fields.iter().enumerate() {
+                    if const_f.is_some_and(|f| f != f_idx) {
+                        continue;
+                    }
+                    for (root, path) in targets {
+                        charge(self.fuel, path.len().saturating_add(3))?;
+                        let mut next_path = path.clone();
+                        next_path.extend([VARIANT_FIELD, v_idx, f_idx]);
+                        out_targets.insert((*root, next_path));
+                    }
+                }
+            }
+        }
+        if out_targets.is_empty() {
+            return Ok(Some(Regions::new()));
+        }
+        let mut ptr_regions = Regions::new();
+        ptr_regions.places.insert(vec![], Some(out_targets));
+        Ok(Some(prefix(
+            ptr_regions,
+            &[VARIANT_FIELD, 1, 0],
+            self.fuel,
+        )?))
+    }
+}
+
+fn strip_computation(mut ty: &Term) -> &Term {
+    while let Term::Computation { effects, result } = ty
+        && effects.is_empty()
+    {
+        ty = result;
+    }
+    ty
 }

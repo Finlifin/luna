@@ -26,10 +26,10 @@ mod values;
 /// A generic method call retains its selected interface until inference
 /// completes the arguments belonging to the member itself.
 pub(super) struct SelectedMethod {
-    interface: DeclarationId,
-    interface_arguments: Vec<Term>,
-    member: DeclarationId,
-    subject: Term,
+    pub(super) interface: DeclarationId,
+    pub(super) interface_arguments: Vec<Term>,
+    pub(super) member: DeclarationId,
+    pub(super) subject: Term,
 }
 
 impl SelectedMethod {
@@ -88,6 +88,14 @@ impl Checker<'_, '_> {
     // shape. Unknown structural evidence is not evidence of a different type;
     // the implementation resolver must still prove its own applicability.
     pub(super) fn method_subject_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        if let Term::FieldType { subject, field } = ty
+            && let Term::Symbol(name) = field.as_ref()
+            && let Some(resolved) = self
+                .context
+                .resolve_struct_field_type(subject, name.as_ref())
+        {
+            return self.method_subject_view(&resolved, span);
+        }
         if self.bound_tuple_elements(ty).is_some()
             || !matches!(
                 ty,
@@ -95,6 +103,9 @@ impl Checker<'_, '_> {
                     | Term::AssociatedType { .. }
                     | Term::Rigid { .. }
                     | Term::NormalForm { .. }
+                    | Term::FieldType { .. }
+                    | Term::VariantFieldType { .. }
+                    | Term::TupleAppend { .. }
                     | Term::Hole { .. }
             )
         {
@@ -1443,6 +1454,44 @@ impl Checker<'_, '_> {
                     assumptions: &implementation.capabilities,
                     context: &context,
                 };
+                if Some(interface) == self.protocols.copy
+                    && let Some(drop_id) = self.protocols.drop
+                {
+                    let drop_req = n::TraitRequirement {
+                        subject: implementation.subject.clone(),
+                        interface: drop_id,
+                        interface_arguments: Vec::new(),
+                    };
+                    let has_given_drop = world
+                        .given(&drop_req, Budget::default())
+                        .map_err(|e| error(span, e.to_string()))?
+                        .is_some();
+                    let has_resolved_drop = if has_given_drop {
+                        true
+                    } else {
+                        matches!(
+                            world
+                                .resolve_instance(
+                                    &drop_req.interface_instance(),
+                                    &drop_req.subject,
+                                    Budget::default(),
+                                )
+                                .map_err(|e| {
+                                    error(span, format!("Copy/Drop compatibility query failed: {e}"))
+                                })?
+                                .types
+                                .selection,
+                            crate::implementation::Selection::Selected(_)
+                        )
+                    };
+                    if has_resolved_drop {
+                        return Err(error(
+                            span,
+                            "cannot implement `Copy` for a type that implements `Drop`",
+                        ));
+                    }
+                }
+                let mut instantiated_requirements = Vec::new();
                 for (requirement, kind) in requirements {
                     let mut fuel = 100_000;
                     let requirement = contract
@@ -1451,6 +1500,66 @@ impl Checker<'_, '_> {
                             substitution.instantiate_requirement_bounded(&requirement, &mut fuel)
                         })
                         .map_err(|e| error(span, e.to_string()))?;
+                    instantiated_requirements.push((requirement, kind));
+                }
+                if Some(interface) == self.protocols.copy
+                    && self
+                        .package
+                        .item(owner)
+                        .is_some_and(|item| matches!(&item.kind, ItemKind::Impl(def) if def.generation_trait.is_some()))
+                    && let Term::Nominal {
+                        declaration,
+                        arguments: subject_args,
+                    } = &implementation.subject
+                {
+                    let declaration = *declaration;
+                    let subject_args = subject_args.clone();
+                    let subject = implementation.subject.clone();
+                    self.ensure_nominal_type(&subject, span)?;
+                    let mut fuel = 100_000;
+                    if let Some(struct_def) = self.structs.get(&declaration) {
+                        let fields = nir::normal_forms::instantiate_value_fields_checked(
+                            &struct_def.type_parameters,
+                            &struct_def.parameter_types,
+                            &subject_args,
+                            struct_def.fields.iter().map(|(_, ty)| ty),
+                            &mut fuel,
+                        )
+                        .map_err(|e| error(span, e.to_string()))?;
+                        for field_ty in fields {
+                            instantiated_requirements.push((
+                                n::TraitRequirement {
+                                    subject: field_ty,
+                                    interface,
+                                    interface_arguments: Vec::new(),
+                                },
+                                "derived Copy field",
+                            ));
+                        }
+                    } else if let Some(enum_def) = self.enums.get(&declaration) {
+                        for variant in &enum_def.variants {
+                            let fields = nir::normal_forms::instantiate_value_fields_checked(
+                                &enum_def.type_parameters,
+                                &enum_def.parameter_types,
+                                &subject_args,
+                                variant.fields.iter(),
+                                &mut fuel,
+                            )
+                            .map_err(|e| error(span, e.to_string()))?;
+                            for field_ty in fields {
+                                instantiated_requirements.push((
+                                    n::TraitRequirement {
+                                        subject: field_ty,
+                                        interface,
+                                        interface_arguments: Vec::new(),
+                                    },
+                                    "derived Copy field",
+                                ));
+                            }
+                        }
+                    }
+                }
+                for (requirement, kind) in instantiated_requirements {
                     if world
                         .given(&requirement, Budget::default())
                         .map_err(|e| error(span, e.to_string()))?
@@ -2504,6 +2613,13 @@ impl Checker<'_, '_> {
                         self.self_types.insert(*member, ty.clone());
                     }
                 }
+                ItemKind::Deriver(_) => {
+                    let ty = Term::Rigid {
+                        declaration: declaration(self.package, &self.package_identities, owner),
+                        sort: Sort::Type,
+                    };
+                    self.self_types.insert(owner, ty);
+                }
                 ItemKind::Struct(_) | ItemKind::Enum(_) => {
                     let members = match &item.kind {
                         ItemKind::Struct(def) => &def.nested_items,
@@ -2680,21 +2796,29 @@ impl Checker<'_, '_> {
         // A named Type first exposes methods of the represented subject.
         // When none matches, the Type value itself may have an inherent
         // receiver method (for example checked structural reflection).
-        if domain_method.is_none() && (projected_subject || self.is_static_method_subject(view)) {
+        let cast_type_subject =
+            matches!(view.kind, H::Cast(base, _) if self.is_type_receiver(base)?);
+        if domain_method.is_none()
+            && (projected_subject || self.is_static_method_subject(view) || cast_type_subject)
+        {
             if let Some(method) =
                 self.static_method(view, name.name.as_str(), callee.span, callee.hir_id)?
             {
                 return Ok(Some((method, vec![])));
             }
         }
-        if matches!(view.kind, H::Cast(base, _) if self.is_static_method_subject(base)) {
+        if cast_type_subject
+            || matches!(view.kind, H::Cast(base, _) if self.is_static_method_subject(base))
+        {
             return Ok(None);
         }
         let (base, interface) = match view.kind {
             // A conversion to a Type produces the receiver; only a trait
             // target selects a method interface on the original receiver.
             H::Cast(_, target) if !self.is_trait_view_target(target) => (view, None),
-            H::Cast(base, interface) if !self.is_static_method_subject(base) => {
+            H::Cast(base, interface)
+                if !self.is_static_method_subject(base) && !cast_type_subject =>
+            {
                 (base, Some(interface))
             }
             _ if self

@@ -5,7 +5,7 @@ use super::*;
 use crate::implementation::{EvidenceError, TypeAssessment};
 use crate::ptc::{Proof, ProofError, TraitQuery, UnknownReason};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConditionSupport {
     context: Context,
     facts: Vec<ConditionFact>,
@@ -13,12 +13,12 @@ pub struct ConditionSupport {
     proof: Proof,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ConditionFact {
     query: TraitQuery,
     truth: bool,
     given: Option<TraitRequirement>,
-    resolution: Option<Box<Resolution>>,
+    resolution: Option<Arc<Resolution>>,
     input_projections: Vec<ProjectionEquation>,
 }
 
@@ -146,6 +146,8 @@ mod tests {
             world: &world,
             scope: ResolutionScope::capture(&world),
             active: HashSet::new(),
+            completed: HashMap::new(),
+            hit_active: false,
             remaining: 100_000,
         };
         let key = (
@@ -217,6 +219,8 @@ mod tests {
                 world: &world,
                 scope: ResolutionScope::capture(&world),
                 active: HashSet::new(),
+                completed: HashMap::new(),
+                hit_active: false,
                 remaining: 100_000,
             };
             let result = solver.condition_fact(
@@ -338,9 +342,15 @@ impl Solver<'_, '_> {
         let mut context = self.world.context.fork();
         let mut facts = Vec::new();
         let mut pending_reason = None;
+        let trait_goal = matches!(goal, Formula::Trait(_));
         for query in inputs.traits {
+            let final_reserve = if trait_goal {
+                (self.remaining / 8).min(256)
+            } else {
+                self.remaining / (obligations + 1)
+            };
             let allowance = Budget {
-                steps: self.remaining / (obligations + 1),
+                steps: self.remaining.saturating_sub(final_reserve) / obligations,
                 ..budget
             };
             obligations -= 1;
@@ -363,8 +373,13 @@ impl Solver<'_, '_> {
         }
         let mut projections = Vec::new();
         for ty in inputs.projections {
+            let final_reserve = if trait_goal {
+                (self.remaining / 8).min(256)
+            } else {
+                self.remaining / (obligations + 1)
+            };
             let allowance = Budget {
-                steps: self.remaining / (obligations + 1),
+                steps: self.remaining.saturating_sub(final_reserve) / obligations,
                 ..budget
             };
             obligations -= 1;
@@ -621,7 +636,7 @@ impl Solver<'_, '_> {
             query: query.clone(),
             truth,
             given: None,
-            resolution: Some(Box::new(resolution)),
+            resolution: Some(Arc::new(resolution)),
             input_projections,
         })
     }

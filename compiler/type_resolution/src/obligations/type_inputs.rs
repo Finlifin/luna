@@ -204,6 +204,10 @@ fn existing_inputs(
                 Formula::Kind(query) => pending.push(Input::Term(&query.ty)),
                 Formula::NotSized(query) => pending.push(Input::Term(&query.ty)),
                 Formula::HasHeadShape(query) => pending.push(Input::Term(&query.ty)),
+                Formula::HasField(query) => {
+                    pending.push(Input::Term(&query.ty));
+                    pending.push(Input::Term(&query.field));
+                }
                 Formula::RowContains(query) => {
                     pending.push(Input::Term(&query.row));
                     match &query.label {

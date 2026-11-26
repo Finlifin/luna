@@ -194,6 +194,10 @@ pub(crate) fn admit_in(
                         charge(fuel, 1)?;
                         pending.push(Work::Term(ty));
                     }
+                    TypePredicate::HasField { subject, field } => {
+                        charge(fuel, 2)?;
+                        pending.extend([Work::Term(subject), Work::Term(field)]);
+                    }
                     TypePredicate::Trait(capability) => {
                         charge(fuel, 1)?;
                         pending.push(Work::Capability(capability));

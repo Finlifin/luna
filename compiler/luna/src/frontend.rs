@@ -691,6 +691,7 @@ pub(crate) fn source_protocols(
         implicit_passing: options.implicit_passing_protocol.as_deref(),
         call_context: options.call_context_type.as_deref(),
         call_description: options.call_description_type.as_deref(),
+        source_span: options.source_span_type.as_deref(),
         arithmetic: std::array::from_fn(|index| options.arithmetic_protocols[index].as_deref()),
         compound_arithmetic: std::array::from_fn(|index| {
             options.compound_arithmetic_protocols[index].as_deref()

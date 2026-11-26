@@ -1,6 +1,9 @@
 use List;
 use bindings;
-use builtin.{Integer, Symbol, Type, bool, void}
+use builtin.{ExtendedVariadicCollector, Integer, Symbol, Type, bool, void}
+use ops_impl.ComptimeIndex;
+use reflection_impl.structure.reflect_record;
+use structs_impl;
 
 pub use bindings.Object;
 
@@ -305,5 +308,37 @@ impl Object {
             index += 1;
         }
         result
+    }
+}
+
+comptime impl ExtendedVariadicCollector for Object {
+    comptime fn comptime_extended_variadic_collect(properties: Ps) -> Object where Ps {
+        var out: Object = {}
+        inline if Type.predicates.is_anonymous_record(Ps) {
+            reflect_record(Ps) match {
+                info! => {
+                    let count = info.fields().length();
+                    var index: Integer = 0;
+                    while index < count {
+                        let field = info.fields()[index];
+                        field.name() match {
+                            sym? => {
+                                out = out.concat(
+                                    bindings.comptime_field_entry(
+                                        properties,
+                                        sym,
+                                        field.field_type(),
+                                    )
+                                );
+                            },
+                            null => {},
+                        }
+                        index = index + 1;
+                    }
+                },
+                error _ => {},
+            }
+        }
+        out
     }
 }

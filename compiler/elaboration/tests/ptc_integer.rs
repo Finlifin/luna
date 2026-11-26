@@ -46,6 +46,7 @@ fn eval(formula: &F, integers: &BTreeMap<DeclarationId, i128>) -> bool {
         | F::Trait(_)
         | F::IntCongruent(_)
         | F::HasHeadShape(_)
+        | F::HasField(_)
         | F::RowContains(_)
         | F::RowSubset(_)
         | F::RowDisjoint(_) => panic!("integer-only oracle"),

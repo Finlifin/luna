@@ -205,6 +205,22 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             K::AnonymousField { .. } | K::Field { .. } if expression_place(expr).is_none() => {
                 self.project_temporary(expr, flow, depth + 1)
             }
+            K::NamedField { value, name } => {
+                self.named_field_origins(expr, value, name, flow, depth)
+            }
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            } => self.enum_variant_field_ptr_origins(expr, pointer, variant, field, flow, depth),
+            K::ConstructStruct { fields } => self.evaluate_value_origins(fields, flow, depth + 1),
+            K::ConstructEnum { variant, fields } => {
+                self.expr(variant, flow, depth + 1)?;
+                self.evaluate_value_origins(fields, flow, depth + 1)
+            }
+            K::TupleAppend { tuple, element } => {
+                self.tuple_append_origins(tuple, element, flow, depth)
+            }
             K::Match { value, arms } => self.in_temporary_scope(
                 expr.source,
                 TemporaryBoundary::Match,
@@ -933,5 +949,142 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             }
         }
         Ok(result_origins)
+    }
+
+    #[inline(never)]
+    fn named_field_origins(
+        &mut self,
+        _expr: &Expr,
+        value: &Expr,
+        name: &str,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        if let Some(index) = resolve_concrete_field_index_by_name(self.package, &value.ty, name) {
+            let mut projected = BTreeMap::new();
+            for (path, targets) in origins {
+                if let Some(rest) = path.strip_prefix(&[index][..]) {
+                    projected.insert(rest.to_vec(), targets);
+                }
+            }
+            flow.value_pointer_guards = flow
+                .value_pointer_guards
+                .iter()
+                .filter_map(|(slot, entries)| {
+                    slot.strip_prefix(&[index][..])
+                        .map(|rest| (rest.to_vec(), entries.clone()))
+                })
+                .collect();
+            flow.value_variants = flow
+                .value_variants
+                .iter()
+                .filter_map(|(path, tags)| {
+                    path.strip_prefix(&[index][..])
+                        .map(|rest| (rest.to_vec(), tags.clone()))
+                })
+                .collect();
+            flow.value_callables = flow
+                .value_callables
+                .iter()
+                .filter_map(|(path, callable)| {
+                    path.strip_prefix(&[index][..])
+                        .map(|rest| (rest.to_vec(), callable.clone()))
+                })
+                .collect();
+            flow.value_callable = flow.value_callables.get(&vec![]).cloned();
+            return Ok(projected);
+        }
+        flow.value_pointer_guards.clear();
+        flow.value_variants.clear();
+        flow.value_callables.clear();
+        flow.value_callable = None;
+        Ok(BTreeMap::new())
+    }
+
+    #[inline(never)]
+    fn enum_variant_field_ptr_origins(
+        &mut self,
+        expr: &Expr,
+        pointer: &Expr,
+        variant: &Expr,
+        field: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let targets = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+        self.expr(variant, flow, depth + 1)?;
+        self.expr(field, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        let targets = targets.unwrap_or_default();
+        self.pointer_work(&targets, expr.source)?;
+        let layout = self.pointer_input_layout(completion_type(&expr.ty), expr.source)?;
+        let mut origins = BTreeMap::new();
+        for leaf in layout {
+            if !leaf.guards.is_empty() {
+                let mut guarded = PointerTargetGuards::new();
+                self.merge_pointer_conditions(&mut guarded, &targets, &leaf.guards, expr.source)?;
+                flow.value_pointer_guards
+                    .insert(leaf.storage_fields.clone(), guarded);
+            }
+            origins.insert(leaf.storage_fields, targets.clone());
+        }
+        Ok(origins)
+    }
+
+    #[inline(never)]
+    fn tuple_append_origins(
+        &mut self,
+        tuple: &Expr,
+        element: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let prefix_len = resolve_tuple_len(self.package, completion_type(&tuple.ty)).unwrap_or(0);
+        let mut origins = self.evaluate_value_origins(tuple, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        let mut guards = std::mem::take(&mut flow.value_pointer_guards);
+        let mut domains = std::mem::take(&mut flow.value_variants);
+        let mut callables = std::mem::take(&mut flow.value_callables);
+        let elem_origins = self.evaluate_value_origins(element, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        for (path, targets) in elem_origins {
+            let mut nested = vec![prefix_len];
+            nested.extend(path);
+            origins.insert(nested, targets);
+        }
+        for (mut slot, mut entries) in std::mem::take(&mut flow.value_pointer_guards) {
+            slot.insert(0, prefix_len);
+            for conditions in entries.values_mut() {
+                for (path, _) in conditions {
+                    path.insert(0, prefix_len);
+                }
+            }
+            guards.insert(slot, entries);
+        }
+        for (path, tags) in std::mem::take(&mut flow.value_variants) {
+            let mut nested = vec![prefix_len];
+            nested.extend(path);
+            domains.insert(nested, tags);
+        }
+        for (path, callable) in std::mem::take(&mut flow.value_callables) {
+            let mut nested = vec![prefix_len];
+            nested.extend(path);
+            callables.insert(nested, callable);
+        }
+        flow.value_pointer_guards = guards;
+        flow.value_variants = domains;
+        flow.value_callables = callables;
+        flow.value_callable = flow.value_callables.get(&vec![]).cloned();
+        Ok(origins)
     }
 }

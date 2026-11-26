@@ -86,56 +86,74 @@ impl Checker<'_, '_> {
                     None => Ok(None),
                 }
             };
+        let positive_entailed = matches!(
+            self.context
+                .prove_metered(fact.clone(), &mut crate::ptc::Budget::default()),
+            crate::ptc::Outcome::Entailed(_)
+        );
+        let negative_entailed = !positive_entailed
+            && matches!(
+                self.context
+                    .prove_metered(fact.clone().negate(), &mut crate::ptc::Budget::default()),
+                crate::ptc::Outcome::Entailed(_)
+            );
         let has_else = no.is_some();
         let saved = self.context.clone();
         let saved_control_result = self.control.result.clone();
-        self.context.assume(fact.clone());
-        let yes_returns = simplify_opt(self, returns, expr.span)?;
-        let yes_expected = if has_else {
-            simplify_opt(self, expected, expr.span)?
-        } else {
-            None
-        };
-        if let Some(target) = saved_control_result.as_ref()
-            && matches!(target, Term::DeferredErrorResult { .. })
-        {
-            self.control.result = Some(self.simplify_deferred_error_result(target, expr.span)?);
-        }
-        self.definition_refinements
-            .requirements
-            .push(predicate.clone());
-        let yes = self.describe_open_block(
-            yes,
-            &mut locals.clone(),
-            yes_returns.as_ref(),
-            yes_expected.as_ref(),
-            depth + 1,
-        );
-        self.definition_refinements.requirements.pop();
-        self.control.result = saved_control_result.clone();
-        self.context = saved.clone();
-        let yes = yes?;
-        let yes = if !has_else && !matches!(&yes, D::Known(ty) if is_never(ty)) {
-            D::Known(p(P::Void))
-        } else {
-            yes
-        };
-        let no = if let Some(no) = no {
-            self.context.assume(fact.negate());
-            let no_returns = simplify_opt(self, returns, expr.span)?;
-            let no_expected = simplify_opt(self, expected, expr.span)?;
+        let check_yes = |this: &mut Self| -> Result<D, Error> {
+            this.context.assume(fact.clone());
+            let yes_returns = simplify_opt(this, returns, expr.span)?;
+            let yes_expected = if has_else {
+                simplify_opt(this, expected, expr.span)?
+            } else {
+                None
+            };
             if let Some(target) = saved_control_result.as_ref()
                 && matches!(target, Term::DeferredErrorResult { .. })
             {
-                self.control.result = Some(self.simplify_deferred_error_result(target, expr.span)?);
+                this.control.result = Some(this.simplify_deferred_error_result(target, expr.span)?);
             }
-            self.definition_refinements
+            this.definition_refinements
                 .requirements
-                .push(n::TypePredicate::Not(Box::new(predicate)));
-            let result = if let H::If(cond2, yes2, no2) = no.kind
-                && self.is_type_assumption(cond2)
+                .push(predicate.clone());
+            let yes = this.describe_open_block(
+                yes,
+                &mut locals.clone(),
+                yes_returns.as_ref(),
+                yes_expected.as_ref(),
+                depth + 1,
+            );
+            this.definition_refinements.requirements.pop();
+            this.control.result = saved_control_result.clone();
+            this.context = saved.clone();
+            let yes = yes?;
+            Ok(
+                if !has_else && !matches!(&yes, D::Known(ty) if is_never(ty)) {
+                    D::Known(p(P::Void))
+                } else {
+                    yes
+                },
+            )
+        };
+        let check_no = |this: &mut Self| -> Result<D, Error> {
+            let Some(no) = no else {
+                return Ok(D::Known(p(P::Void)));
+            };
+            this.context.assume(fact.clone().negate());
+            let no_returns = simplify_opt(this, returns, expr.span)?;
+            let no_expected = simplify_opt(this, expected, expr.span)?;
+            if let Some(target) = saved_control_result.as_ref()
+                && matches!(target, Term::DeferredErrorResult { .. })
             {
-                self.describe_inline_trait_guard(
+                this.control.result = Some(this.simplify_deferred_error_result(target, expr.span)?);
+            }
+            this.definition_refinements
+                .requirements
+                .push(n::TypePredicate::Not(Box::new(predicate.clone())));
+            let result = if let H::If(cond2, yes2, no2) = no.kind
+                && this.is_type_assumption(cond2)
+            {
+                this.describe_inline_trait_guard(
                     no,
                     cond2,
                     yes2,
@@ -146,7 +164,7 @@ impl Checker<'_, '_> {
                     depth + 1,
                 )
             } else {
-                self.describe_open_expression(
+                this.describe_open_expression(
                     no,
                     &mut locals.clone(),
                     no_returns.as_ref(),
@@ -154,13 +172,24 @@ impl Checker<'_, '_> {
                     depth + 1,
                 )
             };
-            self.definition_refinements.requirements.pop();
-            self.control.result = saved_control_result;
-            self.context = saved;
-            result?
-        } else {
-            D::Known(p(P::Void))
+            this.definition_refinements.requirements.pop();
+            this.control.result = saved_control_result.clone();
+            this.context = saved.clone();
+            result
         };
+        if positive_entailed {
+            let yes = check_yes(self)?;
+            self.require_description(&yes, expected, expr.span)?;
+            return Ok(yes);
+        }
+        if negative_entailed {
+            let no = check_no(self)?;
+            self.require_description(&no, expected, expr.span)?;
+            return Ok(no);
+        }
+        self.open_definition_needs_instance = true;
+        let yes = check_yes(self)?;
+        let no = check_no(self)?;
         let result = match (&yes, &no) {
             (D::Known(a), D::Known(b)) if is_never(a) && is_never(b) => D::Known(p(P::Never)),
             (D::Known(_), D::Known(_)) if has_else && matches!(expected, Some(D::Known(_))) => {

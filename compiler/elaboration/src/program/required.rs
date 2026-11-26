@@ -89,26 +89,31 @@ impl Invocation {
             &checker.definition_attributes,
             &self.prepared.world.package().definition_attributes,
         );
-        let prepared = match try_memoize_pure_invocation(
-            self.prepared,
-            &self.values,
-            supply_attributes,
-            &checker.protocols,
-            &mut steps,
-            span,
-            self.package,
-            &self.identities,
-        )? {
-            Ok((cached, definitions)) => {
-                checker.required_steps = steps;
-                return Ok(CompletedInvocation {
-                    result: cached,
-                    definitions,
-                    span: self.span,
-                });
+        let prepared = if checker.active_implicit_call_site.is_some() {
+            self.prepared
+        } else {
+            match try_memoize_pure_invocation(
+                self.prepared,
+                &self.values,
+                supply_attributes,
+                &checker.protocols,
+                &mut steps,
+                span,
+                self.package,
+                &self.identities,
+            )? {
+                Ok((cached, definitions)) => {
+                    checker.required_steps = steps;
+                    return Ok(CompletedInvocation {
+                        result: cached,
+                        definitions,
+                        span: self.span,
+                    });
+                }
+                Err(prepared) => prepared,
             }
-            Err(prepared) => prepared,
         };
+        let implicit_call_site = checker.active_implicit_call_site.clone();
         let checker = std::cell::RefCell::new(checker);
         let source_failure = std::cell::Cell::new(None);
         let lookup = |implementation, member, remaining: &mut u64| {
@@ -158,6 +163,7 @@ impl Invocation {
             Some(data::Reader {
                 owner: &owner,
                 attributes: supply_attributes.then_some(&attributes),
+                implicit_call_site: implicit_call_site.as_ref(),
                 form: &lookup,
             }),
         );
@@ -319,12 +325,27 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn contract_parameter_is_ptc_symbol(&self, value: &Expr<'_>) -> bool {
+        match value.kind {
+            H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id) => {
+                self.locals.get(&local(id)) == Some(&p(P::Symbol))
+            }
+            H::ResolvedClauseParam(_, id) => {
+                self.trait_input_domain(DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                }) == Some(p(P::Symbol))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn program_requirement(&mut self, value: &Expr<'_>) -> Result<bool, Error> {
         // Program predicates need not mention an ordinary parameter: a
         // completed associated Boolean can be the whole condition. Classify
         // before elaborating; a failed type proof must never trigger fallback
         // interpretation under a different meaning.
-        fn type_shape(
+        fn classify(
             checker: &mut Checker<'_, '_>,
             value: &Expr<'_>,
             depth: usize,
@@ -335,35 +356,50 @@ impl Checker<'_, '_> {
                     "program precondition classification depth exhausted",
                 ));
             }
-            Ok(match &value.kind {
-                _ if checker.ptc_integer_comparison(value).is_some() => true,
-                H::Binary(BinOp::Eq | BinOp::Ne, left, right) => {
-                    !matches!(left.kind, H::Lit(_))
+            if checker.type_predicate_not_sized_call(value)?.is_some()
+                || checker.type_predicate_kind_call(value)?.is_some()
+                || checker.type_predicate_eq_call(value)?.is_some()
+                || checker.type_predicate_has_field_call(value)?.is_some()
+                || matches!(value.kind, H::TraitBound(..))
+            {
+                return Ok(false);
+            }
+            match &value.kind {
+                H::Unary(UnOp::Not, inner) => classify(checker, inner, depth + 1),
+                H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, left, right) => {
+                    Ok(classify(checker, left, depth + 1)? || classify(checker, right, depth + 1)?)
+                }
+                _ if checker.ptc_integer_comparison(value).is_some() => {
+                    mentions_value_parameter(value, 0, &|v| {
+                        checker.contract_parameter_is_type(v)
+                            || checker.contract_parameter_is_ptc_integer(v)
+                            || checker.contract_parameter_is_ptc_symbol(v)
+                    })
+                }
+                H::Binary(BinOp::Eq | BinOp::Ne, left, right)
+                    if !matches!(left.kind, H::Lit(_))
                         && !matches!(right.kind, H::Lit(_))
                         && !checker
                             .contract_projection_domain(left)?
                             .is_some_and(|ty| ty != p(P::Type))
                         && !checker
                             .contract_projection_domain(right)?
-                            .is_some_and(|ty| ty != p(P::Type))
+                            .is_some_and(|ty| ty != p(P::Type)) =>
+                {
+                    mentions_value_parameter(value, 0, &|v| {
+                        checker.contract_parameter_is_type(v)
+                            || checker.contract_parameter_is_ptc_integer(v)
+                            || checker.contract_parameter_is_ptc_symbol(v)
+                    })
                 }
-                H::TraitBound(..)
-                | H::Lit(hir::Lit {
+                H::Lit(hir::Lit {
                     kind: hir::LitKind::Bool(_),
                     ..
-                }) => true,
-                H::Unary(UnOp::Not, inner) => type_shape(checker, inner, depth + 1)?,
-                H::Binary(BinOp::And | BinOp::Or | BinOp::Implies, left, right) => {
-                    type_shape(checker, left, depth + 1)? && type_shape(checker, right, depth + 1)?
-                }
-                _ if checker.type_predicate_not_sized_call(value)?.is_some() => true,
-                _ if checker.type_predicate_kind_call(value)?.is_some() => true,
-                _ => false,
-            })
+                }) => Ok(false),
+                _ => Ok(true),
+            }
         }
-        Ok(mentions_value_parameter(value, 0, &|value| {
-            self.contract_parameter_is_type(value) || self.contract_parameter_is_ptc_integer(value)
-        })? || !type_shape(self, value, 0)?)
+        classify(self, value, 0)
     }
 
     pub(super) fn ensure_contract(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
@@ -568,7 +604,12 @@ impl Checker<'_, '_> {
                         ));
                     };
                     if self.program_requirement(value)? {
-                        if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        let item_kind = &self.package.item(owner).unwrap().kind;
+                        if !matches!(
+                            item_kind,
+                            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
+                                if !sig.modifiers.is_normal_form_head
+                        ) && !matches!(item_kind, ItemKind::Deriver(_))
                         {
                             return Err(error(
                                 clause.span,
@@ -2357,6 +2398,10 @@ pub(super) fn requirement_terms<'a>(
                 terms.push(b);
             }
             n::TypePredicate::Kind(ty, _) | n::TypePredicate::NotSized(ty) => terms.push(ty),
+            n::TypePredicate::HasField { subject, field } => {
+                terms.push(subject);
+                terms.push(field);
+            }
             n::TypePredicate::Not(p) => pending.push((p, depth + 1)),
             n::TypePredicate::And(ps) | n::TypePredicate::Or(ps) => {
                 pending.extend(ps.iter().map(|p| (p, depth + 1)))
@@ -2404,6 +2449,10 @@ pub(super) fn map_requirement(
         ),
         Q::Kind(ty, kind) => Q::Kind(map(ty)?, *kind),
         Q::NotSized(ty) => Q::NotSized(map(ty)?),
+        Q::HasField { subject, field } => Q::HasField {
+            subject: map(subject)?,
+            field: map(field)?,
+        },
         Q::Not(p) => Q::Not(Box::new(map_requirement(p, map, span, depth + 1)?)),
         Q::And(ps) | Q::Or(ps) => {
             let parts = ps
@@ -2776,9 +2825,57 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
             | K::TypeNotSized { operand: value }
-            | K::TypeLayout { operand: value, .. } => stack.push(value),
+            | K::TypeLayout { operand: value, .. }
+            | K::NamedField { value, .. }
+            | K::ConstructStruct { fields: value }
+            | K::EnumVariantIndex(value)
+            | K::StructFieldSpans(value)
+            | K::RecordFieldSpans(value)
+            | K::DeclarationSpan(value)
+            | K::EnumVariantSpans(value)
+            | K::EnumVariantFieldSpans(value)
+            | K::ComptimeEnumVariantIndex(value)
+            | K::ComptimeEnumVariantFieldValues(value) => stack.push(value),
+            K::TypeHasField {
+                subject: a,
+                field: b,
+            }
+            | K::TypeFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::StructFieldType {
+                subject: a,
+                field: b,
+            }
+            | K::FieldPtr {
+                pointer: a,
+                field: b,
+            }
+            | K::FieldValue { value: a, field: b }
+            | K::ConstructEnum {
+                variant: a,
+                fields: b,
+            }
+            | K::TupleAppend {
+                tuple: a,
+                element: b,
+            } => {
+                stack.push(a);
+                stack.push(b);
+            }
             K::BitWindow {
                 value, start, end, ..
+            }
+            | K::EnumVariantFieldPtr {
+                pointer: value,
+                variant: start,
+                field: end,
+            }
+            | K::ComptimeFieldEntry {
+                value,
+                field: start,
+                ty: end,
             } => {
                 stack.push(value);
                 stack.push(start);
@@ -2805,7 +2902,8 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
             | K::FunctionType { .. }
             | K::ClosureType { .. }
             | K::TraitObjectType { .. }
-            | K::FunctionResultType { .. } => return false,
+            | K::FunctionResultType { .. }
+            | K::ImplicitQuery { .. } => return false,
         }
     }
     true
@@ -3102,6 +3200,7 @@ fn scope_for_required(
         protocols_cfg.implicit_passing,
         protocols_cfg.call_context,
         protocols_cfg.call_description,
+        protocols_cfg.source_span,
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,

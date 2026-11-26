@@ -1,4 +1,4 @@
-use bindings.{from_usize, to_isize, to_usize}
+use bindings.{implicit_src, to_isize, to_usize}
 use builtin.{CallDescription, Clone, Context, Copy, ImplicitPassing, Integer, Splice, Type, bool, isize, str, usize}
 use numeric.equality.ComptimeEq;
 
@@ -83,12 +83,7 @@ impl ImplicitPassing<.__src__> for SourceSpan {
         callee: Context,
         calling: CallDescription,
     ) -> < |- SourceSpan > {
-        let span_val = SourceSpan.new(
-            calling.call_file(),
-            from_usize(calling.call_byte_start()),
-            from_usize(calling.call_byte_end()),
-            calling.expansion_id(),
-        );
+        let span_val = implicit_src(calling);
         '( span_val )
     }
 }

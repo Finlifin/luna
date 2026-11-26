@@ -435,6 +435,30 @@ impl Checker<'_, '_> {
                 arguments,
             } = shape
             else {
+                let field_sym = Term::Symbol(field.name.as_str().into());
+                let has_field_pred = n::TypePredicate::HasField {
+                    subject: shape.clone(),
+                    field: field_sym.clone(),
+                };
+                if self
+                    .establish_type_requirement(&has_field_pred, field.span)
+                    .is_ok()
+                {
+                    let field_ty = Term::field_type(shape, field_sym);
+                    pointer = n::Expr {
+                        source: source(expr.span),
+                        ty: Term::Pointer(Box::new(field_ty)),
+                        kind: K::FieldPtr {
+                            pointer: Box::new(pointer),
+                            field: Box::new(n::Expr {
+                                source: source(field.span),
+                                ty: p(P::Symbol),
+                                kind: K::Literal(n::Literal::Symbol(field.name.to_string())),
+                            }),
+                        },
+                    };
+                    continue;
+                }
                 return Err(error(
                     field.span,
                     "dereferenced field place requires a struct; spell pointer indirection explicitly",
@@ -609,6 +633,30 @@ impl Checker<'_, '_> {
                 arguments,
             } = shape
             else {
+                let field_sym = Term::Symbol(field.name.as_str().into());
+                let has_field_pred = n::TypePredicate::HasField {
+                    subject: shape.clone(),
+                    field: field_sym.clone(),
+                };
+                if self
+                    .establish_type_requirement(&has_field_pred, field.span)
+                    .is_ok()
+                {
+                    let field_ty = Term::field_type(shape, field_sym);
+                    pointer = n::Expr {
+                        source: source(expr.span),
+                        ty: Term::Pointer(Box::new(field_ty)),
+                        kind: K::FieldPtr {
+                            pointer: Box::new(pointer),
+                            field: Box::new(n::Expr {
+                                source: source(field.span),
+                                ty: p(P::Symbol),
+                                kind: K::Literal(n::Literal::Symbol(field.name.to_string())),
+                            }),
+                        },
+                    };
+                    continue;
+                }
                 return Err(error(
                     field.span,
                     "projected storage place requires a struct or record",

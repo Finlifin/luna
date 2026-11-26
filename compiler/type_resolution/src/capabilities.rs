@@ -7,7 +7,7 @@ use crate::implementation::{
 use crate::ptc::{Budget, Context, Formula, Outcome};
 use nir::program::{Implementation, InterfaceInstance, Trait, TraitRequirement};
 use nir::{DeclarationId as Id, NominalAdmissionError as QueryError, Term};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ mod given;
 mod proposition_inputs;
 mod propositions;
 mod qualification;
+
 pub use conditions::ConditionSupport;
 pub use propositions::{
     PredicateDemand, TraitDecision, TraitTruth, WorldProposition, check_predicate_with,
@@ -28,11 +29,13 @@ pub enum Qualification {
     Excluded(Vec<Witness>),
     Pending(QueryError),
 }
+
 #[derive(Clone, Debug)]
 pub struct Witness {
     pub requirement: TraitRequirement,
     pub origin: Origin,
 }
+
 #[derive(Clone, Debug)]
 pub enum Origin {
     Given(TraitRequirement),
@@ -45,7 +48,8 @@ pub enum Origin {
     /// global PTC theorem and must not survive implementation-world changes.
     Absent,
 }
-#[derive(Debug)]
+
+#[derive(Clone, Debug)]
 pub struct Resolution {
     // Shared by the entire recursive query, never reconstructed from a public
     // assessment table. A proof cannot escape its caller's premise scope.
@@ -54,11 +58,13 @@ pub struct Resolution {
     pub qualifications: BTreeMap<Id, Qualification>,
     pub condition_support: BTreeMap<Id, Vec<ConditionSupport>>,
 }
+
 #[derive(Debug)]
 struct ResolutionScope {
     context: Context,
     assumptions: Vec<TraitRequirement>,
 }
+
 impl ResolutionScope {
     fn capture(world: &World<'_>) -> Arc<Self> {
         Arc::new(Self {
@@ -66,10 +72,12 @@ impl ResolutionScope {
             assumptions: world.assumptions.to_vec(),
         })
     }
+
     fn matches(&self, world: &World<'_>) -> bool {
         self.context == *world.context && self.assumptions == world.assumptions
     }
 }
+
 #[derive(Clone, Copy)]
 pub struct World<'a> {
     pub index: &'a Index,
@@ -322,12 +330,16 @@ pub fn subject_requirements_with_layouts(
     }
     output
 }
+
 struct Solver<'a, 'w> {
     world: &'a World<'w>,
     scope: Arc<ResolutionScope>,
     active: HashSet<(InterfaceInstance, Term)>,
+    completed: HashMap<(InterfaceInstance, Term), Arc<Resolution>>,
+    hit_active: bool,
     remaining: usize,
 }
+
 impl World<'_> {
     /// Search caller premises. Only Ok(None) denotes a completed search
     /// without a witness; failures must not authorize negative selection.
@@ -338,6 +350,7 @@ impl World<'_> {
     ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
         self.given_metered(requirement, &mut { budget })
     }
+
     pub fn given_metered(
         &self,
         requirement: &TraitRequirement,
@@ -345,6 +358,7 @@ impl World<'_> {
     ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
         given::lookup(self, requirement, *budget, &[], &[], &mut budget.steps)
     }
+
     pub fn given_in_scope(
         &self,
         requirement: &TraitRequirement,
@@ -367,6 +381,7 @@ impl World<'_> {
         };
         given::lookup(self, requirement, budget, parameters, &frames, &mut fuel)
     }
+
     pub fn given_in_context(
         &self,
         requirement: &TraitRequirement,
@@ -374,6 +389,7 @@ impl World<'_> {
     ) -> Result<Option<TraitRequirement>, nir::NominalAdmissionError> {
         self.given_in_context_metered(requirement, &mut { budget })
     }
+
     pub(crate) fn given_in_context_metered(
         &self,
         requirement: &TraitRequirement,
@@ -388,6 +404,7 @@ impl World<'_> {
             &mut budget.steps,
         )
     }
+
     /// Incomplete runtime domains retain the caller's sort frame. No complete
     /// telescope or Type equality wrapper is invented for these inputs.
     pub fn given_in_input_scope(
@@ -400,6 +417,7 @@ impl World<'_> {
             budget.steps
         })
     }
+
     pub fn resolve(
         &self,
         interface: Id,
@@ -408,6 +426,7 @@ impl World<'_> {
     ) -> Result<Resolution, QueryError> {
         self.resolve_instance(&interface.into(), subject, budget)
     }
+
     pub fn resolve_instance(
         &self,
         interface: &InterfaceInstance,
@@ -416,6 +435,7 @@ impl World<'_> {
     ) -> Result<Resolution, QueryError> {
         self.resolve_instance_metered(interface, subject, &mut { budget })
     }
+
     /// Report work tracked by the capability solver, including failed queries.
     /// Candidate matching retains its own bounded subquery allowances.
     pub fn resolve_instance_metered(
@@ -428,12 +448,15 @@ impl World<'_> {
             world: self,
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
+            completed: HashMap::new(),
+            hit_active: false,
             remaining: budget.steps,
         };
         let result = solver.resolve(interface, subject, *budget, 0);
         budget.steps = budget.steps.min(solver.remaining);
         result
     }
+
     pub(crate) fn resolve_projected_instance_metered(
         &self,
         interface: &InterfaceInstance,
@@ -444,6 +467,8 @@ impl World<'_> {
             world: self,
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
+            completed: HashMap::new(),
+            hit_active: false,
             remaining: budget.steps,
         };
         let result = (|| {
@@ -478,6 +503,8 @@ impl World<'_> {
             world: self,
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
+            completed: HashMap::new(),
+            hit_active: false,
             remaining: budget.steps,
         };
         let mut qualifications = BTreeMap::new();
@@ -530,6 +557,7 @@ impl World<'_> {
         })
     }
 }
+
 impl Qualification {
     fn state(&self) -> Applicability {
         match self {
@@ -539,6 +567,7 @@ impl Qualification {
         }
     }
 }
+
 impl Solver<'_, '_> {
     fn resolve(
         &mut self,
@@ -571,11 +600,17 @@ impl Solver<'_, '_> {
             )?;
         }
         let key = (interface.clone(), subject.clone());
+        if let Some(cached) = self.completed.get(&key) {
+            return Ok(Resolution::clone(cached));
+        }
         if !self.active.insert(key.clone()) {
+            self.hit_active = true;
             return Err(QueryError::Unresolved(
                 "recursive capability obligation remains pending".into(),
             ));
         }
+        let saved_hit = self.hit_active;
+        self.hit_active = false;
         let mut qualifications = BTreeMap::new();
         let mut condition_support = BTreeMap::new();
         let index = self.world.index;
@@ -621,7 +656,12 @@ impl Solver<'_, '_> {
                     };
                     let state = match &assessment {
                         crate::implementation::TypeAssessment::Applicable(evidence) => {
-                            let qualification = self.qualify(evidence, allowance, depth + 1);
+                            let qualification_budget = Budget {
+                                steps: budget.steps.min(self.remaining),
+                                ..budget
+                            };
+                            let qualification =
+                                self.qualify(evidence, qualification_budget, depth + 1);
                             let state = qualification.state();
                             qualifications.insert(evidence.implementation, qualification);
                             state
@@ -658,6 +698,18 @@ impl Solver<'_, '_> {
             })
         })();
         self.active.remove(&key);
+        let subtree_hit = self.hit_active;
+        self.hit_active = saved_hit || subtree_hit;
+        if !subtree_hit
+            && let Ok(resolution) = &result
+            && (matches!(
+                resolution.types.selection,
+                Selection::Selected(id)
+                    if matches!(resolution.qualifications.get(&id), Some(Qualification::Proved(_)))
+            ) || matches!(resolution.types.selection, Selection::NoApplicableCandidate))
+        {
+            self.completed.insert(key, Arc::new(resolution.clone()));
+        }
         result
     }
 
@@ -728,6 +780,7 @@ impl Solver<'_, '_> {
         }
         Ok(())
     }
+
     fn given(
         &mut self,
         requirement: &TraitRequirement,
@@ -742,6 +795,7 @@ impl Solver<'_, '_> {
             &mut self.remaining,
         )
     }
+
     fn prerequisite_type(
         &mut self,
         ty: &Term,
@@ -809,6 +863,7 @@ impl Solver<'_, '_> {
         normalized.map(|(ty, _)| ty)
     }
 }
+
 impl fmt::Display for Qualification {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -839,6 +894,7 @@ impl fmt::Display for Qualification {
         }
     }
 }
+
 impl fmt::Display for Witness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(capability-witness {} ", self.requirement)?;
@@ -864,6 +920,7 @@ impl fmt::Display for Witness {
         write!(f, ")")
     }
 }
+
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(capability-resolution {} (qualifications", self.types)?;

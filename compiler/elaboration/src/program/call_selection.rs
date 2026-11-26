@@ -697,7 +697,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         )
     }
 
-    fn selected_open_trait_method_target(
+    pub(super) fn selected_open_trait_method_target(
         &mut self,
         interface: DeclarationId,
         interface_arguments: &[Term],

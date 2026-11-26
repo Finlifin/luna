@@ -72,7 +72,12 @@ impl Checker<'_, '_> {
                             ),
                         ));
                     }
-                    if self.open_staged_locals.contains(&binding) {
+                    let is_closed_staged_const = self.immutable.contains(&binding)
+                        && self
+                            .generator_data
+                            .get(&binding)
+                            .is_some_and(Option::is_some);
+                    if self.open_staged_locals.contains(&binding) || is_closed_staged_const {
                         let ty = self
                             .locals
                             .get(&binding)

@@ -592,6 +592,10 @@ impl Refinement {
                 Formula::RowDisjoint(query) => {
                     Formula::row_disjoint(term(&query.left)?, term(&query.right)?)
                 }
+                Formula::HasField(query) => Formula::HasField(ptc::HasFieldQuery {
+                    ty: term(&query.ty)?,
+                    field: term(&query.field)?,
+                }),
                 Formula::Trait(query) => Formula::Trait(ptc::TraitQuery {
                     interface: query.interface,
                     subject: term(&query.subject)?,

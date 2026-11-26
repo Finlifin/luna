@@ -16,7 +16,109 @@ pub use hash.{BuildHasher, Hash, Hasher}
 -- ── Conversion ─────────────────────────────────────────────────────────────
 pub use conversion.{AsMut, AsRef, ConversionErr, From, InfallibleErr, Into, LiteralInto, TryFrom, TryInto}
 
+use primitives.*;
+
 -- ── Default ────────────────────────────────────────────────────────────────
 pub trait Default {
     fn default() -> Self;
+}
+
+impl Default for bool {
+    fn default() -> Self {
+        false
+    }
+}
+
+impl Default for void {
+    fn default() -> Self {}
+}
+
+impl Default for u8 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for u16 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for u32 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for u64 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for u128 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for usize {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for i8 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for i16 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for i32 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for i64 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for i128 {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for isize {
+    fn default() -> Self {
+        0
+    }
+}
+
+impl Default for f32 {
+    fn default() -> Self {
+        0.0
+    }
+}
+
+impl Default for f64 {
+    fn default() -> Self {
+        0.0
+    }
+}
+
+impl Default for str {
+    fn default() -> Self {
+        ""
+    }
 }

@@ -793,6 +793,10 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         work.push((Node::Type(b), depth + 1));
                     }
                     P::Kind(ty, _) | P::NotSized(ty) => work.push((Node::Type(ty), depth + 1)),
+                    P::HasField { subject, field } => {
+                        work.push((Node::Type(subject), depth + 1));
+                        work.push((Node::Type(field), depth + 1));
+                    }
                     P::Trait(requirement) => work.push((Node::Requirement(requirement), depth + 1)),
                     P::Not(inner) => work.push((Node::Predicate(inner), depth + 1)),
                     P::And(items) | P::Or(items) => {
@@ -1214,6 +1218,16 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::ObjectEdit { subject: value, .. }
                     | K::StructFieldNames(value)
                     | K::RecordFieldNames(value)
+                    | K::ImplicitQuery { operand: value, .. }
+                    | K::ConstructStruct { fields: value }
+                    | K::EnumVariantIndex(value)
+                    | K::StructFieldSpans(value)
+                    | K::RecordFieldSpans(value)
+                    | K::DeclarationSpan(value)
+                    | K::EnumVariantSpans(value)
+                    | K::EnumVariantFieldSpans(value)
+                    | K::ComptimeEnumVariantIndex(value)
+                    | K::ComptimeEnumVariantFieldValues(value)
                     | K::BitVecType(value)
                     | K::FloatNegate(value)
                     | K::IntegerNegate(value)
@@ -1246,6 +1260,34 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     }
                     K::ListConcat(left, right)
                     | K::TypeListIndex(left, right)
+                    | K::TypeHasField {
+                        subject: left,
+                        field: right,
+                    }
+                    | K::TypeFieldType {
+                        subject: left,
+                        field: right,
+                    }
+                    | K::StructFieldType {
+                        subject: left,
+                        field: right,
+                    }
+                    | K::FieldPtr {
+                        pointer: left,
+                        field: right,
+                    }
+                    | K::FieldValue {
+                        value: left,
+                        field: right,
+                    }
+                    | K::ConstructEnum {
+                        variant: left,
+                        fields: right,
+                    }
+                    | K::TupleAppend {
+                        tuple: left,
+                        element: right,
+                    }
                     | K::TypeEqual(left, right)
                     | K::TemplateEqual(left, right)
                     | K::ScalarEqual(left, right)
@@ -1273,6 +1315,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         0
                     }
                     K::AnonymousField { value, name, .. }
+                    | K::NamedField { value, name }
                     | K::PointerAnonymousField {
                         pointer: value,
                         name,
@@ -1280,6 +1323,21 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     } => {
                         work.push((Node::Expr(value), depth + 1));
                         name.len()
+                    }
+                    K::EnumVariantFieldPtr {
+                        pointer,
+                        variant,
+                        field,
+                    }
+                    | K::ComptimeFieldEntry {
+                        value: pointer,
+                        field: variant,
+                        ty: field,
+                    } => {
+                        work.push((Node::Expr(pointer), depth + 1));
+                        work.push((Node::Expr(variant), depth + 1));
+                        work.push((Node::Expr(field), depth + 1));
+                        0
                     }
                     K::BitWindow { value, start, end } => {
                         for value in [value, start, end] {

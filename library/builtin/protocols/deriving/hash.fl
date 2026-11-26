@@ -1,0 +1,45 @@
+use meta;
+use primitives.{Symbol, Type, usize, void};
+use protocols.hash.{Hash, Hasher};
+
+^{__flurry_derivation_default: true}
+pub derive fn by_fields for Hash
+where
+    requires Type.predicates.is_struct(Self) or Type.predicates.is_enum(Self),
+{
+    fn hash(*self, state: *H) -> void
+    where
+        H: Type,
+        requires H :- Hasher,
+    {
+        inline if Type.predicates.is_struct(Self) {
+            const NAMES = meta.reflection.struct_field_names(Self);
+            inline for i in 0..NAMES.length() {
+                const sym: Symbol = NAMES[i];
+                inline if Type.predicates.has_field(Self, sym) {
+                    meta.structs.field_ptr(self, sym).as(Hash).hash(state);
+                }
+            }
+        } else {
+            const VF_TYPES = meta.reflection.enum_variant_field_types(Self);
+            let lv = meta.enums.enum_variant_index(self);
+            state.as(Hasher).write_usize(lv);
+            inline for v in 0..VF_TYPES.length() {
+                const V_U: usize = meta.enums.to_usize(v);
+                if lv == V_U {
+                    const FIELD_COUNT = VF_TYPES[v].length();
+                    inline if FIELD_COUNT > 0 {
+                        inline for f in 0..FIELD_COUNT {
+                            const F_U: usize = meta.enums.to_usize(f);
+                            meta.enums.enum_variant_field_ptr(Self, self, V_U, F_U) match {
+                                fp? => fp.as(Hash).hash(state),
+                                null => {},
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}

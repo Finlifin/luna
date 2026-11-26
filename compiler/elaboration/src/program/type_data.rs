@@ -248,6 +248,35 @@ impl Checker<'_, '_> {
                 if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {
                     return self.generator_type_data(expr);
                 }
+                if !describe_input
+                    && !self.collecting_named_types()
+                    && let H::ResolvedDef { def_id, .. } = callee.kind
+                    && let Some(callee_owner) = self.package.definition_owner(def_id)
+                    && self
+                        .pure_field_type_builtin_wrapper(declaration(
+                            self.package,
+                            &self.package_identities,
+                            callee_owner,
+                        ))
+                        .is_some()
+                {
+                    let checked =
+                        self.with_staged_input(true, |this| this.expr(expr, Some(&p(P::Type))))?;
+                    if let Some(identity) =
+                        self.preserved_input_identity(&checked, |_, _| Ok(None), expr.span)?
+                    {
+                        let open = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                            Ok(identity.check_scope(&[]).is_err()
+                                || nir::type_computations::has_rigid_parameters_bounded(
+                                    &identity, fuel,
+                                )?)
+                        })
+                        .map_err(|failure| error(expr.span, failure.to_string()))?;
+                        if open {
+                            return Ok(CompletedType::Identity(identity));
+                        }
+                    }
+                }
                 if describe_input {
                     let checked = self.with_staged_input(true, |this| {
                         let checked = this.expr(expr, Some(&p(P::Type)))?;
@@ -349,7 +378,13 @@ impl Checker<'_, '_> {
             }
             _ => Err(error(
                 expr.span,
-                "declaration does not produce a supported type",
+                match self.package.item(owner) {
+                    Some(item) => format!(
+                        "declaration `{}` does not produce a supported type",
+                        item.ident.name
+                    ),
+                    None => "declaration does not produce a supported type".to_string(),
+                },
             )),
         }
     }

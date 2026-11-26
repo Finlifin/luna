@@ -133,7 +133,10 @@ impl Walker<'_> {
             | K::BuildEnum(subject)
             | K::ObjectQuery { subject, .. }
             | K::ObjectEdit { subject, .. }
-            | K::EnumStructure { subject, .. } => {
+            | K::EnumStructure { subject, .. }
+            | K::ImplicitQuery {
+                operand: subject, ..
+            } => {
                 self.child(subject, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
@@ -592,6 +595,59 @@ impl Walker<'_> {
             }
             K::TypeLayout { operand, .. } => {
                 self.child(operand, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
+            K::TypeHasField { subject, field }
+            | K::TypeFieldType { subject, field }
+            | K::StructFieldType { subject, field }
+            | K::FieldValue {
+                value: subject,
+                field,
+            }
+            | K::TupleAppend {
+                tuple: subject,
+                element: field,
+            } => {
+                self.child(subject, state, depth)?;
+                self.child(field, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
+            K::NamedField { value: operand, .. }
+            | K::ConstructStruct { fields: operand }
+            | K::EnumVariantIndex(operand)
+            | K::StructFieldSpans(operand)
+            | K::RecordFieldSpans(operand)
+            | K::DeclarationSpan(operand)
+            | K::EnumVariantSpans(operand)
+            | K::EnumVariantFieldSpans(operand)
+            | K::ComptimeEnumVariantIndex(operand)
+            | K::ComptimeEnumVariantFieldValues(operand) => {
+                self.child(operand, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
+            K::ConstructEnum { variant, fields } => {
+                self.child(variant, state, depth)?;
+                self.child(fields, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
+            K::FieldPtr { pointer, field } => {
+                self.child(pointer, state, depth)?;
+                self.child(field, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
+            K::EnumVariantFieldPtr {
+                pointer,
+                variant,
+                field,
+            }
+            | K::ComptimeFieldEntry {
+                value: pointer,
+                field: variant,
+                ty: field,
+            } => {
+                self.child(pointer, state, depth)?;
+                self.child(variant, state, depth)?;
+                self.child(field, state, depth)?;
                 return self.unknown_value(&expr.ty);
             }
             _ => return Err(Reason::Unsupported),

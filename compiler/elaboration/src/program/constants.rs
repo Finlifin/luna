@@ -2351,6 +2351,16 @@ impl Checker<'_, '_> {
                 | K::TypeKind { operand: value, .. }
                 | K::TypeNotSized { operand: value }
                 | K::TypeLayout { operand: value, .. }
+                | K::NamedField { value, .. }
+                | K::ConstructStruct { fields: value }
+                | K::EnumVariantIndex(value)
+                | K::StructFieldSpans(value)
+                | K::RecordFieldSpans(value)
+                | K::DeclarationSpan(value)
+                | K::EnumVariantSpans(value)
+                | K::EnumVariantFieldSpans(value)
+                | K::ComptimeEnumVariantIndex(value)
+                | K::ComptimeEnumVariantFieldValues(value)
                 | K::BitConvert(value)
                 | K::ErrorConvert { value, .. }
                 | K::NewtypeConvert(value)
@@ -2376,9 +2386,51 @@ impl Checker<'_, '_> {
                 K::BitWindow { value, start, end } => {
                     pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
                 }
-                K::BitEqual(left, right) | K::BitConcat(left, right) | K::BitIndex(left, right) => {
+                K::BitEqual(left, right)
+                | K::BitConcat(left, right)
+                | K::BitIndex(left, right)
+                | K::TypeHasField {
+                    subject: left,
+                    field: right,
+                }
+                | K::TypeFieldType {
+                    subject: left,
+                    field: right,
+                }
+                | K::StructFieldType {
+                    subject: left,
+                    field: right,
+                }
+                | K::FieldPtr {
+                    pointer: left,
+                    field: right,
+                }
+                | K::FieldValue {
+                    value: left,
+                    field: right,
+                }
+                | K::ConstructEnum {
+                    variant: left,
+                    fields: right,
+                }
+                | K::TupleAppend {
+                    tuple: left,
+                    element: right,
+                } => {
                     pending.push(left);
                     pending.push(right);
+                }
+                K::EnumVariantFieldPtr {
+                    pointer,
+                    variant,
+                    field,
+                }
+                | K::ComptimeFieldEntry {
+                    value: pointer,
+                    field: variant,
+                    ty: field,
+                } => {
+                    pending.extend([pointer.as_ref(), variant.as_ref(), field.as_ref()]);
                 }
                 K::And(left, right) | K::Or(left, right)
                     if matches!(value.ty, Term::Primitive(P::BitVec(_))) =>

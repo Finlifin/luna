@@ -52,7 +52,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 };
                 self.ensure_static_global(flow, *declaration, pointee, source)?;
             }
-            K::PointerAnonymousField { .. } | K::PointerField { .. } => {
+            K::PointerAnonymousField { .. } | K::PointerField { .. } | K::FieldPtr { .. } => {
                 self.evaluate_pointer_value(expr, flow, depth + 1)?;
             }
             K::ReadPointer(_) => self.expr_read_pointer(expr, flow, depth)?,
@@ -149,6 +149,11 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::OptionalPresent(_)
             | K::OptionalAbsent
             | K::Variant { .. }
+            | K::EnumVariantFieldPtr { .. }
+            | K::ConstructStruct { .. }
+            | K::ConstructEnum { .. }
+            | K::TupleAppend { .. }
+            | K::NamedField { .. }
             | K::ErrorConvert { .. } => {
                 self.evaluate_value_origins(expr, flow, depth + 1)?;
             }
@@ -244,6 +249,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::TypeNotSized { operand: value }
             | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.expr(value, flow, depth + 1)?,
+            K::EnumVariantIndex(pointer) => {
+                self.check_pointer_observation(pointer, flow, depth + 1)?;
+            }
             K::BitWindow { value, start, end } => {
                 self.expr(value, flow, depth + 1)?;
                 self.expr(start, flow, depth + 1)?;
@@ -833,6 +841,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                 | Term::AssociatedTypeCall(_)
                                 | Term::ComptimeCall(_)
                                 | Term::DeferredErrorResult { .. }
+                                | Term::FieldType { .. }
+                                | Term::VariantFieldType { .. }
+                                | Term::TupleAppend { .. }
                         )
                         && self.storage_inputs_are_closed(&argument.ty, source)?
                     {
@@ -1122,9 +1133,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 let mut domains = None;
                 let mut code = None;
                 for target in &target {
-                    flow.state.require_present(target).map_err(|e| {
-                        error(source, format!("pointer read target unavailable: {e:?}"))
-                    })?;
+                    self.require_target_available(flow, target, true, source)?
+                        .map_err(|e| {
+                            error(source, format!("pointer read target unavailable: {e:?}"))
+                        })?;
                     let next = self.stored_enum_domains(flow, target, source)?;
                     let next_code = self.stored_code(flow, target, source)?;
                     code = Some(if let Some(previous) = code {

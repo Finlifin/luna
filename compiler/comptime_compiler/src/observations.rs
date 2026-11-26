@@ -14,6 +14,43 @@ pub enum Kind {
     SymbolName,
     Text(nir::program::TextQueryKind),
     TypeLayout(nir::TypeLayoutQuery),
+    ImplicitQuery(nir::program::ImplicitQueryKind),
+    StructFieldSpans,
+    RecordFieldSpans,
+    DeclarationSpan,
+    EnumVariantSpans,
+    EnumVariantFieldSpans,
+    ComptimeEnumVariantIndex,
+    ComptimeEnumVariantFieldValues,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldOp {
+    TypeHasField,
+    TypeFieldType,
+    StructFieldType,
+    FieldValue,
+    ComptimeFieldEntry,
+    NamedField(std::sync::Arc<str>),
+    ConstructStruct,
+    ConstructEnum,
+    TupleAppend,
+}
+
+impl fmt::Display for FieldOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TypeHasField => f.write_str("type-has-field"),
+            Self::TypeFieldType => f.write_str("type-field-type"),
+            Self::StructFieldType => f.write_str("struct-field-type"),
+            Self::FieldValue => f.write_str("field-value"),
+            Self::ComptimeFieldEntry => f.write_str("comptime-field-entry"),
+            Self::NamedField(name) => write!(f, "named-field {name:?}"),
+            Self::ConstructStruct => f.write_str("construct-struct"),
+            Self::ConstructEnum => f.write_str("construct-enum"),
+            Self::TupleAppend => f.write_str("tuple-append"),
+        }
+    }
 }
 
 impl fmt::Display for Kind {
@@ -34,6 +71,16 @@ impl fmt::Display for Kind {
             Self::SymbolName => write!(f, "symbol-name"),
             Self::Text(query) => write!(f, "(text {query})"),
             Self::TypeLayout(query) => write!(f, "(type-layout {query})"),
+            Self::ImplicitQuery(query) => write!(f, "(implicit-query {query})"),
+            Self::StructFieldSpans => f.write_str("struct-field-spans"),
+            Self::RecordFieldSpans => f.write_str("record-field-spans"),
+            Self::DeclarationSpan => f.write_str("declaration-span"),
+            Self::EnumVariantSpans => f.write_str("enum-variant-spans"),
+            Self::EnumVariantFieldSpans => f.write_str("enum-variant-field-spans"),
+            Self::ComptimeEnumVariantIndex => f.write_str("comptime-enum-variant-index"),
+            Self::ComptimeEnumVariantFieldValues => {
+                f.write_str("comptime-enum-variant-field-values")
+            }
         }
     }
 }

@@ -58,33 +58,27 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn build_call_description_value(
-        &self,
-        desc_decl: DeclarationId,
-        callee_decl: Option<DeclarationId>,
-        param_name: &str,
-        call_span: Span,
-    ) -> Value {
-        let (_, _, callee_name) = self.declaration_context_fields(callee_decl);
+    fn build_call_description_value(&self, desc_decl: DeclarationId) -> Value {
+        Value::Record {
+            arguments: Vec::new(),
+            declaration: desc_decl,
+            fields: Vec::new(),
+        }
+    }
+
+    fn build_implicit_call_site(&self, call_span: Span) -> comptime_interpretor::ImplicitCallSite {
         let loc = self
             .protocols
             .source_locator
             .as_ref()
             .map(|locator| locator.locate(call_span))
             .unwrap_or_else(|| CallSiteLocation::fallback(call_span));
-        Value::Record {
-            arguments: Vec::new(),
-            declaration: desc_decl,
-            fields: vec![
-                Value::String(Arc::from(callee_name)),
-                Value::Symbol(Arc::from(param_name)),
-                Value::String(Arc::from(loc.file)),
-                Value::UnsignedInteger(u128::from(loc.line)),
-                Value::UnsignedInteger(u128::from(loc.column)),
-                Value::UnsignedInteger(loc.byte_start as u128),
-                Value::UnsignedInteger(loc.byte_end as u128),
-                Value::Integer(comptime_runtime::Integer::from_i128(loc.expansion_id)),
-            ],
+        comptime_interpretor::ImplicitCallSite {
+            file: Arc::from(loc.file),
+            line: loc.line,
+            byte_start: loc.byte_start as u64,
+            byte_end: loc.byte_end as u64,
+            expansion_id: loc.expansion_id,
         }
     }
 
@@ -312,8 +306,7 @@ impl Checker<'_, '_> {
             .or(self.active_body_declaration);
         let caller_val = self.build_implicit_context_value(context_decl, caller_decl);
         let callee_val = self.build_implicit_context_value(context_decl, callee_decl);
-        let calling_val =
-            self.build_call_description_value(desc_decl, callee_decl, param_name, call_span);
+        let calling_val = self.build_call_description_value(desc_decl);
 
         if definition.inputs.len() != 3 {
             return Err(error(
@@ -328,9 +321,14 @@ impl Checker<'_, '_> {
             Some(Argument::LiveData(calling_val)),
         ];
 
+        let saved_call_site = self
+            .active_implicit_call_site
+            .replace(self.build_implicit_call_site(call_span));
         let code = self.generator_frame(target_owner, |this| {
             this.run_code_generator(&definition, arguments, call_span)
-        })?;
+        });
+        self.active_implicit_call_site = saved_call_site;
+        let code = code?;
 
         if !code.context.is_empty() {
             return Err(error(

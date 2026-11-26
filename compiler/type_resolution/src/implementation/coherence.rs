@@ -327,6 +327,10 @@ fn separation_goal(
                     terms.push(b);
                 }
                 TypePredicate::Kind(ty, _) | TypePredicate::NotSized(ty) => terms.push(ty),
+                TypePredicate::HasField { subject, field } => {
+                    terms.push(subject);
+                    terms.push(field);
+                }
                 TypePredicate::IntLe(a, b) => {
                     used.extend(a.variable);
                     used.extend(b.variable);
@@ -357,6 +361,23 @@ fn separation_goal(
                 Term::DeferredErrorResult { errors, result } => {
                     terms.push(errors);
                     terms.push(result);
+                }
+                Term::FieldType { subject, field } => {
+                    terms.push(subject);
+                    terms.push(field);
+                }
+                Term::VariantFieldType {
+                    subject,
+                    variant,
+                    field,
+                } => {
+                    terms.push(subject);
+                    terms.push(variant);
+                    terms.push(field);
+                }
+                Term::TupleAppend { tuple, element } => {
+                    terms.push(tuple);
+                    terms.push(element);
                 }
                 Term::Rigid { declaration, .. } => {
                     used.insert(*declaration);

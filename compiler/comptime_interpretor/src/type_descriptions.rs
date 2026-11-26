@@ -619,7 +619,10 @@ pub(super) fn inspect<'signature>(
             Term::AssociatedType { .. }
             | Term::AssociatedTypeCall(_)
             | Term::ComptimeCall(_)
-            | Term::DeferredErrorResult { .. } => {
+            | Term::DeferredErrorResult { .. }
+            | Term::FieldType { .. }
+            | Term::VariantFieldType { .. }
+            | Term::TupleAppend { .. } => {
                 return Err(ErrorKind::UnmaterializedDispatch);
             }
             Term::Rigid { .. } | Term::Runtime(_) | Term::Value { .. } | Term::Hole { .. } => {

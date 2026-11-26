@@ -656,7 +656,20 @@ impl Checker<'_, '_> {
                         }
                     }
                     let mut variants = Vec::new();
+                    let mut variant_spans = Vec::new();
+                    let mut variant_field_spans = Vec::new();
                     for (variant_index, (variant, full_name)) in leaves.iter().enumerate() {
+                        let field_spans: Vec<n::SourceRange> = match &variant.kind {
+                            hir::item::VariantKind::Tuple(types) => {
+                                types.iter().map(|ty| source(ty.span)).collect()
+                            }
+                            hir::item::VariantKind::Struct(fields) => {
+                                fields.iter().map(|f| source(f.span)).collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                        variant_spans.push(source(variant.span));
+                        variant_field_spans.push(field_spans);
                         let (shape, fields) = match &variant.kind {
                             hir::item::VariantKind::Pattern(_)
                             | hir::item::VariantKind::Const(_)
@@ -760,17 +773,36 @@ impl Checker<'_, '_> {
                     );
                     self.enum_sources
                         .insert(id, leaves.into_iter().map(|(variant, _)| variant).collect());
+                    self.reflection_spans.enums.insert(
+                        declaration(self.package, &self.package_identities, owner),
+                        source(span),
+                    );
+                    self.reflection_spans.enum_variants.insert(
+                        declaration(self.package, &self.package_identities, owner),
+                        variant_spans,
+                    );
+                    self.reflection_spans.enum_variant_fields.insert(
+                        declaration(self.package, &self.package_identities, owner),
+                        variant_field_spans,
+                    );
                 }
                 ItemKind::Struct(def) => {
                     let mut names = BTreeSet::new();
                     let mut fields = Vec::new();
+                    let mut field_spans = Vec::new();
                     for field in def.fields {
                         let name = field.ident.name.as_str().to_string();
                         if !names.insert(name.clone()) {
                             return Err(error(field.span, "duplicate struct field"));
                         }
                         fields.push((name, self.type_expr(field.ty)?));
+                        field_spans.push(source(field.span));
                     }
+                    let decl_id = declaration(self.package, &self.package_identities, owner);
+                    self.reflection_spans.structs.insert(decl_id, source(span));
+                    self.reflection_spans
+                        .struct_fields
+                        .insert(decl_id, field_spans);
                     let parameter_types = self.nominal_parameter_types(owner, span)?;
                     self.structs.insert(
                         declaration(self.package, &self.package_identities, owner),
