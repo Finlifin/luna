@@ -36,8 +36,7 @@
 //!
 //! Mutual recursion among queries is detected when a key is re-entered while
 //! `InProgress`.  Prefer [`try_get_with`](crate::try_get_with) and emit a
-//! diagnostic from [`CycleError`](crate::CycleError); use
-//! [`force_get_with`](crate::force_get_with) only when a cycle is an ICE.
+//! diagnostic from [`QueryFailure`](crate::QueryFailure).
 //!
 //! ## Invalidation
 //!
@@ -46,7 +45,9 @@
 //! mutation inside the callback. Observed consumers are transitively invalidated,
 //! including dependencies returned from cache. Reentrant updates from providers
 //! are rejected. Recomputed queries replace their old dependency edges.
-//! Share `Arc<QueryCache<...>>` to share results; a direct cache clone is cold.
+//! Cloning a [`QueryCache`](crate::QueryCache) preserves completed/poisoned entries
+//! and dependency node identities; cloning [`QueryEngine`](crate::QueryEngine)
+//! preserves the dependency graph without sharing an active evaluation stack.
 //! Query tokens are session-local, not persistent fingerprints. A new compilation
 //! still starts a new `Db`; unchanged-result validation is not implemented.
 

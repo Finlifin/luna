@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use hir::OwnerId;
-use query::{QueryCache, QueryDesc, QueryEngine, QueryResult, force_get_with, try_get_with};
+use query::{QueryCache, QueryDesc, QueryEngine, QueryFailure, try_get_with};
 
 use crate::hir_package::HirPackageBox;
 use crate::hir_query::HirQueryInput;
@@ -185,7 +185,14 @@ pub trait LunaDatabase<'session> {
     /// Panics if no provider has been registered, no input has been set,
     /// the query is poisoned, or a cycle is detected.
     fn hir_package(&self, key: ()) -> Arc<HirPackageBox> {
-        self.as_db().hir_package_query(key)
+        self.as_db()
+            .try_hir_package_query(key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Cycle-safe variant of [`LunaDatabase::hir_package`].
+    fn try_hir_package(&self, key: ()) -> Result<Arc<HirPackageBox>, QueryFailure> {
+        self.as_db().try_hir_package_query(key)
     }
 
     // ── Mid-end interface, signature & elaboration queries ─────────────────
@@ -195,7 +202,14 @@ pub trait LunaDatabase<'session> {
     /// By default reads `hir_package(())`, so replacing HIR inputs
     /// transitively invalidates cached package interfaces.
     fn package_interface(&self, key: ()) -> Arc<PackageInterface> {
-        self.as_db().package_interface_query(key)
+        self.as_db()
+            .try_package_interface_query(key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Cycle-safe variant of [`LunaDatabase::package_interface`].
+    fn try_package_interface(&self, key: ()) -> Result<Arc<PackageInterface>, QueryFailure> {
+        self.as_db().try_package_interface_query(key)
     }
 
     /// Look up the [`ItemInterfaceSummary`] for a single [`OwnerId`].
@@ -203,17 +217,29 @@ pub trait LunaDatabase<'session> {
     /// Memoised per owner and invalidated transitively when upstream package
     /// HIR/interface inputs change.
     fn item_signature(&self, owner: OwnerId) -> Option<Arc<ItemInterfaceSummary>> {
-        self.as_db().item_signature_query(owner)
+        self.as_db()
+            .try_item_signature_query(owner)
+            .unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// Cycle-safe variant of [`LunaDatabase::item_signature`].
-    fn try_item_signature(&self, owner: OwnerId) -> QueryResult<Option<Arc<ItemInterfaceSummary>>> {
+    fn try_item_signature(
+        &self,
+        owner: OwnerId,
+    ) -> Result<Option<Arc<ItemInterfaceSummary>>, QueryFailure> {
         self.as_db().try_item_signature_query(owner)
     }
 
     /// Compute the package's [`PackageTraitImpls`] inventory.
     fn package_trait_impls(&self, key: ()) -> Arc<PackageTraitImpls> {
-        self.as_db().package_trait_impls_query(key)
+        self.as_db()
+            .try_package_trait_impls_query(key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Cycle-safe variant of [`LunaDatabase::package_trait_impls`].
+    fn try_package_trait_impls(&self, key: ()) -> Result<Arc<PackageTraitImpls>, QueryFailure> {
+        self.as_db().try_package_trait_impls_query(key)
     }
 
     /// Run mid-end package elaboration via the registered provider.
@@ -223,11 +249,13 @@ pub trait LunaDatabase<'session> {
     /// Panics if no provider has been registered, the query is poisoned, or a
     /// cycle is detected.
     fn elaborated_package(&self, key: ()) -> Arc<ElaboratedPackage> {
-        self.as_db().elaborated_package_query(key)
+        self.as_db()
+            .try_elaborated_package_query(key)
+            .unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// Cycle-safe variant of [`LunaDatabase::elaborated_package`].
-    fn try_elaborated_package(&self, key: ()) -> QueryResult<Arc<ElaboratedPackage>> {
+    fn try_elaborated_package(&self, key: ()) -> Result<Arc<ElaboratedPackage>, QueryFailure> {
         self.as_db().try_elaborated_package_query(key)
     }
 }
@@ -368,8 +396,8 @@ impl<'session> Db<'session> {
     }
 
     /// `hir_package` query body — goes through the generic query engine.
-    fn hir_package_query(&self, key: ()) -> Arc<HirPackageBox> {
-        force_get_with(
+    fn try_hir_package_query(&self, key: ()) -> Result<Arc<HirPackageBox>, QueryFailure> {
+        try_get_with(
             &self.query_engine,
             &self.caches.hir_package,
             HIR_PACKAGE,
@@ -379,8 +407,8 @@ impl<'session> Db<'session> {
         )
     }
 
-    fn package_interface_query(&self, key: ()) -> Arc<PackageInterface> {
-        force_get_with(
+    fn try_package_interface_query(&self, key: ()) -> Result<Arc<PackageInterface>, QueryFailure> {
+        try_get_with(
             &self.query_engine,
             &self.caches.package_interface,
             PACKAGE_INTERFACE,
@@ -390,21 +418,10 @@ impl<'session> Db<'session> {
         )
     }
 
-    fn item_signature_query(&self, owner: OwnerId) -> Option<Arc<ItemInterfaceSummary>> {
-        force_get_with(
-            &self.query_engine,
-            &self.caches.item_signature,
-            ITEM_SIGNATURE,
-            owner,
-            |id| format!("{id}"),
-            || (self.providers.item_signature)(self, owner),
-        )
-    }
-
     fn try_item_signature_query(
         &self,
         owner: OwnerId,
-    ) -> QueryResult<Option<Arc<ItemInterfaceSummary>>> {
+    ) -> Result<Option<Arc<ItemInterfaceSummary>>, QueryFailure> {
         try_get_with(
             &self.query_engine,
             &self.caches.item_signature,
@@ -415,8 +432,11 @@ impl<'session> Db<'session> {
         )
     }
 
-    fn package_trait_impls_query(&self, key: ()) -> Arc<PackageTraitImpls> {
-        force_get_with(
+    fn try_package_trait_impls_query(
+        &self,
+        key: (),
+    ) -> Result<Arc<PackageTraitImpls>, QueryFailure> {
+        try_get_with(
             &self.query_engine,
             &self.caches.package_trait_impls,
             PACKAGE_TRAIT_IMPLS,
@@ -426,18 +446,10 @@ impl<'session> Db<'session> {
         )
     }
 
-    fn elaborated_package_query(&self, key: ()) -> Arc<ElaboratedPackage> {
-        force_get_with(
-            &self.query_engine,
-            &self.caches.elaborated_package,
-            ELABORATED_PACKAGE,
-            key,
-            |_| "()".to_string(),
-            || (self.providers.elaborated_package)(self),
-        )
-    }
-
-    fn try_elaborated_package_query(&self, key: ()) -> QueryResult<Arc<ElaboratedPackage>> {
+    fn try_elaborated_package_query(
+        &self,
+        key: (),
+    ) -> Result<Arc<ElaboratedPackage>, QueryFailure> {
         try_get_with(
             &self.query_engine,
             &self.caches.elaborated_package,

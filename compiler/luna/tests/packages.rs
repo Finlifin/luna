@@ -2,8 +2,10 @@ use luna::{
     frontend::Artifact,
     packages::{self, SourcePackage},
 };
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 use primitive_bindings::write_fixture;
 
 use resolve::DependencyEdge;
@@ -11,8 +13,11 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 struct Inputs(PathBuf);
+
 impl Inputs {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
@@ -23,6 +28,7 @@ impl Inputs {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
+
     fn package(&self, id: u32, name: &str, source: &str) -> SourcePackage {
         let entry = self.0.join(format!("{name}.fl"));
         write_fixture(&entry, primitive_bindings::with_bool_binding(source)).unwrap();
@@ -34,11 +40,13 @@ impl Inputs {
         }
     }
 }
+
 impl Drop for Inputs {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
+
 fn dependency(requester: u32, alias: &str, provider: u32) -> DependencyEdge {
     DependencyEdge {
         requester,
@@ -550,6 +558,7 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
     };
     assert!(compile_provider_tuple(&inputs, &dependencies, 7, &foreign, None).is_err());
 }
+
 #[test]
 fn imported_generic_function_executes_from_its_provider_package() {
     let input = Inputs::new();
@@ -576,6 +585,7 @@ fn imported_generic_function_executes_from_its_provider_package() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
 #[test]
 fn cross_package_nominal_types_keep_provider_identity() {
     let input = Inputs::new();
@@ -595,6 +605,7 @@ fn cross_package_nominal_types_keep_provider_identity() {
         matches!(value,comptime_interpretor::Value::Record {declaration,..} if declaration.package==1002)
     );
 }
+
 #[test]
 fn visibility_failures_prevent_multi_package_elaboration() {
     for declaration in ["fn hidden() {}", "private fn hidden() {}"] {
@@ -1848,6 +1859,7 @@ fn compilation_input_dump_escapes_text_and_preserves_native_path_bytes() {
         }],
         directories: vec![],
         discovery: vec![],
+        config_files: vec![],
     };
     let encoded: String = path
         .as_os_str()
@@ -2075,4 +2087,158 @@ fn primitive_library_does_not_export_invented_aliases() {
             "{name}: {failure}"
         );
     }
+}
+
+#[test]
+fn five_prelude_rule_applies_consistently_across_package_entrypoints_and_hir_conf() {
+    let inputs = Inputs::new();
+    let app = inputs.package(
+        1,
+        "app",
+        "fn entry() -> bool { b_flag() and m_flag() and c_flag() and a_flag() and v_flag() }",
+    );
+    let builtin = inputs.package(
+        2,
+        "builtin",
+        "pub typealias bool = .bool'builtin; pub mod prelude { pub use .bool; pub fn b_flag() -> bool { true } }",
+    );
+    let meta = inputs.package(
+        3,
+        "meta",
+        "pub mod prelude { pub fn m_flag() -> bool { true } }",
+    );
+    let build = inputs.package(
+        4,
+        "build",
+        "pub mod prelude { pub fn c_flag() -> bool { true } }",
+    );
+    let attrs = inputs.package(
+        5,
+        "attrs",
+        "pub mod prelude { pub fn a_flag() -> bool { true } }",
+    );
+    let verification = inputs.package(
+        6,
+        "verification",
+        "pub mod prelude { pub fn v_flag() -> bool { true } }",
+    );
+    let std_pkg = inputs.package(
+        7,
+        "std",
+        "pub mod prelude { pub fn s_flag() -> bool { true } }",
+    );
+    let all = [app, builtin, meta, build, attrs, verification, std_pkg];
+
+    // compile_with_builtin must inject all 5 preludes (excluding std).
+    let Artifact::Nir(program) = packages::compile_with_builtin(&all, &[], 1, Some(2)).unwrap()
+    else {
+        panic!("expected NIR");
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    // compile_with_definitions must also respect the 5-prelude rule.
+    let (Artifact::Nir(def_program), _) = packages::compile_with_definitions(
+        &all,
+        &[],
+        1,
+        Some(2),
+        &Default::default(),
+        Default::default(),
+        None,
+        &mut 100_000,
+        &mut |_, _, _| Ok(()),
+    )
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&def_program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    // std must NOT be auto-imported.
+    let app_needs_std = inputs.package(1, "app", "fn entry() -> bool { s_flag() }");
+    let mut with_std_ref = all.clone();
+    with_std_ref[0] = app_needs_std;
+    assert!(packages::compile_with_builtin(&with_std_ref, &[], 1, Some(2)).is_err());
+
+    // Emit::Hir with --sysroot must validate language-items.conf and protect it from --output.
+    let ws = inputs.0.join("hir_sysroot");
+    for name in ["builtin", "meta", "build", "attrs", "verification", "std"] {
+        std::fs::create_dir_all(ws.join("library").join(name)).unwrap();
+        std::fs::write(
+            ws.join("library").join(name).join("lib.fl"),
+            "pub typealias bool = .bool'builtin; pub mod prelude {}",
+        )
+        .unwrap();
+    }
+    let bad_conf = ws.join("library/language-items.conf");
+    std::fs::write(&bad_conf, "version = 999\n").unwrap();
+    let src = ws.join("main.fl");
+    std::fs::write(&src, "fn main() -> bool { true }").unwrap();
+
+    let hir_bad = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg("dump")
+        .arg(&src)
+        .args(["--emit", "hir", "--sysroot"])
+        .arg(ws.join("library"))
+        .output()
+        .unwrap();
+    assert!(!hir_bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&hir_bad.stderr).contains("language-items.conf"),
+        "{}",
+        String::from_utf8_lossy(&hir_bad.stderr)
+    );
+
+    std::fs::write(&bad_conf, "version = 1\n").unwrap();
+    let hir_protect = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg("dump")
+        .arg(&src)
+        .args(["--emit", "hir", "--sysroot"])
+        .arg(ws.join("library"))
+        .arg("-o")
+        .arg(&bad_conf)
+        .output()
+        .unwrap();
+    assert!(!hir_protect.status.success());
+    assert_eq!(std::fs::read_to_string(&bad_conf).unwrap(), "version = 1\n");
+}
+
+#[test]
+fn package_fl_manifest_discovery_finds_root_entries_and_scripts() {
+    let inputs = Inputs::new();
+    let ws = inputs.0.join("manifest_ws");
+    let lib_pkg = ws.join("mylib");
+    std::fs::create_dir_all(lib_pkg.join("src/nested")).unwrap();
+    std::fs::create_dir_all(lib_pkg.join("scripts")).unwrap();
+    std::fs::write(lib_pkg.join("package.fl"), "// deferred build.package\n").unwrap();
+    std::fs::write(lib_pkg.join("src/lib.fl"), "pub fn ok() -> bool { true }").unwrap();
+    let nested_file = lib_pkg.join("src/nested/mod.fl");
+    std::fs::write(&nested_file, "").unwrap();
+
+    let found = packages::discover_package_manifest(&nested_file)
+        .unwrap()
+        .expect("package.fl discovered from nested source");
+    assert_eq!(found.root, std::fs::canonicalize(&lib_pkg).unwrap());
+    assert_eq!(
+        found.entry,
+        Some((
+            packages::PackageEntryKind::Library,
+            std::fs::canonicalize(&lib_pkg).unwrap().join("src/lib.fl")
+        ))
+    );
+    assert!(found.scripts_dir.is_some());
+    assert!(matches!(
+        found.evaluation,
+        packages::ManifestEvaluation::DeferredAwaitingBuildLibrary { .. }
+    ));
+
+    // Directory without any package.fl returns Ok(None).
+    let orphan = inputs.0.join("no_manifest");
+    std::fs::create_dir_all(&orphan).unwrap();
+    assert_eq!(packages::discover_package_manifest(&orphan).unwrap(), None);
 }

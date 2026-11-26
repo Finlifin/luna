@@ -534,6 +534,84 @@ fn memory_package_cache_lru_hits_eviction_and_stats() {
 }
 
 #[test]
+fn extra_config_files_distinguish_full_path_missing_and_io_error() {
+    use luna::package_cache::compute_parsed_package_key;
+
+    let root = temp_dir("extra-cfg-states");
+    let dir_a = root.join("dir_a");
+    let dir_b = root.join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let entry = root.join("entry.fl");
+    std::fs::write(&entry, "fn run() -> bool { true }").unwrap();
+
+    let cfg_a = dir_a.join("language-items.conf");
+    let cfg_b = dir_b.join("language-items.conf");
+    std::fs::write(&cfg_a, "version = 1\n").unwrap();
+    std::fs::write(&cfg_b, "version = 1\n").unwrap();
+
+    let packages = vec![pkg(1, 1, "app", entry)];
+    let protocols = Protocols::default();
+    let compute_key = |configs: &[PathBuf]| {
+        let inputs = UpstreamKeyInputs {
+            all_packages: &packages,
+            upstream_ids: &[1],
+            upstream_edges: &[],
+            builtin: None,
+            preludes: &[],
+            extra_config_files: configs,
+            target: None,
+            protocols: &protocols,
+            selector_tag: b"",
+            compiler_override: Some([7u8; 32]),
+        };
+        compute_unit_merkle_key(&inputs, &[], 1).unwrap().0
+    };
+
+    // 1. Same filename in different directories MUST NOT collide.
+    let key_a = compute_key(&[cfg_a.clone()]);
+    let key_b = compute_key(&[cfg_b.clone()]);
+    assert_ne!(
+        key_a, key_b,
+        "identical config filenames in distinct directories must produce distinct keys"
+    );
+
+    // 2. Present vs Missing vs IoError (directory at config path) MUST produce 3 distinct keys.
+    let missing = root.join("absent.conf");
+    let key_missing = compute_key(&[missing.clone()]);
+
+    let as_dir = root.join("io_err.conf");
+    std::fs::create_dir(&as_dir).unwrap(); // fs::read on a directory returns IsADirectory IoError
+    let key_io_dir = compute_key(&[as_dir]);
+
+    let present_same_name = root.join("present_vs_missing.conf");
+    let key_absent_same = compute_key(&[present_same_name.clone()]);
+    std::fs::write(&present_same_name, b"").unwrap();
+    let key_present_empty = compute_key(&[present_same_name]);
+    assert_ne!(key_absent_same, key_present_empty);
+    assert_ne!(key_missing, key_io_dir);
+
+    // 3. compute_parsed_package_key includes empty source_directories.
+    let files = vec![(PathBuf::from("lib.fl"), b"fn x() {}".as_slice())];
+    let pk_no_dirs = compute_parsed_package_key("pkg", &files, &[]);
+    let pk_with_dir = compute_parsed_package_key("pkg", &files, &[PathBuf::from("empty_sub")]);
+    assert_ne!(pk_no_dirs, pk_with_dir);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let p1 = PathBuf::from(std::ffi::OsString::from_vec(b"mod_\xfe.fl".to_vec()));
+        let p2 = PathBuf::from(std::ffi::OsString::from_vec(b"mod_\xff.fl".to_vec()));
+        let k1 = compute_parsed_package_key("pkg", &[(p1, b"fn x() {}".as_slice())], &[]);
+        let k2 = compute_parsed_package_key("pkg", &[(p2, b"fn x() {}".as_slice())], &[]);
+        assert_ne!(k1, k2, "distinct non-UTF-8 paths must not collide");
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resolved_source_ids_collect_deterministically() {
     let ids: BTreeSet<u32> = [3, 1, 2].into_iter().collect();
     assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);

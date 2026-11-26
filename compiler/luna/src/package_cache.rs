@@ -129,6 +129,14 @@ impl Sha256 {
         self.update_len_prefixed(text.as_bytes());
     }
 
+    pub fn update_os_str(&mut self, value: &std::ffi::OsStr) {
+        self.update_len_prefixed(value.as_encoded_bytes());
+    }
+
+    pub fn update_u8(&mut self, value: u8) {
+        self.update(&[value]);
+    }
+
     pub fn update_u32(&mut self, value: u32) {
         self.update(&value.to_le_bytes());
     }
@@ -954,22 +962,74 @@ fn read_elf_gnu_build_id(path: &Path) -> Option<Vec<u8>> {
     None
 }
 
+fn probe_tool_version(tool: &std::ffi::OsStr, hasher: &mut Sha256) {
+    hasher.update_os_str(tool);
+    match std::process::Command::new(tool).arg("--version").output() {
+        Ok(out) if out.status.success() => {
+            hasher.update_bool(true);
+            hasher.update_len_prefixed(&out.stdout);
+        }
+        Ok(out) => {
+            hasher.update_bool(false);
+            hasher.update_u32(out.status.code().unwrap_or(-1) as u32);
+        }
+        Err(_) => {
+            hasher.update_bool(false);
+            hasher.update_u32(u32::MAX);
+        }
+    }
+}
+
+fn toolchain_fingerprint() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update_str("flurry-toolchain-v1");
+    let llvm_config =
+        std::env::var_os("LUNA_LLVM_CONFIG").unwrap_or_else(|| "llvm-config-21".into());
+    let linker = std::env::var_os("LUNA_CC").unwrap_or_else(|| "cc".into());
+    probe_tool_version(&llvm_config, &mut hasher);
+    probe_tool_version(&linker, &mut hasher);
+    hasher.update_str(env!("CARGO_PKG_VERSION"));
+    hasher.update_str(std::env::consts::ARCH);
+    hasher.update_str(std::env::consts::OS);
+    hasher.finalize()
+}
+
+fn hash_file_streaming(path: &Path) -> Option<[u8; 32]> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher.finalize())
+}
+
 pub fn compiler_fingerprint() -> [u8; 32] {
     static FINGERPRINT: OnceLock<[u8; 32]> = OnceLock::new();
     *FINGERPRINT.get_or_init(|| {
+        let toolchain = toolchain_fingerprint();
         if let Ok(exe) = std::env::current_exe() {
             if let Some(build_id) = read_elf_gnu_build_id(&exe) {
                 let mut hasher = Sha256::new();
-                hasher.update_str("flurry-compiler-elf-build-id-v1");
+                hasher.update_str("flurry-compiler-elf-build-id-v2");
                 hasher.update(&build_id);
-                hasher.update_str(env!("CARGO_PKG_VERSION"));
-                hasher.update_str(std::env::consts::ARCH);
-                hasher.update_str(std::env::consts::OS);
+                hasher.update(&toolchain);
+                return hasher.finalize();
+            }
+            if let Some(exe_hash) = hash_file_streaming(&exe) {
+                let mut hasher = Sha256::new();
+                hasher.update_str("flurry-compiler-exe-sha256-v2");
+                hasher.update(&exe_hash);
+                hasher.update(&toolchain);
                 return hasher.finalize();
             }
             if let Ok(meta) = fs::metadata(&exe) {
                 let mut hasher = Sha256::new();
-                hasher.update_str("flurry-compiler-stat-v1");
+                hasher.update_str("flurry-compiler-stat-v2");
                 hasher.update_u64(meta.len());
                 match meta
                     .modified()
@@ -991,17 +1051,19 @@ pub fn compiler_fingerprint() -> [u8; 32] {
                     hasher.update_u64(meta.ctime() as u64);
                     hasher.update_u64(meta.ctime_nsec() as u64);
                 }
-                hasher.update_str(env!("CARGO_PKG_VERSION"));
-                hasher.update_str(std::env::consts::ARCH);
-                hasher.update_str(std::env::consts::OS);
+                hasher.update(&toolchain);
                 return hasher.finalize();
             }
         }
         let mut fallback = Sha256::new();
-        fallback.update_str("flurry-compiler-fallback-v1");
-        fallback.update_str(env!("CARGO_PKG_VERSION"));
-        fallback.update_str(std::env::consts::ARCH);
-        fallback.update_str(std::env::consts::OS);
+        fallback.update_str("flurry-compiler-fallback-v2");
+        if let Some(argv0) = std::env::args_os().next() {
+            fallback.update_bool(true);
+            fallback.update_os_str(&argv0);
+        } else {
+            fallback.update_bool(false);
+        }
+        fallback.update(&toolchain);
         fallback.finalize()
     })
 }
@@ -1070,7 +1132,7 @@ fn hash_single_package_sources(
 
     let canonical_entry = fs::canonicalize(&package.entry)
         .map_err(|e| format!("cannot canonicalize package {}: {e}", package.name))?;
-    hasher.update_str(&canonical_entry.to_string_lossy());
+    hasher.update_os_str(canonical_entry.as_os_str());
 
     let directory = package
         .entry
@@ -1111,7 +1173,7 @@ fn hash_single_package_sources(
 
     hasher.update_u64(directories.len() as u64);
     for dir in &directories {
-        hasher.update_str(&dir.to_string_lossy());
+        hasher.update_os_str(dir.as_os_str());
     }
 
     hasher.update_u64(files.len() as u64);
@@ -1119,7 +1181,7 @@ fn hash_single_package_sources(
         let full = directory.join(rel);
         let bytes =
             fs::read(&full).map_err(|e| format!("cannot read source '{}': {e}", full.display()))?;
-        hasher.update_str(&rel.to_string_lossy());
+        hasher.update_os_str(rel.as_os_str());
         hasher.update_len_prefixed(&bytes);
     }
 
@@ -1133,14 +1195,14 @@ fn hash_single_package_sources(
         script_files.dedup();
         hasher.update_u64(script_dirs.len() as u64);
         for dir in &script_dirs {
-            hasher.update_str(&dir.to_string_lossy());
+            hasher.update_os_str(dir.as_os_str());
         }
         hasher.update_u64(script_files.len() as u64);
         for rel in &script_files {
             let full = scripts_dir.join(rel);
             let bytes = fs::read(&full)
                 .map_err(|e| format!("cannot read macro script '{}': {e}", full.display()))?;
-            hasher.update_str(&rel.to_string_lossy());
+            hasher.update_os_str(rel.as_os_str());
             hasher.update_len_prefixed(&bytes);
         }
     } else {
@@ -1175,6 +1237,34 @@ pub fn compute_upstream_key_with_jobs(
     jobs: usize,
 ) -> Result<(PackageSnapshotKey, UpstreamSourceManifest), String> {
     compute_unit_merkle_key(inputs, &[], jobs)
+}
+
+/// Normalize an external config path (canonicalizing when possible, otherwise
+/// resolving against `cwd` and cleaning `.` / `..` lexically).
+pub(crate) fn normalize_config_path(path: &Path) -> PathBuf {
+    if let Ok(canon) = fs::canonicalize(path) {
+        return canon;
+    }
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let mut normalized = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component);
+                }
+            }
+            _ => normalized.push(component),
+        }
+    }
+    normalized
 }
 
 /// Extend [`compute_upstream_key_with_jobs`] with Merkle keys of direct dependency
@@ -1250,23 +1340,33 @@ pub fn compute_unit_merkle_key(
         hasher.update(&key.0);
     }
 
-    // 4. Extra config files (e.g. language-items.conf), sorted by canonical string path.
-    let mut configs: Vec<&PathBuf> = inputs.extra_config_files.iter().collect();
-    configs.sort();
-    configs.dedup();
+    // 4. Extra config files (e.g. language-items.conf), hashed by full normalized
+    // path (raw OsStr bytes) and distinguishing Present(hash) vs Missing vs IoError.
+    let mut configs: Vec<(PathBuf, &PathBuf)> = inputs
+        .extra_config_files
+        .iter()
+        .map(|path| (normalize_config_path(path), path))
+        .collect();
+    configs.sort_by(|(a, _), (b, _)| a.as_os_str().cmp(b.as_os_str()));
+    configs.dedup_by(|a, b| a.0 == b.0);
     hasher.update_u64(configs.len() as u64);
-    for path in configs {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_else(|| path.to_string_lossy());
-        hasher.update_str(&name);
-        match fs::read(path) {
+    for (normalized, raw_path) in configs {
+        hasher.update_os_str(normalized.as_os_str());
+        match fs::read(raw_path) {
             Ok(bytes) => {
-                hasher.update_bool(true);
+                hasher.update_u8(0);
+                let digest = Sha256::hash(&bytes);
+                hasher.update(&digest);
                 hasher.update_len_prefixed(&bytes);
             }
-            Err(_) => hasher.update_bool(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                hasher.update_u8(1);
+            }
+            Err(err) => {
+                hasher.update_u8(2);
+                hasher.update_str(&format!("{:?}", err.kind()));
+                hasher.update_u32(err.raw_os_error().unwrap_or(0) as u32);
+            }
         }
     }
 
@@ -1745,6 +1845,106 @@ impl DiskPackageCache {
 
         Ok(Some(target))
     }
+
+    /// Remove cached `.flpkg` snapshots and stale temp files under this cache root.
+    pub fn clean(&self) -> Result<CleanReport, String> {
+        if !self.enabled {
+            return Ok(CleanReport {
+                root: self.root.clone(),
+                removed_files: 0,
+                removed_bytes: 0,
+            });
+        }
+        let mut report = CleanReport {
+            root: self.root.clone(),
+            removed_files: 0,
+            removed_bytes: 0,
+        };
+        if !self.root.exists() {
+            return Ok(report);
+        }
+        let entries = fs::read_dir(&self.root).map_err(|e| {
+            format!(
+                "cannot inspect cache directory '{}': {e}",
+                self.root.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                format!("cannot read cache directory '{}': {e}", self.root.display())
+            })?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let is_version_dir = name
+                .to_str()
+                .is_some_and(|s| s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit()));
+            if is_version_dir && path.is_dir() {
+                clean_version_dir(&path, &mut report)?;
+                let _ = fs::remove_dir(&path);
+            }
+        }
+        Ok(report)
+    }
+}
+
+fn clean_version_dir(dir: &Path, report: &mut CleanReport) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("cannot inspect cache directory '{}': {e}", dir.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("cannot read cache directory '{}': {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            clean_version_dir(&path, report)?;
+            let _ = fs::remove_dir(&path);
+        } else if path.is_file() {
+            let is_cache_artifact = path.extension().is_some_and(|ext| ext == "flpkg")
+                || path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
+            if is_cache_artifact {
+                let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                fs::remove_file(&path).map_err(|e| {
+                    format!("cannot remove cache artifact '{}': {e}", path.display())
+                })?;
+                report.removed_files += 1;
+                report.removed_bytes = report.removed_bytes.saturating_add(bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Summary of a cache cleanup pass (`luna clean`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanReport {
+    pub root: PathBuf,
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+impl fmt::Display for CleanReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(clean (path {}) (removed-files {}) (removed-bytes {}))",
+            nir::program::Literal::String(self.root.to_string_lossy().into_owned()),
+            self.removed_files,
+            self.removed_bytes
+        )
+    }
+}
+
+/// Clear in-process package caches and remove `.flpkg` artifacts from disk.
+pub fn clean_cache(cache_dir: Option<&Path>) -> Result<CleanReport, String> {
+    global_parsed_cache().clear();
+    global_verified_cache().clear();
+    global_elaborated_cache().clear();
+    let root = cache_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(DiskPackageCache::default_location);
+    DiskPackageCache::new(root).clean()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1843,22 +2043,32 @@ impl<T> MemoryPackageCache<T> {
 // Portable ParsedPackage & VerifiedUpstream Snapshot Codecs + Global Caches
 // ---------------------------------------------------------------------------
 
-/// Compute a deterministic key for a package's parsed AST snapshot.
+/// Compute a deterministic key for a package's parsed AST snapshot, preserving
+/// raw `OsStr` path bytes and empty discovered `source_directories`.
 pub fn compute_parsed_package_key(
     package_name: &str,
     files: &[(PathBuf, &[u8])],
+    source_directories: &[PathBuf],
 ) -> PackageSnapshotKey {
+    let mut sorted_dirs: Vec<&Path> = source_directories.iter().map(PathBuf::as_path).collect();
+    sorted_dirs.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    sorted_dirs.dedup_by(|a, b| a.as_os_str() == b.as_os_str());
+
     let mut sorted: Vec<(&Path, &[u8])> = files.iter().map(|(p, b)| (p.as_path(), *b)).collect();
-    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted.sort_by(|(a, _), (b, _)| a.as_os_str().cmp(b.as_os_str()));
 
     let mut hasher = Sha256::new();
     hasher.update_str(std::str::from_utf8(PARSED_PKG_KEY_DOMAIN_V1).expect("ASCII domain tag"));
     let compiler = compiler_fingerprint();
     hasher.update(&compiler);
     hasher.update_str(package_name);
+    hasher.update_u64(sorted_dirs.len() as u64);
+    for dir in sorted_dirs {
+        hasher.update_os_str(dir.as_os_str());
+    }
     hasher.update_u64(sorted.len() as u64);
     for (rel, bytes) in sorted {
-        hasher.update_str(&rel.to_string_lossy());
+        hasher.update_os_str(rel.as_os_str());
         hasher.update_len_prefixed(bytes);
     }
     PackageSnapshotKey(hasher.finalize())

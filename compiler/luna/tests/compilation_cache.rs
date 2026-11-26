@@ -1,7 +1,9 @@
 #[path = "support/build_libraries.rs"]
 mod build_libraries;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 use luna::{
     compilation_cache::CompilationCache,
     frontend::Artifact,
@@ -14,8 +16,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 struct Files(PathBuf);
+
 impl Files {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -26,9 +31,11 @@ impl Files {
         std::fs::create_dir(&root).unwrap();
         Self(root)
     }
+
     fn write(&self, name: &str, text: &str) {
         primitive_bindings::write_fixture(self.0.join(name), text).unwrap();
     }
+
     fn request(&self, file: &str) -> Request {
         package_cli::parse([
             "--package".into(),
@@ -44,6 +51,7 @@ impl Files {
         .unwrap()
     }
 }
+
 impl Drop for Files {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).unwrap();
@@ -69,12 +77,14 @@ fn bind_build_libraries(files: &Files, request: &mut Request) {
     request.options.meta_list_type = Some("meta.List".into());
     request.options.comptime_intrinsics = build_libraries::comptime_intrinsics();
 }
+
 fn result(value: &luna::compilation_cache::CompilationOutcome) -> comptime_interpretor::Value {
     let Artifact::Nir(package) = &value.compilation.artifact else {
         panic!("expected NIR")
     };
     luna::execution::interpret(package, "run", 100_000).unwrap()
 }
+
 #[test]
 fn completed_artifacts_reuse_and_invalidate_without_caching_failures() {
     let files = Files::new();
@@ -104,6 +114,7 @@ fn completed_artifacts_reuse_and_invalidate_without_caching_failures() {
     assert!(!cache.compile(&request).unwrap().reused);
     assert!(cache.compile(&request).unwrap().reused);
 }
+
 #[test]
 fn discovery_membership_invalidates_but_unrelated_files_do_not() {
     let files = Files::new();
@@ -123,6 +134,7 @@ fn discovery_membership_invalidates_but_unrelated_files_do_not() {
     std::fs::remove_dir(files.0.join("empty")).unwrap();
     assert!(!cache.compile(&request).unwrap().reused);
 }
+
 #[test]
 fn request_keys_and_lru_capacity_bound_reuse() {
     let files = Files::new();
@@ -160,6 +172,7 @@ fn request_keys_and_lru_capacity_bound_reuse() {
     assert!(!disabled.compile(&a).unwrap().reused);
     assert!(disabled.is_empty());
 }
+
 #[test]
 fn cache_hits_recheck_output_alias_protection() {
     let files = Files::new();
@@ -606,4 +619,56 @@ fn typed_metadata_requests_invalidate_values_presence_and_provider_identity() {
     assert!(!recovered.reused);
     assert_eq!(result(&recovered), comptime_interpretor::Value::Bool(true));
     assert!(cache.compile(&request).unwrap().reused);
+}
+
+#[test]
+fn external_config_files_invalidate_resident_compilation_cache() {
+    let files = Files::new();
+    std::fs::create_dir(files.0.join("builtin")).unwrap();
+    files.write(
+        "builtin/lib.fl",
+        "pub typealias bool = .bool'builtin; pub mod prelude { pub use .bool; }",
+    );
+    files.write("client.fl", "fn run() -> bool { true }");
+
+    let mut request = files.request("client.fl");
+    request.packages.push(luna::packages::SourcePackage {
+        resolution_id: 2,
+        identity: 202,
+        name: "builtin".into(),
+        entry: files.0.join("builtin/lib.fl"),
+    });
+    request.builtin = Some(2);
+    request.dependencies.push((1, "builtin".into(), 2));
+
+    let mut cache = CompilationCache::new(4);
+    let first = cache.compile(&request).unwrap();
+    assert!(!first.reused);
+    assert!(cache.compile(&request).unwrap().reused);
+
+    // Creating language-items.conf next to the builtin package root must invalidate.
+    files.write("language-items.conf", "version = 1\n");
+    let after_create = cache.compile(&request).unwrap();
+    assert!(
+        !after_create.reused,
+        "creating language-items.conf must invalidate CompilationCache"
+    );
+    assert!(cache.compile(&request).unwrap().reused);
+
+    // Editing language-items.conf must invalidate.
+    files.write("language-items.conf", "version = 1\n# edited\n");
+    let after_edit = cache.compile(&request).unwrap();
+    assert!(
+        !after_edit.reused,
+        "editing language-items.conf must invalidate CompilationCache"
+    );
+    assert!(cache.compile(&request).unwrap().reused);
+
+    // Deleting language-items.conf must invalidate.
+    std::fs::remove_file(files.0.join("language-items.conf")).unwrap();
+    let after_delete = cache.compile(&request).unwrap();
+    assert!(
+        !after_delete.reused,
+        "deleting language-items.conf must invalidate CompilationCache"
+    );
 }

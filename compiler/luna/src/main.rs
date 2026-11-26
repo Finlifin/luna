@@ -1,6 +1,7 @@
 //! Source compilation, IR export and explicit bounded comptime invocation.
 
 use luna::{cli, frontend};
+
 mod output;
 
 use cli::Command;
@@ -128,6 +129,8 @@ fn main() -> ExitCode {
         }),
         Command::Help => output::write_stdout(cli::HELP),
         Command::HelpTopic(text) => output::write_stdout(&text),
+        Command::Clean { cache_dir } => luna::package_cache::clean_cache(cache_dir.as_deref())
+            .and_then(|report| output::write_stdout(&report.to_string())),
         Command::Check(options) => frontend::compile(&options).map(|_| ()),
         Command::CheckPackages(request) => request.compile().map(|_| ()),
         Command::Packages(request)
@@ -213,6 +216,7 @@ fn main() -> ExitCode {
             &host_intrinsics,
         )
         .and_then(|(artifact, bindings)| {
+            let jobs = options.incremental.effective_jobs();
             luna::package_cli::Action::Tests {
                 host_fma,
                 host_sqrt,
@@ -227,7 +231,7 @@ fn main() -> ExitCode {
                 inline: inline_functions,
                 protocols,
             }
-            .run(artifact, &bindings, 0)
+            .run_with_jobs(artifact, &bindings, 0, jobs)
         })
         .and_then(|dump| {
             if let Some(path) = &options.output {

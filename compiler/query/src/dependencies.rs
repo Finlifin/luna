@@ -1,33 +1,44 @@
 //! Invocation-local dependency identities, independent of diagnostic key text.
-use crate::DepNode;
+use crate::{DepNode, QueryFailure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NodeId(u64);
+
 impl NodeId {
-    pub(crate) fn fresh() -> Self {
+    pub(crate) fn fresh() -> Result<Self, QueryFailure> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(
-            NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .expect("query identity space exhausted"),
-        )
+        NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map(Self)
+            .map_err(|_| QueryFailure::DependencyInvariant {
+                detail: "query identity space exhausted",
+            })
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Node {
     label: Option<DepNode>,
     reads: BTreeSet<NodeId>,
     users: BTreeSet<NodeId>,
     dirty: bool,
 }
+
 #[derive(Default)]
 pub(crate) struct Dependencies {
     nodes: BTreeMap<NodeId, Node>,
     active: Vec<(NodeId, BTreeSet<NodeId>)>,
 }
+
 impl Dependencies {
+    pub(crate) fn clone_settled(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            active: Vec::new(),
+        }
+    }
+
     pub(crate) fn read(&mut self, id: NodeId, label: DepNode) -> bool {
         if let Some((_, reads)) = self.active.last_mut() {
             reads.insert(id);
@@ -36,23 +47,32 @@ impl Dependencies {
         node.label = Some(label);
         std::mem::take(&mut node.dirty)
     }
+
     pub(crate) fn begin(&mut self, id: NodeId) {
         self.active.push((id, BTreeSet::new()));
     }
-    pub(crate) fn finish(&mut self) {
-        let (id, reads) = self.active.pop().expect("active dependency frame");
+
+    pub(crate) fn finish(&mut self) -> Result<(), QueryFailure> {
+        let Some((id, reads)) = self.active.pop() else {
+            return Err(QueryFailure::DependencyInvariant {
+                detail: "missing active dependency frame",
+            });
+        };
         let old = std::mem::replace(&mut self.nodes.entry(id).or_default().reads, reads.clone());
         for dependency in old {
-            self.nodes
-                .get_mut(&dependency)
-                .expect("dependency node")
-                .users
-                .remove(&id);
+            let Some(dep_node) = self.nodes.get_mut(&dependency) else {
+                return Err(QueryFailure::DependencyInvariant {
+                    detail: "missing dependency node",
+                });
+            };
+            dep_node.users.remove(&id);
         }
         for dependency in reads {
             self.nodes.entry(dependency).or_default().users.insert(id);
         }
+        Ok(())
     }
+
     pub(crate) fn invalidate(&mut self, root: NodeId) {
         let mut pending = vec![root];
         let mut visited = BTreeSet::new();
@@ -66,6 +86,7 @@ impl Dependencies {
         }
     }
 }
+
 impl std::fmt::Display for Dependencies {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(query-dependencies")?;

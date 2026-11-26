@@ -101,6 +101,33 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
     if first == "lsp" {
         return Ok(Command::Lsp(args.into_iter().skip(1).collect()));
     }
+    if first == "clean" {
+        let mut cache_dir = None;
+        let mut index = 1;
+        while index < args.len() {
+            let arg = &args[index];
+            match arg.to_str() {
+                Some("--help" | "-h") => return Ok(Command::HelpTopic(help(&["clean"])?)),
+                Some("--cache-dir") => {
+                    once(
+                        &mut cache_dir,
+                        value(&args, &mut index, "--cache-dir")?,
+                        "--cache-dir",
+                    )?;
+                }
+                Some(flag) if flag.starts_with('-') => {
+                    return Err(format!("unknown option '{flag}' for clean"));
+                }
+                _ => {
+                    return Err("clean does not accept positional arguments".into());
+                }
+            }
+            index += 1;
+        }
+        return Ok(Command::Clean {
+            cache_dir: cache_dir.map(std::path::PathBuf::from),
+        });
+    }
     let packages = first == "packages";
     let mut start = if packages { 2 } else { 1 };
     let command = if packages {
@@ -114,7 +141,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return Err("bindings is a help topic; use luna help bindings".into());
     }
     help(&[command])?;
-    if matches!(command, "packages" | "serve" | "fmt" | "lsp") {
+    if matches!(command, "packages" | "serve" | "fmt" | "lsp" | "clean") {
         return Err(format!("unsupported packages action '{command}'"));
     }
     if packages && args.len() == 3 && args[2] == "--help" {

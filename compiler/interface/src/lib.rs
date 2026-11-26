@@ -16,6 +16,7 @@ pub use middle;
 pub use query;
 pub use vfs;
 
+use std::cell::OnceCell;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -40,11 +41,11 @@ pub struct CompilerInstance<'sess> {
     pub diag_ctx: Arc<DiagnosticContext<'sess>>,
     /// Virtual file system for the **user** package.
     pub vfs: Vfs,
-    /// VFS instances for the sysroot packages loaded by [`Session::sysroot`]
-    /// (ordered by `PackageId`: `builtin` and `std` via `Sysroot::packages()`;
-    /// multi-package driver builds load all six builtin packages: `builtin`,
-    /// `std`, `meta`, `build`, `attrs`, and `verification`).
-    pub sysroot_vfs: Vec<Vfs>,
+    /// Lazily loaded VFS instances for sysroot packages (`Session::sysroot`),
+    /// scanned on demand when accessed via [`CompilerInstance::sysroot_vfs`],
+    /// [`CompilerInstance::sysroot_package`], [`CompilerInstance::builtin_vfs`],
+    /// or [`CompilerInstance::std_vfs`].
+    sysroot_vfs: OnceCell<Vec<Vfs>>,
     /// The central query database.
     ///
     /// Stores inputs and memoised HIR results with dependency invalidation.
@@ -60,15 +61,16 @@ pub struct CompilerInstance<'sess> {
 
 impl<'sess> CompilerInstance<'sess> {
     /// Create a new compiler instance tied to the given session.
+    ///
+    /// Sysroot VFS scanning is deferred until sysroot packages are requested.
     pub fn new(sess: &'sess Session) -> Self {
         let db = Db::new();
         let intrinsic_ctx = intrinsic::initialize();
-        let sysroot_vfs = Self::load_sysroot(sess);
 
         CompilerInstance {
             diag_ctx: Arc::new(DiagnosticContext::new(&sess.source_map)),
             vfs: Vfs::new(&sess.config.name, sess.config.root.clone()),
-            sysroot_vfs,
+            sysroot_vfs: OnceCell::new(),
             db,
             hir_arena: HirArena::new(),
             intrinsic_ctx,
@@ -88,10 +90,22 @@ impl<'sess> CompilerInstance<'sess> {
             .collect()
     }
 
+    /// Access all sysroot package VFS instances (scanning on first access).
+    pub fn sysroot_vfs(&self) -> &[Vfs] {
+        self.sysroot_vfs
+            .get_or_init(|| Self::load_sysroot(self.sess))
+            .as_slice()
+    }
+
+    /// Returns `true` if sysroot VFS scanning has already been triggered.
+    pub fn is_sysroot_loaded(&self) -> bool {
+        self.sysroot_vfs.get().is_some()
+    }
+
     /// Get the VFS for a sysroot package by [`PackageId`].
     pub fn sysroot_package(&self, id: PackageId) -> Option<&Vfs> {
         if id.is_sysroot() {
-            self.sysroot_vfs.get(id.index())
+            self.sysroot_vfs().get(id.index())
         } else {
             None
         }
@@ -174,11 +188,23 @@ impl<'c, 'sess> Compiler<'c, 'sess> {
         self.db.hir_package(())
     }
 
+    /// Cycle-safe variant of [`Compiler::hir_package`].
+    pub fn try_hir_package(self) -> Result<Arc<HirPackageBox>, query::QueryFailure> {
+        self.db.try_hir_package(())
+    }
+
     // ── Mid-end interface, signature & elaboration queries ─────────────────────
 
     /// Compute the lowered package's interface summary (memoised via `middle::Db`).
     pub fn package_interface(self) -> Arc<middle::PackageInterface> {
         self.db.package_interface(())
+    }
+
+    /// Cycle-safe variant of [`Compiler::package_interface`].
+    pub fn try_package_interface(
+        self,
+    ) -> Result<Arc<middle::PackageInterface>, query::QueryFailure> {
+        self.db.try_package_interface(())
     }
 
     /// Look up the [`middle::ItemInterfaceSummary`] for `owner`.
@@ -190,7 +216,7 @@ impl<'c, 'sess> Compiler<'c, 'sess> {
     pub fn try_item_signature(
         self,
         owner: hir::OwnerId,
-    ) -> query::QueryResult<Option<Arc<middle::ItemInterfaceSummary>>> {
+    ) -> Result<Option<Arc<middle::ItemInterfaceSummary>>, query::QueryFailure> {
         self.db.try_item_signature(owner)
     }
 
@@ -199,13 +225,22 @@ impl<'c, 'sess> Compiler<'c, 'sess> {
         self.db.package_trait_impls(())
     }
 
+    /// Cycle-safe variant of [`Compiler::package_trait_impls`].
+    pub fn try_package_trait_impls(
+        self,
+    ) -> Result<Arc<middle::PackageTraitImpls>, query::QueryFailure> {
+        self.db.try_package_trait_impls(())
+    }
+
     /// Evaluate and memoise mid-end package elaboration via the registered provider.
     pub fn elaborated_package(self) -> Arc<middle::ElaboratedPackage> {
         self.db.elaborated_package(())
     }
 
     /// Cycle-safe variant of [`Compiler::elaborated_package`].
-    pub fn try_elaborated_package(self) -> query::QueryResult<Arc<middle::ElaboratedPackage>> {
+    pub fn try_elaborated_package(
+        self,
+    ) -> Result<Arc<middle::ElaboratedPackage>, query::QueryFailure> {
         self.db.try_elaborated_package(())
     }
 }
@@ -380,5 +415,33 @@ mod tests {
         });
         assert_eq!(HIR_CALLS.load(Ordering::SeqCst), 2);
         assert_eq!(ELAB_CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn sysroot_vfs_is_loaded_lazily_on_demand() {
+        let dir =
+            std::env::temp_dir().join(format!("interface-lazy-sysroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for pkg in ["builtin", "meta", "build", "attrs", "verification", "std"] {
+            std::fs::create_dir_all(dir.join(pkg)).unwrap();
+            std::fs::write(dir.join(pkg).join("lib.fl"), "pub mod prelude {}").unwrap();
+        }
+
+        let mut cfg = CompilerConfig::new("lazy", dir.clone());
+        cfg.sysroot_override = Some(dir.clone());
+        let sess = Session::new(cfg);
+        assert!(sess.sysroot.is_some());
+
+        let instance = CompilerInstance::new(&sess);
+        assert!(
+            !instance.is_sysroot_loaded(),
+            "CompilerInstance::new must not eagerly scan sysroot VFS"
+        );
+        let builtin = instance.builtin_vfs().expect("lazy builtin VFS");
+        assert!(instance.is_sysroot_loaded());
+        assert_eq!(builtin.file_count(), 1);
+        assert_eq!(instance.std_vfs().expect("lazy std VFS").file_count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
