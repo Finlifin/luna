@@ -74,6 +74,7 @@ pub(super) struct Invocation {
 pub(super) struct CompletedInvocation {
     result: (Value, Term),
     definitions: crate::definitions::PublishedDefinitions,
+    diagnostics: Vec<comptime_interpretor::EmittedDiagnostic>,
     span: Span,
 }
 
@@ -107,6 +108,7 @@ impl Invocation {
                     return Ok(CompletedInvocation {
                         result: cached,
                         definitions,
+                        diagnostics: Vec::new(),
                         span: self.span,
                     });
                 }
@@ -154,7 +156,8 @@ impl Invocation {
                 }
             })
         };
-        let result = prepared.invoke_publishing(
+        let mut diagnostics = Vec::new();
+        let result = prepared.invoke_publishing_collecting_diagnostics(
             self.values,
             &mut steps,
             span,
@@ -166,6 +169,7 @@ impl Invocation {
                 implicit_call_site: implicit_call_site.as_ref(),
                 form: &lookup,
             }),
+            Some(&mut diagnostics),
         );
         checker.into_inner().required_steps = steps;
         if let Some(failure) = source_failure.take() {
@@ -175,6 +179,7 @@ impl Invocation {
         Ok(CompletedInvocation {
             result,
             definitions,
+            diagnostics,
             span: self.span,
         })
     }
@@ -220,6 +225,18 @@ impl CompletedInvocation {
                 .attribute_demands
                 .layouts
                 .register(&self.definitions);
+        }
+        for diagnostic in self.diagnostics {
+            let message = if diagnostic.level == 2 {
+                format!("note: {}", diagnostic.message)
+            } else {
+                diagnostic.message
+            };
+            checker.warnings.push(Warning {
+                code: None,
+                source: diagnostic.source,
+                message,
+            });
         }
         Ok(self.result)
     }
@@ -1708,6 +1725,13 @@ impl Checker<'_, '_> {
                 retained = refreshed.retained;
             }
             let _ = extra_closure_added;
+            self.retain_bounded_stack_targets(
+                &capture.function.body,
+                &retained,
+                &mut functions,
+                &mut runtime_function_identities,
+                expr.span,
+            )?;
             let capture::Entry {
                 function,
                 inputs,
@@ -1848,6 +1872,8 @@ impl Checker<'_, '_> {
                 enums: self.enums.values().cloned().collect(),
                 statics: self.statics.values().cloned().collect(),
                 definition_attributes: self.definition_attributes.clone(),
+                volatile_storage: self.volatile_storage.clone(),
+                layout_alignments: self.layout_alignments.clone(),
                 runtime_domains: self.runtime_domains.clone(),
                 global_runtime_deliveries: self
                     .global_runtime_deliveries
@@ -2105,6 +2131,160 @@ impl Checker<'_, '_> {
             function_bodies::SourceBody::Required,
             span,
         )
+    }
+
+    fn retain_bounded_stack_targets(
+        &mut self,
+        entry_body: &n::Expr,
+        retained: &BTreeSet<dependencies::Dependency>,
+        functions: &mut Vec<n::Function>,
+        runtime_function_identities: &mut Vec<n::RuntimeFunctionIdentity>,
+        span: Span,
+    ) -> Result<(), Error> {
+        fn expr_uses_bounded_stack_bytes(
+            expr: &n::Expr,
+            steps: &mut u64,
+            span: Span,
+        ) -> Result<bool, Error> {
+            let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let mut found = false;
+            let res = nir::visit::expression_checked(expr, &mut fuel, |sub, _| {
+                if matches!(sub.kind, K::BoundedStackBytes(_)) {
+                    found = true;
+                }
+                Ok::<(), nir::visit::Error>(())
+            });
+            *steps = steps.saturating_sub((before - fuel) as u64);
+            res.map_err(|err| error(span, err.to_string()))?;
+            Ok(found)
+        }
+
+        let mut uses_query =
+            expr_uses_bounded_stack_bytes(entry_body, &mut self.required_steps, span)?;
+        if !uses_query {
+            for function in functions.iter() {
+                if expr_uses_bounded_stack_bytes(&function.body, &mut self.required_steps, span)? {
+                    uses_query = true;
+                    break;
+                }
+            }
+        }
+        if !uses_query {
+            return Ok(());
+        }
+
+        let mut present: BTreeSet<DeclarationId> =
+            functions.iter().map(|f| f.declaration).collect();
+        let mut work = VecDeque::new();
+        let mut queued = BTreeSet::new();
+        for dep in retained {
+            match dep {
+                dependencies::Dependency::Callable(id)
+                | dependencies::Dependency::Definition(id) => {
+                    if queued.insert(*id) {
+                        work.push_back(*id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let collect_callees = |body: &n::Expr,
+                               queued: &mut BTreeSet<DeclarationId>,
+                               work: &mut VecDeque<DeclarationId>,
+                               steps: &mut u64|
+         -> Result<(), Error> {
+            let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let res = nir::visit::expression_checked(body, &mut fuel, |sub, _| {
+                match &sub.kind {
+                    K::Function(id) => {
+                        if queued.insert(*id) {
+                            work.push_back(*id);
+                        }
+                    }
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } if arguments.is_empty() => {
+                        if queued.insert(*declaration) {
+                            work.push_back(*declaration);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok::<(), nir::visit::Error>(())
+            });
+            *steps = steps.saturating_sub((before - fuel) as u64);
+            res.map_err(|err| error(span, err.to_string()))
+        };
+        collect_callees(entry_body, &mut queued, &mut work, &mut self.required_steps)?;
+        for function in functions.iter() {
+            collect_callees(
+                &function.body,
+                &mut queued,
+                &mut work,
+                &mut self.required_steps,
+            )?;
+        }
+
+        while let Some(decl_id) = work.pop_front() {
+            if present.contains(&decl_id) {
+                continue;
+            }
+            let Some(owner) = self.source_declarations.owner(decl_id) else {
+                continue;
+            };
+            if self.active_source_bodies.contains(&owner)
+                || self.open_functions.contains_key(&owner)
+            {
+                continue;
+            }
+            let Some(item) = self.package.item(owner) else {
+                continue;
+            };
+            let is_plain_runtime = match &item.kind {
+                ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) => {
+                    !sig.modifiers.is_comptime
+                        && !sig.modifiers.is_normal_form_head
+                        && !sig.modifiers.is_function_template
+                }
+                _ => false,
+            };
+            if !is_plain_runtime {
+                continue;
+            }
+            let function = if let Some(cached) = self.checked_runtime_functions.get(&owner).cloned()
+            {
+                cached
+            } else {
+                self.ensure_signature(owner, span)?;
+                self.ensure_contract(owner, span)?;
+                let Some(signature) = self.declared_signature(owner).map(|sig| sig.into_owned())
+                else {
+                    continue;
+                };
+                let checked = self.check_source_function(
+                    owner,
+                    signature,
+                    function_bodies::SourceBody::Package,
+                    item.span,
+                )?;
+                self.checked_runtime_functions
+                    .insert(owner, checked.clone());
+                checked
+            };
+            present.insert(decl_id);
+            collect_callees(
+                &function.body,
+                &mut queued,
+                &mut work,
+                &mut self.required_steps,
+            )?;
+            functions.push(function);
+        }
+        runtime_function_identities.retain(|identity| !present.contains(&identity.declaration));
+        Ok(())
     }
 }
 
@@ -2685,7 +2865,9 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
             | K::DynCall(_)
             | K::StagedValue(_)
             | K::ConstAddress { .. }
-            | K::StaticAddress(_) => return false,
+            | K::StaticAddress(_)
+            | K::EmitDiagnostic(_)
+            | K::CompileError(_) => return false,
             K::Call {
                 callee,
                 arguments,
@@ -2765,7 +2947,7 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
                 stack.push(left);
                 stack.push(right);
             }
-            K::Tuple(items) | K::TypeList(items) => {
+            K::Tuple(items) | K::Array(items) | K::TypeList(items) => {
                 stack.extend(items.iter());
             }
             K::Intrinsic { .. } => return false,
@@ -2810,6 +2992,9 @@ fn is_pure_cacheable_expr(root: &n::Expr, package: &n::Package) -> bool {
             | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::ListLength(value)
+            | K::TupleLen(value)
+            | K::TupleElem(value)
+            | K::BoundedStackBytes(value)
             | K::NewtypeRepresentation(value)
             | K::StructFieldTypes(value)
             | K::StructFieldNames(value)
@@ -3019,6 +3204,14 @@ fn canonical_required_body(expr: &n::Expr) -> Option<String> {
                 }
                 out.push(')');
             }
+            K::Array(items) => {
+                let _ = write!(out, "(array {}", expr.ty);
+                for item in items {
+                    out.push(' ');
+                    write_expr(item, out, depth + 1)?;
+                }
+                out.push(')');
+            }
             K::IntegerBinary { op, left, right } => {
                 let _ = write!(out, "(ibin {} {op:?} ", expr.ty);
                 write_expr(left, out, depth + 1)?;
@@ -3128,6 +3321,7 @@ fn scope_for_required(
     }
     defs.display(&package.definition_attributes);
     defs.display(&package.volatile_storage);
+    defs.display(&package.layout_alignments);
     for (pkg_id, meta) in &package.package_metadata {
         defs.u64(*pkg_id);
         defs.display(meta);
@@ -3204,6 +3398,9 @@ fn scope_for_required(
         protocols_cfg.splice,
         protocols_cfg.meta_list,
         protocols_cfg.tuple,
+        protocols_cfg.array,
+        protocols_cfg.maybe_uninit_storage,
+        protocols_cfg.manually_drop_storage,
     ]
     .into_iter()
     .chain(protocols_cfg.arithmetic)

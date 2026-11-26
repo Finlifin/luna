@@ -2236,6 +2236,55 @@ fn validate_head_arguments_with_runtime_domains(
                     declaration,
                     sort: Sort::ComptimeValue | Sort::Runtime,
                 } => evidence.get(declaration),
+                Term::ComptimeCall(call) if value.sort() == Sort::ComptimeValue => Some(&call.ty),
+                Term::NormalForm {
+                    head,
+                    sort: Sort::ComptimeValue,
+                    arguments,
+                } => {
+                    let Some(package) = layouts else {
+                        return Ok(false);
+                    };
+                    let Some(result_ty) = package.normal_form_results.get(head) else {
+                        return Ok(false);
+                    };
+                    let Some(descriptor) = package
+                        .normal_forms
+                        .iter()
+                        .find(|meta| meta.declaration == *head)
+                    else {
+                        return Ok(false);
+                    };
+                    if descriptor.parameters.len() != arguments.len() {
+                        return Ok(false);
+                    }
+                    let ids: Vec<_> = descriptor
+                        .parameters
+                        .iter()
+                        .map(|param| param.declaration)
+                        .collect();
+                    let domains: Vec<_> = descriptor
+                        .parameters
+                        .iter()
+                        .map(|param| param.ty.clone())
+                        .collect();
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &ids, &domains, arguments, frames, fuel,
+                    )
+                    .map_err(|error| match error {
+                        nir::type_computations::Error::Budget => nir::NominalAdmissionError::Budget,
+                        error => nir::NominalAdmissionError::Invalid(error.to_string()),
+                    })?;
+                    projected = Some(substitution.instantiate_bounded(result_ty, fuel).map_err(
+                        |error| match error {
+                            nir::type_computations::Error::Budget => {
+                                nir::NominalAdmissionError::Budget
+                            }
+                            error => nir::NominalAdmissionError::Invalid(error.to_string()),
+                        },
+                    )?);
+                    projected.as_ref()
+                }
                 Term::RuntimeField { .. } => {
                     projected = nir::runtime_fields::declared_domain(
                         value,

@@ -111,6 +111,15 @@ struct BitPackedPointerChain<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct AlignedRecordLayout {
+    fields: Vec<Ty>,
+    llvm_members: Vec<String>,
+    field_llvm_indices: Vec<usize>,
+    size: u64,
+    align: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
     Optional(std::sync::Arc<OptionalLayout>),
@@ -136,8 +145,25 @@ enum Ty {
     // its layout from the checked logical IIR type, preserving nominal identity.
     Pointer,
     Record(std::sync::Arc<Vec<Ty>>),
+    AlignedRecord(std::sync::Arc<AlignedRecordLayout>),
     PackedRecord(std::sync::Arc<Vec<Ty>>),
     BitPackedRecord(std::sync::Arc<BitPackedLayout>),
+    RawStorage {
+        size: u64,
+        align: u64,
+    },
+    Array {
+        elem: Box<Ty>,
+        len: usize,
+        elem_size: u64,
+        align: u64,
+    },
+    Aligned {
+        inner: Box<Ty>,
+        size: u64,
+        align: u64,
+        pad_bytes: u64,
+    },
 }
 
 impl Ty {
@@ -218,6 +244,42 @@ impl Ty {
                     format!("{{ {inner} }}")
                 }
             }
+            Self::AlignedRecord(layout) => {
+                if layout.llvm_members.is_empty() {
+                    "{}".into()
+                } else {
+                    format!("{{ {} }}", layout.llvm_members.join(", "))
+                }
+            }
+            Self::RawStorage { size, .. } => {
+                if *size == 0 {
+                    "{}".into()
+                } else {
+                    format!("[{size} x i8]")
+                }
+            }
+            Self::Array { elem, len, .. } => {
+                let inner = if **elem == Ty::Unit {
+                    "{}".into()
+                } else {
+                    elem.llvm()
+                };
+                format!("[{len} x {inner}]")
+            }
+            Self::Aligned {
+                inner, pad_bytes, ..
+            } => {
+                let base = if **inner == Ty::Unit {
+                    "{}".into()
+                } else {
+                    inner.llvm()
+                };
+                if *pad_bytes == 0 {
+                    base
+                } else {
+                    format!("{{ {base}, [{pad_bytes} x i8] }}")
+                }
+            }
             Self::BitPackedRecord(layout) => {
                 if layout.total_bits == 0 {
                     "{}".into()
@@ -242,6 +304,63 @@ impl Ty {
 
     fn signed(&self) -> bool {
         matches!(self, Self::Int(_, true))
+    }
+
+    fn explicit_align(&self) -> Option<u64> {
+        match self {
+            Self::PackedRecord(_) => Some(1),
+            Self::RawStorage { align, .. }
+            | Self::Array { align, .. }
+            | Self::Aligned { align, .. }
+                if *align > 1 =>
+            {
+                Some(*align)
+            }
+            Self::AlignedRecord(layout) if layout.align > 1 => Some(layout.align),
+            _ => None,
+        }
+    }
+
+    fn natural_llvm_align(&self, pointer_bits: u32) -> u64 {
+        match self {
+            Self::Unit | Self::Bool => 1,
+            Self::Float16 | Self::BFloat16 => 2,
+            Self::Float32 => 4,
+            Self::Float64 | Self::TemplateIdentity(_) | Self::String | Self::Symbol => 8,
+            Self::Int(bits, _) => nir::layout::integer_layout(*bits).map_or(1, |l| l.align),
+            Self::Pointer | Self::FunctionPointer | Self::TraitObject => {
+                nir::layout::integer_layout(pointer_bits).map_or(8, |l| l.align)
+            }
+            Self::RawStorage { .. } | Self::PackedRecord(_) => 1,
+            Self::Array { elem, .. } => elem.natural_llvm_align(pointer_bits),
+            Self::Aligned { inner, .. } => inner.natural_llvm_align(pointer_bits),
+            Self::AlignedRecord(layout) => layout
+                .fields
+                .iter()
+                .map(|f| f.natural_llvm_align(pointer_bits))
+                .max()
+                .unwrap_or(1),
+            Self::Record(fields) => fields
+                .iter()
+                .map(|f| f.natural_llvm_align(pointer_bits))
+                .max()
+                .unwrap_or(1),
+            Self::BitPackedRecord(layout) => {
+                nir::layout::integer_layout(layout.total_bits).map_or(1, |l| l.align)
+            }
+            Self::Optional(opt) => {
+                if opt.niche.is_some() {
+                    opt.carrier.natural_llvm_align(pointer_bits)
+                } else {
+                    opt.payload.natural_llvm_align(pointer_bits)
+                }
+            }
+            _ => {
+                let mut fuel = 1024;
+                self.storage_layout_at(pointer_bits, 0, &mut fuel)
+                    .map_or(1, |l| l.align)
+            }
+        }
     }
 
     fn storage_layout_at(
@@ -301,6 +420,29 @@ impl Ty {
                 }
                 nir::layout::struct_layout(&layouts).map_err(|e| e.to_string())
             }
+            Self::AlignedRecord(layout) => Ok(nir::TypeLayout {
+                size: layout.size,
+                align: layout.align,
+            }),
+            Self::RawStorage { size, align } => Ok(nir::TypeLayout {
+                size: *size,
+                align: *align,
+            }),
+            Self::Array {
+                elem_size,
+                len,
+                align,
+                ..
+            } => Ok(nir::TypeLayout {
+                size: elem_size
+                    .checked_mul(*len as u64)
+                    .ok_or("host array size overflow")?,
+                align: *align,
+            }),
+            Self::Aligned { size, align, .. } => Ok(nir::TypeLayout {
+                size: *size,
+                align: *align,
+            }),
             Self::PackedRecord(fields) => {
                 let mut layouts = Vec::with_capacity(fields.len());
                 for field in fields.iter() {
@@ -408,6 +550,33 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
             .normal_forms
             .iter()
             .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn is_array_head(&self, head: nir::DeclarationId) -> bool {
+        self.graph
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::Array)
+    }
+
+    fn is_maybe_uninit_storage_head(&self, head: nir::DeclarationId) -> bool {
+        self.graph.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == nir::normal_forms::Role::MaybeUninitStorage
+        })
+    }
+
+    fn is_manually_drop_storage_head(&self, head: nir::DeclarationId) -> bool {
+        self.graph.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == nir::normal_forms::Role::ManuallyDropStorage
+        })
+    }
+
+    fn declaration_alignment(&self, declaration: nir::DeclarationId) -> Option<u64> {
+        self.graph.layout_alignments.declaration_align(declaration)
+    }
+
+    fn field_alignment(&self, declaration: nir::DeclarationId, index: usize) -> Option<u64> {
+        self.graph.layout_alignments.field_align(declaration, index)
     }
 
     fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
@@ -685,12 +854,13 @@ fn repr_at(
                 ErrorResultLayout::new(fields, pointer_bits)?,
             )))
         }
-        Term::Record(fields) => Ok(Ty::Record(std::sync::Arc::new(
-            fields
+        Term::Record(fields) => {
+            let tys = fields
                 .iter()
                 .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
+                .collect::<Result<Vec<_>, _>>()?;
+            build_record_ty(graph, None, tys, remaining)
+        }
         Term::Pointer(_) => {
             if !checked {
                 return Err(
@@ -714,18 +884,62 @@ fn repr_at(
             let definition = match &instance.definition {
                 iir::NominalDefinition::Struct(definition) => definition,
                 iir::NominalDefinition::Newtype(definition) => {
-                    return repr_at(
+                    let inner = repr_at(
                         graph,
                         &definition.representation,
                         depth + 1,
                         checked,
                         remaining,
-                    );
+                    )?;
+                    let decl_align = graph
+                        .layout_alignments
+                        .declaration_align(definition.declaration);
+                    if let Some(d) = decl_align {
+                        let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+                        let layout = inner.storage_layout_at(pointer_bits, 0, remaining)?;
+                        let target_align = layout.align.max(d);
+                        let target_size = nir::layout::align_up(layout.size, target_align)
+                            .map_err(|e| e.to_string())?;
+                        if target_align > inner.natural_llvm_align(pointer_bits)
+                            || target_size > layout.size
+                        {
+                            let pad_bytes = target_size.saturating_sub(layout.size);
+                            return Ok(Ty::Aligned {
+                                inner: Box::new(inner),
+                                size: target_size,
+                                align: target_align,
+                                pad_bytes,
+                            });
+                        }
+                    }
+                    return Ok(inner);
                 }
                 iir::NominalDefinition::Enum(definition) => {
-                    return Ok(Ty::Enum(std::sync::Arc::new(enums::EnumLayout::build(
+                    let enum_ty = Ty::Enum(std::sync::Arc::new(enums::EnumLayout::build(
                         graph, definition, depth, checked, remaining,
-                    )?)));
+                    )?));
+                    if let Some(d) = graph
+                        .layout_alignments
+                        .declaration_align(definition.declaration)
+                    {
+                        let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+                        let layout = enum_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                        let target_align = layout.align.max(d);
+                        let target_size = nir::layout::align_up(layout.size, target_align)
+                            .map_err(|e| e.to_string())?;
+                        if target_align > enum_ty.natural_llvm_align(pointer_bits)
+                            || target_size > layout.size
+                        {
+                            let pad_bytes = target_size.saturating_sub(layout.size);
+                            return Ok(Ty::Aligned {
+                                inner: Box::new(enum_ty),
+                                size: target_size,
+                                align: target_align,
+                                pad_bytes,
+                            });
+                        }
+                    }
+                    return Ok(enum_ty);
                 }
             };
             let fields = definition
@@ -734,7 +948,9 @@ fn repr_at(
                 .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
                 .collect::<Result<Vec<_>, _>>()?;
             match definition.packed {
-                nir::program::PackedMode::None => Ok(Ty::Record(std::sync::Arc::new(fields))),
+                nir::program::PackedMode::None => {
+                    build_record_ty(graph, Some(definition.declaration), fields, remaining)
+                }
                 nir::program::PackedMode::Byte => Ok(Ty::PackedRecord(std::sync::Arc::new(fields))),
                 nir::program::PackedMode::Bit => {
                     let field_terms: Vec<Term> =
@@ -821,17 +1037,123 @@ fn repr_at(
             .ok_or_else(|| format!("host LLVM representation is not implemented for {ty}")),
         Term::Tuple(fields) => tuple_layout(graph, fields, depth, checked, remaining),
         Term::NormalForm { .. } => {
-            let fields = graph
+            if let Some(fields) = graph
                 .normal_forms
                 .iter()
                 .find_map(|head| head.tuple_elements(ty))
-                .ok_or_else(|| format!("host has no trusted representation for {ty}"))?;
-            tuple_layout(graph, fields, depth, checked, remaining)
+            {
+                return tuple_layout(graph, fields, depth, checked, remaining);
+            }
+            let nf_has_role = |id, role| {
+                graph
+                    .normal_forms
+                    .iter()
+                    .find(|head| head.declaration == id)
+                    .is_some_and(|head| head.role == role)
+            };
+            if let Some((element, len)) = nir::normal_forms::array_element_and_len_with(ty, &|id| {
+                nf_has_role(id, nir::normal_forms::Role::Array)
+            }) {
+                nir::type_computations::charge_term(ty, remaining).map_err(|e| e.to_string())?;
+                let elem_ty = repr_at(graph, element, depth + 1, checked, remaining)?;
+                let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+                let elem_layout = elem_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                return Ok(Ty::Array {
+                    elem: Box::new(elem_ty),
+                    len,
+                    elem_size: elem_layout.size,
+                    align: elem_layout.align,
+                });
+            }
+            if let Some(inner) = nir::normal_forms::storage_inner_type_with(ty, &|id| {
+                nf_has_role(id, nir::normal_forms::Role::MaybeUninitStorage)
+            }) {
+                let inner_ty = repr_at(graph, inner, depth + 1, checked, remaining)?;
+                let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+                let layout = inner_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                return Ok(Ty::RawStorage {
+                    size: layout.size,
+                    align: layout.align,
+                });
+            }
+            if let Some(inner) = nir::normal_forms::storage_inner_type_with(ty, &|id| {
+                nf_has_role(id, nir::normal_forms::Role::ManuallyDropStorage)
+            }) {
+                return repr_at(graph, inner, depth + 1, checked, remaining);
+            }
+            Err(format!("host has no trusted representation for {ty}"))
         }
         _ => Err(format!(
             "host LLVM representation is not implemented for {ty}"
         )),
     }
+}
+
+fn build_record_ty(
+    graph: &iir::Package,
+    declaration: Option<nir::DeclarationId>,
+    fields: Vec<Ty>,
+    remaining: &mut usize,
+) -> Result<Ty, String> {
+    let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+    let decl_align = declaration.and_then(|d| graph.layout_alignments.declaration_align(d));
+    let mut needs_aligned_record = decl_align.is_some();
+    if !needs_aligned_record {
+        for (i, field) in fields.iter().enumerate() {
+            if declaration
+                .and_then(|d| graph.layout_alignments.field_align(d, i))
+                .is_some()
+            {
+                needs_aligned_record = true;
+                break;
+            }
+            let layout = field.storage_layout_at(pointer_bits, 0, remaining)?;
+            if layout.align > field.natural_llvm_align(pointer_bits) {
+                needs_aligned_record = true;
+                break;
+            }
+        }
+    }
+    if !needs_aligned_record {
+        return Ok(Ty::Record(std::sync::Arc::new(fields)));
+    }
+    let mut llvm_members = Vec::new();
+    let mut field_llvm_indices = Vec::with_capacity(fields.len());
+    let mut offset = 0u64;
+    let mut max_align = decl_align.unwrap_or(1);
+    for (i, field) in fields.iter().enumerate() {
+        let layout = field.storage_layout_at(pointer_bits, 0, remaining)?;
+        let field_align = declaration
+            .and_then(|d| graph.layout_alignments.field_align(d, i))
+            .map_or(layout.align, |a| layout.align.max(a));
+        max_align = max_align.max(field_align);
+        let aligned = nir::layout::align_up(offset, field_align).map_err(|e| e.to_string())?;
+        if aligned > offset {
+            llvm_members.push(format!("[{} x i8]", aligned - offset));
+        }
+        field_llvm_indices.push(llvm_members.len());
+        llvm_members.push(if *field == Ty::Unit {
+            "{}".into()
+        } else {
+            field.llvm()
+        });
+        offset = aligned
+            .checked_add(layout.size)
+            .ok_or("host aligned record offset overflow")?;
+    }
+    let total_size = nir::layout::align_up(offset, max_align).map_err(|e| e.to_string())?;
+    if total_size > offset {
+        llvm_members.push(format!("[{} x i8]", total_size - offset));
+    }
+    Ok(Ty::AlignedRecord(std::sync::Arc::new(
+        AlignedRecordLayout {
+            fields,
+            llvm_members,
+            field_llvm_indices,
+            size: total_size,
+            align: max_align,
+        },
+    )))
 }
 
 fn tuple_layout(
@@ -844,12 +1166,11 @@ fn tuple_layout(
     if fields.is_empty() {
         return Ok(Ty::Unit);
     }
-    Ok(Ty::Record(std::sync::Arc::new(
-        fields
-            .iter()
-            .map(|ty| repr_at(graph, ty, depth + 1, checked, remaining))
-            .collect::<Result<Vec<_>, _>>()?,
-    )))
+    let tys = fields
+        .iter()
+        .map(|ty| repr_at(graph, ty, depth + 1, checked, remaining))
+        .collect::<Result<Vec<_>, _>>()?;
+    build_record_ty(graph, None, tys, remaining)
 }
 
 #[derive(Clone)]
@@ -979,7 +1300,7 @@ impl Emitter<'_> {
 
     fn slot(&mut self, ty: Ty) -> Slot {
         let name = self.fresh();
-        let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
+        let align = ty.explicit_align();
         let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
         self.prologue.push_str(&format!(
             "  %{name} = alloca {}{align_suffix}\n",
@@ -1002,9 +1323,7 @@ impl Emitter<'_> {
             return Err("host LLVM store representation mismatch".into());
         }
         if value.ty != Ty::Unit {
-            let align = slot
-                .align
-                .or_else(|| matches!(value.ty, Ty::PackedRecord(_)).then_some(1));
+            let align = slot.align.or_else(|| value.ty.explicit_align());
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             let op = if slot.volatile {
                 self.emitted_effects.has_volatile = true;
@@ -1026,9 +1345,7 @@ impl Emitter<'_> {
         if slot.ty == Ty::Unit {
             Value::unit()
         } else {
-            let align = slot
-                .align
-                .or_else(|| matches!(slot.ty, Ty::PackedRecord(_)).then_some(1));
+            let align = slot.align.or_else(|| slot.ty.explicit_align());
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             let op = if slot.volatile {
                 self.emitted_effects.has_volatile = true;
@@ -1632,6 +1949,7 @@ impl Emitter<'_> {
             K::Variant { index, fields, .. } => {
                 self.variant(expr.source, *index, fields, &expr.ty, depth)
             }
+            K::Array(fields) => self.array(expr.source, fields, &expr.ty, depth),
             K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
                 if matches!(expr.kind, K::Record { .. })
                     && self.is_bit_packed_type(&expr.ty)
@@ -2404,6 +2722,8 @@ impl Emitter<'_> {
                     let mut slot = self.pointer_slot(&pointer, &expr.ty)?;
                     if unaligned {
                         slot.align = Some(1);
+                    } else if slot.align.is_none() {
+                        slot.align = slot.ty.explicit_align();
                     }
                     slot.volatile = volatile;
                     Ok(self.load(&slot))
@@ -2459,6 +2779,8 @@ impl Emitter<'_> {
                     let mut slot = self.pointer_slot(&pointer, pointee_ty)?;
                     if unaligned {
                         slot.align = Some(1);
+                    } else if slot.align.is_none() {
+                        slot.align = slot.ty.explicit_align();
                     }
                     slot.volatile = volatile;
                     self.store(&slot, &value)?;
@@ -2972,6 +3294,8 @@ impl Emitter<'_> {
                     let mut slot = self.pointer_slot(&pointer, pointee_ty)?;
                     if unaligned {
                         slot.align = Some(1);
+                    } else if slot.align.is_none() {
+                        slot.align = slot.ty.explicit_align();
                     }
                     slot.volatile = volatile;
                     self.bit_write(slot, selections, value, depth)
@@ -3185,10 +3509,56 @@ impl Emitter<'_> {
                 // IIR has validated exactly one declared representation edge.
                 // Equal LLVM layouts do not authorize any other conversion.
                 let target = repr(self.graph, &expr.ty, self.checked)?;
-                if value.ty != target {
-                    return Err("host newtype representation edge changes its layout".into());
+                if value.ty == target {
+                    return Ok(value);
                 }
-                Ok(value)
+                if let Ty::Aligned {
+                    inner, pad_bytes, ..
+                } = &target
+                    && **inner == value.ty
+                {
+                    let pad_bytes = *pad_bytes;
+                    if pad_bytes == 0 || value.ty == Ty::Unit {
+                        let target_ty = target.clone();
+                        return Ok(Value {
+                            ty: target_ty,
+                            text: if pad_bytes == 0 {
+                                value.text
+                            } else {
+                                "zeroinitializer".into()
+                            },
+                        });
+                    }
+                    return Ok(self.instruction(
+                        target.clone(),
+                        format!(
+                            "insertvalue {} zeroinitializer, {} {}, 0",
+                            target.llvm(),
+                            value.ty.llvm(),
+                            value.text
+                        ),
+                    ));
+                }
+                if let Ty::Aligned {
+                    inner, pad_bytes, ..
+                } = &value.ty
+                    && **inner == target
+                {
+                    if target == Ty::Unit {
+                        return Ok(Value::unit());
+                    }
+                    if *pad_bytes == 0 {
+                        return Ok(Value {
+                            ty: target,
+                            text: value.text,
+                        });
+                    }
+                    return Ok(self.instruction(
+                        target.clone(),
+                        format!("extractvalue {} {}, 0", value.ty.llvm(), value.text),
+                    ));
+                }
+                Err("host newtype representation edge changes its layout".into())
             }
             _ => unreachable!(),
         }

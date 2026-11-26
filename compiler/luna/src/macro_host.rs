@@ -332,6 +332,9 @@ struct OwnedSelectors {
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
+    array: Option<String>,
+    maybe_uninit_storage: Option<String>,
+    manually_drop_storage: Option<String>,
 }
 
 impl OwnedSelectors {
@@ -407,6 +410,9 @@ impl OwnedSelectors {
             splice: s.splice.map(str::to_owned),
             meta_list: s.meta_list.map(str::to_owned),
             tuple: s.tuple.map(str::to_owned),
+            array: s.array.map(str::to_owned),
+            maybe_uninit_storage: s.maybe_uninit_storage.map(str::to_owned),
+            manually_drop_storage: s.manually_drop_storage.map(str::to_owned),
         }
     }
 
@@ -478,6 +484,9 @@ impl OwnedSelectors {
             splice: self.splice.as_deref(),
             meta_list: self.meta_list.as_deref(),
             tuple: self.tuple.as_deref(),
+            array: self.array.as_deref(),
+            maybe_uninit_storage: self.maybe_uninit_storage.as_deref(),
+            manually_drop_storage: self.manually_drop_storage.as_deref(),
         }
     }
 }

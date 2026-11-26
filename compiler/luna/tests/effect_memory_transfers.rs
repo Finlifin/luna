@@ -6,6 +6,7 @@ mod effect_fixture;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 #[test]
@@ -2899,6 +2900,7 @@ fn variant_matches_route_qualified_pointers_to_typed_effect_requests() {
         }
     }
 }
+
 #[test]
 fn effect_aliases_preserve_variant_conditions_until_storage_is_replaced() {
     let seed = support::compile_with_tuple(
@@ -4656,10 +4658,10 @@ fn indirect_enum_load_preserves_conditions_on_each_loaded_root() {
 #[test]
 fn scalar_passing_request_footprint_is_independent_of_provider_storage() {
     use elaboration::verification::memory;
-    let package = support::compile(
-        effect_fixture!("^attrs.effects.direct_passing effect value()->T where T;
-         fn subject()->#value<T> T where T {value<T>()#}"),
-    );
+    let package = support::compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect value()->T where T;
+         fn subject()->#value<T> T where T {value<T>()#}"
+    ));
     for primitive in [
         nir::Primitive::Bool,
         nir::Primitive::U128,
@@ -4682,13 +4684,13 @@ fn scalar_passing_request_footprint_is_independent_of_provider_storage() {
 #[test]
 fn scalar_passing_request_rule_does_not_erase_provider_access_or_rejection() {
     use elaboration::verification::memory;
-    let package = support::compile(
-        effect_fixture!("^attrs.effects.direct_passing effect ready()->bool;
+    let package = support::compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect ready()->bool;
          fn subject()->#ready bool {ready()#}
          fn install(target:*bool)->bool {
              subject()# {ready()=>do {assumes target.*; target.* = false; true},}
-         }"),
-    );
+         }"
+    ));
     let summary =
         memory::infer_in_package(&package, support::id(&package, "install"), &[], &mut 200000)
             .unwrap();
@@ -4706,7 +4708,10 @@ fn scalar_passing_request_rule_does_not_erase_provider_access_or_rejection() {
 #[test]
 fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
     use elaboration::verification::memory;
-    for (attribute, result) in [("", "bool"), (effect_fixture!("^attrs.effects.direct_passing"), "*bool")] {
+    for (attribute, result) in [
+        ("", "bool"),
+        (effect_fixture!("^attrs.effects.direct_passing"), "*bool"),
+    ] {
         let package = support::compile(&format!(
             "{attribute} effect ready()->{result}; fn subject()->#ready {result} {{ready()#}}"
         ));
@@ -4718,9 +4723,9 @@ fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
             "{error}"
         );
     }
-    let mut package = support::compile(
-        effect_fixture!("^attrs.effects.direct_passing effect ready()->bool; fn subject()->#ready bool {ready()#}"),
-    );
+    let mut package = support::compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect ready()->bool; fn subject()->#ready bool {ready()#}"
+    ));
     let id = support::id(&package, "subject");
     for function in &mut package.functions {
         nir::visit::expression_mut(&mut function.body, &mut 10000, |expr, _| {

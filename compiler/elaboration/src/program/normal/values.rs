@@ -110,6 +110,20 @@ impl Checker<'_, '_> {
                 };
                 Term::TupleValue(fields)
             }
+            Value::Array { ty, values } => {
+                let Some(fields) = values
+                    .into_iter()
+                    .map(|value| self.optional_normal_term_at(value, span, depth + 1))
+                    .collect::<Result<Option<Vec<_>>, _>>()?
+                else {
+                    return Ok(None);
+                };
+                Term::NominalValue {
+                    ty: Box::new(ty),
+                    variant: None,
+                    fields,
+                }
+            }
             Value::AnonymousRecord(values) => {
                 let Some(fields) = values
                     .into_iter()

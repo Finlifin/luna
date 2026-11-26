@@ -380,6 +380,7 @@ impl PreparedRequired {
             span,
             None,
             None,
+            None,
         )
     }
 
@@ -401,6 +402,7 @@ impl PreparedRequired {
             span,
             None,
             None,
+            None,
         )
     }
 
@@ -412,6 +414,27 @@ impl PreparedRequired {
         package_identity: u64,
         identities: crate::definitions::DefinitionIdentities,
         reader: Option<data::Reader<'_>>,
+    ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
+        self.invoke_publishing_collecting_diagnostics(
+            values,
+            steps,
+            span,
+            package_identity,
+            identities,
+            reader,
+            None,
+        )
+    }
+
+    pub(in crate::program) fn invoke_publishing_collecting_diagnostics(
+        self,
+        values: Vec<(n::LocalId, Value)>,
+        steps: &mut u64,
+        span: Span,
+        package_identity: u64,
+        identities: crate::definitions::DefinitionIdentities,
+        reader: Option<data::Reader<'_>>,
+        diagnostics: Option<&mut Vec<comptime_interpretor::EmittedDiagnostic>>,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let world = Arc::clone(&self.world);
         // The receiver installs concrete descriptors into the package. Only the
@@ -453,6 +476,7 @@ impl PreparedRequired {
             span,
             Some(&publisher),
             reader,
+            diagnostics,
         );
         let diagnostic = publisher.last_diagnostic();
         let (definitions, _) = publisher.finish();
@@ -470,6 +494,7 @@ impl PreparedRequired {
         span: Span,
         builder: Option<&dyn crate::definitions::StructBuildService>,
         reader: Option<data::Reader<'_>>,
+        diagnostics: Option<&mut Vec<comptime_interpretor::EmittedDiagnostic>>,
     ) -> Result<(Value, Term), Error> {
         let world = Arc::clone(&self.world);
         let package = world.package();
@@ -586,6 +611,9 @@ impl PreparedRequired {
                 .run_with_result_type()
         });
         *steps = interpreter.remaining_steps();
+        if let Some(out) = diagnostics {
+            out.extend(interpreter.take_emitted_diagnostics());
+        }
         let delivered = value.map_err(|failure| {
             use comptime_interpretor::ErrorKind;
             if *in_signature && (failure.kind == ErrorKind::MissingBinding
@@ -2270,7 +2298,7 @@ mod tests {
             assert_eq!(
                 prepared
                     .clone()
-                    .invoke_in_world(values, &mut 100_000, span, None, None)
+                    .invoke_in_world(values, &mut 100_000, span, None, None, None)
                     .unwrap(),
                 (Value::Type(p(expected)), p(P::Type))
             );

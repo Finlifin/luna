@@ -98,9 +98,10 @@ fn charge_clone(value: &Value, fuel: &mut u64, depth: usize) -> Result<(), Error
             term(ty, fuel)?;
             charge_clone(value, fuel, depth + 1)?;
         }
-        Value::Type(ty) | Value::AbstractValue { ty, .. } | Value::List { ty, .. } => {
-            term(ty, fuel)?
-        }
+        Value::Type(ty)
+        | Value::AbstractValue { ty, .. }
+        | Value::List { ty, .. }
+        | Value::Array { ty, .. } => term(ty, fuel)?,
         Value::NormalForm { term: value, ty } => {
             term(ty, fuel)?;
             term(value, fuel)?;

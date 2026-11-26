@@ -9,6 +9,7 @@ fn spend(fuel: &mut usize, work: usize) -> Result<(), ()> {
     *fuel = fuel.checked_sub(work).ok_or(())?;
     Ok(())
 }
+
 fn labels<'a>(
     pattern: &'a Pattern,
     out: &mut BTreeSet<&'a str>,
@@ -49,6 +50,7 @@ fn labels<'a>(
     }
     Ok(())
 }
+
 fn expression_labels<'a>(
     expr: &'a Expr,
     out: &mut BTreeSet<&'a str>,
@@ -101,6 +103,7 @@ pub(crate) struct Case<'a> {
     subject: Atom<'a>,
     env: Environment<'a>,
 }
+
 pub(crate) fn cases<'a>(
     patterns: impl IntoIterator<Item = &'a Pattern>,
     fuel: &mut usize,
@@ -149,6 +152,7 @@ pub(crate) fn cases<'a>(
     }
     Ok(out)
 }
+
 fn enumerate<'a>(
     names: &[&'a str],
     inputs: &[LocalId],
@@ -187,6 +191,7 @@ fn enumerate<'a>(
     }
     Ok(())
 }
+
 pub(crate) fn covers_case<'a>(
     pattern: &'a Pattern,
     case: &Case<'a>,
@@ -216,20 +221,25 @@ enum Atom<'a> {
     Named(&'a str),
     Fresh(usize),
 }
+
 #[derive(Clone)]
 enum Value<'a> {
     Symbol(Atom<'a>),
     Bool(bool),
     Unit,
     Tuple(Rc<[Value<'a>]>),
+    Array(Rc<[Value<'a>]>),
     Record(&'a [(String, Term)], Rc<[Value<'a>]>),
     Nominal(nir::DeclarationId, Option<usize>, Rc<[Value<'a>]>),
 }
+
 type Environment<'a> = BTreeMap<LocalId, Value<'a>>;
+
 fn snapshot<'a>(env: &Environment<'a>, fuel: &mut usize) -> Result<Environment<'a>, ()> {
     spend(fuel, env.len())?;
     Ok(env.clone())
 }
+
 /// Rebuild only the modified path. Aliases retain their immutable old values.
 fn assigned<'a>(
     old: Value<'a>,
@@ -259,6 +269,7 @@ fn assigned<'a>(
     updated[*index] = replacement;
     Ok(Some(Value::Record(layout, updated.into())))
 }
+
 macro_rules! known {
     ($value:expr) => {
         match $value? {
@@ -267,6 +278,7 @@ macro_rules! known {
         }
     };
 }
+
 fn boolean(value: Value<'_>) -> Option<bool> {
     if let Value::Bool(value) = value {
         Some(value)
@@ -274,6 +286,7 @@ fn boolean(value: Value<'_>) -> Option<bool> {
         None
     }
 }
+
 fn literal(value: &Literal) -> Option<Value<'_>> {
     match value {
         Literal::Symbol(name) => Some(Value::Symbol(Atom::Named(name))),
@@ -281,6 +294,7 @@ fn literal(value: &Literal) -> Option<Value<'_>> {
         _ => None,
     }
 }
+
 fn equal(left: Value<'_>, right: Value<'_>, fuel: &mut usize) -> Result<bool, ()> {
     if let Value::Symbol(Atom::Named(name)) = &left {
         spend(fuel, name.len())?;
@@ -292,8 +306,10 @@ fn equal(left: Value<'_>, right: Value<'_>, fuel: &mut usize) -> Result<bool, ()
         (Value::Symbol(a), Value::Symbol(b)) => Ok(a == b),
         (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
         (Value::Unit, Value::Unit) => Ok(true),
-        (Value::Tuple(_) | Value::Record(..) | Value::Nominal(..), _)
-        | (_, Value::Tuple(_) | Value::Record(..) | Value::Nominal(..)) => Err(()),
+        (Value::Tuple(_) | Value::Array(_) | Value::Record(..) | Value::Nominal(..), _)
+        | (_, Value::Tuple(_) | Value::Array(_) | Value::Record(..) | Value::Nominal(..)) => {
+            Err(())
+        }
         _ => Ok(false),
     }
 }
@@ -311,6 +327,7 @@ pub(crate) fn covers(pattern: &Pattern, cell: Option<&str>, fuel: &mut usize) ->
         Some(true)
     ))
 }
+
 fn matches<'a>(
     pattern: &'a Pattern,
     value: Value<'a>,
@@ -465,6 +482,7 @@ fn matches<'a>(
         _ => Ok(None),
     }
 }
+
 fn expression<'a>(
     expr: &'a Expr,
     env: &Environment<'a>,
@@ -548,13 +566,17 @@ fn expression<'a>(
             }
             Ok(values.get(*index).cloned())
         }
-        K::Tuple(fields) => {
+        K::Tuple(fields) | K::Array(fields) => {
             spend(fuel, fields.len())?;
             let mut values = Vec::with_capacity(fields.len());
             for field in fields {
                 values.push(known!(expression(field, env, fuel, depth + 1)));
             }
-            Ok(Some(Value::Tuple(values.into())))
+            if matches!(expr.kind, K::Array(_)) {
+                Ok(Some(Value::Array(values.into())))
+            } else {
+                Ok(Some(Value::Tuple(values.into())))
+            }
         }
         K::Not(inner) => Ok(boolean(known!(expression(inner, env, fuel, depth + 1)))
             .map(|value| Value::Bool(!value))),
@@ -699,6 +721,7 @@ mod tests {
     use super::*;
     use nir::program::SourceRange;
     use nir::{Primitive, Term};
+
     fn expr(ty: Primitive, kind: K) -> Expr {
         Expr {
             ty: Term::Primitive(ty),
@@ -706,6 +729,7 @@ mod tests {
             source: SourceRange { start: 0, end: 0 },
         }
     }
+
     fn predicate(name: &str, negated: bool) -> Expr {
         let binding = LocalId { owner: 0, index: 0 };
         let equality = expr(
@@ -724,6 +748,7 @@ mod tests {
             equality
         }
     }
+
     fn guarded(condition: Expr) -> Pattern {
         Pattern::Guard {
             pattern: Box::new(Pattern::Binding {
@@ -733,6 +758,7 @@ mod tests {
             condition: Box::new(condition),
         }
     }
+
     #[test]
     fn finite_cells_agree_with_equality_boolean_oracle() {
         for a in [false, true] {
@@ -768,6 +794,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn budget_exhaustion_does_not_produce_coverage_or_poison_recovery() {
         let pattern = guarded(predicate("a", true));
@@ -782,6 +809,7 @@ mod tests {
 mod completed_tests {
     use super::*;
     use nir::program::SourceRange;
+
     fn node(ty: Primitive, kind: K) -> Expr {
         Expr {
             ty: Term::Primitive(ty),
@@ -789,6 +817,7 @@ mod completed_tests {
             source: SourceRange { start: 0, end: 0 },
         }
     }
+
     #[test]
     fn completed_symbols_refine_partitions_before_proving_complements() {
         let binding = LocalId { owner: 0, index: 0 };
@@ -831,6 +860,7 @@ mod completed_tests {
             crate::coverage::Coverage::Exhaustive
         );
     }
+
     #[test]
     fn completed_evidence_does_not_authorize_opaque_or_mistyped_values() {
         let bad = node(Primitive::Symbol, K::ComptimeValue(Term::Bool(true)));
@@ -866,6 +896,7 @@ mod completed_tests {
 #[cfg(test)]
 mod partition_tests {
     use super::*;
+
     #[test]
     fn boolean_partitions_preserve_independence_and_budget_failure() {
         use nir::program::SourceRange;
@@ -896,6 +927,7 @@ mod partition_tests {
         assert!(assignments.contains(&vec![false; 8]));
         assert!(assignments.contains(&vec![true; 8]));
     }
+
     #[test]
     fn equality_partitions_include_aliasing_and_distinct_fresh_names() {
         let inputs = [
@@ -985,6 +1017,7 @@ mod partition_tests {
 mod record_tests {
     use super::*;
     use nir::program::SourceRange;
+
     #[test]
     fn record_writes_are_persistent_bounded_and_reject_wrong_paths() {
         use nir::program::FieldOwner;
@@ -1036,6 +1069,7 @@ mod record_tests {
             );
         }
     }
+
     #[test]
     fn record_projection_checks_labels_and_positions_with_budget() {
         let source = SourceRange { start: 0, end: 0 };
@@ -1099,6 +1133,7 @@ mod record_tests {
 #[cfg(test)]
 mod nominal_tests {
     use super::*;
+
     #[test]
     fn nominal_observations_require_declaration_and_variant_identity() {
         let first = nir::DeclarationId {

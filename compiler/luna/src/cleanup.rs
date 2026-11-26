@@ -893,6 +893,12 @@ fn prepare_source_impl(
             }
             // Higher-order bodies are verified against each call's concrete
             // inputs below, never published as an unconditional root schedule.
+            let env_parameter_types = instance
+                .function
+                .env_parameters
+                .iter()
+                .map(|env| env.ty.clone())
+                .collect::<Vec<_>>();
             if !verification_session
                 .callable_parameter_paths(
                     &instance.function.signature,
@@ -901,20 +907,14 @@ fn prepare_source_impl(
                 )
                 .map_err(|error| error.to_string())?
                 .is_empty()
-                || !moves::effect_result_slots_with_envs(
-                    package,
-                    &instance.function.signature,
-                    &instance
-                        .function
-                        .env_parameters
-                        .iter()
-                        .map(|env| env.ty.clone())
-                        .collect::<Vec<_>>(),
-                    fuel,
-                    instance.function.body.source,
-                )
-                .map_err(|error| error.to_string())?
-                .is_empty()
+                || !verification_session
+                    .effect_result_slots_for_function(
+                        &instance.function,
+                        &env_parameter_types,
+                        fuel,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .is_empty()
             {
                 if instance.key == entry {
                     return Err("higher-order entry requires callable input context".into());
@@ -1225,10 +1225,7 @@ fn prepare_source_impl(
                                     &mut hooks,
                                     fuel,
                                 )?;
-                                if !matches!(
-                                    arm.body.kind,
-                                    K::Block { .. } | K::CallPreparation { .. }
-                                ) {
+                                if !arm.body.opens_block_scope() {
                                     hooks.push((arm.body.source, Boundary::ScopeEnd));
                                 }
                             }

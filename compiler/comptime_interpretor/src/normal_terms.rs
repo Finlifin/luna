@@ -152,6 +152,10 @@ impl Value {
         while let Some(value) = pending.pop() {
             match value {
                 Value::Tuple(values) => pending.extend(values),
+                Value::Array { ty, values } => {
+                    ty.drop_iteratively();
+                    pending.extend(values);
+                }
                 Value::List { ty, values } => {
                     ty.drop_iteratively();
                     pending.extend(values);
@@ -295,6 +299,7 @@ impl Value {
                 }
                 Value::AnonymousRecord(_) => freeze_record(value, depth, budget, scope, holes),
                 Value::Tuple(_) => freeze_tuple(value, depth, budget, scope, holes),
+                Value::Array { .. } => freeze_array(value, depth, budget, scope, holes),
                 _ => visit_scalar(value, depth, budget, scope),
             }
         }
@@ -554,6 +559,31 @@ impl Value {
                         .map(|value| visit(value, depth + 1, budget, scope, holes))
                         .collect::<Result<_, _>>()?,
                 ),
+                _ => unreachable!(),
+            })
+        }
+        #[inline(never)]
+        fn freeze_array(
+            value: &Value,
+            depth: usize,
+            budget: &mut comptime_runtime::Budget,
+            scope: &ExportScope<'_>,
+            holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
+        ) -> Result<Term, ErrorKind> {
+            charge(budget, 1)?;
+            Ok(match value {
+                Value::Array { ty, values } => {
+                    scope.inspect_type(ty, budget)?;
+                    charge(budget, values.len())?;
+                    Term::NominalValue {
+                        ty: Box::new(ty.clone()),
+                        variant: None,
+                        fields: values
+                            .iter()
+                            .map(|value| visit(value, depth + 1, budget, scope, holes))
+                            .collect::<Result<_, _>>()?,
+                    }
+                }
                 _ => unreachable!(),
             })
         }

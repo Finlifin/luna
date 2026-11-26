@@ -939,6 +939,9 @@ fn all_resolved_protocols_in(
         protocols.splice,
         protocols.meta_list,
         protocols.tuple,
+        protocols.array,
+        protocols.maybe_uninit_storage,
+        protocols.manually_drop_storage,
     ]
     .into_iter()
     .all(decl_ok)
@@ -1940,7 +1943,41 @@ fn compile_packages_core(
                 jobs: Some(jobs),
             },
         )
-        .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
+        .map_err(|e| {
+            let can_render = e.source.expansion_index().is_none()
+                && e.source.start <= e.source.end
+                && session.source_map.files().iter().any(|file| {
+                    file.src.as_ref().is_some_and(|src| {
+                        let start = file.start_pos.0;
+                        let end = start.saturating_add(src.len() as u32);
+                        start <= e.source.start && e.source.end <= end
+                    })
+                });
+            if can_render {
+                let span = rustc_span::Span::new(
+                    rustc_span::BytePos(e.source.start),
+                    rustc_span::BytePos(e.source.end),
+                );
+                let loc = session.source_map.lookup_char_pos(span.lo());
+                let file = loc
+                    .file
+                    .name
+                    .display(rustc_span::FileNameDisplayPreference::Local);
+                let snippet = session
+                    .source_map
+                    .span_to_snippet(span)
+                    .ok()
+                    .map(|s| format!(" `{s}`"))
+                    .unwrap_or_default();
+                format!(
+                    "multi-package elaboration failed: {e} ({file}:{}:{}{snippet})",
+                    loc.line,
+                    loc.col.0 + 1
+                )
+            } else {
+                format!("multi-package elaboration failed: {e}")
+            }
+        })?;
     crate::frontend::emit_elaboration_warnings(&instance.diag_ctx, &warnings);
     if reordered_packages {
         reorder_nir_by_package_rank(&mut nir, caller_packages);

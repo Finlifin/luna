@@ -182,8 +182,7 @@ impl<'a> Search<'a> {
             let term = &self.terms.nodes[index];
             if constructor(term).is_some()
                 || matches!(term, Term::Record(_))
-                || self.context.is_tuple_type(term)
-                || self.context.is_list_type(term)
+                || self.context.is_builtin_normal_type(term)
             {
                 return Ok(true);
             }
@@ -201,8 +200,7 @@ impl<'a> Search<'a> {
             let term = &self.terms.nodes[index];
             if constructor(term).is_some()
                 || matches!(term, Term::Record(_))
-                || self.context.is_tuple_type(term)
-                || self.context.is_list_type(term)
+                || self.context.is_builtin_normal_type(term)
             {
                 return Ok(true);
             }

@@ -462,7 +462,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // a private borrowed-root namespace and still need request-side
                 // substitution before crossing this installation boundary.
                 if (!flow.effect_borrows.contains(&target.root)
-                    && !crate::is_const_global_place(target.root))
+                    && !crate::is_const_global_place(target.root)
+                    && !crate::is_static_global_place(target.root)
+                    && !crate::is_external_raw_place(target.root))
                     || !flow.types.contains_key(&target.root)
                     || self.report.borrowed_roots.contains_key(&target.root)
                 {
@@ -949,7 +951,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .ok_or_else(|| error(source, "handler pointer target is not a known local"))?;
             if (!outer.roots.contains(&target.root)
                 && !outer.effect_borrows.contains(&target.root)
-                && !crate::is_const_global_place(target.root))
+                && !crate::is_const_global_place(target.root)
+                && !crate::is_static_global_place(target.root)
+                && !crate::is_external_raw_place(target.root))
                 || target.fields.contains(&VARIANT_PATH)
             {
                 return Err(error(
@@ -2776,6 +2780,305 @@ pub fn effect_result_slots_with_envs(
         }
     }
     Ok(slots)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn effect_result_slots_with_body(
+    package: &Package,
+    declarations: &crate::declarations::Metadata<'_>,
+    declaration_source: Option<::materialization::DeclarationSource<'_>>,
+    methods: &mut crate::memory::MethodCallees,
+    signature: &Term,
+    env_parameter_types: &[Term],
+    body: Option<&Expr>,
+    uninstantiated: bool,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Vec<usize>, Error> {
+    let mut slots =
+        effect_result_slots_with_envs(package, signature, env_parameter_types, fuel, source)?;
+    let Some(body) = body else {
+        return Ok(slots);
+    };
+    let Term::Function { result, .. } = signature.callable_signature() else {
+        return Ok(slots);
+    };
+    let Term::Computation { effects, .. } = result.as_ref() else {
+        return Ok(slots);
+    };
+    if effects.is_empty() || slots.len() >= effects.len() {
+        return Ok(slots);
+    }
+    let mut visited = BTreeSet::new();
+    let exposed_ops = body_memory_exposed_effect_ops(
+        package,
+        declarations,
+        declaration_source,
+        methods,
+        effects,
+        body,
+        uninstantiated,
+        &mut visited,
+        fuel,
+        source,
+        0,
+    )?;
+    if exposed_ops.is_empty() {
+        return Ok(slots);
+    }
+    for (slot, operation) in effects.iter().enumerate() {
+        if !slots.contains(&slot)
+            && exposed_ops.iter().any(|op| {
+                if uninstantiated {
+                    op.declaration == operation.declaration
+                } else {
+                    *op == operation
+                }
+            })
+        {
+            slots.push(slot);
+        }
+    }
+    slots.sort_unstable();
+    Ok(slots)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn body_memory_exposed_effect_ops<'e>(
+    package: &'e Package,
+    declarations: &crate::declarations::Metadata<'e>,
+    declaration_source: Option<::materialization::DeclarationSource<'e>>,
+    methods: &mut crate::memory::MethodCallees,
+    effects: &'e [nir::effects::Operation],
+    body: &'e Expr,
+    uninstantiated: bool,
+    visited: &mut BTreeSet<(nir::DeclarationId, Vec<crate::memory::OrderedTerm>)>,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<Vec<&'e nir::effects::Operation>, Error> {
+    if depth >= 64 {
+        return Err(error(
+            source,
+            "effect body memory traversal depth exhausted",
+        ));
+    }
+    let mut has_address_of = false;
+    let mut requested_ops = Vec::new();
+    let mut calls: Vec<(Expr, Vec<nir::effects::Operation>)> = Vec::new();
+    fn collect_scope<'a>(
+        expr: &'a Expr,
+        shadowed: &[nir::effects::Operation],
+        has_address_of: &mut bool,
+        requested_ops: &mut Vec<&'a nir::effects::Operation>,
+        calls: &mut Vec<(Expr, Vec<nir::effects::Operation>)>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        nir::visit::expression_pruned(expr, fuel, |node, fuel| match &node.kind {
+            K::Closure { captures, .. } => {
+                *fuel = fuel
+                    .checked_sub(captures.len())
+                    .ok_or("effect body capture traversal budget exhausted")?;
+                for capture in captures {
+                    if let Some(value) = &capture.value {
+                        collect_scope(value, shadowed, has_address_of, requested_ops, calls, fuel)?;
+                    }
+                }
+                Ok(false)
+            }
+            K::EffectHandle {
+                computation,
+                handlers,
+                ..
+            } => {
+                *fuel = fuel
+                    .checked_sub(handlers.len().saturating_add(1))
+                    .ok_or("effect handler scope traversal budget exhausted")?;
+                let mut inner_shadowed = shadowed.to_vec();
+                for handler in handlers {
+                    if handler.fallback.is_none() && !inner_shadowed.contains(&handler.operation) {
+                        inner_shadowed.push(handler.operation.clone());
+                    }
+                }
+                collect_scope(
+                    computation,
+                    &inner_shadowed,
+                    has_address_of,
+                    requested_ops,
+                    calls,
+                    fuel,
+                )?;
+                Ok(false)
+            }
+            K::AddressOf(_) => {
+                *has_address_of = true;
+                Ok(true)
+            }
+            K::EffectRequest { operation, .. } => {
+                if !shadowed.contains(operation) {
+                    requested_ops.push(operation);
+                }
+                Ok(true)
+            }
+            K::Call { callee, .. } => {
+                if matches!(
+                    callee.kind,
+                    K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+                ) {
+                    calls.push((callee.as_ref().clone(), shadowed.to_vec()));
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
+        })
+    }
+    collect_scope(
+        body,
+        &[],
+        &mut has_address_of,
+        &mut requested_ops,
+        &mut calls,
+        fuel,
+    )
+    .map_err(|reason| error(source, reason))?;
+
+    let mut needed = Vec::new();
+    if has_address_of {
+        for operation in requested_ops {
+            if effects.iter().any(|outer| {
+                if uninstantiated {
+                    outer.declaration == operation.declaration
+                } else {
+                    outer == operation
+                }
+            }) {
+                needed.push(operation);
+            }
+        }
+    }
+
+    for (callee, shadowed) in calls {
+        let Term::Function { result, .. } = callee.ty.callable_signature() else {
+            continue;
+        };
+        let Term::Computation {
+            effects: callee_effects,
+            ..
+        } = result.as_ref()
+        else {
+            continue;
+        };
+        if callee_effects.is_empty() {
+            continue;
+        }
+        let callee_effects = callee_effects.clone();
+        let selected = if matches!(callee.kind, K::TraitMethod { .. }) {
+            let mut domains = None;
+            match methods.select_with_context(
+                package,
+                &callee,
+                declaration_source,
+                Some(declarations),
+                &mut domains,
+                fuel,
+                true,
+            ) {
+                Ok(expr) => expr,
+                Err(reason)
+                    if reason.contains("budget exhausted")
+                        || reason.contains("depth exhausted") =>
+                {
+                    return Err(error(source, reason));
+                }
+                Err(_) => continue,
+            }
+        } else {
+            callee
+        };
+        let (decl, args): (nir::DeclarationId, Vec<Term>) = match &selected.kind {
+            K::Function(decl) => (*decl, vec![]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.clone()),
+            _ => continue,
+        };
+        let key = (
+            decl,
+            args.iter()
+                .cloned()
+                .map(crate::memory::OrderedTerm)
+                .collect::<Vec<_>>(),
+        );
+        if !visited.insert(key) {
+            continue;
+        }
+        let (callee_fn, remaining_args) = match declarations.runtime_body_checked(decl, &args, fuel)
+        {
+            Ok(found) => found,
+            Err(reason) if reason.contains("budget exhausted") => {
+                return Err(error(source, reason));
+            }
+            Err(_) => continue,
+        };
+        let Term::Function {
+            result: callee_fn_result,
+            ..
+        } = callee_fn.signature.callable_signature()
+        else {
+            continue;
+        };
+        let Term::Computation {
+            effects: callee_fn_effects,
+            ..
+        } = callee_fn_result.as_ref()
+        else {
+            continue;
+        };
+        let callee_uninstantiated = !remaining_args.is_empty();
+        let callee_needed = body_memory_exposed_effect_ops(
+            package,
+            declarations,
+            declaration_source,
+            methods,
+            callee_fn_effects,
+            &callee_fn.body,
+            callee_uninstantiated,
+            visited,
+            fuel,
+            source,
+            depth + 1,
+        )?;
+        for (slot, fn_op) in callee_fn_effects.iter().enumerate() {
+            let needs_slot = callee_needed.iter().any(|op| {
+                if callee_uninstantiated {
+                    op.declaration == fn_op.declaration
+                } else {
+                    *op == fn_op
+                }
+            });
+            if !needs_slot {
+                continue;
+            }
+            let Some(call_op) = callee_effects.get(slot) else {
+                continue;
+            };
+            if shadowed.contains(call_op) {
+                continue;
+            }
+            for outer in effects {
+                let matches_outer = if uninstantiated {
+                    outer.declaration == call_op.declaration
+                } else {
+                    outer == call_op
+                };
+                if matches_outer && !needed.contains(&outer) {
+                    needed.push(outer);
+                }
+            }
+        }
+    }
+    Ok(needed)
 }
 
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>

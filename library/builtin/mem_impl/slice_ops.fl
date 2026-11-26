@@ -1,3 +1,5 @@
+use bindings.integer_to_usize;
+use mem_impl.array.{VariadicArrayBuffer, tuple_len_or_zero}
 use mem_impl.raw.{align_up_usize, checked_add_usize, checked_mul_usize, raw_ptr}
 use mem_impl.slice.Slice;
 use primitives.{Type, usize, void}
@@ -83,6 +85,34 @@ impl VariadicCollector for SliceBounds {
             discard_collector_arg<S>(args);
             assumes false;
             SliceBounds { start: 0, end: 0 }
+        }
+    }
+}
+
+impl VariadicCollector for Slice<T> where T {
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {
+        VariadicArrayBuffer<T, tuple_len_or_zero(_s)>
+    };
+
+    fn variadic_init() -> Tmp<S> where S {
+        VariadicArrayBuffer<T, tuple_len_or_zero(S)>.uninit()
+    }
+
+    fn variadic_collect(tmp: *Tmp<S>, args: S) -> Slice<T> where S {
+        inline if Type.predicates.is_tuple(S) {
+            inline for (idx, elem) in args'tuple_indexed {
+                inline if elem'type == T {
+                    tmp.write_slot(integer_to_usize(idx), elem);
+                } else {
+                    discard_collector_arg(elem);
+                    assumes false;
+                }
+            };
+            tmp.as_slice()
+        } else {
+            discard_collector_arg<S>(args);
+            assumes false;
+            Slice<T>.empty()
         }
     }
 }

@@ -16,7 +16,7 @@ impl Emitter<'_> {
             return Err("host memory access requires a data pointer".into());
         };
         let ty = repr(self.graph, pointee, self.checked)?;
-        let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
+        let align = ty.explicit_align();
         Ok(Slot {
             ty,
             pointer: pointer.text.clone(),
@@ -64,16 +64,26 @@ impl Emitter<'_> {
         pointee: &Term,
     ) -> Result<Value, String> {
         let slot = self.pointer_slot(&pointer, pointee)?;
-        let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &slot.ty else {
-            return Err("host pointer projection requires an aggregate layout".into());
+        let llvm_index = match &slot.ty {
+            Ty::Record(fields) | Ty::PackedRecord(fields) => {
+                fields
+                    .get(index)
+                    .ok_or("host pointer field index out of range")?;
+                index
+            }
+            Ty::AlignedRecord(layout) => {
+                layout
+                    .fields
+                    .get(index)
+                    .ok_or("host pointer aligned field index out of range")?;
+                layout.field_llvm_indices[index]
+            }
+            _ => return Err("host pointer projection requires an aggregate layout".into()),
         };
-        fields
-            .get(index)
-            .ok_or("host pointer field index out of range")?;
         Ok(self.instruction(
             Ty::Pointer,
             format!(
-                "getelementptr {}, ptr {}, i32 0, i32 {index}",
+                "getelementptr {}, ptr {}, i32 0, i32 {llvm_index}",
                 slot.ty.llvm(),
                 pointer.text
             ),
@@ -293,7 +303,44 @@ impl Emitter<'_> {
                 }
                 self.const_eval(&target.function.body, &BTreeMap::new(), depth + 1)
             }
-            K::NewtypeConvert(inner) | K::UnsafeScope(inner) | K::Snapshot(inner) => {
+            K::NewtypeConvert(inner) => {
+                let inner_ty = repr(self.graph, &inner.ty, self.checked)?;
+                let val = self.const_eval(inner, env, depth + 1)?;
+                if inner_ty == ty {
+                    return Ok(val);
+                }
+                if let Ty::Aligned {
+                    inner: expected_inner,
+                    pad_bytes,
+                    ..
+                } = &ty
+                    && **expected_inner == inner_ty
+                {
+                    if inner_ty == Ty::Unit {
+                        return Ok(ConstValue::Zeroed {
+                            llvm_ty: ty.llvm(),
+                            ty,
+                        });
+                    }
+                    return Ok(ConstValue::Aligned {
+                        pad_bytes: *pad_bytes,
+                        ty,
+                        inner: Box::new(val),
+                    });
+                }
+                if let Ty::Aligned {
+                    inner: expected_inner,
+                    ..
+                } = &inner_ty
+                    && **expected_inner == ty
+                {
+                    if let ConstValue::Aligned { inner, .. } = val {
+                        return Ok(*inner);
+                    }
+                }
+                Err("host constant conversion changes representation".into())
+            }
+            K::UnsafeScope(inner) | K::Snapshot(inner) => {
                 if repr(self.graph, &inner.ty, self.checked)? != ty {
                     return Err("host constant conversion changes representation".into());
                 }
@@ -323,6 +370,26 @@ impl Emitter<'_> {
                     zero_sized: false,
                 })
             }
+            K::Array(fields) => {
+                let Ty::Array { elem, len, .. } = &ty else {
+                    return Err("host constant array lacks an array layout".into());
+                };
+                if fields.len() != *len {
+                    return Err("host constant array length mismatch".into());
+                }
+                let mut evaluated = Vec::with_capacity(fields.len());
+                for field in fields {
+                    if repr(self.graph, &field.ty, self.checked)? != **elem {
+                        return Err("host constant array element representation mismatch".into());
+                    }
+                    evaluated.push(self.const_eval(field, env, depth + 1)?);
+                }
+                Ok(ConstValue::Array {
+                    llvm_ty: ty.llvm(),
+                    ty,
+                    elems: evaluated,
+                })
+            }
             K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
                 if ty == Ty::Unit && fields.is_empty() {
                     return Ok(ConstValue::Unit);
@@ -348,6 +415,25 @@ impl Emitter<'_> {
                         );
                     }
                     return const_value_from_bit_words(&ty, &total_words);
+                }
+                if let Ty::AlignedRecord(layout) = &ty {
+                    if fields.len() != layout.fields.len() {
+                        return Err("host constant aligned record field count mismatch".into());
+                    }
+                    let mut evaluated = Vec::with_capacity(fields.len());
+                    for (field, expected) in fields.iter().zip(layout.fields.iter()) {
+                        if repr(self.graph, &field.ty, self.checked)? != *expected {
+                            return Err(
+                                "host constant aligned record field representation mismatch".into(),
+                            );
+                        }
+                        evaluated.push(self.const_eval(field, env, depth + 1)?);
+                    }
+                    return Ok(ConstValue::AlignedRecord {
+                        layout: layout.clone(),
+                        ty,
+                        fields: evaluated,
+                    });
                 }
                 let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &ty else {
                     return Err("host constant record lacks a record layout".into());
@@ -719,6 +805,25 @@ enum ConstValue {
         llvm_ty: String,
         fields: Vec<ConstValue>,
     },
+    AlignedRecord {
+        ty: Ty,
+        layout: std::sync::Arc<AlignedRecordLayout>,
+        fields: Vec<ConstValue>,
+    },
+    Array {
+        ty: Ty,
+        llvm_ty: String,
+        elems: Vec<ConstValue>,
+    },
+    Aligned {
+        ty: Ty,
+        pad_bytes: u64,
+        inner: Box<ConstValue>,
+    },
+    Zeroed {
+        ty: Ty,
+        llvm_ty: String,
+    },
     Optional {
         ty: Ty,
         llvm_ty: String,
@@ -746,6 +851,10 @@ impl ConstValue {
             Self::Unit => &Ty::Unit,
             Self::Atom { ty, .. }
             | Self::Record { ty, .. }
+            | Self::AlignedRecord { ty, .. }
+            | Self::Array { ty, .. }
+            | Self::Aligned { ty, .. }
+            | Self::Zeroed { ty, .. }
             | Self::Optional { ty, .. }
             | Self::Enum { ty, .. }
             | Self::NicheCarrier { ty, .. }
@@ -755,10 +864,14 @@ impl ConstValue {
 
     fn contains_aggregate_enum(&self) -> bool {
         match self {
-            Self::Unit | Self::Atom { .. } | Self::Enum { .. } => false,
+            Self::Unit | Self::Atom { .. } | Self::Enum { .. } | Self::Zeroed { .. } => false,
             Self::AggregateEnum { .. } => true,
-            Self::NicheCarrier { inner, .. } => inner.contains_aggregate_enum(),
-            Self::Record { fields, .. } => fields.iter().any(Self::contains_aggregate_enum),
+            Self::NicheCarrier { inner, .. } | Self::Aligned { inner, .. } => {
+                inner.contains_aggregate_enum()
+            }
+            Self::Record { fields, .. }
+            | Self::AlignedRecord { fields, .. }
+            | Self::Array { elems: fields, .. } => fields.iter().any(Self::contains_aggregate_enum),
             Self::Optional { payload, .. } => payload
                 .as_deref()
                 .is_some_and(Self::contains_aggregate_enum),
@@ -813,6 +926,68 @@ impl ConstValue {
                         format!("{{ {parts} }}")
                     };
                     (llvm_ty.clone(), init)
+                }
+            }
+            Self::AlignedRecord { ty, layout, fields } => {
+                if layout.llvm_members.is_empty() {
+                    if top_level {
+                        ("i8".into(), "0".into())
+                    } else {
+                        ("{}".into(), "zeroinitializer".into())
+                    }
+                } else {
+                    let mut parts = Vec::with_capacity(layout.llvm_members.len());
+                    for (member_idx, member_ty) in layout.llvm_members.iter().enumerate() {
+                        if let Some(field_idx) = layout
+                            .field_llvm_indices
+                            .iter()
+                            .position(|&idx| idx == member_idx)
+                        {
+                            let (ft, fi) = fields[field_idx].to_llvm(false);
+                            parts.push(format!("{ft} {fi}"));
+                        } else {
+                            parts.push(format!("{member_ty} zeroinitializer"));
+                        }
+                    }
+                    (ty.llvm(), format!("{{ {} }}", parts.join(", ")))
+                }
+            }
+            Self::Array { llvm_ty, elems, .. } => {
+                if elems.is_empty() {
+                    (llvm_ty.clone(), "zeroinitializer".into())
+                } else {
+                    let parts = elems
+                        .iter()
+                        .map(|elem| {
+                            let (et, ei) = elem.to_llvm(false);
+                            format!("{et} {ei}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (llvm_ty.clone(), format!("[ {parts} ]"))
+                }
+            }
+            Self::Aligned {
+                ty,
+                pad_bytes,
+                inner,
+            } => {
+                let (it, ii) = inner.to_llvm(false);
+                if *pad_bytes == 0 {
+                    (ty.llvm(), ii)
+                } else {
+                    (
+                        ty.llvm(),
+                        format!("{{ {it} {ii}, [{pad_bytes} x i8] zeroinitializer }}"),
+                    )
+                }
+            }
+            Self::Zeroed { ty, llvm_ty } => {
+                if top_level && *llvm_ty == "{}" {
+                    ("i8".into(), "0".into())
+                } else {
+                    let _ = ty;
+                    (llvm_ty.clone(), "zeroinitializer".into())
                 }
             }
             Self::Optional {
@@ -946,6 +1121,68 @@ impl ConstValue {
                     .checked_sub(offset)
                     .ok_or("host constant initializer layout mismatch")?;
                 push_zero_padding(tail, types, inits);
+                Ok(total.size)
+            }
+            Self::Zeroed { ty, .. } => {
+                let layout = ty.storage_layout_at(pointer_bits, 0, fuel)?;
+                push_zero_padding(layout.size, types, inits);
+                Ok(layout.size)
+            }
+            Self::Aligned {
+                ty,
+                pad_bytes,
+                inner,
+            } => {
+                let total = ty.storage_layout_at(pointer_bits, 0, fuel)?;
+                let written =
+                    inner.append_packed_parts(pointer_bits, depth + 1, fuel, types, inits)?;
+                let rem = total.size.checked_sub(written).unwrap_or(*pad_bytes);
+                push_zero_padding(rem, types, inits);
+                Ok(total.size)
+            }
+            Self::Array { ty, elems, .. } => {
+                let total = ty.storage_layout_at(pointer_bits, 0, fuel)?;
+                let Ty::Array { elem_size, .. } = ty else {
+                    return Err("host array constant lacks array layout".into());
+                };
+                for elem in elems {
+                    let written =
+                        elem.append_packed_parts(pointer_bits, depth + 1, fuel, types, inits)?;
+                    if *elem_size > written {
+                        push_zero_padding(elem_size - written, types, inits);
+                    }
+                }
+                Ok(total.size)
+            }
+            Self::AlignedRecord { ty, layout, fields } => {
+                let total = ty.storage_layout_at(pointer_bits, 0, fuel)?;
+                let mut offset = 0u64;
+                for (member_idx, member_ty) in layout.llvm_members.iter().enumerate() {
+                    if let Some(field_idx) = layout
+                        .field_llvm_indices
+                        .iter()
+                        .position(|&idx| idx == member_idx)
+                    {
+                        let written = fields[field_idx].append_packed_parts(
+                            pointer_bits,
+                            depth + 1,
+                            fuel,
+                            types,
+                            inits,
+                        )?;
+                        offset += written;
+                    } else if let Some(pad) = member_ty
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(" x i8]"))
+                        .and_then(|n| n.parse::<u64>().ok())
+                    {
+                        push_zero_padding(pad, types, inits);
+                        offset += pad;
+                    }
+                }
+                if total.size > offset {
+                    push_zero_padding(total.size - offset, types, inits);
+                }
                 Ok(total.size)
             }
             Self::Optional { ty, payload, .. } => {
@@ -1115,6 +1352,46 @@ fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
                     zero_sized: false,
                 })
             }
+        }
+        Ty::AlignedRecord(layout) => {
+            let zeroed = layout
+                .fields
+                .iter()
+                .map(const_zero_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ConstValue::AlignedRecord {
+                ty: ty.clone(),
+                layout: layout.clone(),
+                fields: zeroed,
+            })
+        }
+        Ty::Array { elem, len, .. } => {
+            let zero_elem = const_zero_value(elem)?;
+            Ok(ConstValue::Array {
+                ty: ty.clone(),
+                llvm_ty: ty.llvm(),
+                elems: vec![zero_elem; *len],
+            })
+        }
+        Ty::RawStorage { size, .. } => {
+            if *size == 0 {
+                Ok(ConstValue::Unit)
+            } else {
+                Ok(ConstValue::Zeroed {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                })
+            }
+        }
+        Ty::Aligned {
+            inner, pad_bytes, ..
+        } => {
+            let zero_inner = const_zero_value(inner)?;
+            Ok(ConstValue::Aligned {
+                ty: ty.clone(),
+                pad_bytes: *pad_bytes,
+                inner: Box::new(zero_inner),
+            })
         }
         Ty::Optional(opt) => {
             if opt.niche.is_some() {

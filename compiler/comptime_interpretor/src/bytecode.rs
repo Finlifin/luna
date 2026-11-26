@@ -1070,6 +1070,7 @@ impl<'a> Interpreter<'a> {
         for index in path.into_iter().rev() {
             value = match value {
                 Value::Tuple(fields)
+                | Value::Array { values: fields, .. }
                 | Value::Record { fields, .. }
                 | Value::Variant { fields, .. } => fields.get(index),
                 Value::AnonymousRecord(fields) => fields.get(index).map(|(_, value)| value),
@@ -2089,6 +2090,23 @@ impl<'a> Interpreter<'a> {
                         .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.slots[*destination] = Some(Value::Tuple(values));
+                }
+                Op::Array {
+                    destination,
+                    fields,
+                    ty,
+                } => {
+                    let mut values = Vec::with_capacity(fields.len());
+                    for field in fields {
+                        let Some(value) = frame.slots.get_mut(*field).and_then(Option::take) else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        values.push(value);
+                    }
+                    frame.slots[*destination] = Some(Value::Array {
+                        ty: ty.as_ref().clone(),
+                        values,
+                    });
                 }
 
                 Op::BeginTypePattern {

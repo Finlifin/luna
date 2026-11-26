@@ -228,6 +228,26 @@ pub trait LayoutWorld {
 
     fn is_list_head(&self, head: DeclarationId) -> bool;
 
+    fn is_array_head(&self, _head: DeclarationId) -> bool {
+        false
+    }
+
+    fn is_maybe_uninit_storage_head(&self, _head: DeclarationId) -> bool {
+        false
+    }
+
+    fn is_manually_drop_storage_head(&self, _head: DeclarationId) -> bool {
+        false
+    }
+
+    fn declaration_alignment(&self, _declaration: DeclarationId) -> Option<u64> {
+        None
+    }
+
+    fn field_alignment(&self, _declaration: DeclarationId, _index: usize) -> Option<u64> {
+        None
+    }
+
     fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind>;
 
     fn is_template_identity(&self, _ty: &Term) -> bool {
@@ -306,7 +326,7 @@ pub fn compute_field_offset(
                 field: field.to_string(),
             })
         }
-        Term::Nominal { .. } => {
+        Term::Nominal { declaration, .. } => {
             let Some(definition) = world.nominal_layout(ty, fuel)? else {
                 return Err(LayoutError::Unresolved(ty.clone()));
             };
@@ -325,7 +345,10 @@ pub fn compute_field_offset(
                     let mut offset = 0u64;
                     for (i, field_ty) in fields.iter().enumerate() {
                         let fl = compute_layout(world, field_ty, fuel)?;
-                        offset = align_up(offset, fl.align)?;
+                        let field_align = fl
+                            .align
+                            .max(world.field_alignment(*declaration, i).unwrap_or(1));
+                        offset = align_up(offset, field_align)?;
                         if i == index {
                             return Ok(offset);
                         }
@@ -724,6 +747,19 @@ fn evaluate_not_sized_at(
                     );
                 }
             }
+            if let Some((elem, len)) =
+                crate::normal_forms::array_element_and_len_with(ty, &|id| world.is_array_head(id))
+            {
+                if len == 0 {
+                    return Ok(Some(false));
+                }
+                return evaluate_not_sized_at(world, elem, depth + 1, visiting, fuel);
+            }
+            if let Some(inner) = crate::normal_forms::storage_inner_type_with(ty, &|id| {
+                world.is_maybe_uninit_storage_head(id) || world.is_manually_drop_storage_head(id)
+            }) {
+                return evaluate_not_sized_at(world, inner, depth + 1, visiting, fuel);
+            }
             Ok(None)
         }
         Term::Nominal { .. } => {
@@ -1117,19 +1153,75 @@ fn layout_with_niche_at(
             if world.is_list_head(*head) {
                 return Err(LayoutError::ComptimeOnly(ty.clone()));
             }
+            if let Some((elem, len)) =
+                crate::normal_forms::array_element_and_len_with(ty, &|id| world.is_array_head(id))
+            {
+                let elem_res = layout_with_niche_at(world, elem, depth + 1, visiting, fuel)?;
+                if len == 0 || elem_res.layout.size == 0 {
+                    return Ok(no_niche(TypeLayout {
+                        size: 0,
+                        align: elem_res.layout.align.max(1),
+                    }));
+                }
+                let stride = align_up(elem_res.layout.size, elem_res.layout.align)?;
+                let total_size = stride
+                    .checked_mul(u64::try_from(len).map_err(|_| LayoutError::Overflow)?)
+                    .ok_or(LayoutError::Overflow)?;
+                let niche = elem_res.niche.map(|mut niche| {
+                    niche.path.insert(0, 0);
+                    niche
+                });
+                return Ok(LayoutWithNiche {
+                    layout: TypeLayout {
+                        size: total_size,
+                        align: elem_res.layout.align,
+                    },
+                    niche,
+                });
+            }
+            if let Some(inner) = crate::normal_forms::storage_inner_type_with(ty, &|id| {
+                world.is_maybe_uninit_storage_head(id) || world.is_manually_drop_storage_head(id)
+            }) {
+                let inner_res = layout_with_niche_at(world, inner, depth + 1, visiting, fuel)?;
+                return Ok(no_niche(inner_res.layout));
+            }
             Err(LayoutError::Unsupported(ty.clone()))
         }
-        Term::Nominal { .. } => {
+        Term::Nominal { declaration, .. } => {
             if visiting.contains(ty) {
                 return Err(LayoutError::Cycle(ty.clone()));
             }
             let Some(definition) = world.nominal_layout(ty, fuel)? else {
                 return Err(LayoutError::Unresolved(ty.clone()));
             };
+            let decl_align = world.declaration_alignment(*declaration);
             visiting.push(ty.clone());
-            let result = match definition {
+            let mut result = match definition {
                 NominalLayout::Struct(fields) => {
-                    fields_layout_with_niche(world, &fields, depth + 1, visiting, fuel)
+                    charge(fuel, fields.len())?;
+                    let mut field_layouts = Vec::with_capacity(fields.len());
+                    let mut best: Option<(usize, Niche)> = None;
+                    for (index, field_ty) in fields.iter().enumerate() {
+                        let fw = layout_with_niche_at(world, field_ty, depth + 1, visiting, fuel)?;
+                        let mut field_layout = fw.layout;
+                        if let Some(fa) = world.field_alignment(*declaration, index) {
+                            field_layout.align = field_layout.align.max(fa);
+                        }
+                        field_layouts.push(field_layout);
+                        if let Some(niche) = fw.niche
+                            && best
+                                .as_ref()
+                                .is_none_or(|(_, prev)| niche.count > prev.count)
+                        {
+                            best = Some((index, niche));
+                        }
+                    }
+                    let layout = struct_layout(&field_layouts)?;
+                    let niche = best.map(|(index, mut niche)| {
+                        niche.path.insert(0, index);
+                        niche
+                    });
+                    Ok(LayoutWithNiche { layout, niche })
                 }
                 NominalLayout::PackedStruct(fields) => {
                     charge(fuel, fields.len())?;
@@ -1278,6 +1370,13 @@ fn layout_with_niche_at(
                 }
             };
             visiting.pop();
+            if let (Ok(layout_with_niche), Some(explicit_align)) = (&mut result, decl_align) {
+                if explicit_align > layout_with_niche.layout.align {
+                    layout_with_niche.layout.align = explicit_align;
+                    layout_with_niche.layout.size =
+                        align_up(layout_with_niche.layout.size, explicit_align)?;
+                }
+            }
             result
         }
         Term::Closure {
@@ -1654,6 +1753,36 @@ fn closure_field_state_count(
                 Err(LayoutError::Unresolved(ty.clone()))
             }
         }
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            ..
+        } if world.is_array_head(*head) => {
+            if let Some((elem, len)) =
+                crate::normal_forms::array_element_and_len_with(ty, &|id| world.is_array_head(id))
+            {
+                if len == 0 {
+                    Ok(1)
+                } else {
+                    let per_elem = closure_field_state_count(world, elem, depth + 1, fuel)?;
+                    per_elem
+                        .checked_mul(len)
+                        .and_then(|v| v.checked_add(1))
+                        .ok_or(LayoutError::Overflow)
+                }
+            } else {
+                Err(LayoutError::Unresolved(ty.clone()))
+            }
+        }
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            ..
+        } if world.is_maybe_uninit_storage_head(*head)
+            || world.is_manually_drop_storage_head(*head) =>
+        {
+            Ok(1)
+        }
         Term::Nominal { .. } => match world.nominal_layout(ty, fuel)? {
             Some(NominalLayout::Struct(fields)) => {
                 closure_env_state_count(world, &fields, depth + 1, fuel)
@@ -1703,6 +1832,33 @@ impl LayoutWorld for PackageLayoutWorld<'_> {
             .normal_forms
             .iter()
             .any(|nf| nf.declaration == head && nf.role == crate::normal_forms::Role::TypeList)
+    }
+
+    fn is_array_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == crate::normal_forms::Role::Array)
+    }
+
+    fn is_maybe_uninit_storage_head(&self, head: DeclarationId) -> bool {
+        self.0.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == crate::normal_forms::Role::MaybeUninitStorage
+        })
+    }
+
+    fn is_manually_drop_storage_head(&self, head: DeclarationId) -> bool {
+        self.0.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == crate::normal_forms::Role::ManuallyDropStorage
+        })
+    }
+
+    fn declaration_alignment(&self, declaration: DeclarationId) -> Option<u64> {
+        self.0.layout_alignments.declaration_align(declaration)
+    }
+
+    fn field_alignment(&self, declaration: DeclarationId, index: usize) -> Option<u64> {
+        self.0.layout_alignments.field_align(declaration, index)
     }
 
     fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind> {

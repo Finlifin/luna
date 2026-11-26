@@ -20,6 +20,7 @@
 | `__flurry_stable_since` | `attrs.stable_since(version: str)`（`attrs.prelude`） | `str` | ABI `type_id` 规范版本锚点（[type_id.md](../type/type_id.md)；构造器已按规范命名，消费者待接通） |
 | `__flurry_comptime_phase` | `attrs.comptime_phase`（`attrs.prelude`） | `bool` | trait 成员阶段检查（当前源码仍使用旧键 `comptime_phase`，待统一迁移） |
 | `__flurry_packed_mode` | `attrs.packed.byte`、`attrs.packed.bit`（保留 `attrs.layout` 过渡） | `Symbol`（`.byte` \| `.bit`） | 结构体紧凑布局：`byte` 为 `align = 1` 任意 runtime 字段（禁对齐字段指针）；`bit` 为 POD 位打包直降 `BitVec<W>`（`W > 256` 警告；`attrs` 构造器已落地，消费者待接通至 `PackedLayoutMode`） |
+| `__flurry_align` | `attrs.layout.align(bytes: usize)` | `usize`（2 的幂，且 `<= 2^29`） | 为结构体、枚举、`newtype` 或结构体字段指定最小对齐字节数（不得与紧凑布局混用，不得使用配置点语法） |
 | `__flurry_direct_passing` | `attrs.effects.direct_passing` | `bool` | 零参非 `async` 直接传递效应检查（当前源码仍使用旧键 `direct_passing`，待统一迁移） |
 | `__flurry_abi` | `attrs.abi(name: Symbol)`（`attrs.prelude`） | `Symbol` | 函数调用约定（已接通 `^attrs.abi(.c)` 与 LLVM C wrapper/trampoline 降码，`fa4cd077`） |
 | `__flurry_purity` | `attrs.purity.{p0, p1, p2, p3, p4, p5}` | `Symbol`（`.p0` \| `.p1` \| `.p2` \| `.p3` \| `.p4` \| `.p5`） | 运行时函数纯度层级约束（已接通 P0–P5 编译期纯度与终止／无 trap 检查） |

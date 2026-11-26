@@ -302,8 +302,10 @@ impl Query<'_, '_, '_, '_, '_, '_> {
         returned: &mut Option<Regions>,
         next: usize,
     ) -> Result<Option<Regions>, String> {
-        let (K::Tuple(fields) | K::Record { fields, .. } | K::AnonymousRecord { fields }) =
-            &expr.kind
+        let (K::Tuple(fields)
+        | K::Array(fields)
+        | K::Record { fields, .. }
+        | K::AnonymousRecord { fields }) = &expr.kind
         else {
             unreachable!("checked text transfer variant")
         };

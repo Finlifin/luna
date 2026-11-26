@@ -665,7 +665,11 @@ impl Index {
                     meta.declaration == *head
                         && matches!(
                             meta.role,
-                            nir::normal_forms::Role::Tuple | nir::normal_forms::Role::TypeList
+                            nir::normal_forms::Role::Tuple
+                                | nir::normal_forms::Role::TypeList
+                                | nir::normal_forms::Role::Array
+                                | nir::normal_forms::Role::MaybeUninitStorage
+                                | nir::normal_forms::Role::ManuallyDropStorage
                         )
                 })
             )
@@ -729,6 +733,7 @@ impl Index {
         self.nominal_layouts = nir::program::Package {
             target: self.nominal_layouts.target,
             normal_forms: std::mem::take(&mut self.nominal_layouts.normal_forms),
+            normal_form_results: std::mem::take(&mut self.nominal_layouts.normal_form_results),
             structs,
             enums,
             newtypes,
@@ -743,6 +748,14 @@ impl Index {
         heads.sort_by_key(|head| head.declaration);
         if self.nominal_layouts.normal_forms != heads {
             self.nominal_layouts.normal_forms = heads;
+            self.revision += 1;
+        }
+    }
+
+    /// Result types for value-sorted normal-form applications.
+    pub fn set_normal_form_results(&mut self, results: BTreeMap<DeclarationId, Term>) {
+        if self.nominal_layouts.normal_form_results != results {
+            self.nominal_layouts.normal_form_results = results;
             self.revision += 1;
         }
     }

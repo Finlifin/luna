@@ -1,0 +1,174 @@
+use bindings.{try_u64_to_usize, try_usize_to_u64}
+use mem_impl.raw.align_up_usize;
+use numeric.comparison.Eq;
+use primitives.{Type, bool, u64, usize}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.display.Display;
+use protocols.formatting.writer.ByteWriter;
+use protocols.resources.{Clone, Copy}
+use types.tuple.Tuple;
+
+{-
+    Allocation layouts validate arithmetic before a future allocator receives
+    a request. Sizes use u64; host allocation must additionally check its
+    address-space limit. This module does not allocate or invent memory views.
+-}
+pub struct Layout {
+    size: u64,
+    alignment: u64,
+}
+
+impl Clone for Layout {
+    fn clone(*self) -> Self {
+        Layout {
+            size: self.size.*,
+            alignment: self.alignment.*,
+        }
+    }
+}
+
+impl Copy for Layout {}
+
+impl Layout {
+    pub pure fn new(size: u64, alignment: u64) -> ?Self {
+        if alignment == 0 {
+            return null;
+        }
+        var power = alignment;
+        while power > 1 {
+            if power % 2 != 0 {
+                return null;
+            }
+            power = power / 2;
+        }
+        let padding = alignment - 1;
+        if size > 18446744073709551615 - padding {
+            return null;
+        }
+        Layout {
+            size: size,
+            alignment: alignment,
+        }
+    }
+
+    pub pure fn byte_size(self) -> u64 {
+        self.size
+    }
+
+    pub pure fn byte_alignment(self) -> u64 {
+        self.alignment
+    }
+
+    pub fn byte_size_usize(self) -> ?usize {
+        try_u64_to_usize(self.size)
+    }
+
+    pub fn byte_alignment_usize(self) -> ?usize {
+        try_u64_to_usize(self.alignment)
+    }
+
+    pub pure fn repeat(self, count: u64) -> ?Self {
+        if self.alignment == 0 {
+            return null;
+        }
+        let remainder = self.size % self.alignment;
+        let padding: u64 = if remainder == 0 {
+            0
+        } else {
+            self.alignment - remainder
+        }
+        if self.size > 18446744073709551615 - padding {
+            return null;
+        }
+        let stride = self.size + padding;
+        let wide_stride = stride'bitvec.as(u128);
+        let wide_count = count'bitvec.as(u128);
+        if wide_stride > 18446744073709551615 or wide_count > 18446744073709551615 {
+            return null;
+        }
+        let total = wide_stride * wide_count;
+        if total > 18446744073709551615 {
+            return null;
+        }
+        Layout.new(total'bitvec[0..64].as(u64), self.alignment)
+    }
+
+    pub fn of() -> ?Self where T {
+        let size = usize_to_u64(Type.size_of(T)) match {
+            value? => value,
+            null => return null,
+        }
+        let alignment = usize_to_u64(Type.align_of(T)) match {
+            value? => value,
+            null => return null,
+        }
+        Layout.new(size, alignment)
+    }
+
+    pub fn array(count: u64) -> ?Self where T {
+        let element = Layout.of<T>() match {
+            value? => value,
+            null => return null,
+        }
+        element.repeat(count)
+    }
+
+    pub pure fn pad_to_align(self) -> ?Self {
+        if self.alignment == 0 {
+            return null;
+        }
+        let remainder = self.size % self.alignment;
+        let padding: u64 = if remainder == 0 {
+            0
+        } else {
+            self.alignment - remainder
+        }
+        if self.size > 18446744073709551615 - padding {
+            return null;
+        }
+        Layout.new(self.size + padding, self.alignment)
+    }
+
+    pub pure fn append(self, next: Self) -> ?Tuple<Self, u64> {
+        if self.alignment == 0 or next.alignment == 0 {
+            return null;
+        }
+        let alignment = if self.alignment >= next.alignment {
+            self.alignment
+        } else {
+            next.alignment
+        }
+        let remainder = self.size % next.alignment;
+        let padding: u64 = if remainder == 0 {
+            0
+        } else {
+            next.alignment - remainder
+        }
+        if self.size > 18446744073709551615 - padding {
+            return null;
+        }
+        let offset = self.size + padding;
+        if offset > 18446744073709551615 - next.size {
+            return null;
+        }
+        let combined = Layout.new(offset + next.size, alignment) match {
+            value? => value,
+            null => return null,
+        };
+        (combined, offset)
+    }
+}
+
+fn usize_to_u64(value: usize) -> ?u64 {
+    try_usize_to_u64(value)
+}
+
+impl Debug for Layout {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("Layout { size: ")!;
+        self.size.as(Display).fmt(output)!;
+        output.write_str(", align: ")!;
+        self.alignment.as(Display).fmt(output)!;
+        output.write_str(" }")
+    }
+}

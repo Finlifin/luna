@@ -1,0 +1,357 @@
+use List;
+use ast_impl.span.{ComptimeSourceSpanOps, SourceSpan}
+use bindings;
+use builtin.{Type, bool, str, u8, usize, void}
+use data.text.ComptimeTextBytes;
+
+{- Severity of a compiler diagnostic emitted during comptime elaboration. -}
+pub enum DiagnosticLevel {
+    err,
+    warning,
+    note,
+    help,
+}
+
+{- Visual emphasis for a source span label attached to a diagnostic. -}
+pub enum LabelStyle {
+    primary,
+    secondary,
+}
+
+{- Source-anchored annotation attached to a structured diagnostic. -}
+pub struct SpanLabel {
+    span: SourceSpan,
+    message: str,
+    style: LabelStyle,
+}
+
+impl SpanLabel {
+    pub pure comptime fn new(span: SourceSpan, message: str, style: LabelStyle) -> SpanLabel {
+        SpanLabel {
+            span: span,
+            message: message,
+            style: style,
+        }
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.span
+    }
+
+    pub pure comptime fn message(self) -> str {
+        self.message
+    }
+
+    pub pure comptime fn style(self) -> LabelStyle {
+        self.style
+    }
+}
+
+{- Machine-applicable or advisory source replacement suggestion. -}
+pub struct Suggestion {
+    span: SourceSpan,
+    replacement: str,
+    message: str,
+}
+
+impl Suggestion {
+    pub pure comptime fn new(span: SourceSpan, replacement: str, message: str) -> Suggestion {
+        Suggestion {
+            span: span,
+            replacement: replacement,
+            message: message,
+        }
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.span
+    }
+
+    pub pure comptime fn replacement(self) -> str {
+        self.replacement
+    }
+
+    pub pure comptime fn message(self) -> str {
+        self.message
+    }
+}
+
+{- Structured compiler diagnostic produced by comptime macros and checks. -}
+pub struct Diagnostic {
+    level: DiagnosticLevel,
+    code: ?str,
+    message: str,
+    labels: List<SpanLabel>,
+    notes: List<str>,
+    suggestions: List<Suggestion>,
+}
+
+{- Fluent comptime builder for structured compiler diagnostics. -}
+pub struct DiagnosticBuilder {
+    inner: Diagnostic,
+}
+
+pure comptime fn append_str(base: str, suffix: str) -> str {
+    base.as(ComptimeTextBytes).concat(suffix)
+}
+
+pure comptime fn render_diagnostic(diag: Diagnostic) -> str {
+    var out = diag.code match {
+        code? => append_str(append_str(append_str("[", code), "] "), diag.message),
+        null => diag.message,
+    };
+    let help_prefix = diag.level match {
+        DiagnosticLevel.help => "help: ",
+        _ => "",
+    };
+    out = append_str(help_prefix, out);
+
+    var i = 0;
+    let label_count = diag.labels.length();
+    while i < label_count {
+        let label = diag.labels[i];
+        let tag = label.style match {
+            LabelStyle.primary => " | ",
+            LabelStyle.secondary => " | note: ",
+        };
+        if not label.message.as(ComptimeTextBytes).is_empty() {
+            out = append_str(append_str(out, tag), label.message);
+        }
+        i = i + 1;
+    }
+
+    var n = 0;
+    let note_count = diag.notes.length();
+    while n < note_count {
+        out = append_str(append_str(out, " | note: "), diag.notes[n]);
+        n = n + 1;
+    }
+
+    var s = 0;
+    let sug_count = diag.suggestions.length();
+    while s < sug_count {
+        let sug = diag.suggestions[s];
+        out = append_str(append_str(out, " | help: "), sug.message);
+        if not sug.replacement.as(ComptimeTextBytes).is_empty() {
+            out = append_str(append_str(out, " -> `"), append_str(sug.replacement, "`"));
+        }
+        s = s + 1;
+    }
+    out
+}
+
+pure comptime fn primary_span(diag: Diagnostic) -> ?SourceSpan {
+    var i = 0;
+    let count = diag.labels.length();
+    while i < count {
+        let label = diag.labels[i];
+        let is_primary = label.style match {
+            LabelStyle.primary => true,
+            LabelStyle.secondary => false,
+        };
+        if is_primary {
+            return label.span;
+        }
+        i = i + 1;
+    }
+    if count > 0 {
+        return diag.labels[0].span;
+    }
+    if diag.suggestions.length() > 0 {
+        return diag.suggestions[0].span;
+    }
+    null
+}
+
+impl Diagnostic {
+    pub pure comptime fn new(level: DiagnosticLevel, message: str) -> Diagnostic {
+        Diagnostic {
+            level: level,
+            code: null,
+            message: message,
+            labels: [],
+            notes: [],
+            suggestions: [],
+        }
+    }
+
+    pub pure comptime fn err(message: str) -> Diagnostic {
+        Diagnostic.new(DiagnosticLevel.err, message)
+    }
+
+    pub pure comptime fn warning(message: str) -> Diagnostic {
+        Diagnostic.new(DiagnosticLevel.warning, message)
+    }
+
+    pub pure comptime fn note(message: str) -> Diagnostic {
+        Diagnostic.new(DiagnosticLevel.note, message)
+    }
+
+    pub pure comptime fn help(message: str) -> Diagnostic {
+        Diagnostic.new(DiagnosticLevel.help, message)
+    }
+
+    pub pure comptime fn builder(level: DiagnosticLevel, message: str) -> DiagnosticBuilder {
+        DiagnosticBuilder.new(level, message)
+    }
+
+    pub pure comptime fn level(self) -> DiagnosticLevel {
+        self.level
+    }
+
+    pub pure comptime fn code(self) -> ?str {
+        self.code
+    }
+
+    pub pure comptime fn message(self) -> str {
+        self.message
+    }
+
+    pub pure comptime fn labels(self) -> List<SpanLabel> {
+        self.labels
+    }
+
+    pub pure comptime fn notes(self) -> List<str> {
+        self.notes
+    }
+
+    pub pure comptime fn suggestions(self) -> List<Suggestion> {
+        self.suggestions
+    }
+
+    pub pure comptime fn render(self) -> str {
+        render_diagnostic(self)
+    }
+
+    pub comptime fn emit(self) -> void {
+        let level_code: u8 = self.level match {
+            DiagnosticLevel.err => 0,
+            DiagnosticLevel.warning => 1,
+            DiagnosticLevel.note => 2,
+            DiagnosticLevel.help => 2,
+        };
+        let rendered = render_diagnostic(self);
+        primary_span(self) match {
+            span? => if span.is_synthetic() {
+                bindings.emit_diagnostic_raw(level_code, rendered, "", 0, 0);
+            } else {
+                bindings.emit_diagnostic_raw(
+                    level_code,
+                    rendered,
+                    span.as(ComptimeSourceSpanOps).file(),
+                    span.as(ComptimeSourceSpanOps).start(),
+                    span.as(ComptimeSourceSpanOps).end(),
+                );
+            },
+            null => bindings.emit_diagnostic_raw(level_code, rendered, "", 0, 0),
+        }
+    }
+}
+
+impl DiagnosticBuilder {
+    pub pure comptime fn new(level: DiagnosticLevel, message: str) -> DiagnosticBuilder {
+        DiagnosticBuilder {
+            inner: Diagnostic.new(level, message),
+        }
+    }
+
+    pub pure comptime fn with_code(self, code: str) -> DiagnosticBuilder {
+        DiagnosticBuilder {
+            inner: Diagnostic {
+                level: self.inner.level,
+                code: code,
+                message: self.inner.message,
+                labels: self.inner.labels,
+                notes: self.inner.notes,
+                suggestions: self.inner.suggestions,
+            },
+        }
+    }
+
+    pub pure comptime fn with_label(
+        self,
+        span: SourceSpan,
+        message: str,
+        style: LabelStyle,
+    ) -> DiagnosticBuilder {
+        var next_labels = self.inner.labels;
+        next_labels.append(SpanLabel {
+            span: span,
+            message: message,
+            style: style,
+        });
+        DiagnosticBuilder {
+            inner: Diagnostic {
+                level: self.inner.level,
+                code: self.inner.code,
+                message: self.inner.message,
+                labels: next_labels,
+                notes: self.inner.notes,
+                suggestions: self.inner.suggestions,
+            },
+        }
+    }
+
+    pub pure comptime fn with_primary_label(
+        self,
+        span: SourceSpan,
+        message: str,
+    ) -> DiagnosticBuilder {
+        self.with_label(span, message, LabelStyle.primary)
+    }
+
+    pub pure comptime fn with_secondary_label(
+        self,
+        span: SourceSpan,
+        message: str,
+    ) -> DiagnosticBuilder {
+        self.with_label(span, message, LabelStyle.secondary)
+    }
+
+    pub pure comptime fn with_note(self, text: str) -> DiagnosticBuilder {
+        var next_notes = self.inner.notes;
+        next_notes.append(text);
+        DiagnosticBuilder {
+            inner: Diagnostic {
+                level: self.inner.level,
+                code: self.inner.code,
+                message: self.inner.message,
+                labels: self.inner.labels,
+                notes: next_notes,
+                suggestions: self.inner.suggestions,
+            },
+        }
+    }
+
+    pub pure comptime fn with_suggestion(
+        self,
+        span: SourceSpan,
+        replacement: str,
+        message: str,
+    ) -> DiagnosticBuilder {
+        var next_suggestions = self.inner.suggestions;
+        next_suggestions.append(Suggestion {
+            span: span,
+            replacement: replacement,
+            message: message,
+        });
+        DiagnosticBuilder {
+            inner: Diagnostic {
+                level: self.inner.level,
+                code: self.inner.code,
+                message: self.inner.message,
+                labels: self.inner.labels,
+                notes: self.inner.notes,
+                suggestions: next_suggestions,
+            },
+        }
+    }
+
+    pub pure comptime fn build(self) -> Diagnostic {
+        self.inner
+    }
+
+    pub comptime fn emit(self) -> void {
+        self.inner.emit();
+    }
+}

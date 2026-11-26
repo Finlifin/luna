@@ -19,6 +19,7 @@ impl Index {
             package.builtin_implementation_packages.iter().copied(),
         );
         index.set_normal_form_metadata(package.normal_forms.clone());
+        index.set_normal_form_results(package.normal_form_results.clone());
         index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
         for implementation in &package.implementations {
             construction::spend(&mut budget.steps, 1)?;

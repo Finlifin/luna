@@ -68,7 +68,51 @@ pub(super) fn pointer_possible(
             }
             Some(environment.as_slice())
         }
-        _ => nir::normal_forms::tuple_fields(package, ty),
+        _ => {
+            if let Some(tuple_field_types) = nir::normal_forms::tuple_fields(package, ty) {
+                let Some((&field, rest)) = fields.split_first() else {
+                    return Ok(false);
+                };
+                let Some(ty) = tuple_field_types.get(field) else {
+                    return Ok(false);
+                };
+                qualified.push(field);
+                let result = pointer_possible(
+                    package,
+                    ty,
+                    rest,
+                    domains,
+                    qualified,
+                    fuel,
+                    source,
+                    depth + 1,
+                );
+                qualified.pop();
+                return result;
+            }
+            if let Some((elem, len)) = nir::normal_forms::array_element_and_len(package, ty) {
+                let Some((&field, rest)) = fields.split_first() else {
+                    return Ok(false);
+                };
+                if field >= len {
+                    return Ok(false);
+                }
+                qualified.push(field);
+                let result = pointer_possible(
+                    package,
+                    elem,
+                    rest,
+                    domains,
+                    qualified,
+                    fuel,
+                    source,
+                    depth + 1,
+                );
+                qualified.pop();
+                return result;
+            }
+            None
+        }
     };
     if let Some(types) = fields_layout {
         let Some((&field, rest)) = fields.split_first() else {

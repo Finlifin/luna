@@ -73,6 +73,23 @@ impl Checker<'_, '_> {
             {
                 Role::Tuple
             }
+            [(_, _, elem_ty), (_, _, len_ty)]
+                if Some(head) == self.protocols.array
+                    && *elem_ty == p(P::Type)
+                    && *len_ty == p(P::Usize) =>
+            {
+                Role::Array
+            }
+            [(_, _, ty)]
+                if Some(head) == self.protocols.maybe_uninit_storage && *ty == p(P::Type) =>
+            {
+                Role::MaybeUninitStorage
+            }
+            [(_, _, ty)]
+                if Some(head) == self.protocols.manually_drop_storage && *ty == p(P::Type) =>
+            {
+                Role::ManuallyDropStorage
+            }
             _ => Role::Opaque,
         };
         Some((head, role))
@@ -447,7 +464,14 @@ impl Checker<'_, '_> {
             let binder = if sort == Sort::Type {
                 self.fresh_type_binder(owner, span)?
             } else {
-                self.fresh_value_binder(owner, span)?
+                let binder = self.fresh_value_binder(owner, span)?;
+                self.implementation_index
+                    .register_parameter_domain(binder.declaration, checked.ty.clone())
+                    .map_err(|message| error(span, message))?;
+                self.inherent_index
+                    .register_parameter_domain(binder.declaration, checked.ty.clone())
+                    .map_err(|message| error(span, message))?;
+                binder
             };
             let symbol = Term::Rigid {
                 declaration: binder.declaration,
@@ -931,6 +955,18 @@ impl Checker<'_, '_> {
                 == self.protocols.meta_list
             {
                 nir::normal_forms::Role::TypeList
+            } else if Some(declaration(self.package, &self.package_identities, owner))
+                == self.protocols.array
+            {
+                nir::normal_forms::Role::Array
+            } else if Some(declaration(self.package, &self.package_identities, owner))
+                == self.protocols.maybe_uninit_storage
+            {
+                nir::normal_forms::Role::MaybeUninitStorage
+            } else if Some(declaration(self.package, &self.package_identities, owner))
+                == self.protocols.manually_drop_storage
+            {
+                nir::normal_forms::Role::ManuallyDropStorage
             } else {
                 nir::normal_forms::Role::Opaque
             },
@@ -971,6 +1007,26 @@ impl Checker<'_, '_> {
             .keys()
             .filter_map(|owner| self.normal_form_head_metadata(*owner))
             .collect()
+    }
+
+    pub(super) fn normal_form_results(&self) -> std::collections::BTreeMap<DeclarationId, Term> {
+        let mut results = std::collections::BTreeMap::new();
+        for owner in self.normal_parameters.keys() {
+            if !self.is_registered_normal_form(*owner) {
+                continue;
+            }
+            let Some(Term::Function { result, .. }) = self
+                .signatures
+                .get(owner)
+                .or_else(|| self.interface_signatures.get(owner))
+                .map(|ty| ty.callable_signature())
+            else {
+                continue;
+            };
+            let head = declaration(self.package, &self.package_identities, *owner);
+            results.insert(head, (**result).clone());
+        }
+        results
     }
 
     pub(super) fn normal_form_value(
@@ -1826,6 +1882,14 @@ impl Checker<'_, '_> {
                     .map(|value| self.observe_normal_input_in(value, depth + 1, budget, bindings))
                     .collect::<Result<Vec<_>, Failure>>()?,
             )),
+            K::Array(values) => Ok(Term::NominalValue {
+                ty: Box::new(expr.ty.clone()),
+                variant: None,
+                fields: values
+                    .iter()
+                    .map(|value| self.observe_normal_input_in(value, depth + 1, budget, bindings))
+                    .collect::<Result<Vec<_>, Failure>>()?,
+            }),
             K::Unit => Ok(Term::Unit),
             K::Literal(literal) => known_scalars::literal(literal, budget),
             K::SymbolName(value) => {
@@ -1996,7 +2060,17 @@ impl Checker<'_, '_> {
                 arguments,
                 env_arguments,
                 ..
-            } if env_arguments.is_empty() => {
+            } if env_arguments.is_empty()
+                && matches!(
+                    &callee.kind,
+                    K::Function(decl_id)
+                        | K::FunctionInstance {
+                            declaration: decl_id,
+                            ..
+                        }
+                        if self.pure_field_type_builtin_wrapper(*decl_id).is_some()
+                ) =>
+            {
                 let decl_id = match &callee.kind {
                     K::Function(decl_id) => *decl_id,
                     K::FunctionInstance { declaration, .. } => *declaration,
@@ -2297,6 +2371,65 @@ impl Checker<'_, '_> {
                     return Err(Failure::LocalType(*binding, expr.source));
                 }
                 Err(Failure::Unavailable)
+            }
+            K::Call {
+                callee,
+                arguments,
+                env_arguments,
+                ..
+            } if env_arguments.is_empty()
+                && callee.ty.is_comptime_callable()
+                && callee.ty.is_pure_callable()
+                && Sort::of_comptime_domain(&expr.ty) == Sort::ComptimeValue =>
+            {
+                let (declaration, type_arguments) = match &callee.kind {
+                    K::Function(declaration) => (*declaration, Vec::new()),
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } => (*declaration, copy_observed_terms(arguments, budget)?),
+                    _ => return Err(Failure::Unavailable),
+                };
+                let mut call_arguments = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    if !matches!(argument.passing, n::ArgumentPassing::Value) {
+                        return Err(Failure::Unavailable);
+                    }
+                    call_arguments.push(self.observe_normal_input_in(
+                        &argument.value,
+                        depth + 1,
+                        budget,
+                        bindings,
+                    )?);
+                }
+                let call = nir::ComptimeCall {
+                    declaration,
+                    type_arguments,
+                    arguments: call_arguments,
+                    ty: copy_observed_term(&expr.ty, budget)?,
+                };
+                let open = call
+                    .type_arguments
+                    .iter()
+                    .chain(&call.arguments)
+                    .any(|term| {
+                        term.structural_terms().any(|sub| {
+                            matches!(
+                                sub,
+                                Term::Rigid { .. }
+                                    | Term::Bound { .. }
+                                    | Term::Hole { .. }
+                                    | Term::AssociatedType { .. }
+                                    | Term::AssociatedTypeCall(_)
+                                    | Term::ComptimeCall(_)
+                            )
+                        })
+                    });
+                if open {
+                    Ok(Term::ComptimeCall(Box::new(call)))
+                } else {
+                    Err(Failure::Unavailable)
+                }
             }
             _ => Err(Failure::Unavailable),
         }
@@ -3865,4 +3998,13 @@ pub(super) fn boolean_guard_values(
             }
         }
     }))
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn array_element_and_len(&self, ty: &Term) -> Option<(Term, usize)> {
+        nir::normal_forms::array_element_and_len_with(ty, &|head| {
+            Some(head) == self.protocols.array
+        })
+        .map(|(elem, len)| (elem.clone(), len))
+    }
 }

@@ -31,8 +31,7 @@ impl Search<'_> {
                 let term = &self.terms.nodes[index];
                 closed[slot] |= constructor(term).is_some()
                     || matches!(term, Term::Record(_))
-                    || self.context.is_tuple_type(term)
-                    || self.context.is_list_type(term);
+                    || self.context.is_builtin_normal_type(term);
             }
         }
         if closed.into_iter().all(|known| known)
@@ -130,8 +129,7 @@ impl Search<'_> {
                 let term = &terms.nodes[index];
                 if constructor(term).is_some()
                     || matches!(term, Term::Record(_))
-                    || self.context.is_tuple_type(term)
-                    || self.context.is_list_type(term)
+                    || self.context.is_builtin_normal_type(term)
                 {
                     return Ok(Some((labels, root)));
                 }

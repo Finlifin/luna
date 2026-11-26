@@ -1,0 +1,135 @@
+use ast_impl.span.{ComptimeSourceSpanOps, SourceSpan}
+use bindings;
+use builtin.{NoReturn, Type, bool, str, usize, void}
+use diagnostics_impl.{Diagnostic, DiagnosticLevel, LabelStyle}
+
+{- Errors returned by comptime compilation control and inspection helpers. -}
+pub enum CompileErr {
+    Failed,
+    UnsupportedTarget,
+    MissingSourceLocation,
+    InvalidDiagnostic,
+}
+
+{- Normalized source file and byte range extracted from a SourceSpan. -}
+pub struct SourceLocationInfo {
+    file: str,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+impl SourceLocationInfo {
+    pub pure comptime fn from_span(span: SourceSpan) -> SourceLocationInfo {
+        SourceLocationInfo {
+            file: span.as(ComptimeSourceSpanOps).file(),
+            byte_start: span.as(ComptimeSourceSpanOps).start(),
+            byte_end: span.as(ComptimeSourceSpanOps).end(),
+        }
+    }
+
+    pub pure comptime fn file(self) -> str {
+        self.file
+    }
+
+    pub pure comptime fn byte_start(self) -> usize {
+        self.byte_start
+    }
+
+    pub pure comptime fn byte_end(self) -> usize {
+        self.byte_end
+    }
+}
+
+{- Target architecture layout summary available during comptime evaluation. -}
+pub struct TargetCfg {
+    pointer_bits: usize,
+    pointer_bytes: usize,
+}
+
+impl TargetCfg {
+    pub pure comptime fn pointer_bits(self) -> usize {
+        self.pointer_bits
+    }
+
+    pub pure comptime fn pointer_bytes(self) -> usize {
+        self.pointer_bytes
+    }
+
+    pub pure comptime fn is_64_bit(self) -> bool {
+        self.pointer_bits == 64
+    }
+
+    pub pure comptime fn is_32_bit(self) -> bool {
+        self.pointer_bits == 32
+    }
+}
+
+{- Checked IIR stage handle preserving identity without exposing unfrozen inference state. -}
+pub struct IIR {
+    id: usize,
+    name: str,
+}
+
+impl IIR {
+    pub pure comptime fn handle(id: usize, name: str) -> IIR {
+        IIR { id: id, name: name }
+    }
+
+    pub pure comptime fn id(self) -> usize {
+        self.id
+    }
+
+    pub pure comptime fn name(self) -> str {
+        self.name
+    }
+}
+
+{- Observe current target pointer width via usize layout without requiring --build-target metadata. -}
+pub pure comptime fn cfg() -> TargetCfg {
+    let pointer_bytes = Type.size_of(usize);
+    assumes pointer_bytes <= 16;
+    TargetCfg {
+        pointer_bits: pointer_bytes * 8,
+        pointer_bytes: pointer_bytes,
+    }
+}
+
+{- Abort comptime evaluation with an explicit user diagnostic error. -}
+pub comptime fn err(message: str) -> NoReturn {
+    bindings.compile_error(message)
+}
+
+{- Emit a non-fatal compiler warning during comptime evaluation. -}
+pub comptime fn warn(message: str) -> void {
+    bindings.emit_diagnostic_raw(1, message, "", 0, 0);
+}
+
+{- Emit a compiler note diagnostic during comptime evaluation. -}
+pub comptime fn note(message: str) -> void {
+    bindings.emit_diagnostic_raw(2, message, "", 0, 0);
+}
+
+{- Emit a structured diagnostic through the compiler diagnostic sink. -}
+pub comptime fn emit_diagnostic(diagnostic: Diagnostic) -> void {
+    diagnostic.emit();
+}
+
+{- Emit a diagnostic anchored at a source span. -}
+pub comptime fn emit_at(span: SourceSpan, level: DiagnosticLevel, message: str) -> void {
+    Diagnostic.builder(level, message)
+        .with_label(span, message, LabelStyle.primary)
+        .emit();
+}
+
+pub comptime fn err_at(span: SourceSpan, message: str) -> NoReturn {
+    emit_at(span, DiagnosticLevel.err, message);
+    bindings.compile_error(message)
+}
+
+pub comptime fn warn_at(span: SourceSpan, message: str) -> void {
+    emit_at(span, DiagnosticLevel.warning, message);
+}
+
+pub comptime fn note_at(span: SourceSpan, message: str) -> void {
+    emit_at(span, DiagnosticLevel.note, message);
+}

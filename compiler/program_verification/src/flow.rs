@@ -2793,14 +2793,15 @@ impl Walker<'_> {
             return self.invariant_pointer_targets(expr, state, changed, depth + 1);
         };
         match &expr.kind {
-            K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
-                match fields.get(*index) {
-                    Some(field) => {
-                        self.invariant_input_pointer_targets(field, rest, state, changed, depth + 1)
-                    }
-                    None => Ok(None),
+            K::Tuple(fields)
+            | K::Array(fields)
+            | K::AnonymousRecord { fields }
+            | K::Record { fields, .. } => match fields.get(*index) {
+                Some(field) => {
+                    self.invariant_input_pointer_targets(field, rest, state, changed, depth + 1)
                 }
-            }
+                None => Ok(None),
+            },
             K::Block {
                 result: Some(result),
                 ..
@@ -6785,6 +6786,7 @@ impl Walker<'_> {
             | K::OptionalPresent(_)
             | K::Object { .. }
             | K::Tuple(_)
+            | K::Array(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::Variant { .. }
@@ -8118,7 +8120,7 @@ fn exportable_postcondition(
                 work.push(a);
                 work.push(b);
             }
-            K::Tuple(fields) => work.extend(fields),
+            K::Tuple(fields) | K::Array(fields) => work.extend(fields),
             K::If {
                 condition,
                 then_branch,

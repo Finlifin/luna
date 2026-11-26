@@ -30,6 +30,7 @@ impl Checker<'_, '_> {
                     K::Block { statements, .. } if statements.is_empty() => return Ok(true),
                     K::If { .. }
                     | K::Tuple(_)
+                    | K::Array(_)
                     | K::Record { .. }
                     | K::AnonymousRecord { .. }
                     | K::Variant { .. }

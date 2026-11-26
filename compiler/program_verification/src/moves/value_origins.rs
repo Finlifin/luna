@@ -228,6 +228,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 |this, flow| this.match_arms(value, arms, flow, expr.source, depth + 1),
             ),
             K::Tuple(_)
+            | K::Array(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::OptionalPresent(_)
@@ -524,6 +525,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
     ) -> Result<ValueOrigins, Error> {
         match &expr.kind {
             K::Tuple(_)
+            | K::Array(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::OptionalPresent(_)

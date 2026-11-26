@@ -203,6 +203,15 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
             _ => unreachable!("Object callable contract has no body"),
         };
     }
+    if name == "emit_diagnostic" {
+        return K::EmitDiagnostic(Box::new(packet(inputs, source)));
+    }
+    if name == "tuple_elem" {
+        return K::TupleElem(Box::new(packet(inputs, source)));
+    }
+    if name == "bounded_stack_bytes" {
+        inputs.remove(0);
+    }
     let subject = Box::new(inputs.pop().unwrap());
     match name {
         "newtype_representation" => K::NewtypeRepresentation(subject),
@@ -241,6 +250,9 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
             kind: n::ImplicitQueryKind::SourceSpan,
             operand: subject,
         },
+        "tuple_len" => K::TupleLen(subject),
+        "compile_error" => K::CompileError(subject),
+        "bounded_stack_bytes" => K::BoundedStackBytes(subject),
         _ => K::EnumStructure {
             subject,
             query: match name {

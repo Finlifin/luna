@@ -91,6 +91,7 @@ impl Checker<'_, '_> {
     ) -> &[DeclarationId] {
         self.type_parameters
             .get(&owner)
+            .filter(|params| !params.is_empty())
             .or_else(|| {
                 self.enclosing_impl_owner(owner)
                     .and_then(|impl_owner| self.type_parameters.get(&impl_owner))

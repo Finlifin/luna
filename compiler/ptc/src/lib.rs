@@ -453,6 +453,55 @@ impl Context {
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
 
+    pub fn is_array_head(&self, head: DeclarationId) -> bool {
+        self.theory.constructors.array_heads.contains(&head)
+    }
+
+    pub fn is_array_type(&self, ty: &Term) -> bool {
+        matches!(
+            ty,
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments,
+            } if self.is_array_head(*head)
+                && arguments.len() == 2
+                && arguments[0].sort() == Sort::Type
+                && arguments[1].sort() != Sort::Type
+        )
+    }
+
+    pub fn is_storage_head(&self, head: DeclarationId) -> bool {
+        self.theory.constructors.storage_heads.contains(&head)
+    }
+
+    pub fn is_storage_type(&self, ty: &Term) -> bool {
+        matches!(
+            ty,
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments,
+            } if self.is_storage_head(*head)
+                && arguments.len() == 1
+                && arguments[0].sort() == Sort::Type
+        )
+    }
+
+    pub fn is_builtin_normal_head(&self, head: DeclarationId) -> bool {
+        self.is_tuple_head(head)
+            || self.is_list_inference_head(head)
+            || self.is_array_head(head)
+            || self.is_storage_head(head)
+    }
+
+    pub fn is_builtin_normal_type(&self, ty: &Term) -> bool {
+        self.is_tuple_type(ty)
+            || self.is_list_type(ty)
+            || self.is_array_type(ty)
+            || self.is_storage_type(ty)
+    }
+
     /// Fast outer-constructor disjointness consistent with PTC's type theory.
     /// Never grants disjointness to opaque normal-form heads, unclosed
     /// computations, or empty error-result wrappers.
@@ -473,11 +522,39 @@ impl Context {
         let non_list = |term: &Term| {
             constructor(term).is_some()
                 || self.is_tuple_type(term)
+                || self.is_array_type(term)
+                || self.is_storage_type(term)
                 || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
                 || matches!(term, Term::ErrorResult { errors, .. } if !errors.is_empty())
         };
         if (self.is_list_type(left) && non_list(right))
             || (self.is_list_type(right) && non_list(left))
+        {
+            return true;
+        }
+        let non_array = |term: &Term| {
+            constructor(term).is_some()
+                || self.is_tuple_type(term)
+                || self.is_list_type(term)
+                || self.is_storage_type(term)
+                || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
+                || matches!(term, Term::ErrorResult { errors, .. } if !errors.is_empty())
+        };
+        if (self.is_array_type(left) && non_array(right))
+            || (self.is_array_type(right) && non_array(left))
+        {
+            return true;
+        }
+        let non_storage = |term: &Term| {
+            constructor(term).is_some()
+                || self.is_tuple_type(term)
+                || self.is_list_type(term)
+                || self.is_array_type(term)
+                || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
+                || matches!(term, Term::ErrorResult { errors, .. } if !errors.is_empty())
+        };
+        if (self.is_storage_type(left) && non_storage(right))
+            || (self.is_storage_type(right) && non_storage(left))
         {
             return true;
         }
@@ -491,8 +568,7 @@ impl Context {
         }
         let non_error = |term: &Term| {
             constructor(term).is_some()
-                || self.is_tuple_type(term)
-                || self.is_list_type(term)
+                || self.is_builtin_normal_type(term)
                 || matches!(term, Term::Primitive(Primitive::Unit) | Term::Record(_))
         };
         if (matches!(left, Term::ErrorResult { errors, .. } if !errors.is_empty())
@@ -527,6 +603,29 @@ impl Context {
                 .iter()
                 .zip(b)
                 .any(|(l, r)| self.distinct_outer_types_at(l, r, depth + 1)),
+            (
+                Term::NormalForm {
+                    head: h1,
+                    sort: Sort::Type,
+                    arguments: a1,
+                },
+                Term::NormalForm {
+                    head: h2,
+                    sort: Sort::Type,
+                    arguments: a2,
+                },
+            ) if (self.is_array_head(*h1) || self.is_storage_head(*h1))
+                && (self.is_array_head(*h2) || self.is_storage_head(*h2)) =>
+            {
+                h1 != h2
+                    || (a1.len() == a2.len()
+                        && a1.iter().zip(a2).any(|(l, r)| {
+                            (l.sort() == Sort::Type
+                                && r.sort() == Sort::Type
+                                && self.distinct_outer_types_at(l, r, depth + 1))
+                                || matches!((l, r), (Term::Integer(x), Term::Integer(y)) if x != y)
+                        }))
+            }
             _ => false,
         }
     }
@@ -1897,6 +1996,8 @@ enum Head {
     PureFunction,
     Tuple(usize),
     NormalTuple(DeclarationId, usize),
+    BuiltinArray(DeclarationId),
+    BuiltinStorage(DeclarationId),
     Function(Vec<Sort>),
     Closure(usize),
     Nominal(DeclarationId, usize),
@@ -1956,8 +2057,19 @@ fn tuple_normal_elements<'a>(
 
 fn constructor_in_context(context: &Context, term: &Term) -> Option<Head> {
     constructor(term).or_else(|| {
-        tuple_normal_elements(context, term)
-            .map(|(head, _, elements)| Head::NormalTuple(head, elements.len()))
+        if let Some((head, _, elements)) = tuple_normal_elements(context, term) {
+            Some(Head::NormalTuple(head, elements.len()))
+        } else if context.is_array_type(term)
+            && let Term::NormalForm { head, .. } = term
+        {
+            Some(Head::BuiltinArray(*head))
+        } else if context.is_storage_type(term)
+            && let Term::NormalForm { head, .. } = term
+        {
+            Some(Head::BuiltinStorage(*head))
+        } else {
+            None
+        }
     })
 }
 
@@ -2483,8 +2595,14 @@ impl Search<'_> {
                                 if let (
                                     Term::Nominal {
                                         arguments: left, ..
+                                    }
+                                    | Term::NormalForm {
+                                        arguments: left, ..
                                     },
                                     Term::Nominal {
+                                        arguments: right, ..
+                                    }
+                                    | Term::NormalForm {
                                         arguments: right, ..
                                     },
                                 ) = (ta, tb)
@@ -2820,6 +2938,12 @@ fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize
         Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration) => {
             children
         }
+        Term::NormalForm {
+            sort: Sort::Type, ..
+        } if context.is_array_type(term) => &children[..1],
+        Term::NormalForm {
+            sort: Sort::Type, ..
+        } if context.is_storage_type(term) => children,
         Term::TraitObject { .. } => children,
         Term::Computation { effects, .. } if !effects.is_empty() => &children[..children.len() - 1],
         Term::ErrorResult { errors, .. } if !errors.is_empty() => &children[..errors.len()],

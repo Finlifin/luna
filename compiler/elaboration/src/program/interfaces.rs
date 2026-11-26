@@ -617,8 +617,7 @@ impl Checker<'_, '_> {
                             sort: Sort::Type,
                             ..
                         }
-                ) && !context.is_tuple_type(&subject)
-                    && !context.is_list_type(&subject)
+                ) && !context.is_builtin_normal_type(&subject)
                 {
                     return Err(error(
                         item.span,
@@ -640,8 +639,11 @@ impl Checker<'_, '_> {
                 };
                 if matches!(subject, Term::NormalForm { .. }) {
                     let normal_forms = self.normal_form_metadata();
+                    let normal_form_results = self.normal_form_results();
                     index.set_normal_form_metadata(normal_forms.clone());
+                    index.set_normal_form_results(normal_form_results.clone());
                     inherent_index.set_normal_form_metadata(normal_forms);
+                    inherent_index.set_normal_form_results(normal_form_results);
                 }
                 let phase = match &item.kind {
                     ItemKind::Impl(def) => def.phase,
@@ -658,8 +660,11 @@ impl Checker<'_, '_> {
             } else {
                 if matches!(subject, Term::NormalForm { .. }) {
                     let normal_forms = self.normal_form_metadata();
+                    let normal_form_results = self.normal_form_results();
                     index.set_normal_form_metadata(normal_forms.clone());
+                    index.set_normal_form_results(normal_form_results.clone());
                     inherent_index.set_normal_form_metadata(normal_forms);
+                    inherent_index.set_normal_form_results(normal_form_results);
                 }
                 inherent_index
                     .check_ownership(
@@ -689,8 +694,11 @@ impl Checker<'_, '_> {
             self.newtypes.values().cloned().collect(),
         );
         let normal_forms = self.normal_form_metadata();
+        let normal_form_results = self.normal_form_results();
         index.set_normal_form_metadata(normal_forms.clone());
+        index.set_normal_form_results(normal_form_results.clone());
         inherent_index.set_normal_form_metadata(normal_forms);
+        inherent_index.set_normal_form_results(normal_form_results);
         let coherence_context = self.nominal_context();
         let coherence =
             index.check_type_coherence_by_interface(&coherence_context, Budget::default());

@@ -597,6 +597,13 @@ impl<'a> Interpreter<'a> {
                     self.check_borrowed_representation_in(&entry.value().value, source, depth + 1)?;
                 }
             }
+            Value::Array { ty, values } => {
+                self.copy_invocation_type_work(ty, source, true)?;
+                self.copy_work(values.len(), source)?;
+                for value in values {
+                    self.check_borrowed_representation_in(value, source, depth + 1)?;
+                }
+            }
             Value::List { ty, values } => {
                 self.copy_invocation_type_work(ty, source, true)?;
                 if self.comptime_only && values.has_flat_checkpoint() {
@@ -730,6 +737,7 @@ impl<'a> Interpreter<'a> {
             }
             Value::Integer(integer) => self.copy_work(integer.bit_len().div_ceil(32), source)?,
             Value::BitVec(bits) => self.copy_work(bits.words().len(), source)?,
+            Value::Array { .. } => unreachable!("structural representation"),
             Value::Unit
             | Value::Bool(_)
             | Value::Char(_)
@@ -954,6 +962,20 @@ impl<'a> Interpreter<'a> {
                             self.clone_representation(value, source, depth + 1, preserve_identity)
                         })
                         .collect::<Result<_, _>>()?,
+                }
+            }
+            Value::Array { ty, values } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                self.copy_work(values.len(), source)?;
+                let values = values
+                    .iter()
+                    .map(|value| {
+                        self.clone_representation(value, source, depth + 1, preserve_identity)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Value::Array {
+                    ty: ty.clone(),
+                    values,
                 }
             }
             Value::List { ty, values } => {

@@ -270,8 +270,13 @@ impl Printer<'_> {
             let payload_slot = if layout.payload_size > 0 {
                 let slot = format!("%display_err_slot{}", self.serial);
                 self.serial += 1;
-                self.prologue
-                    .push_str(&format!("  {slot} = alloca {}\n", physical.llvm()));
+                let align_suffix = physical
+                    .explicit_align()
+                    .map_or(String::new(), |a| format!(", align {a}"));
+                self.prologue.push_str(&format!(
+                    "  {slot} = alloca {}{align_suffix}\n",
+                    physical.llvm()
+                ));
                 self.body.push_str(&format!(
                     "  store {} {value}, ptr {slot}\n",
                     physical.llvm()
@@ -342,12 +347,47 @@ impl Printer<'_> {
                     .collect::<Vec<_>>(),
             )),
             Term::Tuple(fields) => Some(("tuple", fields.iter().map(|ty| (None, ty)).collect())),
-            Term::NormalForm { .. } => self
-                .graph
-                .normal_forms
-                .iter()
-                .find_map(|head| head.tuple_elements(logical))
-                .map(|fields| ("tuple", fields.iter().map(|ty| (None, ty)).collect())),
+            Term::NormalForm { .. } => {
+                if let Some(fields) = self
+                    .graph
+                    .normal_forms
+                    .iter()
+                    .find_map(|head| head.tuple_elements(logical))
+                {
+                    Some(("tuple", fields.iter().map(|ty| (None, ty)).collect()))
+                } else if let Ty::Array { elem, len, .. } = physical {
+                    let is_array = |id| {
+                        self.graph.normal_forms.iter().any(|head| {
+                            head.declaration == id && head.role == nir::normal_forms::Role::Array
+                        })
+                    };
+                    if let Some((elem_term, term_len)) =
+                        nir::normal_forms::array_element_and_len_with(logical, &is_array)
+                        && term_len == *len
+                    {
+                        nir::type_computations::charge_term(logical, self.fuel)
+                            .map_err(|e| e.to_string())?;
+                        self.print("(array")?;
+                        for index in 0..*len {
+                            let child = if **elem == Ty::Unit {
+                                String::new()
+                            } else {
+                                self.instruction(format!(
+                                    "extractvalue {} {value}, {index}",
+                                    physical.llvm()
+                                ))
+                            };
+                            self.print(" ")?;
+                            self.value(&elem_term, elem, &child, depth + 1)?;
+                        }
+                        self.print(")")?;
+                        return Ok(());
+                    }
+                    None
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         if let Some((tag, fields)) = fields {
@@ -362,18 +402,29 @@ impl Printer<'_> {
                 self.print(&format!("({tag}{close}"))?;
                 return Ok(());
             }
-            let (Ty::Record(layout) | Ty::PackedRecord(layout)) = physical else {
-                return Err("host entry product layout mismatch".into());
+            let (layout_fields, llvm_indices): (&[Ty], Option<&[usize]>) = match physical {
+                Ty::Record(layout) | Ty::PackedRecord(layout) => (layout.as_slice(), None),
+                Ty::AlignedRecord(layout) => (
+                    layout.fields.as_slice(),
+                    Some(layout.field_llvm_indices.as_slice()),
+                ),
+                _ => return Err("host entry product layout mismatch".into()),
             };
-            if fields.len() != layout.len() {
+            if fields.len() != layout_fields.len() {
                 return Err("host entry product field count mismatch".into());
             }
             self.print(&format!("({tag}"))?;
-            for (index, ((name, ty), field)) in fields.into_iter().zip(layout.iter()).enumerate() {
+            for (index, ((name, ty), field)) in
+                fields.into_iter().zip(layout_fields.iter()).enumerate()
+            {
+                let llvm_index = llvm_indices.map_or(index, |m| m[index]);
                 let child = if *field == Ty::Unit {
                     String::new()
                 } else {
-                    self.instruction(format!("extractvalue {} {value}, {index}", physical.llvm()))
+                    self.instruction(format!(
+                        "extractvalue {} {value}, {llvm_index}",
+                        physical.llvm()
+                    ))
                 };
                 if let Some(name) = name {
                     *self.fuel = self

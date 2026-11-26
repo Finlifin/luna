@@ -85,6 +85,9 @@ pub struct Options {
     pub splice_protocol: Option<String>,
     pub meta_list_type: Option<String>,
     pub tuple_type: Option<String>,
+    pub array_type: Option<String>,
+    pub maybe_uninit_storage_type: Option<String>,
+    pub manually_drop_storage_type: Option<String>,
     pub incremental: crate::package_cache::IncrementalConfig,
 }
 
@@ -272,6 +275,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut call_description_type = None;
     let mut source_span_type = None;
     let mut tuple_type = None;
+    let mut array_type = None;
+    let mut maybe_uninit_storage_type = None;
+    let mut manually_drop_storage_type = None;
     let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
     let mut comptime_compound_arithmetic_protocols: [Option<String>; 5] = Default::default();
@@ -1276,11 +1282,20 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     comptime_arithmetic_protocols[index] = Some(value);
                     continue;
                 }
-                Some(option @ ("--meta-list-type" | "--tuple-type")) => {
-                    let target = if option == "--meta-list-type" {
-                        &mut meta_list_type
-                    } else {
-                        &mut tuple_type
+                Some(
+                    option @ ("--meta-list-type"
+                    | "--tuple-type"
+                    | "--array-type"
+                    | "--maybe-uninit-storage-type"
+                    | "--manually-drop-storage-type"),
+                ) => {
+                    let target = match option {
+                        "--meta-list-type" => &mut meta_list_type,
+                        "--tuple-type" => &mut tuple_type,
+                        "--array-type" => &mut array_type,
+                        "--maybe-uninit-storage-type" => &mut maybe_uninit_storage_type,
+                        "--manually-drop-storage-type" => &mut manually_drop_storage_type,
+                        _ => unreachable!(),
                     };
                     if target.is_some() {
                         return Err(format!("{option} may only be specified once"));
@@ -1499,6 +1514,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         splice_protocol,
         meta_list_type,
         tuple_type,
+        array_type,
+        maybe_uninit_storage_type,
+        manually_drop_storage_type,
         arithmetic_protocols,
         compound_arithmetic_protocols,
         comptime_compound_arithmetic_protocols,
@@ -1754,6 +1772,9 @@ mod tests {
                 comptime_compound_arithmetic_protocols: Default::default(),
                 comptime_arithmetic_protocols: Default::default(),
                 tuple_type: None,
+                array_type: None,
+                maybe_uninit_storage_type: None,
+                manually_drop_storage_type: None,
                 incremental: Default::default(),
             })
         );
@@ -1834,6 +1855,9 @@ mod tests {
                 comptime_compound_arithmetic_protocols: Default::default(),
                 comptime_arithmetic_protocols: Default::default(),
                 tuple_type: None,
+                array_type: None,
+                maybe_uninit_storage_type: None,
+                manually_drop_storage_type: None,
                 incremental: Default::default(),
             })
         );

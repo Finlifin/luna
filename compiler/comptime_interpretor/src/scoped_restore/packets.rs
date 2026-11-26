@@ -5,6 +5,7 @@ use comptime_runtime::object::Entry;
 
 enum Group<'v> {
     Tuple,
+    Array(Term),
     List(Term),
     Record(DeclarationId, Vec<Term>),
     Variant(DeclarationId, Vec<Term>, usize),
@@ -99,6 +100,11 @@ impl<'v> Packet<'v> {
                 Value::Tuple(fields) => {
                     restore.spend(fields.len())?;
                     self.group(Group::Tuple, fields.iter().map(child));
+                }
+                Value::Array { ty, values } => {
+                    let ty = restore.ty(ty)?;
+                    restore.spend(values.len())?;
+                    self.group(Group::Array(ty), values.iter().map(child));
                 }
                 Value::List { ty, values } => {
                     let ty = restore.ty(ty)?;
@@ -204,6 +210,7 @@ impl Group<'_> {
     ) -> Result<Value, ErrorKind> {
         Ok(match self {
             Self::Tuple => Value::Tuple(fields),
+            Self::Array(ty) => Value::Array { ty, values: fields },
             Self::List(ty) => Value::List {
                 ty,
                 values: fields.into(),

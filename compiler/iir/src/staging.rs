@@ -47,6 +47,23 @@ impl<'a> Layouts<'a> {
         Ok(None)
     }
 
+    fn array_element_and_len(
+        self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<(Term, usize)>, String> {
+        charge(fuel, self.heads.len())?;
+        let Some((element, len)) = nir::normal_forms::array_element_and_len_with(ty, &|id| {
+            self.heads
+                .iter()
+                .any(|head| head.declaration == id && head.role == nir::normal_forms::Role::Array)
+        }) else {
+            return Ok(None);
+        };
+        nir::type_computations::charge_term(element, fuel).map_err(|e| e.to_string())?;
+        Ok(Some((element.clone(), len)))
+    }
+
     pub fn new(
         heads: &'a [nir::normal_forms::Head],
         newtypes: &'a [nir::newtypes::Newtype],
@@ -629,6 +646,7 @@ pub fn structural_boolean_dependencies_in(
             | K::TypeValue(_)
             | K::Unit
             | K::Tuple(_)
+            | K::Array(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::Variant { .. }
@@ -2207,6 +2225,7 @@ fn fold_aggregate_input<'layout>(
     charge(fuel, 1)?;
     let fields = match &expr.kind {
         K::Tuple(fields)
+        | K::Array(fields)
         | K::AnonymousRecord { fields }
         | K::Record { fields, .. }
         | K::Variant { fields, .. } => fields,
@@ -2218,6 +2237,7 @@ fn fold_aggregate_input<'layout>(
         .collect::<Result<Vec<_>, _>>()?;
     let kind = match &expr.kind {
         K::Tuple(_) => K::Tuple(fields),
+        K::Array(_) => K::Array(fields),
         K::Record { declaration, .. } => K::Record {
             declaration: *declaration,
             fields,
@@ -2577,7 +2597,11 @@ fn fold_input<'layout>(
         fold_boolean_control(heads, expr, fuel, depth)
     } else if matches!(
         expr.kind,
-        K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
+        K::Tuple(_)
+            | K::Array(_)
+            | K::AnonymousRecord { .. }
+            | K::Record { .. }
+            | K::Variant { .. }
     ) {
         fold_aggregate_input(heads, expr, fuel, depth)
     } else if matches!(expr.kind, K::FloatNegate(_) | K::FloatBinary { .. }) {
@@ -3076,6 +3100,27 @@ fn constant_with_locals<'layout>(
             let decoded = frozen::fold(heads, expr, value, fuel, depth + 1)?;
             constant_with_locals(heads, &decoded, locals, fuel, depth + 1)?
         }
+        (K::Array(fields), _) => {
+            let Some((element, len)) = heads.array_element_and_len(&expr.ty, fuel)? else {
+                return Err("staged array requires a bound Array layout".into());
+            };
+            if fields.len() != len {
+                return Err("staged array arity mismatch".into());
+            }
+            charge(fuel, fields.len())?;
+            let mut canonical = Vec::with_capacity(fields.len());
+            for field in fields {
+                if field.ty != element {
+                    return Err("staged array element type mismatch".into());
+                }
+                canonical.push(constant_with_locals(heads, field, locals, fuel, depth + 1)?);
+            }
+            Term::NominalValue {
+                ty: Box::new(expr.ty.clone()),
+                variant: None,
+                fields: canonical,
+            }
+        }
         (K::Local(id), _) => {
             let Some(bound) = locals.get(id) else {
                 return Err("staged input requires a supported canonical constant".into());
@@ -3083,7 +3128,7 @@ fn constant_with_locals<'layout>(
             nir::type_computations::charge_term(bound, fuel).map_err(|e| e.to_string())?;
             bound.clone()
         }
-        (K::Block { statements, result }, _) => {
+        (K::Block { statements, result } | K::CallPreparation { statements, result }, _) => {
             let mut inner = locals.clone();
             for statement in statements {
                 let K::Let { binding, value } = &statement.kind else {

@@ -3023,6 +3023,36 @@ impl Checker<'_, '_> {
                 }
                 D::Known(expected_ty.clone())
             }
+            H::List(elements) if matches!(expected, Some(D::Known(ty)) if self.array_element_and_len(ty).is_some()) =>
+            {
+                let Some(D::Known(expected_ty)) = expected else {
+                    return Err(error(expr.span, "expected array domain"));
+                };
+                let Some((element_type, expected_len)) = self.array_element_and_len(expected_ty)
+                else {
+                    return Err(error(expr.span, "expected array element domain"));
+                };
+                if elements.len() != expected_len {
+                    return Err(error(
+                        expr.span,
+                        format!(
+                            "array literal has {} element(s), expected {}",
+                            elements.len(),
+                            expected_len
+                        ),
+                    ));
+                }
+                for element in *elements {
+                    self.describe_open_expression(
+                        element,
+                        locals,
+                        returns,
+                        Some(&D::Known(element_type.clone())),
+                        depth + 1,
+                    )?;
+                }
+                D::Known(expected_ty.clone())
+            }
             H::TyPtr(inner)
             | H::TyOptional(inner)
             | H::TyTraitObject(inner)

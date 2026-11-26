@@ -1,0 +1,62 @@
+use mem_impl.raw.{
+    drop_in_place, ptr_cast, read, unwrap_manually_drop, wrap_manually_drop,
+}
+use primitives.Type;
+use protocols.resources.{Clone, Copy}
+
+pub const ManuallyDropStorage: pure comptime fn<T: Type> -> Type = .ManuallyDropStorage'builtin;
+
+{-
+    Wrapper inhibiting automatic compiler `Drop` for a valid initialized `T`.
+-}
+pub struct ManuallyDrop
+where
+    T,
+{
+    raw: ManuallyDropStorage<T>,
+}
+
+impl ManuallyDrop<T> where T {
+    pub fn new(value: T) -> ManuallyDrop<T> {
+        ManuallyDrop<T> {
+            raw: wrap_manually_drop<T>(value),
+        }
+    }
+
+    pub fn into_inner(slot: ManuallyDrop<T>) -> T {
+        unsafe { unwrap_manually_drop<T>(slot.raw) }
+    }
+
+    pub unsafe fn take(slot: *ManuallyDrop<T>) -> T {
+        read<T>(slot.get())
+    }
+
+    pub unsafe fn drop(slot: *ManuallyDrop<T>) {
+        drop_in_place<T>(slot.get_mut());
+    }
+
+    pub unsafe fn get(*self) -> *T {
+        ptr_cast<ManuallyDropStorage<T>, T>(self.raw)
+    }
+
+    pub unsafe fn get_mut(*self) -> *T {
+        ptr_cast<ManuallyDropStorage<T>, T>(self.raw)
+    }
+}
+
+impl Clone for ManuallyDrop<T> where T :- Clone {
+    fn clone(*self) -> Self {
+        let copied = T.as(Clone).clone(unsafe { self.get() });
+        ManuallyDrop<T>.new(copied)
+    }
+}
+
+impl Clone for ManuallyDropStorage<T> where T :- Copy {
+    fn clone(*self) -> Self {
+        unsafe { read<ManuallyDropStorage<T>>(self) }
+    }
+}
+
+impl Copy for ManuallyDropStorage<T> where T :- Copy {}
+
+impl Copy for ManuallyDrop<T> where T :- Copy {}

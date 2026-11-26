@@ -102,6 +102,11 @@ impl Interpreter<'_> {
             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
             K::TypeLayout { query, operand } => (O::TypeLayout(*query), operand.as_ref()),
             K::ImplicitQuery { kind, operand } => (O::ImplicitQuery(*kind), operand.as_ref()),
+            K::TupleLen(operand) => (O::TupleLen, operand.as_ref()),
+            K::TupleElem(operand) => (O::TupleElem, operand.as_ref()),
+            K::BoundedStackBytes(operand) => (O::BoundedStackBytes, operand.as_ref()),
+            K::CompileError(operand) => (O::CompileError, operand.as_ref()),
+            K::EmitDiagnostic(operand) => (O::EmitDiagnostic, operand.as_ref()),
             _ => unreachable!("observation dispatcher"),
         };
         let observation = Observation {
@@ -341,6 +346,71 @@ impl Interpreter<'_> {
                     ),
                 };
                 if !valid {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::TupleLen => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Optional(Box::new(Term::Primitive(Primitive::Usize)))
+                };
+                if *output != expected
+                    || (*input != never && *input != Term::Primitive(Primitive::Type))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::TupleElem => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected_input = Term::Tuple(vec![
+                    Term::Primitive(Primitive::Type),
+                    Term::Primitive(Primitive::Usize),
+                ]);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Optional(Box::new(Term::Primitive(Primitive::Type)))
+                };
+                if *output != expected || (*input != never && *input != expected_input) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::BoundedStackBytes => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Optional(Box::new(Term::Primitive(Primitive::Usize)))
+                };
+                if *output != expected {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::CompileError => {
+                let never = Term::Primitive(Primitive::Never);
+                if *output != never
+                    || (*input != never && *input != Term::Primitive(Primitive::Str))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::EmitDiagnostic => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected_input = Term::Tuple(vec![
+                    Term::Primitive(Primitive::U8),
+                    Term::Primitive(Primitive::Str),
+                    Term::Primitive(Primitive::Str),
+                    Term::Primitive(Primitive::Usize),
+                    Term::Primitive(Primitive::Usize),
+                ]);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Primitive(Primitive::Void)
+                };
+                if *output != expected || (*input != never && *input != expected_input) {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
@@ -682,7 +752,182 @@ impl Interpreter<'_> {
                     }
                 }
             }
+            O::TupleLen => self.observe_tuple_len(value, observation.output.borrow(), source),
+            O::TupleElem => self.observe_tuple_elem(value, observation.output.borrow(), source),
+            O::BoundedStackBytes => {
+                self.observe_bounded_stack_bytes(value, observation.output.borrow(), source)
+            }
+            O::CompileError => {
+                let Value::String(message) = value else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
+                Err(self.failure(
+                    ErrorKind::CustomDiagnostic(message.to_string()),
+                    Some(source),
+                ))
+            }
+            O::EmitDiagnostic => self.observe_emit_diagnostic(value, source),
         }
+    }
+
+    fn observe_tuple_fields(
+        &mut self,
+        type_val: Value,
+        source: SourceRange,
+    ) -> Result<Option<Vec<Term>>, Error> {
+        let subject = self.type_identity_term(type_val, source)?;
+        let subject = self.selected_type_view(&subject, Some(source))?;
+        match &subject {
+            Term::Tuple(elems) => Ok(Some(elems.clone())),
+            Term::NormalForm { .. } => {
+                Ok(nir::normal_forms::registered_tuple_fields(&subject, |id| {
+                    self.normal_forms.get(&id)
+                })
+                .map(<[Term]>::to_vec))
+            }
+            Term::Rigid { .. } | Term::Hole { .. } | Term::Bound { .. } => {
+                Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn observe_tuple_len(
+        &mut self,
+        value: Value,
+        output_ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let count = self.observe_tuple_fields(value, source)?.map(|f| f.len());
+        Ok(Value::Optional {
+            ty: output_ty.clone(),
+            value: count.map(|len| Box::new(Value::UnsignedInteger(len as u128))),
+        })
+    }
+
+    fn observe_tuple_elem(
+        &mut self,
+        value: Value,
+        output_ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::Tuple(mut items) = value else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if items.len() != 2 {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let index_val = items.pop().unwrap();
+        let type_val = items.pop().unwrap();
+        let Value::UnsignedInteger(raw_index) = index_val else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let index = usize::try_from(raw_index).ok();
+        let elem = self
+            .observe_tuple_fields(type_val, source)?
+            .and_then(|fields| index.and_then(|i| fields.into_iter().nth(i)));
+        Ok(Value::Optional {
+            ty: output_ty.clone(),
+            value: elem.map(|ty| Box::new(Value::Type(ty))),
+        })
+    }
+
+    fn observe_bounded_stack_bytes(
+        &mut self,
+        value: Value,
+        output_ty: &Term,
+        _source: SourceRange,
+    ) -> Result<Value, Error> {
+        let bound = if let Some(package) = self.declaration_world {
+            let entry = match &value {
+                Value::Function(decl) => Some((*decl, &[][..])),
+                Value::FunctionInstance {
+                    declaration,
+                    arguments,
+                } => Some((*declaration, arguments.as_slice())),
+                Value::IirCallable(handle) => {
+                    Some((handle.key.declaration, &*handle.key.arguments))
+                }
+                _ => None,
+            };
+            if let Some((decl, args)) = entry {
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let bytes = crate::stack_bounds::compute_bounded_stack_bytes(
+                    package, decl, args, &mut fuel,
+                );
+                self.budget.steps -= (before - fuel) as u64;
+                bytes.and_then(|raw| {
+                    let val = u128::from(raw);
+                    if let Some(target) = self.target
+                        && target.pointer_bits() < 128
+                        && let Some(limit) = 1u128.checked_shl(target.pointer_bits())
+                        && val >= limit
+                    {
+                        None
+                    } else {
+                        Some(val)
+                    }
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(Value::Optional {
+            ty: output_ty.clone(),
+            value: bound.map(|val| Box::new(Value::UnsignedInteger(val))),
+        })
+    }
+
+    fn observe_emit_diagnostic(
+        &mut self,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::Tuple(fields) = value else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if fields.len() != 5 {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let mut iter = fields.into_iter();
+        let (
+            Some(Value::UnsignedInteger(level)),
+            Some(Value::String(message)),
+            Some(Value::String(file)),
+            Some(Value::UnsignedInteger(line)),
+            Some(Value::UnsignedInteger(column)),
+        ) = (
+            iter.next(),
+            iter.next(),
+            iter.next(),
+            iter.next(),
+            iter.next(),
+        )
+        else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if level == 0 {
+            let rendered = if file.is_empty() && line == 0 && column == 0 {
+                message.to_string()
+            } else {
+                format!("{file}:{line}:{column}: {message}")
+            };
+            return Err(self.failure(ErrorKind::CustomDiagnostic(rendered), Some(source)));
+        }
+        let formatted = if file.is_empty() && line == 0 && column == 0 {
+            message.to_string()
+        } else {
+            format!("{file}:{line}:{column}: {message}")
+        };
+        self.emitted_diagnostics.push(crate::EmittedDiagnostic {
+            level: u8::try_from(level).unwrap_or(1),
+            message: formatted,
+            source,
+        });
+        Ok(Value::Unit)
     }
 
     fn observe_type_layout(

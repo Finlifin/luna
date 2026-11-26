@@ -100,6 +100,7 @@ fn total_default_field(expr: &n::Expr) -> bool {
         K::AnonymousRecord { fields }
         | K::Record { fields, .. }
         | K::Variant { fields, .. }
+        | K::Array(fields)
         | K::Tuple(fields) => fields.iter().all(total_default_field),
         K::Block { statements, result } | K::CallPreparation { statements, result } => {
             statements
@@ -150,6 +151,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         K::AnonymousRecord { fields }
         | K::Record { fields, .. }
         | K::Variant { fields, .. }
+        | K::Array(fields)
         | K::Tuple(fields) => {
             return if fields.iter().all(|field| copy_scalar(&field.ty)) {
                 fields.iter().all(stable_default)
@@ -276,6 +278,11 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::TypeNotSized { .. }
         | K::TypeLayout { .. }
         | K::ListLength(_)
+        | K::TupleLen(_)
+        | K::TupleElem(_)
+        | K::CompileError(_)
+        | K::EmitDiagnostic(_)
+        | K::BoundedStackBytes(_)
         | K::NewtypeRepresentation(_)
         | K::DefinitionAttributes(_)
         | K::StructFieldTypes(_)
@@ -336,6 +343,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         K::AnonymousRecord { .. }
         | K::Record { .. }
         | K::Variant { .. }
+        | K::Array(_)
         | K::Tuple(_)
         | K::Block { .. }
         | K::CallPreparation { .. }

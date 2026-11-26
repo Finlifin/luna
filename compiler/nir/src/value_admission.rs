@@ -148,8 +148,12 @@ fn validate_value(
         } | Term::Bound {
             sort: Sort::ComptimeValue,
             ..
+        } | Term::NormalForm {
+            sort: Sort::ComptimeValue,
+            ..
         }
-    ) {
+    ) || matches!(argument, Term::ComptimeCall(_) if argument.sort() == Sort::ComptimeValue)
+    {
         return if *domain != Term::Primitive(Primitive::Type)
             && (queries.declared)(argument, domain, fuel)?
         {
@@ -204,7 +208,15 @@ fn validate_value(
         )?;
         return validate_value(value, payload, fuel, queries, frames, depth + 1);
     }
-    if matches!(domain, Term::NormalForm { .. }) && matches!(argument, Term::NominalValue { .. }) {
+    if let (
+        Term::NormalForm { .. },
+        Term::NominalValue {
+            ty,
+            variant: None,
+            fields,
+        },
+    ) = (domain, argument)
+    {
         if let Some(element) = (queries.collection)(domain, fuel)? {
             crate::type_computations::charge_term(&element, fuel)?;
             element.check_scope(frames).map_err(|e| e.to_string())?;
@@ -216,6 +228,17 @@ fn validate_value(
             *fuel = fuel.checked_sub(fields.len()).ok_or(Error::Budget)?;
             for value in fields {
                 validate_value(value, &element, fuel, queries, frames, depth + 1)?;
+            }
+            return Ok(());
+        }
+        if ty.as_ref() == domain {
+            let expected = (queries.layout)(domain, None, fuel)?;
+            if expected.len() != fields.len() {
+                return Err("nominal value index payload arity mismatch".into());
+            }
+            for (value, domain) in fields.iter().zip(&expected) {
+                crate::type_computations::charge_term(domain, fuel).map_err(Error::from)?;
+                validate_value(value, domain, fuel, queries, frames, depth + 1)?;
             }
             return Ok(());
         }

@@ -638,6 +638,7 @@ impl<'a> InstantiationSession<'a> {
             normal_forms,
             callable_identities,
             statics: package.statics.clone(),
+            layout_alignments: package.layout_alignments.clone(),
         };
         validate_materialized_bit_convert_safety(
             &output,
@@ -883,6 +884,7 @@ impl<'a> InstantiationSession<'a> {
             normal_forms,
             callable_identities: builder.callable_identities.clone(),
             statics: package.statics.clone(),
+            layout_alignments: package.layout_alignments.clone(),
         };
         validate_materialized_bit_convert_safety(&output, source_pkg, &mut publication_fuel)?;
         output.validate(&mut publication_fuel)?;
@@ -4713,6 +4715,11 @@ impl Builder<'_, '_> {
                 | K::OptionalType(value)
                 | K::PointerType(value)
                 | K::ListLength(value)
+                | K::TupleLen(value)
+                | K::TupleElem(value)
+                | K::CompileError(value)
+                | K::EmitDiagnostic(value)
+                | K::BoundedStackBytes(value)
                 | K::NewtypeRepresentation(value)
                 | K::DefinitionAttributes(value)
                 | K::StructFieldTypes(value)
@@ -5280,6 +5287,7 @@ impl Builder<'_, '_> {
                 parameters: fields, ..
             }
             | K::TypeList(fields)
+            | K::Array(fields)
             | K::Tuple(fields) => {
                 for e in fields {
                     self.expr(e, depth + 1, comptime)?;
@@ -5341,6 +5349,11 @@ impl Builder<'_, '_> {
             | K::OptionalType(value)
             | K::PointerType(value)
             | K::ListLength(value)
+            | K::TupleLen(value)
+            | K::TupleElem(value)
+            | K::CompileError(value)
+            | K::EmitDiagnostic(value)
+            | K::BoundedStackBytes(value)
             | K::NewtypeRepresentation(value)
             | K::DefinitionAttributes(value)
             | K::StructFieldTypes(value)

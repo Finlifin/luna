@@ -924,6 +924,7 @@ impl Emitter<'_> {
                     };
                     let field_ty = match &cur_ty {
                         Ty::Record(fs) | Ty::PackedRecord(fs) => fs.get(*idx).cloned(),
+                        Ty::AlignedRecord(layout) => layout.fields.get(*idx).cloned(),
                         _ => None,
                     };
                     let Some(field_ty) = field_ty else {
@@ -960,6 +961,7 @@ impl Emitter<'_> {
                     };
                     let field_ty = match &cur_ty {
                         Ty::Record(fs) | Ty::PackedRecord(fs) => fs.get(idx).cloned(),
+                        Ty::AlignedRecord(layout) => layout.fields.get(idx).cloned(),
                         _ => None,
                     };
                     let Some(field_ty) = field_ty else {
@@ -1972,7 +1974,7 @@ impl Emitter<'_> {
             self.retain_pattern(arm.body.source, value, &receipt)?;
             let selected_val = self.expr_with_effects(&arm.body, depth, selected)?;
             if !self.terminated {
-                if !matches!(arm.body.kind, K::Block { .. } | K::CallPreparation { .. }) {
+                if !arm.body.opens_block_scope() {
                     self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::ScopeEnd)?;
                 }
                 if never {

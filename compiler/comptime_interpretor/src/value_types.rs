@@ -732,6 +732,29 @@ impl Interpreter<'_> {
                             && self.has_type_at(&typed.value, &typed.ty, depth + 1, checks)
                     })
             }
+            (Value::Array { ty: actual, values }, ty) => {
+                if values.len() > 100_000 {
+                    checks.failure = Some(ErrorKind::RepresentationSizeLimit);
+                    return false;
+                }
+                actual == ty
+                    && checks
+                        .admit(|fuel| {
+                            nir::type_computations::charge_term(ty, fuel)?;
+                            Ok(nir::normal_forms::array_element_and_len_with(ty, &|id| {
+                                self.normal_forms
+                                    .get(&id)
+                                    .is_some_and(|meta| meta.role == nir::normal_forms::Role::Array)
+                            }))
+                        })
+                        .flatten()
+                        .is_some_and(|(element, len)| {
+                            values.len() == len
+                                && values.iter().all(|value| {
+                                    self.has_type_at(value, &element, depth + 1, checks)
+                                })
+                        })
+            }
             (Value::List { ty: actual, values }, ty) => {
                 if values.len() > 100_000 {
                     checks.failure = Some(ErrorKind::RepresentationSizeLimit);

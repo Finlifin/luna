@@ -1505,6 +1505,9 @@ fn hash_scoped_protocols(
         protocols.splice,
         protocols.meta_list,
         protocols.tuple,
+        protocols.array,
+        protocols.maybe_uninit_storage,
+        protocols.manually_drop_storage,
     ] {
         hash_decl(hasher, decl);
     }
@@ -1931,6 +1934,9 @@ pub fn encode_selectors_tag(
         splice,
         meta_list,
         tuple,
+        array,
+        maybe_uninit_storage,
+        manually_drop_storage,
     } = selectors;
 
     let mut writer = BinaryWriter::new();
@@ -2022,6 +2028,9 @@ pub fn encode_selectors_tag(
         *splice,
         *meta_list,
         *tuple,
+        *array,
+        *maybe_uninit_storage,
+        *manually_drop_storage,
     ] {
         write_opt_str(&mut writer, opt);
     }

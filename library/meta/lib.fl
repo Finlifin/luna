@@ -6,6 +6,7 @@ pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
 {- Comptime data, arithmetic, reflection, AST tokens, and checked definition builders. -}
 use ast_impl;
 use code.{combinators as code_combinators, types as code_types};
+use compilation_impl;
 use data.{
     errors,
     hashing,
@@ -24,6 +25,7 @@ use data.{
 }
 use definitions.{enums as enum_builders, newtypes, structs as struct_builders}
 use deriving_impl;
+use diagnostics_impl;
 use enums_impl;
 use formatting;
 use macros_impl;
@@ -31,6 +33,7 @@ use numeric.{conversions, equality, ordering, scalar_math}
 use ops_impl;
 use range;
 use reflection_impl.structure;
+use runtime_impl;
 use structs_impl;
 use types.equality as type_equality;
 
@@ -139,6 +142,18 @@ pub mod deriving {
     pub mod to_tokens {
         pub use ..deriving_impl.to_tokens.*;
     }
+}
+
+pub mod diagnostics {
+    pub use diagnostics_impl.*;
+}
+
+pub mod compilation {
+    pub use compilation_impl.*;
+}
+
+pub mod runtime {
+    pub use runtime_impl.*;
 }
 
 pub mod math {

@@ -16,6 +16,7 @@ impl Value {
                 fields.iter().try_for_each(|field| visit(None, field))
             }
             Self::List { values, .. } => values.iter().try_for_each(|value| visit(None, value)),
+            Self::Array { values, .. } => values.iter().try_for_each(|value| visit(None, value)),
             Self::AnonymousRecord(fields) => {
                 fields.iter().try_for_each(|(_, value)| visit(None, value))
             }

@@ -13,6 +13,7 @@ fn inert_input(expression: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
                 | K::Literal(_)
                 | K::Unit
                 | K::Tuple(_)
+                | K::Array(_)
                 | K::AnonymousRecord { .. }
                 | K::Record { .. }
                 | K::Variant { .. }

@@ -109,16 +109,30 @@ fn decode(
                 variant: None,
                 fields,
             } if domain.as_ref() == ty => {
-                let element = heads
-                    .list_element(ty, fuel)?
-                    .ok_or("frozen list requires a bound list layout")?;
-                charge(fuel, fields.len())?;
-                K::TypeList(
-                    fields
-                        .iter()
-                        .map(|value| child(value, &element, fuel))
-                        .collect::<Result<_, _>>()?,
-                )
+                if let Some(element) = heads.list_element(ty, fuel)? {
+                    charge(fuel, fields.len())?;
+                    K::TypeList(
+                        fields
+                            .iter()
+                            .map(|value| child(value, &element, fuel))
+                            .collect::<Result<_, _>>()?,
+                    )
+                } else if let Some((element, len)) = heads.array_element_and_len(ty, fuel)? {
+                    if fields.len() != len {
+                        return Err("frozen array arity mismatch".into());
+                    }
+                    charge(fuel, fields.len())?;
+                    K::Array(
+                        fields
+                            .iter()
+                            .map(|value| child(value, &element, fuel))
+                            .collect::<Result<_, _>>()?,
+                    )
+                } else {
+                    return Err(
+                        "frozen nominal container requires a bound list or array layout".into(),
+                    );
+                }
             }
             Term::TupleValue(fields) => {
                 let types = match ty {

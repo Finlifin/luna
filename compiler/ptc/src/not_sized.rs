@@ -157,6 +157,17 @@ fn evaluate_at(
                     );
                 }
             }
+            if constructors.array_heads.contains(head) && arguments.len() == 2 {
+                return evaluate_aggregate(
+                    arguments[..1].iter(),
+                    constructors,
+                    list_heads,
+                    depth + 1,
+                );
+            }
+            if constructors.storage_heads.contains(head) && arguments.len() == 1 {
+                return evaluate_aggregate(arguments.iter(), constructors, list_heads, depth + 1);
+            }
             NotSizedStatus::Unknown
         }
         Term::Nominal {

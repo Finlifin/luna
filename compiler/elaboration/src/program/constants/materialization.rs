@@ -785,6 +785,36 @@ impl Checker<'_, '_> {
                 }
                 K::Literal(literal)
             }
+            Value::Array { ty: actual, values } => {
+                if actual != &ty {
+                    return Err(error(span, "constant array type mismatch"));
+                }
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                nir::type_computations::charge_term(&ty, &mut fuel)
+                    .map_err(|_| error(span, "constant array type budget exhausted"))?;
+                self.required_steps -= (before - fuel) as u64;
+                let Some((element_ty, expected_len)) = self.array_element_and_len(&ty) else {
+                    return Err(error(span, "constant value has an invalid array type"));
+                };
+                if values.len() != expected_len {
+                    return Err(error(span, "constant array length mismatch"));
+                }
+                K::Array(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            self.constant_expression(
+                                value,
+                                element_ty.clone(),
+                                span,
+                                depth + 1,
+                                snapshot,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            }
             Value::Tuple(values) => {
                 let shape = self.structural_type(&ty, span)?;
                 let Term::Tuple(types) = shape else {

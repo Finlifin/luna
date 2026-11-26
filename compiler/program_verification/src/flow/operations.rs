@@ -128,6 +128,11 @@ impl Walker<'_> {
             | K::RecordFieldNames(subject)
             | K::ReflectCallable(subject)
             | K::TypeId(subject)
+            | K::TupleLen(subject)
+            | K::TupleElem(subject)
+            | K::CompileError(subject)
+            | K::EmitDiagnostic(subject)
+            | K::BoundedStackBytes(subject)
             | K::BuildStruct(subject)
             | K::BuildNewtype(subject)
             | K::BuildEnum(subject)
@@ -701,6 +706,7 @@ impl Walker<'_> {
                 }
             }
             K::Tuple(values)
+            | K::Array(values)
             | K::AnonymousRecord { fields: values }
             | K::Record { fields: values, .. }
             | K::Variant { fields: values, .. } => {
@@ -716,7 +722,7 @@ impl Walker<'_> {
                     fields.push(evaluated.snapshot(self.limits, 0)?);
                 }
                 result.fields = Some(fields);
-                result.nominal_type = if matches!(expr.kind, K::Tuple(_))
+                result.nominal_type = if matches!(expr.kind, K::Tuple(_) | K::Array(_))
                     || matches!(expr.ty, Term::Nominal { .. } | Term::Record(_))
                 {
                     Some(std::sync::Arc::new(expr.ty.clone()))
@@ -724,7 +730,7 @@ impl Walker<'_> {
                     None
                 };
                 result.aggregate_kind = Some(match expr.kind {
-                    K::Tuple(..) => AggregateKind::Tuple,
+                    K::Tuple(..) | K::Array(..) => AggregateKind::Tuple,
                     K::AnonymousRecord { .. } => AggregateKind::AnonymousRecord,
                     K::Record { declaration, .. } => AggregateKind::Record(declaration),
                     K::Variant {

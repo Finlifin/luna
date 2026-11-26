@@ -95,6 +95,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         runtime_function_identities,
         open_function_identities,
         normal_forms,
+        normal_form_results,
         dispatch_instances: _,
         observed_associated_types,
         traits,
@@ -108,6 +109,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         statics,
         definition_attributes,
         volatile_storage,
+        layout_alignments,
         match_plans,
         safety_contracts,
         runtime_domains,
@@ -135,6 +137,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         runtime_function_identities.len(),
         open_function_identities.len(),
         normal_forms.len(),
+        normal_form_results.len(),
         traits.len(),
         implementations.len(),
         functions.len(),
@@ -201,6 +204,9 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     }
     for head in normal_forms {
         meter.head(head)?;
+    }
+    for ty in normal_form_results.values() {
+        meter.node(Node::Type(ty))?;
     }
     for contract in traits {
         meter.interface(contract)?;
@@ -284,6 +290,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         runtime_function_identities: runtime_function_identities.clone(),
         open_function_identities: open_function_identities.clone(),
         normal_forms: normal_forms.clone(),
+        normal_form_results: normal_form_results.clone(),
         dispatch_instances: vec![],
         observed_associated_types: observed_associated_types.clone(),
         traits: traits.clone(),
@@ -297,6 +304,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         statics: statics.clone(),
         definition_attributes: definition_attributes.clone(),
         volatile_storage: volatile_storage.clone(),
+        layout_alignments: layout_alignments.clone(),
         match_plans: match_plans.clone(),
         safety_contracts: safety_contracts.clone(),
         runtime_domains: runtime_domains.clone(),

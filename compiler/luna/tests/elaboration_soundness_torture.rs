@@ -305,7 +305,9 @@ fn type_result_guarantees_follow_writes_in_ordered_match_tests() {
         "MATCH",
         "flag match { true if do { chosen = bool; true } => Tuple<u8>, _ => chosen, }",
     );
-    let program = active + &guaranteed + r#"
+    let program = active
+        + &guaranteed
+        + r#"
         comptime fn run() -> bool {
             Choose(true) == Tuple<u8> and Choose(false) == Tuple<bool>
                 and Guarded(true) == Tuple<u8> and Guarded(false) == Tuple<bool>

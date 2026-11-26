@@ -9,7 +9,7 @@ fn bytes() -> bool {
 }
 ```
 
-`byte_length()` 返回 u64 字节数；`byte(index: u64)` 返回 ?u8。索引按 UTF-8
+`byte_length()` 返回 u64 字节数；`byte(index: u64)` 返回 ?u8；`slice(start: u64, end: u64)` 返回 ?str。索引按 UTF-8
 字节计数，越界返回 null，包括空字符串的任何索引。它们不解码 Unicode 字符。
 
 comptime 对应协议为 meta.ComptimeTextBytes，使用相同方法名，从 meta.prelude
@@ -21,13 +21,5 @@ comptime_byte_length 自由函数已移除，调用方迁为接收者方法或 s
 str 属于 builtin，拥有型 String 属于 std/string。编码策略和 I/O 适配不放在这里。
 Symbol 的底层字节观察仍由编译器操作提供，尚未在此协议中提供库实现。
 
-当前 runtime 方法已通过参考执行与 LLVM 字节操作测试，但带完整资源检查的
-跨函数 str 参数传递仍缺少背后字符存储的存活性接线，不能称为完整的安全
-runtime 文本接口。预期成功、目前被拒绝的用例保留在
-[原生文本方法复现](../../../development/repros/native-text-method-provenance.fl)。
-comptime 方法已通过真实 sysroot 验收。
-
-`builtin.bindings` 的两个 str 操作仍使用未注解的直接调用入口。将其改为
-`fn(str) -> u64` 与 `fn(str, u64) -> ?u8` 会形成普通函数边界，并在上述
-来源分析处被拒绝；即使操作主体可证明为 P4，外层调用也尚未取得内存证据。
-后续必须先接通 str 的存储来源，不能以标记 pure 或默认 Copy 绕过该检查。
+带完整资源检查的跨函数 str 参数传递与方法调用（包括 `development/repros/native-text-method-provenance.fl`）
+已通过背后的静态文本来源与 `TextBytes` 方法接通；`slice` 与字节观察共同通过 `builtin.text.TextBytes` / `builtin.prelude` 导出。

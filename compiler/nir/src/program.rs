@@ -41,12 +41,14 @@ mod predicate_shape;
 
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 
+mod layout_alignments;
 mod safety;
 mod volatile_storage;
 
 pub use crate::match_plan::{
     ListObservationMode, ListViewOps, MatchPlan, MatchPlanKey, MatchPlans,
 };
+pub use layout_alignments::LayoutAlignments;
 pub use safety::{PredicateRole, SafetyContracts, SafetyLevel};
 pub use volatile_storage::{VolatileNominal, VolatileStorage};
 
@@ -1476,10 +1478,22 @@ pub enum ExprKind {
     /// Ordered comptime construction of immutable meta.List<T> data.
     /// The expression type carries the trusted head and homogeneous element domain.
     TypeList(Vec<Expr>),
+    /// Fixed-length homogeneous Array<T, N> literal construction.
+    Array(Vec<Expr>),
     /// Checked comptime indexing of a compiler-bound meta.List<T> value.
     TypeListIndex(Box<Expr>, Box<Expr>),
     /// Length of a checked immutable comptime list.
     ListLength(Box<Expr>),
+    /// Arity of a Tuple type, or null if non-Tuple.
+    TupleLen(Box<Expr>),
+    /// Element type at a Tuple index, or null if non-Tuple or out of bounds.
+    TupleElem(Box<Expr>),
+    /// Abort comptime compilation with a diagnostic message.
+    CompileError(Box<Expr>),
+    /// Emit a comptime diagnostic packet (level: u8, message: str, file: str, start: usize, end: usize).
+    EmitDiagnostic(Box<Expr>),
+    /// Conservative static stack-frame byte bound before delimited effect boundaries.
+    BoundedStackBytes(Box<Expr>),
     NewtypeRepresentation(Box<Expr>),
     DefinitionAttributes(Box<Expr>),
     StructFieldTypes(Box<Expr>),
@@ -2501,6 +2515,7 @@ pub struct Package {
     /// Declaration-ordered inputs for opaque heads; separate from executable
     /// function parameters so Type/value interleaving is never reconstructed.
     pub normal_forms: Vec<crate::normal_forms::Head>,
+    pub normal_form_results: std::collections::BTreeMap<DeclarationId, Term>,
     pub dispatch_instances: Vec<DispatchInstance>,
     pub observed_associated_types: std::sync::Arc<ObservedAssociatedTypes>,
     pub traits: Vec<Trait>,
@@ -2516,6 +2531,7 @@ pub struct Package {
     pub statics: Vec<Static>,
     pub definition_attributes: DefinitionAttributes,
     pub volatile_storage: VolatileStorage,
+    pub layout_alignments: LayoutAlignments,
     pub match_plans: MatchPlans,
     pub safety_contracts: SafetyContracts,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
@@ -3755,6 +3771,13 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str(")")
             }
+            Self::Array(xs) => {
+                f.write_str("(array")?;
+                for x in xs {
+                    write!(f, " {x}")?;
+                }
+                f.write_str(")")
+            }
             Self::Block { statements, result } | Self::CallPreparation { statements, result } => {
                 f.write_str(if matches!(self, Self::CallPreparation { .. }) {
                     "(call-preparation (statements"
@@ -4092,6 +4115,11 @@ impl fmt::Display for ExprKind {
                 write!(f, "(template-equal (left {left}) (right {right}))")
             }
             Self::ListLength(values) => write!(f, "(list-length {values})"),
+            Self::TupleLen(subject) => write!(f, "(tuple-len {subject})"),
+            Self::TupleElem(packet) => write!(f, "(tuple-elem {packet})"),
+            Self::CompileError(message) => write!(f, "(compile-error {message})"),
+            Self::EmitDiagnostic(packet) => write!(f, "(emit-diagnostic {packet})"),
+            Self::BoundedStackBytes(target) => write!(f, "(bounded-stack-bytes {target})"),
             Self::NewtypeRepresentation(subject) => write!(f, "(newtype-representation {subject})"),
             Self::DefinitionAttributes(subject) => write!(f, "(definition-attributes {subject})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
@@ -4353,6 +4381,9 @@ impl fmt::Display for Package {
         for head in &self.normal_forms {
             write!(f, "\n {head}")?;
         }
+        for (head, ty) in &self.normal_form_results {
+            write!(f, "\n (normal-form-result {head} {ty})")?;
+        }
         for definition in &self.traits {
             write!(f, "\n {definition}")?;
         }
@@ -4385,6 +4416,9 @@ impl fmt::Display for Package {
         }
         if !self.volatile_storage.is_empty() {
             write!(f, "\n {}", self.volatile_storage)?;
+        }
+        if !self.layout_alignments.is_empty() {
+            write!(f, "\n {}", self.layout_alignments)?;
         }
         if !self.match_plans.is_empty() {
             write!(f, "\n {}", self.match_plans)?;
@@ -4446,6 +4480,22 @@ impl Expr {
             if self.source == inner.source && matches!(inner.ty, Term::Primitive(crate::Primitive::Void))
                 && !matches!(inner.kind, ExprKind::Block {..} | ExprKind::CallPreparation {..}
                     | ExprKind::EffectComputation {..} | ExprKind::EffectRun {..}))
+    }
+
+    /// Unwrap zero-boundary wrappers sharing the same span to detect whether an
+    /// arm/branch body already owns a `Block` or `CallPreparation` scope end.
+    pub fn opens_block_scope(&self) -> bool {
+        let mut current = self;
+        while let ExprKind::UnsafeScope(inner) | ExprKind::Snapshot(inner) = &current.kind {
+            if current.source != inner.source {
+                return false;
+            }
+            current = inner;
+        }
+        matches!(
+            current.kind,
+            ExprKind::Block { .. } | ExprKind::CallPreparation { .. }
+        )
     }
 
     pub(crate) fn with_parameter_substitution(
@@ -4602,6 +4652,11 @@ impl Expr {
                     | ExprKind::OptionalType(_)
                     | ExprKind::PointerType(_)
                     | ExprKind::ListLength(_)
+                    | ExprKind::TupleLen(_)
+                    | ExprKind::TupleElem(_)
+                    | ExprKind::CompileError(_)
+                    | ExprKind::EmitDiagnostic(_)
+                    | ExprKind::BoundedStackBytes(_)
                     | ExprKind::NewtypeRepresentation(_)
                     | ExprKind::DefinitionAttributes(_)
                     | ExprKind::StructFieldTypes(_)
@@ -4742,6 +4797,11 @@ impl Expr {
                 | ExprKind::OptionalType(value)
                 | ExprKind::PointerType(value)
                 | ExprKind::ListLength(value)
+                | ExprKind::TupleLen(value)
+                | ExprKind::TupleElem(value)
+                | ExprKind::CompileError(value)
+                | ExprKind::EmitDiagnostic(value)
+                | ExprKind::BoundedStackBytes(value)
                 | ExprKind::NewtypeRepresentation(value)
                 | ExprKind::DefinitionAttributes(value)
                 | ExprKind::StructFieldTypes(value)
@@ -4921,6 +4981,7 @@ impl Expr {
                     parameters: fields, ..
                 }
                 | ExprKind::TypeList(fields)
+                | ExprKind::Array(fields)
                 | ExprKind::Intrinsic { inputs: fields, .. }
                 | ExprKind::Tuple(fields)
                 | ExprKind::Object { fields, .. }
@@ -5269,6 +5330,7 @@ impl Expr {
                 parameters: fields, ..
             }
             | ExprKind::TypeList(fields)
+            | ExprKind::Array(fields)
             | ExprKind::Intrinsic { inputs: fields, .. }
             | ExprKind::Tuple(fields)
             | ExprKind::Object { fields, .. }
@@ -5298,6 +5360,11 @@ impl Expr {
             | ExprKind::OptionalType(value)
             | ExprKind::PointerType(value)
             | ExprKind::ListLength(value)
+            | ExprKind::TupleLen(value)
+            | ExprKind::TupleElem(value)
+            | ExprKind::CompileError(value)
+            | ExprKind::EmitDiagnostic(value)
+            | ExprKind::BoundedStackBytes(value)
             | ExprKind::NewtypeRepresentation(value)
             | ExprKind::DefinitionAttributes(value)
             | ExprKind::StructFieldTypes(value)

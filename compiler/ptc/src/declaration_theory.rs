@@ -35,6 +35,10 @@ pub struct ConstructorContracts {
     pub nominal_constructors: Arc<NominalConstructors>,
     /// Trusted Tuple classification/layout contracts; never body equations.
     pub tuple_heads: Arc<BTreeSet<DeclarationId>>,
+    /// Trusted Array<T, N> type constructor heads; never body equations.
+    pub array_heads: Arc<BTreeSet<DeclarationId>>,
+    /// Trusted uninit/manually-drop storage wrapper heads; never body equations.
+    pub storage_heads: Arc<BTreeSet<DeclarationId>>,
     /// Unconditional nullary nominal declarations with verified fixed runtime size.
     pub sized_nominals: Arc<BTreeSet<DeclarationId>>,
     /// Unconditional nullary nominal declarations containing comptime-only fields.
@@ -46,6 +50,8 @@ impl ConstructorContracts {
         for (current, recorded) in [
             (&self.congruence_heads, &recorded.congruence_heads),
             (&self.tuple_heads, &recorded.tuple_heads),
+            (&self.array_heads, &recorded.array_heads),
+            (&self.storage_heads, &recorded.storage_heads),
             (&self.sized_nominals, &recorded.sized_nominals),
             (
                 &self.comptime_only_nominals,
@@ -194,6 +200,14 @@ impl DeclarationTheory {
         Arc::make_mut(&mut self.constructors.congruence_heads).insert(head);
         match role {
             Role::Opaque => {}
+            Role::Array => {
+                Arc::make_mut(&mut self.constructors.array_heads).insert(head);
+                self.promote_pending_sized_nominals();
+            }
+            Role::MaybeUninitStorage | Role::ManuallyDropStorage => {
+                Arc::make_mut(&mut self.constructors.storage_heads).insert(head);
+                self.promote_pending_sized_nominals();
+            }
             Role::TypeList => {
                 Arc::make_mut(&mut self.list_inference_heads).insert(head);
                 self.promote_pending_sized_nominals();
@@ -360,6 +374,8 @@ impl fmt::Display for ConstructorContracts {
         }
         f.write_str(")")?;
         write_group(f, "tuple-heads", &self.tuple_heads)?;
+        write_group(f, "array-heads", &self.array_heads)?;
+        write_group(f, "storage-heads", &self.storage_heads)?;
         write_group(f, "sized-nominals", &self.sized_nominals)?;
         write_group(f, "comptime-only-nominals", &self.comptime_only_nominals)?;
         f.write_str(")")

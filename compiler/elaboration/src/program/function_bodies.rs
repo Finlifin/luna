@@ -73,7 +73,11 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Function, Error> {
         let required = matches!(request, SourceBody::Required) && self.in_required_comptime;
-        self.in_declaration_scope(owner, |this| {
+        let track_package_body = !matches!(request, SourceBody::Required);
+        if track_package_body {
+            self.active_source_bodies.insert(owner);
+        }
+        let checked = self.in_declaration_scope(owner, |this| {
             this.in_required_comptime = required;
             let mut interface = this.bind_source_declaration(owner, signature, span)?;
             if matches!(request, SourceBody::Package) {
@@ -178,7 +182,11 @@ impl Checker<'_, '_> {
                 body,
                 runtime_deliveries,
             })
-        })
+        });
+        if track_package_body {
+            self.active_source_bodies.remove(&owner);
+        }
+        checked
     }
 
     pub(super) fn bind_source_declaration(

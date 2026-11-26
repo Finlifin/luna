@@ -252,6 +252,7 @@ impl<'a> Interpreter<'a> {
             invocation_depth: 0,
             invocation_depth_limit: budget.depth,
             events: vec![],
+            emitted_diagnostics: Vec::new(),
         })
     }
 

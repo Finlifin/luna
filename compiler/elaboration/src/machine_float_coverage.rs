@@ -197,6 +197,7 @@ impl Domain {
             }
             K::Unit => K::Unit,
             K::Tuple(fields) => K::Tuple(self.opaque_arguments(fields, fuel, depth + 1)?),
+            K::Array(fields) => K::Array(self.opaque_arguments(fields, fuel, depth + 1)?),
             K::AnonymousRecord { fields } => K::AnonymousRecord {
                 fields: self.opaque_arguments(fields, fuel, depth + 1)?,
             },

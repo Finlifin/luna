@@ -241,6 +241,7 @@ fn loop_may_transfer(
                     return Ok(false);
                 }
                 K::Tuple(fields)
+                | K::Array(fields)
                 | K::TypeList(fields)
                 | K::Record { fields, .. }
                 | K::Object { fields, .. }

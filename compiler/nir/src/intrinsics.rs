@@ -118,6 +118,10 @@ pub enum Operation {
     MemCompareBytes,
     MemBorrowStr,
     MemPtrAddr,
+    MemUninit,
+    MemZeroed,
+    MemManuallyDropWrap,
+    MemManuallyDropUnwrap,
 }
 
 impl Operation {
@@ -187,6 +191,10 @@ impl Operation {
         Self::MemCompareBytes,
         Self::MemBorrowStr,
         Self::MemPtrAddr,
+        Self::MemUninit,
+        Self::MemZeroed,
+        Self::MemManuallyDropWrap,
+        Self::MemManuallyDropUnwrap,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -255,6 +263,10 @@ impl Operation {
             Self::MemCompareBytes => "mem_compare_bytes",
             Self::MemBorrowStr => "mem_borrow_str",
             Self::MemPtrAddr => "mem_ptr_addr",
+            Self::MemUninit => "mem_uninit",
+            Self::MemZeroed => "mem_zeroed",
+            Self::MemManuallyDropWrap => "mem_manually_drop_wrap",
+            Self::MemManuallyDropUnwrap => "mem_manually_drop_unwrap",
         }
     }
 
@@ -290,6 +302,10 @@ impl Operation {
                 | Self::MemCompareBytes
                 | Self::MemBorrowStr
                 | Self::MemPtrAddr
+                | Self::MemUninit
+                | Self::MemZeroed
+                | Self::MemManuallyDropWrap
+                | Self::MemManuallyDropUnwrap
         )
     }
 
@@ -302,6 +318,10 @@ impl Operation {
                 | Self::MemRawPtr
                 | Self::MemBorrowStr
                 | Self::MemPtrAddr
+                | Self::MemUninit
+                | Self::MemZeroed
+                | Self::MemManuallyDropWrap
+                | Self::MemManuallyDropUnwrap
         )
     }
 
@@ -341,9 +361,13 @@ impl Operation {
     pub fn payload_or_scalar<'a>(self, inputs: &'a [Term], output: &'a Term) -> &'a Term {
         if self.is_float_predicate() {
             inputs.first().unwrap_or(output)
-        } else if matches!(self, Self::MemBorrowStr | Self::MemPtrAddr) {
+        } else if matches!(
+            self,
+            Self::MemBorrowStr | Self::MemPtrAddr | Self::MemManuallyDropUnwrap
+        ) {
             match inputs.first() {
                 Some(Term::Pointer(inner)) => inner.as_ref(),
+                Some(inner) if self == Self::MemManuallyDropUnwrap => inner,
                 _ => output,
             }
         } else if matches!(self, Self::MemRawPtr) {
@@ -390,6 +414,13 @@ impl Operation {
             use Primitive::*;
             match (self, index) {
                 (Self::MemRawWrite, 1) => scalar.clone(),
+                (Self::MemManuallyDropWrap, 0) => match scalar {
+                    Term::NormalForm { arguments, .. } => {
+                        arguments.first().cloned().unwrap_or_else(|| scalar.clone())
+                    }
+                    _ => scalar.clone(),
+                },
+                (Self::MemManuallyDropUnwrap, 0) => scalar.clone(),
                 (Self::MemBorrowStr | Self::MemPtrAddr, 0) => {
                     Term::Pointer(Box::new(scalar.clone()))
                 }
@@ -419,7 +450,15 @@ impl Operation {
             | Self::MemCopy
             | Self::MemCopyNonOverlapping
             | Self::MemSetBytes => Term::Primitive(Primitive::Void),
-            Self::MemRawRead => scalar.clone(),
+            Self::MemRawRead | Self::MemUninit | Self::MemZeroed | Self::MemManuallyDropWrap => {
+                scalar.clone()
+            }
+            Self::MemManuallyDropUnwrap => match scalar {
+                Term::NormalForm { arguments, .. } => {
+                    arguments.first().cloned().unwrap_or_else(|| scalar.clone())
+                }
+                _ => scalar.clone(),
+            },
             Self::MemRawPtr => Term::Pointer(Box::new(scalar.clone())),
             Self::MemCompareBytes => Term::Primitive(Primitive::I32),
             Self::MemBorrowStr => Term::Primitive(Primitive::Str),
@@ -447,7 +486,14 @@ impl Operation {
             | Self::LinuxGetPid
             | Self::LinuxWriteRaw
             | Self::LinuxReadRaw => &[I64],
-            Self::LinuxAlloc | Self::MemRawRead | Self::MemRawPtr | Self::MemPtrAddr => &[Usize],
+            Self::LinuxAlloc
+            | Self::MemRawRead
+            | Self::MemRawPtr
+            | Self::MemPtrAddr
+            | Self::MemUninit
+            | Self::MemZeroed
+            | Self::MemManuallyDropWrap
+            | Self::MemManuallyDropUnwrap => &[Usize],
             Self::MemCompareBytes => &[I32],
             Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
@@ -522,8 +568,10 @@ impl Operation {
             | Self::LinuxUnlink
             | Self::MemRawRead
             | Self::MemRawPtr
-            | Self::MemPtrAddr => 1,
-            Self::LinuxGetPid => 0,
+            | Self::MemPtrAddr
+            | Self::MemManuallyDropWrap
+            | Self::MemManuallyDropUnwrap => 1,
+            Self::LinuxGetPid | Self::MemUninit | Self::MemZeroed => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot
             | Self::WrappingAbsoluteValue

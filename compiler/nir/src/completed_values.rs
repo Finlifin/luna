@@ -561,6 +561,45 @@ fn value_in<'a, 'd>(
             }
             Ok(())
         }
+        K::Array(elements) => {
+            let Term::NormalForm {
+                sort: crate::Sort::Type,
+                arguments,
+                ..
+            } = &value.ty
+            else {
+                return Err("completed array requires Array<T, N> normal-form type".into());
+            };
+            let [elem_ty, Term::Integer(len_val)] = arguments.as_slice() else {
+                return Err("completed array requires (T, N) arguments".into());
+            };
+            let len_u64 = len_val
+                .to_unsigned(64)
+                .map_err(|_| Error::Invalid("completed array length out of range".to_string()))?;
+            let len = usize::try_from(len_u64)
+                .map_err(|_| Error::Invalid("completed array length out of range".to_string()))?;
+            if elem_ty.sort() != crate::Sort::Type || elements.len() != len {
+                return Err("completed array element count or sort mismatch".into());
+            }
+            charge(fuel, elements.len())?;
+            for item in elements {
+                if &item.ty != elem_ty {
+                    return Err("completed array element type mismatch".into());
+                }
+                value_in(
+                    item,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    tuple_fields,
+                    list_element,
+                    lookup,
+                    target,
+                )?;
+            }
+            Ok(())
+        }
         K::Object { names, fields } => {
             if value.ty != Term::Primitive(Primitive::Object) || names.len() != fields.len() {
                 return Err("completed Object shape or domain mismatch".into());

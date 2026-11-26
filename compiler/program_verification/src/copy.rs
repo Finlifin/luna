@@ -96,6 +96,8 @@ pub fn acquire(
         // description; it does not authorize runtime Type storage or unfolding.
         if !matches!(classification, Classification::Intrinsic)
             && nir::normal_forms::tuple_fields(Some(package), ty).is_none()
+            && nir::normal_forms::array_element_and_len(Some(package), ty).is_none()
+            && nir::normal_forms::storage_inner_type(Some(package), ty).is_none()
             && !matches!(
                 ty,
                 Term::Primitive(Primitive::Type | Primitive::Str)

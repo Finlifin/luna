@@ -47,91 +47,111 @@ impl Interpreter<'_> {
             }
             return Err(self.failure(ErrorKind::Type, None));
         }
-        let work = if *ty == Term::Primitive(Primitive::Type) {
-            self.check_type_description(term, None)?;
-            0
-        } else {
-            match term {
-                Term::Integer(value) => value.bit_len().div_ceil(32),
-                Term::Float(value) => value
-                    .digits()
-                    .len()
-                    .saturating_add(value.exponent().bit_len().div_ceil(32)),
-                Term::String(value) | Term::Symbol(value) => value.len(),
-                Term::BitVec(value) => value.words().len(),
-                Term::TupleValue(values) => values.len(),
-                Term::OptionalValue { ty, value } => {
-                    self.check_type_description(ty, None)?;
-                    usize::from(value.is_some())
-                }
-                Term::ErrorValue { ty, label, .. } => {
-                    self.check_type_description(ty, None)?;
-                    if let Some(label) = label {
-                        self.check_type_description(label, None)?;
-                    }
-                    1
-                }
-                Term::NominalValue { ty, fields, .. } => {
-                    self.check_type_description(ty, None)?;
-                    fields.len()
-                }
-                _ => 0,
-            }
-        };
+        let work = self.normal_pattern_work(term, ty)?;
         self.integer_operation(None, |budget| budget.consume(work))?;
-        let value = if *ty == Term::Primitive(Primitive::Type) {
-            Value::Type(term.clone())
-        } else {
-            match term {
-                Term::OptionalValue { .. } => {
-                    self.decode_optional_normal_value(term, ty, depth, reconstruct_callables)?
-                }
-                Term::ErrorValue { .. } => {
-                    self.decode_error_normal_value(term, ty, depth, reconstruct_callables)?
-                }
-                Term::NominalValue { .. } => match ty {
-                    Term::Primitive(Primitive::Object) => {
-                        self.decode_object_normal_value(term, ty, depth, reconstruct_callables)?
-                    }
-                    Term::NormalForm { .. } => {
-                        self.decode_list_normal_value(term, ty, depth, reconstruct_callables)?
-                    }
-                    _ => {
-                        self.decode_nominal_normal_value(term, ty, depth, reconstruct_callables)?
-                    }
-                },
-                Term::RecordValue(_) => {
-                    self.decode_record_normal_value(term, ty, depth, reconstruct_callables)?
-                }
-                Term::TupleValue(_) => {
-                    self.decode_tuple_normal_value(term, ty, depth, reconstruct_callables)?
-                }
-                Term::NormalForm {
-                    sort: nir::Sort::ComptimeValue,
-                    ..
-                } => {
-                    self.check_term_description(term, None)?;
-                    self.check_type_description(ty, None)?;
-                    self.admit_type(ty, depth)?;
-                    Value::NormalForm {
-                        term: term.clone(),
-                        ty: ty.clone(),
-                    }
-                }
-                Term::Runtime(_) | Term::RuntimeField { .. } if matches!(ty, Term::Lift(_)) => {
-                    self.check_term_description(term, None)?;
-                    self.check_type_description(ty, None)?;
-                    self.admit_type(ty, depth)?;
-                    Value::NormalForm {
-                        term: term.clone(),
-                        ty: ty.clone(),
-                    }
-                }
-                _ => self.decode_scalar_normal_value(term, ty)?,
-            }
-        };
+        let value = self.decode_normal_pattern_term(term, ty, depth, reconstruct_callables)?;
         self.check_value_type(&value, ty, None)?;
         Ok(value)
+    }
+
+    #[inline(never)]
+    fn normal_pattern_work(&mut self, term: &Term, ty: &Term) -> Result<usize, Error> {
+        if *ty == Term::Primitive(Primitive::Type) {
+            self.check_type_description(term, None)?;
+            return Ok(0);
+        }
+        Ok(match term {
+            Term::Integer(value) => value.bit_len().div_ceil(32),
+            Term::Float(value) => value
+                .digits()
+                .len()
+                .saturating_add(value.exponent().bit_len().div_ceil(32)),
+            Term::String(value) | Term::Symbol(value) => value.len(),
+            Term::BitVec(value) => value.words().len(),
+            Term::TupleValue(values) => values.len(),
+            Term::OptionalValue { ty, value } => {
+                self.check_type_description(ty, None)?;
+                usize::from(value.is_some())
+            }
+            Term::ErrorValue { ty, label, .. } => {
+                self.check_type_description(ty, None)?;
+                if let Some(label) = label {
+                    self.check_type_description(label, None)?;
+                }
+                1
+            }
+            Term::NominalValue { ty, fields, .. } => {
+                self.check_type_description(ty, None)?;
+                fields.len()
+            }
+            _ => 0,
+        })
+    }
+
+    #[inline(never)]
+    fn decode_normal_pattern_term(
+        &mut self,
+        term: &Term,
+        ty: &Term,
+        depth: usize,
+        reconstruct_callables: bool,
+    ) -> Result<Value, Error> {
+        if *ty == Term::Primitive(Primitive::Type) {
+            return Ok(Value::Type(term.clone()));
+        }
+        match term {
+            Term::OptionalValue { .. } => {
+                self.decode_optional_normal_value(term, ty, depth, reconstruct_callables)
+            }
+            Term::ErrorValue { .. } => {
+                self.decode_error_normal_value(term, ty, depth, reconstruct_callables)
+            }
+            Term::NominalValue { .. } => match ty {
+                Term::Primitive(Primitive::Object) => {
+                    self.decode_object_normal_value(term, ty, depth, reconstruct_callables)
+                }
+                Term::NormalForm { head, .. } => {
+                    if self
+                        .normal_forms
+                        .get(head)
+                        .is_some_and(|meta| meta.role == nir::normal_forms::Role::Array)
+                    {
+                        self.decode_array_normal_value(term, ty, depth, reconstruct_callables)
+                    } else {
+                        self.decode_list_normal_value(term, ty, depth, reconstruct_callables)
+                    }
+                }
+                _ => self.decode_nominal_normal_value(term, ty, depth, reconstruct_callables),
+            },
+            Term::RecordValue(_) => {
+                self.decode_record_normal_value(term, ty, depth, reconstruct_callables)
+            }
+            Term::TupleValue(_) => {
+                self.decode_tuple_normal_value(term, ty, depth, reconstruct_callables)
+            }
+            Term::NormalForm {
+                sort: nir::Sort::ComptimeValue,
+                ..
+            } => {
+                self.check_term_description(term, None)?;
+                self.check_type_description(ty, None)?;
+                self.admit_type(ty, depth)?;
+                Ok(Value::NormalForm {
+                    term: term.clone(),
+                    ty: ty.clone(),
+                })
+            }
+            Term::Runtime(_) | Term::RuntimeField { .. } if matches!(ty, Term::Lift(_)) => {
+                self.check_term_description(term, None)?;
+                self.check_type_description(ty, None)?;
+                self.admit_type(ty, depth)?;
+                Ok(Value::NormalForm {
+                    term: term.clone(),
+                    ty: ty.clone(),
+                })
+            }
+            _ => self.decode_scalar_normal_value(term, ty),
+        }
     }
 }
 

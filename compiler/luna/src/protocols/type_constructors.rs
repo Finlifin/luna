@@ -67,6 +67,9 @@ pub struct Selectors<'a> {
     pub splice: Option<&'a str>,
     pub meta_list: Option<&'a str>,
     pub tuple: Option<&'a str>,
+    pub array: Option<&'a str>,
+    pub maybe_uninit_storage: Option<&'a str>,
+    pub manually_drop_storage: Option<&'a str>,
 }
 
 impl Selectors<'_> {
@@ -140,6 +143,9 @@ impl Selectors<'_> {
                 self.splice,
                 self.meta_list,
                 self.tuple,
+                self.array,
+                self.maybe_uninit_storage,
+                self.manually_drop_storage,
             ]
             .into_iter()
             .chain(self.arithmetic)
@@ -593,6 +599,24 @@ pub(crate) fn resolve_source(
             selectors.tuple,
             &mut result.tuple,
         ),
+        (
+            "Array",
+            BuiltinCallable::Array,
+            selectors.array,
+            &mut result.array,
+        ),
+        (
+            "MaybeUninitStorage",
+            BuiltinCallable::MaybeUninitStorage,
+            selectors.maybe_uninit_storage,
+            &mut result.maybe_uninit_storage,
+        ),
+        (
+            "ManuallyDropStorage",
+            BuiltinCallable::ManuallyDropStorage,
+            selectors.manually_drop_storage,
+            &mut result.manually_drop_storage,
+        ),
     ] {
         let Some(selector) = selector else {
             continue;
@@ -787,6 +811,9 @@ pub(crate) fn validate(
     for (label, id) in [
         ("meta.List", protocols.meta_list),
         ("Tuple", protocols.tuple),
+        ("Array", protocols.array),
+        ("MaybeUninitStorage", protocols.maybe_uninit_storage),
+        ("ManuallyDropStorage", protocols.manually_drop_storage),
     ] {
         let Some(id) = id else {
             continue;
@@ -799,19 +826,39 @@ pub(crate) fn validate(
         let [head] = heads.as_slice() else {
             return Err(format!("{label} binding has no unique checked head"));
         };
-        let valid = if label == "meta.List" {
-            head.role == Role::TypeList
-                && head.parameters.len() == 1
-                && head.parameters[0].kind == Kind::Type
-        } else {
-            head.role == Role::Tuple
-                && matches!(
-                    head.collector,
-                    Some(nir::normal_forms::Collector { slot: 0, .. })
-                )
-                && head.parameters.len() == 1
-                && head.parameters[0].kind == Kind::Value
-                && matches!(&head.parameters[0].ty, nir::Term::NormalForm {head, ..} if Some(*head) == protocols.meta_list)
+        let valid = match label {
+            "meta.List" => {
+                head.role == Role::TypeList
+                    && head.parameters.len() == 1
+                    && head.parameters[0].kind == Kind::Type
+            }
+            "Array" => {
+                head.role == Role::Array
+                    && head.parameters.len() == 2
+                    && head.parameters[0].kind == Kind::Type
+                    && head.parameters[1].kind == Kind::Value
+                    && head.parameters[1].ty == nir::Term::Primitive(nir::Primitive::Usize)
+            }
+            "MaybeUninitStorage" => {
+                head.role == Role::MaybeUninitStorage
+                    && head.parameters.len() == 1
+                    && head.parameters[0].kind == Kind::Type
+            }
+            "ManuallyDropStorage" => {
+                head.role == Role::ManuallyDropStorage
+                    && head.parameters.len() == 1
+                    && head.parameters[0].kind == Kind::Type
+            }
+            _ => {
+                head.role == Role::Tuple
+                    && matches!(
+                        head.collector,
+                        Some(nir::normal_forms::Collector { slot: 0, .. })
+                    )
+                    && head.parameters.len() == 1
+                    && head.parameters[0].kind == Kind::Value
+                    && matches!(&head.parameters[0].ty, nir::Term::NormalForm {head, ..} if Some(*head) == protocols.meta_list)
+            }
         };
         if !valid {
             return Err(format!(
@@ -886,6 +933,9 @@ pub(crate) struct SysrootBindings {
     splice: Option<String>,
     meta_list: Option<String>,
     tuple: Option<String>,
+    array: Option<String>,
+    maybe_uninit_storage: Option<String>,
+    manually_drop_storage: Option<String>,
 }
 
 impl SysrootBindings {
@@ -1042,6 +1092,9 @@ impl SysrootBindings {
                 "splice-protocol" => &mut result.splice,
                 "meta-list-type" => &mut result.meta_list,
                 "tuple-type" => &mut result.tuple,
+                "array-type" => &mut result.array,
+                "maybe-uninit-storage-type" => &mut result.maybe_uninit_storage,
+                "manually-drop-storage-type" => &mut result.manually_drop_storage,
                 _ => return Err(fail("unknown language-item key")),
             };
             if target.is_some() {
@@ -1541,6 +1594,27 @@ impl SysrootBindings {
                     .then_some(self.tuple.as_deref())
                     .flatten()
             }),
+            array: explicit.array.or_else(|| {
+                identities
+                    .array
+                    .is_none()
+                    .then_some(self.array.as_deref())
+                    .flatten()
+            }),
+            maybe_uninit_storage: explicit.maybe_uninit_storage.or_else(|| {
+                identities
+                    .maybe_uninit_storage
+                    .is_none()
+                    .then_some(self.maybe_uninit_storage.as_deref())
+                    .flatten()
+            }),
+            manually_drop_storage: explicit.manually_drop_storage.or_else(|| {
+                identities
+                    .manually_drop_storage
+                    .is_none()
+                    .then_some(self.manually_drop_storage.as_deref())
+                    .flatten()
+            }),
         }
     }
 }
@@ -1938,6 +2012,9 @@ mod stage_tests {
             splice_protocol: None,
             meta_list_type: None,
             tuple_type: None,
+            array_type: None,
+            maybe_uninit_storage_type: None,
+            manually_drop_storage_type: None,
             incremental: Default::default(),
         };
         for selector in selectors {

@@ -7,14 +7,15 @@ mod effect_fixture;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
 
 #[test]
 fn direct_entries_forward_environment_and_invoke_for_each_request() {
-    let package = support::compile(
-        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
+    let package = support::compile(effect_fixture!(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         typealias U=.u128'builtin;typealias Void=.void'builtin;
         effect change(ignored:Void,value:U)->U;
         ^attrs.effects.direct_passing effect bias()->U;
@@ -27,8 +28,8 @@ fn direct_entries_forward_environment_and_invoke_for_each_request() {
             second + extra
         }
         fn relay(value:U)->#[bias,change] U {probe(value)}
-        fn run()->bool {let code=relay;true}"),
-    );
+        fn run()->bool {let code=relay;true}"
+    ));
     let prepared = luna::host::prepare_with_protocols(
         &package,
         "run",

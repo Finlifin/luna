@@ -17,6 +17,10 @@ pub mod mem {
     pub use .mem_impl.volatile.volatile;
 }
 
+pub mod layout {
+    pub use .layout_impl.constructors.align;
+}
+
 pub mod packed {
     pub use .layout_impl.constructors.{bit, byte}
 }

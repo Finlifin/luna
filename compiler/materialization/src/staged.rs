@@ -247,6 +247,7 @@ impl Builder<'_, '_> {
                     | K::FunctionInstance { .. }
                     | K::TraitMethod { .. }
                     | K::Tuple(_)
+                    | K::Array(_)
                     | K::TypeList(_)
                     | K::Record { .. }
                     | K::AnonymousRecord { .. }

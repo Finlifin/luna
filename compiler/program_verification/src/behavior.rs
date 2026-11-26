@@ -1071,6 +1071,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             }
 
             K::Tuple(fields)
+            | K::Array(fields)
             | K::AnonymousRecord { fields }
             | K::Record { fields, .. }
             | K::Variant { fields, .. } => {
@@ -1670,7 +1671,11 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             Op::MemRawRead | Op::MemRawPtr | Op::MemCompareBytes | Op::MemBorrowStr => {
                 self.memory = self.memory.join(MemoryEffect::ReadOnly);
             }
-            Op::MemPtrAddr => {}
+            Op::MemPtrAddr
+            | Op::MemUninit
+            | Op::MemZeroed
+            | Op::MemManuallyDropWrap
+            | Op::MemManuallyDropUnwrap => {}
             Op::MemRawWrite | Op::MemCopy | Op::MemCopyNonOverlapping | Op::MemSetBytes => {
                 self.memory = MemoryEffect::Unknown;
                 self.written.fill(true);

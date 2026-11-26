@@ -179,6 +179,7 @@ impl Restore<'_> {
             }
             Value::Description(_) => return Err(ErrorKind::TypeContractUnresolved),
             Value::List { .. }
+            | Value::Array { .. }
             | Value::Tuple(_)
             | Value::AnonymousRecord(_)
             | Value::Record { .. }

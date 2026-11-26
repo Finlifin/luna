@@ -44,9 +44,42 @@ pub mod process {
 }
 
 pub mod mem {
+    use builtin.mem as builtin_mem;
+
     pub use allocator.*;
     pub use arena.{ArenaAllocator, FixedBufferAllocator}
     pub use boxed.Box;
+    pub use builtin_mem.{
+        Align,
+        ManuallyDrop,
+        MaybeUninit,
+        NonNull,
+        TypeMarker,
+        compare_bytes,
+        copy,
+        copy_bytes,
+        copy_bytes_nonoverlapping,
+        copy_nonoverlapping,
+        drop_in_place,
+        forget,
+        make_type_marker,
+        null_ptr,
+        ptr_add,
+        ptr_addr,
+        ptr_cast,
+        ptr_is_null,
+        ptr_sub,
+        raw_ptr,
+        raw_read,
+        raw_write,
+        read,
+        replace,
+        set_bytes,
+        swap,
+        write,
+        write_bytes,
+        zeroed,
+    }
     pub use layout.Layout;
 }
 

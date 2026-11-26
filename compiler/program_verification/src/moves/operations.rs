@@ -144,6 +144,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::DynCast(_)
             | K::DynCall(_)
             | K::Tuple(_)
+            | K::Array(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::OptionalPresent(_)

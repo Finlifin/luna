@@ -34,6 +34,7 @@ impl Interpreter<'_> {
         };
         Ok(value)
     }
+
     #[inline(never)]
     pub(super) fn decode_error_normal_value(
         &mut self,
@@ -78,6 +79,7 @@ impl Interpreter<'_> {
         };
         Ok(value)
     }
+
     #[inline(never)]
     pub(super) fn decode_object_normal_value(
         &mut self,
@@ -128,6 +130,7 @@ impl Interpreter<'_> {
         };
         Ok(value)
     }
+
     #[inline(never)]
     pub(super) fn decode_list_normal_value(
         &mut self,
@@ -166,6 +169,58 @@ impl Interpreter<'_> {
         self.validate_immutable_input(&value, ty)?;
         Ok(value)
     }
+
+    #[inline(never)]
+    pub(super) fn decode_array_normal_value(
+        &mut self,
+        term: &Term,
+        ty: &Term,
+        depth: usize,
+        reconstruct_callables: bool,
+    ) -> Result<Value, Error> {
+        let Term::NominalValue {
+            ty: actual,
+            variant: None,
+            fields,
+        } = term
+        else {
+            return Err(self.failure(ErrorKind::Type, None));
+        };
+        if actual.as_ref() != ty {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+        let Some((element, len)) = self.query_admission(None, |vm, fuel| {
+            nir::type_computations::charge_term(ty, fuel)?;
+            Ok(nir::normal_forms::array_element_and_len_with(ty, &|id| {
+                vm.normal_forms
+                    .get(&id)
+                    .is_some_and(|meta| meta.role == nir::normal_forms::Role::Array)
+            }))
+        })?
+        else {
+            return Err(self.failure(ErrorKind::Type, None));
+        };
+        if fields.len() != len {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+        if fields.len() > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, None));
+        }
+        self.integer_operation(None, |budget| budget.consume(fields.len()))?;
+        let values = fields
+            .iter()
+            .map(|value| {
+                self.normal_pattern_value_at(value, &element, depth + 1, reconstruct_callables)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = Value::Array {
+            ty: ty.clone(),
+            values,
+        };
+        self.validate_immutable_input(&value, ty)?;
+        Ok(value)
+    }
+
     #[inline(never)]
     pub(super) fn decode_nominal_normal_value(
         &mut self,
@@ -231,6 +286,7 @@ impl Interpreter<'_> {
         };
         Ok(value)
     }
+
     #[inline(never)]
     pub(super) fn decode_record_normal_value(
         &mut self,
@@ -267,6 +323,7 @@ impl Interpreter<'_> {
         };
         Ok(value)
     }
+
     #[inline(never)]
     pub(super) fn decode_tuple_normal_value(
         &mut self,
@@ -275,31 +332,24 @@ impl Interpreter<'_> {
         depth: usize,
         reconstruct_callables: bool,
     ) -> Result<Value, Error> {
-        let value = match (term, ty) {
-            (Term::TupleValue(values), ty) => {
-                let Some(types) = self.tuple_input_elements(ty) else {
-                    return Err(self.failure(ErrorKind::Type, None));
-                };
-                if values.len() != types.len() {
-                    return Err(self.failure(ErrorKind::Type, None));
-                }
-                Value::Tuple(
-                    values
-                        .iter()
-                        .zip(types)
-                        .map(|(value, ty)| {
-                            self.normal_pattern_value_at(
-                                value,
-                                ty,
-                                depth + 1,
-                                reconstruct_callables,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?,
-                )
-            }
-            _ => return Err(self.failure(ErrorKind::Type, None)),
+        let Term::TupleValue(values) = term else {
+            return Err(self.failure(ErrorKind::Type, None));
         };
-        Ok(value)
+        let Some(types) = self.tuple_input_elements(ty) else {
+            return Err(self.failure(ErrorKind::Type, None));
+        };
+        if values.len() != types.len() {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+        let mut decoded = Vec::with_capacity(values.len());
+        for (value, ty) in values.iter().zip(types) {
+            decoded.push(self.normal_pattern_value_at(
+                value,
+                ty,
+                depth + 1,
+                reconstruct_callables,
+            )?);
+        }
+        Ok(Value::Tuple(decoded))
     }
 }

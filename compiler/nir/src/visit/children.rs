@@ -205,6 +205,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                 parameters: fields, ..
             }
             | K::TypeList(fields)
+            | K::Array(fields)
             | K::Intrinsic { inputs: fields, .. }
             | K::Tuple(fields) => extend!(work, fuel, fields.iter().map(Node::Expr)),
             K::BitAssign { value, .. }
@@ -227,6 +228,11 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::OptionalType(value)
             | K::PointerType(value)
             | K::ListLength(value)
+            | K::TupleLen(value)
+            | K::TupleElem(value)
+            | K::CompileError(value)
+            | K::EmitDiagnostic(value)
+            | K::BoundedStackBytes(value)
             | K::NewtypeRepresentation(value)
             | K::DefinitionAttributes(value)
             | K::StructFieldTypes(value)

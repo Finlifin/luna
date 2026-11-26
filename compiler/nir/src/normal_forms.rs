@@ -95,6 +95,9 @@ pub fn open_signature(
 pub enum BuiltinCallable {
     List,
     Tuple,
+    Array,
+    MaybeUninitStorage,
+    ManuallyDropStorage,
 }
 
 impl BuiltinCallable {
@@ -102,26 +105,50 @@ impl BuiltinCallable {
         match symbol {
             "List" => Some(Self::List),
             "Tuple" => Some(Self::Tuple),
+            "Array" => Some(Self::Array),
+            "MaybeUninitStorage" => Some(Self::MaybeUninitStorage),
+            "ManuallyDropStorage" => Some(Self::ManuallyDropStorage),
             _ => None,
         }
     }
 
     pub fn signature(self, list: Option<DeclarationId>) -> Option<Term> {
-        let (sort, domain, collector) = match self {
-            Self::List => (Sort::Type, Term::Primitive(Primitive::Type), None),
-            Self::Tuple => (
-                Sort::ComptimeValue,
-                Term::NormalForm {
-                    head: list?,
+        let (parameters, collector) = match self {
+            Self::List | Self::MaybeUninitStorage | Self::ManuallyDropStorage => (
+                vec![crate::Parameter {
                     sort: Sort::Type,
-                    arguments: vec![Term::Primitive(Primitive::Type)],
-                },
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+                None,
+            ),
+            Self::Tuple => (
+                vec![crate::Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: Term::NormalForm {
+                        head: list?,
+                        sort: Sort::Type,
+                        arguments: vec![Term::Primitive(Primitive::Type)],
+                    },
+                }],
                 Some(0),
+            ),
+            Self::Array => (
+                vec![
+                    crate::Parameter {
+                        sort: Sort::Type,
+                        ty: Term::Primitive(Primitive::Type),
+                    },
+                    crate::Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: Term::Primitive(Primitive::Usize),
+                    },
+                ],
+                None,
             ),
         };
         Some(Term::NormalFormFunction(
             Box::new(Term::Function {
-                parameters: vec![crate::Parameter { sort, ty: domain }],
+                parameters,
                 result: Box::new(Term::Primitive(Primitive::Type)),
             }),
             collector,
@@ -150,6 +177,12 @@ pub enum Role {
     Tuple,
     /// Compiler-bound immutable meta.List constructor; the head stays opaque.
     TypeList,
+    /// Compiler-bound fixed-size homogeneous Array<T, N> constructor.
+    Array,
+    /// Compiler-bound uninitialized storage MaybeUninitStorage<T> without auto-Drop.
+    MaybeUninitStorage,
+    /// Compiler-bound manual-drop storage ManuallyDropStorage<T> without auto-Drop.
+    ManuallyDropStorage,
 }
 
 impl fmt::Display for Role {
@@ -158,6 +191,9 @@ impl fmt::Display for Role {
             Self::Opaque => "opaque",
             Self::Tuple => "tuple",
             Self::TypeList => "type-list",
+            Self::Array => "array",
+            Self::MaybeUninitStorage => "maybe-uninit-storage",
+            Self::ManuallyDropStorage => "manually-drop-storage",
         })
     }
 }
@@ -563,6 +599,86 @@ pub fn list_element_budgeted(
     };
     crate::type_computations::charge_term(element, fuel)?;
     Ok(Some(element.clone()))
+}
+
+/// Extract `(element_type, length)` from a recognized `Array<T, N>` normal-form type.
+pub fn array_element_and_len_with<'a>(
+    ty: &'a Term,
+    is_array: &impl Fn(DeclarationId) -> bool,
+) -> Option<(&'a Term, usize)> {
+    let Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments,
+    } = ty
+    else {
+        return None;
+    };
+    if !is_array(*head) {
+        return None;
+    }
+    let [elem, len_term] = arguments.as_slice() else {
+        return None;
+    };
+    if elem.sort() != Sort::Type {
+        return None;
+    }
+    let Term::Integer(value) = len_term else {
+        return None;
+    };
+    let len_u64 = value.to_unsigned(64).ok()?;
+    let len = usize::try_from(len_u64).ok()?;
+    Some((elem, len))
+}
+
+/// Extract `(element_type, length)` from `Array<T, N>` using registered `Role::Array` metadata.
+pub fn array_element_and_len<'a>(
+    package: Option<&Package>,
+    ty: &'a Term,
+) -> Option<(&'a Term, usize)> {
+    let package = package?;
+    array_element_and_len_with(ty, &|head| {
+        package
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == Role::Array)
+    })
+}
+
+/// Extract inner `T` from a recognized `MaybeUninitStorage<T>` or `ManuallyDropStorage<T>` type.
+pub fn storage_inner_type_with<'a>(
+    ty: &'a Term,
+    is_storage: &impl Fn(DeclarationId) -> bool,
+) -> Option<&'a Term> {
+    let Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments,
+    } = ty
+    else {
+        return None;
+    };
+    if !is_storage(*head) {
+        return None;
+    }
+    let [inner] = arguments.as_slice() else {
+        return None;
+    };
+    (inner.sort() == Sort::Type).then_some(inner)
+}
+
+/// Extract inner `T` from `MaybeUninitStorage<T>` or `ManuallyDropStorage<T>` via registered roles.
+pub fn storage_inner_type<'a>(package: Option<&Package>, ty: &'a Term) -> Option<&'a Term> {
+    let package = package?;
+    storage_inner_type_with(ty, &|head| {
+        package.normal_forms.iter().any(|nf| {
+            nf.declaration == head
+                && matches!(
+                    nf.role,
+                    Role::MaybeUninitStorage | Role::ManuallyDropStorage
+                )
+        })
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

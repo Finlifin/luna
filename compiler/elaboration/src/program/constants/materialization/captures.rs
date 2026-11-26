@@ -144,6 +144,15 @@ impl Checker<'_, '_> {
                     ));
                 }
             }
+            Value::Array { ty, .. } => {
+                self.check_capture_domain(ty, type_scope, span)?;
+                if self.array_element_and_len(ty).is_none() {
+                    return Err(error(
+                        span,
+                        "captured array requires its registered Array<T, N> domain",
+                    ));
+                }
+            }
             Value::Optional { ty, .. }
             | Value::Newtype { ty, .. }
             | Value::ErrorResult { ty, .. } => {

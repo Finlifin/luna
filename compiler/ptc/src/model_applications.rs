@@ -8,6 +8,7 @@ pub struct TypeApplication {
     pub arguments: Vec<Term>,
     pub result: Term,
 }
+
 impl fmt::Display for TypeApplication {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(type-application (head {}) (arguments", self.head)?;
@@ -24,6 +25,8 @@ pub(super) fn admitted(term: &Term, context: &Context) -> bool {
     matches!(term, Term::NormalForm { head, sort: Sort::Type, arguments }
         if context.theory.constructors.congruence_heads.contains(head)
             && !context.theory.constructors.tuple_heads.contains(head)
+            && !context.theory.constructors.array_heads.contains(head)
+            && !context.theory.constructors.storage_heads.contains(head)
             && arguments.iter().all(|arg| argument_with_types(arg, &|_| true)))
 }
 
@@ -151,6 +154,16 @@ pub(super) fn index(
                 .constructors
                 .tuple_heads
                 .contains(&entry.head)
+            || context
+                .theory
+                .constructors
+                .array_heads
+                .contains(&entry.head)
+            || context
+                .theory
+                .constructors
+                .storage_heads
+                .contains(&entry.head)
         {
             return Err(ProofError::Invalid);
         }
@@ -184,6 +197,7 @@ pub(super) fn charge(value: &Term, fuel: &std::cell::Cell<usize>) -> Option<()> 
     fuel.set(if result { remaining } else { 0 });
     result.then_some(())
 }
+
 pub(super) fn copy(value: &Term, fuel: &std::cell::Cell<usize>) -> Option<Term> {
     charge(value, fuel)?;
     Some(value.clone())

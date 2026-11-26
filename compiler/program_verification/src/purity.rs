@@ -1994,6 +1994,7 @@ impl<'a> Analysis<'a> {
                 | K::OptionalAbsent
                 | K::ErrorConvert { .. }
                 | K::Tuple(_)
+                | K::Array(_)
                 | K::AnonymousRecord { .. }
                 | K::Object { .. }
                 | K::Call { .. }
@@ -3540,7 +3541,7 @@ impl<'a> Analysis<'a> {
                     || (!self.finite && inner.ty == p(P::Integer)))
                     && self.expression(inner, private, returns, depth + 1)
             }
-            K::Tuple(fields) | K::AnonymousRecord { fields } => {
+            K::Tuple(fields) | K::Array(fields) | K::AnonymousRecord { fields } => {
                 (!self.finite || self.resource_scope || self.copy_type(&value.ty))
                     && self.aggregate_code_fields(fields, private, returns, depth)
             }
@@ -4620,6 +4621,7 @@ impl<'a> Analysis<'a> {
             K::Record { fields, .. }
             | K::Object { fields, .. }
             | K::Tuple(fields)
+            | K::Array(fields)
             | K::AnonymousRecord { fields } => {
                 let (index, tail) = path.split_first()?;
                 Some(self.loop_code_value_at(fields.get(*index)?, tail, facts, depth + 1))

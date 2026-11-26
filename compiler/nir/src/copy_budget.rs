@@ -1140,6 +1140,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         comptime_parameters.len()
                     }
                     K::TypeList(items)
+                    | K::Array(items)
                     | K::Intrinsic { inputs: items, .. }
                     | K::Tuple(items)
                     | K::AnonymousRecord { fields: items }
@@ -1204,6 +1205,11 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::ConstAddress { value, .. }
                     | K::ReadPointer(value)
                     | K::ListLength(value)
+                    | K::TupleLen(value)
+                    | K::TupleElem(value)
+                    | K::CompileError(value)
+                    | K::EmitDiagnostic(value)
+                    | K::BoundedStackBytes(value)
                     | K::NewtypeRepresentation(value)
                     | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)

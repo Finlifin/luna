@@ -76,6 +76,10 @@ impl InherentIndex {
         self.index.set_normal_form_metadata(heads);
     }
 
+    pub fn set_normal_form_results(&mut self, results: BTreeMap<DeclarationId, Term>) {
+        self.index.set_normal_form_results(results);
+    }
+
     /// Avoid copying complete layouts on repeated method lookup in an unchanged
     /// declaration world. Metadata order is canonical before comparison.
     pub fn sync_nominal_layouts<'a>(

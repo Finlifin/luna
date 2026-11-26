@@ -813,6 +813,23 @@ fn synthesize_pointer_delivery_expr(
                     index: field_index,
                 },
             };
+        } else if let Some((elem, len)) =
+            nir::normal_forms::array_element_and_len(Some(package), &current_ty)
+        {
+            if field_index >= len {
+                return Ok(None);
+            }
+            let elem = elem.clone();
+            current_ty = elem.clone();
+            current = nir::program::Expr {
+                source: fallback_source,
+                ty: elem,
+                kind: K::AnonymousField {
+                    value: Box::new(current),
+                    name: field_index.to_string(),
+                    index: field_index,
+                },
+            };
         } else if let Term::Record(fields) = &current_ty {
             let Some((name, field_ty)) = fields.get(field_index).cloned() else {
                 return Ok(None);
@@ -1389,6 +1406,13 @@ fn field_type(
             .get(index)
             .cloned()
             .ok_or("Drop tuple field index is out of bounds".into());
+    }
+    if let Some((elem, len)) = nir::normal_forms::array_element_and_len(Some(package), ty) {
+        return if index < len {
+            Ok(elem.clone())
+        } else {
+            Err("Drop array field index is out of bounds".into())
+        };
     }
     match ty {
         Term::Closure { environment, .. } => environment

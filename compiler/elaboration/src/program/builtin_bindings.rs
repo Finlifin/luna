@@ -66,6 +66,11 @@ fn operation(name: &str) -> bool {
             | "implicit_file"
             | "implicit_line"
             | "implicit_src"
+            | "tuple_len"
+            | "tuple_elem"
+            | "compile_error"
+            | "emit_diagnostic"
+            | "bounded_stack_bytes"
     )
 }
 
@@ -97,6 +102,9 @@ impl Checker<'_, '_> {
         let identity = match builtin {
             BuiltinCallable::Tuple => self.protocols.tuple,
             BuiltinCallable::List => self.protocols.meta_list,
+            BuiltinCallable::Array => self.protocols.array,
+            BuiltinCallable::MaybeUninitStorage => self.protocols.maybe_uninit_storage,
+            BuiltinCallable::ManuallyDropStorage => self.protocols.manually_drop_storage,
         }
         .ok_or_else(|| error(span, "builtin callable requires a registered binding"))?;
         let expected = builtin

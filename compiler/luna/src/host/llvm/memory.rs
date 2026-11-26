@@ -42,11 +42,9 @@ impl Emitter<'_> {
                     Ty::Pointer,
                     format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
                 );
-                let align_suffix = if matches!(result_ty, Ty::PackedRecord(_)) {
-                    ", align 1"
-                } else {
-                    ""
-                };
+                let align_suffix = result_ty
+                    .explicit_align()
+                    .map_or(String::new(), |a| format!(", align {a}"));
                 Ok(self.instruction(
                     result_ty.clone(),
                     format!("load {}, ptr {}{align_suffix}", result_ty.llvm(), ptr.text),
@@ -67,11 +65,10 @@ impl Emitter<'_> {
                     Ty::Pointer,
                     format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
                 );
-                let align_suffix = if matches!(val.ty, Ty::PackedRecord(_)) {
-                    ", align 1"
-                } else {
-                    ""
-                };
+                let align_suffix = val
+                    .ty
+                    .explicit_align()
+                    .map_or(String::new(), |a| format!(", align {a}"));
                 self.line(format!(
                     "store {} {}, ptr {}{align_suffix}",
                     val.ty.llvm(),
@@ -256,6 +253,41 @@ impl Emitter<'_> {
                     result_ty.clone(),
                     format!("ptrtoint ptr {} to {}", ptr.text, result_ty.llvm()),
                 ))
+            }
+            Operation::MemUninit => {
+                if !values.is_empty() {
+                    return Err("host mem_uninit requires 0 runtime arguments".into());
+                }
+                if result_ty == Ty::Unit {
+                    Ok(Value::unit())
+                } else {
+                    Ok(Value {
+                        ty: result_ty,
+                        text: "undef".into(),
+                    })
+                }
+            }
+            Operation::MemZeroed => {
+                if !values.is_empty() {
+                    return Err("host mem_zeroed requires 0 runtime arguments".into());
+                }
+                if result_ty == Ty::Unit {
+                    Ok(Value::unit())
+                } else {
+                    Ok(Value {
+                        ty: result_ty,
+                        text: "zeroinitializer".into(),
+                    })
+                }
+            }
+            Operation::MemManuallyDropWrap | Operation::MemManuallyDropUnwrap => {
+                let [val] = values else {
+                    return Err("host manually_drop conversion requires 1 argument".into());
+                };
+                if val.ty != result_ty {
+                    return Err("host manually_drop representation mismatch".into());
+                }
+                Ok(val.clone())
             }
             _ => Err(format!(
                 "operation `{}` is not a raw memory intrinsic",

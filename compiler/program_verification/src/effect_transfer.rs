@@ -549,6 +549,7 @@ struct TransferFlow {
     normal: Option<BTreeSet<usize>>,
     continues: bool,
 }
+
 impl TransferFlow {
     fn normal(origins: Option<BTreeSet<usize>>) -> Self {
         Self {
@@ -557,6 +558,7 @@ impl TransferFlow {
             continues: true,
         }
     }
+
     fn delivered(self, fuel: &mut usize) -> Option<BTreeSet<usize>> {
         let result = if self.continues {
             join_origins(self.resumed, self.normal?, fuel)?
@@ -565,6 +567,7 @@ impl TransferFlow {
         };
         Some(result)
     }
+
     fn join(self, other: Self, fuel: &mut usize) -> Option<Self> {
         let normal = match (self.continues, other.continues) {
             (true, true) => match (self.normal, other.normal) {
@@ -582,6 +585,7 @@ impl TransferFlow {
         })
     }
 }
+
 fn forwarded_value(
     effects: &[super::memory::EffectInput],
     value: &Expr,
@@ -591,6 +595,7 @@ fn forwarded_value(
 ) -> Option<BTreeSet<usize>> {
     transfer_flow(effects, value, inputs, fuel, depth)?.delivered(fuel)
 }
+
 fn transfer_flow(
     effects: &[super::memory::EffectInput],
     value: &Expr,
@@ -794,6 +799,7 @@ fn transfer_flow(
             Some(combined)
         }
         K::Tuple(fields)
+        | K::Array(fields)
         | K::Record { fields, .. }
         | K::Object { fields, .. }
         | K::AnonymousRecord { fields }
@@ -990,6 +996,7 @@ fn observe_scalar(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
         _ => None,
     }
 }
+
 // Structural matching can observe an existing aggregate or pointer without
 // evaluating a producer or reading through a pointer. The resource pass still
 // checks any consumption and the pattern proof distinguishes fields from whole.
@@ -1000,6 +1007,7 @@ fn observe_subject(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
         observe_place(value, fuel, depth)
     }
 }
+
 fn observe_place(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
     if depth >= 128 {
         return None;
@@ -1013,6 +1021,7 @@ fn observe_place(value: &Expr, fuel: &mut usize, depth: usize) -> Option<()> {
         _ => None,
     }
 }
+
 fn observe_pattern(
     pattern: &Pattern,
     origins: Option<&BTreeSet<usize>>,
@@ -1115,6 +1124,7 @@ fn spend(fuel: &mut usize, amount: usize) -> Option<()> {
     *fuel -= amount;
     Some(())
 }
+
 fn join_origins(
     mut left: BTreeSet<usize>,
     right: BTreeSet<usize>,
@@ -1124,6 +1134,7 @@ fn join_origins(
     left.extend(right);
     Some(left)
 }
+
 /// Fallback can deliver any input delivered by either matching installation.
 /// An unknown premise on either path keeps the combined result unknown.
 pub(crate) fn with_fallback(

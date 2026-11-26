@@ -1,0 +1,70 @@
+use numeric.math_intrinsics;
+use numeric.comparison.{Eq, Ord, Order}
+use primitives.{Type, bool, usize}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.hash.{Hash, Hasher}
+use protocols.resources.{Clone, Copy}
+
+{-
+    Validated power-of-two memory alignment (`bytes >= 1`).
+-}
+pub struct Align {
+    bytes: usize,
+}
+
+impl Align {
+    pub pure fn new(bytes: usize) -> ?Align {
+        if bytes == 0 or math_intrinsics.bit_and(bytes, bytes - 1) != 0 {
+            null
+        } else {
+            Align { bytes: bytes }
+        }
+    }
+
+    pub pure fn of_type() -> Align where T {
+        Align { bytes: Type.align_of(T) }
+    }
+
+    pub pure fn as_usize(self) -> usize {
+        self.bytes
+    }
+
+    pub pure fn is_power_of_two(bytes: usize) -> bool {
+        bytes != 0 and math_intrinsics.bit_and(bytes, bytes - 1) == 0
+    }
+}
+
+impl Clone for Align {
+    fn clone(*self) -> Self {
+        Align { bytes: self.bytes.* }
+    }
+}
+
+impl Copy for Align {}
+
+impl Eq for Align {
+    fn eq(*self, other: *Self) -> bool {
+        self.bytes.* == other.bytes.*
+    }
+}
+
+impl Ord for Align {
+    fn cmp(*self, other: *Self) -> Order {
+        self.bytes.*.as(Ord).cmp(other.bytes)
+    }
+}
+
+impl Hash for Align {
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        self.bytes.*.as(Hash).hash(state);
+    }
+}
+
+impl Debug for Align {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("Align(")!;
+        self.bytes.*.as(Debug).write_debug(output)!;
+        output.write_str(")")
+    }
+}

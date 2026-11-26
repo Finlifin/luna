@@ -705,6 +705,9 @@ pub(crate) fn source_protocols(
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),
         tuple: options.tuple_type.as_deref(),
+        array: options.array_type.as_deref(),
+        maybe_uninit_storage: options.maybe_uninit_storage_type.as_deref(),
+        manually_drop_storage: options.manually_drop_storage_type.as_deref(),
     }
 }
 

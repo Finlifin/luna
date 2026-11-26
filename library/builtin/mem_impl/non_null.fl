@@ -1,0 +1,118 @@
+use mem_impl.raw.{ptr_add, ptr_addr, ptr_sub, raw_ptr, raw_read, raw_write}
+use numeric.comparison.{Eq, Ord, Order}
+use primitives.{Type, bool, usize}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.hash.{Hash, Hasher}
+use protocols.resources.{Clone, Copy}
+
+{-
+    Non-null typed pointer wrapper. Stored as an integer address so
+    `NonNull<T>` unconditionally supports `Copy`/`Clone` without duplicating pointees.
+-}
+pub struct NonNull
+where
+    T,
+{
+    addr: usize,
+}
+
+impl NonNull<T> where T {
+    pub unsafe fn new(ptr: *T) -> ?NonNull<T> {
+        let addr = ptr_addr<T>(ptr);
+        if addr == 0 {
+            null
+        } else {
+            NonNull<T> { addr: addr }
+        }
+    }
+
+    pub unsafe fn new_unchecked(ptr: *T) -> NonNull<T> {
+        NonNull<T> {
+            addr: ptr_addr<T>(ptr),
+        }
+    }
+
+    pub pure fn from_addr(addr: usize) -> ?NonNull<T> {
+        if addr == 0 {
+            null
+        } else {
+            NonNull<T> { addr: addr }
+        }
+    }
+
+    pub pure fn dangling() -> NonNull<T> {
+        let align = Type.align_of(T);
+        NonNull<T> {
+            addr: if align == 0 { 1 } else { align },
+        }
+    }
+
+    pub unsafe fn as_ptr(self) -> *T {
+        raw_ptr<T>(self.addr)
+    }
+
+    pub pure fn as_usize(self) -> usize {
+        self.addr
+    }
+
+    pub pure fn cast(self) -> NonNull<U> where U {
+        NonNull<U> { addr: self.addr }
+    }
+
+    pub unsafe fn read(self) -> T {
+        raw_read<T>(self.addr)
+    }
+
+    pub unsafe fn write(self, value: T) {
+        raw_write<T>(self.addr, value);
+    }
+
+    pub unsafe fn add(self, count: usize) -> NonNull<T> {
+        let moved = ptr_add<T>(self.as_ptr(), count);
+        NonNull<T> {
+            addr: ptr_addr<T>(moved),
+        }
+    }
+
+    pub unsafe fn sub(self, count: usize) -> NonNull<T> {
+        let moved = ptr_sub<T>(self.as_ptr(), count);
+        NonNull<T> {
+            addr: ptr_addr<T>(moved),
+        }
+    }
+}
+
+impl Clone for NonNull<T> where T {
+    fn clone(*self) -> Self {
+        NonNull<T> { addr: self.addr.* }
+    }
+}
+
+impl Copy for NonNull<T> where T {}
+
+impl Eq for NonNull<T> where T {
+    fn eq(*self, other: *Self) -> bool {
+        self.addr.* == other.addr.*
+    }
+}
+
+impl Ord for NonNull<T> where T {
+    fn cmp(*self, other: *Self) -> Order {
+        self.addr.*.as(Ord).cmp(other.addr)
+    }
+}
+
+impl Hash for NonNull<T> where T {
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        self.addr.*.as(Hash).hash(state);
+    }
+}
+
+impl Debug for NonNull<T> where T {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("NonNull(")!;
+        self.addr.*.as(Debug).write_debug(output)!;
+        output.write_str(")")
+    }
+}

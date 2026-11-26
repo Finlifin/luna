@@ -683,6 +683,12 @@ fn owned_fields(
     if let Some(fields) = tuple_fields(package, ty) {
         return Ok(fields.to_vec());
     }
+    if let Some((elem, len)) = nir::normal_forms::array_element_and_len(package, ty) {
+        return Ok(vec![elem.clone(); len]);
+    }
+    if nir::normal_forms::storage_inner_type(package, ty).is_some() {
+        return Ok(Vec::new());
+    }
     if let Term::Nominal {
         declaration,
         arguments,
@@ -863,9 +869,10 @@ pub fn owned_constructor<'a>(
     fuel: &mut usize,
 ) -> Result<(&'a [Expr], Option<usize>), String> {
     match &expr.kind {
-        K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
-            Ok((fields, None))
-        }
+        K::Tuple(fields)
+        | K::Array(fields)
+        | K::AnonymousRecord { fields }
+        | K::Record { fields, .. } => Ok((fields, None)),
         K::OptionalAbsent => Ok((&[], Some(0))),
         K::OptionalPresent(value) => Ok((std::slice::from_ref(value.as_ref()), Some(1))),
         K::Variant { fields, index, .. } => Ok((fields, Some(*index))),
@@ -1369,6 +1376,7 @@ fn extend_storage_projection(
             cursor += 3;
         } else {
             let owner = if tuple_fields(package, &result.ty).is_some()
+                || nir::normal_forms::array_element_and_len(package, &result.ty).is_some()
                 || matches!(result.ty, Term::Record(_) | Term::Closure { .. })
             {
                 nir::program::FieldOwner::Anonymous
@@ -1427,6 +1435,7 @@ fn owned_callable_bottom(
             continue;
         }
         let structured = tuple_fields(package, &ty).is_some()
+            || nir::normal_forms::array_element_and_len(package, &ty).is_some()
             || matches!(ty, Term::Record(_))
             || matches!(&ty,Term::Nominal {declaration,..}
             if package.is_some_and(|p|p.structs.iter().any(|s|s.declaration==*declaration)
@@ -2079,6 +2088,25 @@ fn storage_representation(
         if allow_text && *ty == Term::Primitive(Primitive::Str) {
             return Ok(true);
         }
+        if let Some((elem, len)) = nir::normal_forms::array_element_and_len(package, ty) {
+            if len == 0 {
+                return Ok(true);
+            }
+            return walk(
+                package,
+                elem,
+                fuel,
+                depth + 1,
+                pointer && nested_pointers,
+                code,
+                nested_pointers,
+                allow_text,
+                reject_runtime_deps,
+            );
+        }
+        if nir::normal_forms::storage_inner_type(package, ty).is_some() {
+            return Ok(true);
+        }
         if let Some(fields) = tuple_fields(package, ty) {
             for field in fields {
                 if !walk(
@@ -2227,6 +2255,10 @@ pub(crate) fn require_pointer_free_owned_for(
     }
     let fields = if let Some(fields) = tuple_fields(package, ty) {
         fields.to_vec()
+    } else if let Some((elem, len)) = nir::normal_forms::array_element_and_len(package, ty) {
+        vec![elem.clone(); len]
+    } else if nir::normal_forms::storage_inner_type(package, ty).is_some() {
+        Vec::new()
     } else {
         match ty {
             Term::Closure {
@@ -3643,7 +3675,10 @@ impl<'a> Infer<'a, '_> {
                     None => Ok(false),
                 }
             }
-            K::Tuple(fields) | K::Record { fields, .. } | K::AnonymousRecord { fields } => {
+            K::Tuple(fields)
+            | K::Array(fields)
+            | K::Record { fields, .. }
+            | K::AnonymousRecord { fields } => {
                 let Some((index, rest)) = path.split_first() else {
                     return Ok(false);
                 };
@@ -5853,6 +5888,7 @@ impl<'a> Infer<'a, '_> {
                 constructed = matches!(
                     node.kind,
                     K::Tuple(_)
+                        | K::Array(_)
                         | K::AnonymousRecord { .. }
                         | K::Record { .. }
                         | K::Variant { .. }
@@ -6791,19 +6827,37 @@ impl<'a> Infer<'a, '_> {
                 for input in inputs {
                     self.walk(input, depth + 1)?;
                 }
-                if binding.operation() == nir::intrinsics::Operation::MemRawPtr
-                    && matches!(&output, Term::Pointer(_))
-                {
-                    self.expression_results.insert(
-                        expr as *const Expr as usize,
-                        Some(BTreeSet::from([PointerPlace {
-                            root: PointerRoot::ExternalRaw,
-                            input_fields: vec![],
-                            through: vec![],
-                            fields: vec![],
-                            conditions: BTreeMap::new(),
-                        }])),
-                    );
+                match binding.operation() {
+                    nir::intrinsics::Operation::MemRawPtr
+                        if matches!(&output, Term::Pointer(_)) =>
+                    {
+                        self.expression_results.insert(
+                            expr as *const Expr as usize,
+                            Some(BTreeSet::from([Self::external_raw_place()])),
+                        );
+                    }
+                    nir::intrinsics::Operation::MemRawRead
+                    | nir::intrinsics::Operation::MemManuallyDropUnwrap => {
+                        if self.local_pointer_value(&output)? {
+                            self.expression_results.insert(
+                                expr as *const Expr as usize,
+                                Some(BTreeSet::from([Self::external_raw_place()])),
+                            );
+                        } else {
+                            let layout = self.symbolic_pointer_fields(&output)?;
+                            if !layout.is_empty() {
+                                let loaded = layout
+                                    .into_keys()
+                                    .map(|path| {
+                                        (path, Some(BTreeSet::from([Self::external_raw_place()])))
+                                    })
+                                    .collect();
+                                self.aggregate_pointers
+                                    .insert(expr as *const Expr as usize, loaded);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             K::EffectRequest { .. }
@@ -7021,6 +7075,7 @@ impl<'a> Infer<'a, '_> {
             | K::OptionalPresent(_)
             | K::OptionalAbsent
             | K::Tuple(_)
+            | K::Array(_)
             | K::ErrorConvert { .. } => {
                 let (fields, variant) = owned_constructor(expr, self.fuel)?;
                 let ty = self.ty(&expr.ty)?;

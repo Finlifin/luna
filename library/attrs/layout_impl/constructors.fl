@@ -1,7 +1,10 @@
-use bindings.{Object}
+use bindings.{Object, usize};
 
 {- Byte-packed struct layout (`size = sum(field.size)`, `align = 1`). -}
 pub const byte = { __flurry_packed_mode: .byte }
 
 {- Bit-packed struct layout lowered to `BitVec<total_bits>` via `bitvec_opt`. -}
 pub const bit = { __flurry_packed_mode: .bit }
+
+{- Minimum alignment on a nominal type or struct field (`usize` power of two `<= 2^29`). -}
+pub comptime fn align(bytes: usize) -> Object = { __flurry_align: bytes }

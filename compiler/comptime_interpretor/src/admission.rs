@@ -166,6 +166,17 @@ impl Interpreter<'_> {
                 nir::type_computations::charge_term(ty, fuel)?;
                 return Ok(elements.to_vec());
             }
+            if let Some((element, len)) = nir::normal_forms::array_element_and_len_with(ty, &|id| {
+                self.normal_forms
+                    .get(&id)
+                    .is_some_and(|meta| meta.role == nir::normal_forms::Role::Array)
+            }) {
+                if len > 100_000 {
+                    return Err("array nominal length exceeds representation limit".into());
+                }
+                nir::type_computations::charge_term(ty, fuel)?;
+                return Ok(vec![element.clone(); len]);
+            }
         }
         self.query_normal_value_fields(ty, variant, fuel)
     }

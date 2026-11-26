@@ -1,0 +1,61 @@
+use numeric.comparison.{Eq, Ord, Order}
+use primitives.{Type, bool, u8}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.hash.{Hash, Hasher}
+use protocols.resources.{Clone, Copy}
+use protocols.traits.Default;
+
+{-
+    Zero-sized type marker carrying compile-time type identity `T` without storage overhead.
+-}
+pub struct TypeMarker where T {}
+
+impl TypeMarker<T> where T {
+    pub pure fn new() -> TypeMarker<T> {
+        TypeMarker<T> {}
+    }
+}
+
+pub pure fn make_type_marker() -> TypeMarker<T> where T {
+    TypeMarker<T>.new()
+}
+
+impl Default for TypeMarker<T> where T {
+    fn default() -> Self {
+        TypeMarker<T> {}
+    }
+}
+
+impl Clone for TypeMarker<T> where T {
+    fn clone(*self) -> Self {
+        TypeMarker<T> {}
+    }
+}
+
+impl Copy for TypeMarker<T> where T {}
+
+impl Eq for TypeMarker<T> where T {
+    fn eq(*self, _other: *Self) -> bool {
+        true
+    }
+}
+
+impl Ord for TypeMarker<T> where T {
+    fn cmp(*self, _other: *Self) -> Order {
+        .equal
+    }
+}
+
+impl Hash for TypeMarker<T> where T {
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        let tag: u8 = 0;
+        tag.as(Hash).hash(state);
+    }
+}
+
+impl Debug for TypeMarker<T> where T {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("TypeMarker")
+    }
+}

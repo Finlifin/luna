@@ -10,6 +10,7 @@ mod flow;
 mod instances;
 mod matching;
 mod returns;
+
 use flow::Completion;
 use returns::{FactoryExit, ReturnValues, Returns};
 
@@ -236,6 +237,7 @@ pub(super) fn structural_operand(
                 | K::ComptimeValue(_)
                 | K::StagedValue(_)
                 | K::Tuple(_)
+                | K::Array(_)
                 | K::Record { .. }
                 | K::AnonymousRecord { .. }
                 | K::Field { .. }

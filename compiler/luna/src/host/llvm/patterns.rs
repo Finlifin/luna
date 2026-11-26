@@ -53,6 +53,7 @@ impl Emitter<'_> {
             | Pattern::Record { fields, .. } => {
                 let field_count = match &value.ty {
                     Ty::Record(layout) | Ty::PackedRecord(layout) => layout.len(),
+                    Ty::AlignedRecord(layout) => layout.fields.len(),
                     Ty::BitPackedRecord(layout) => layout.fields.len(),
                     _ => return Err("host record pattern subject has no record layout".into()),
                 };
@@ -602,8 +603,7 @@ impl Emitter<'_> {
                 if !self.terminated {
                     if handler.is_some() {
                         self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::HandlerEnd)?;
-                    } else if !matches!(arm.body.kind, K::Block { .. } | K::CallPreparation { .. })
-                    {
+                    } else if !arm.body.opens_block_scope() {
                         self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::ScopeEnd)?;
                     }
                     // Checked ordinary matches retain even the impossible

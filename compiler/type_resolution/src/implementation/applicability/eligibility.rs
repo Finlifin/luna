@@ -48,8 +48,7 @@ pub(super) fn subject_view(
             _ => {}
         }
     }
-    if context.is_tuple_type(subject)
-        || context.is_list_type(subject)
+    if context.is_builtin_normal_type(subject)
         || !matches!(
             subject,
             Term::Rigid { .. }
@@ -69,7 +68,7 @@ pub(super) fn subject_view(
         ..budget
     };
     let (view, spent) = context.structural_view_with_heads_metered(subject, view_budget, |head| {
-        context.is_tuple_head(head) || context.is_list_inference_head(head)
+        context.is_builtin_normal_head(head)
     });
     head_budget.steps -= spent;
     let failed_view = match view {
@@ -118,8 +117,7 @@ pub(super) fn eligible_shape(context: &Context, ty: &Term) -> bool {
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
             | Term::PureFunction(_)
-    ) || context.is_tuple_type(ty)
-        || context.is_list_type(ty)
+    ) || context.is_builtin_normal_type(ty)
 }
 
 fn prove_eligible_alternatives(

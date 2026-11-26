@@ -41,6 +41,7 @@ mod origins;
 mod patterns;
 mod value_origins;
 
+pub(crate) use effects::effect_result_slots_with_body;
 pub use effects::{effect_result_slots, effect_result_slots_with_envs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3371,6 +3372,62 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .map_err(|reason| error(source, reason))
     }
 
+    fn callee_effect_result_slots(
+        &mut self,
+        package: &'a Package,
+        callee: &Expr,
+        env_types: &[Term],
+        source: SourceRange,
+    ) -> Result<Vec<usize>, Error> {
+        let (declaration, arguments): (nir::DeclarationId, &[Term]) = match &callee.kind {
+            K::Function(id) => (*id, &[]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.as_slice()),
+            _ => {
+                return effect_result_slots_with_envs(
+                    package,
+                    &callee.ty,
+                    env_types,
+                    &mut self.fuel,
+                    source,
+                );
+            }
+        };
+        let (body, signature, uninstantiated) =
+            match self
+                .declarations
+                .runtime_body_checked(declaration, arguments, &mut self.fuel)
+            {
+                Ok((function, remaining)) => (
+                    Some(&function.body),
+                    if remaining.is_empty() {
+                        &function.signature
+                    } else {
+                        &callee.ty
+                    },
+                    !remaining.is_empty(),
+                ),
+                Err(reason) if reason.contains("budget exhausted") => {
+                    return Err(error(source, reason));
+                }
+                Err(_) => (None, &callee.ty, false),
+            };
+        effects::effect_result_slots_with_body(
+            package,
+            self.declarations.as_ref(),
+            self.declaration_source,
+            self.method_callees.as_mut(),
+            signature,
+            env_types,
+            body,
+            uninstantiated,
+            &mut self.fuel,
+            source,
+        )
+    }
+
     fn callee_env_parameter_types(
         &mut self,
         package: &'a Package,
@@ -4973,6 +5030,44 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else {
             right
         };
+        let synced_right;
+        let mut sync_external_raw = |target: &mut Flow, other: &Flow| -> Result<(), Error> {
+            let missing: Vec<_> = other
+                .types
+                .iter()
+                .filter(|(id, _)| {
+                    crate::is_external_raw_place(**id) && !target.types.contains_key(*id)
+                })
+                .map(|(id, ty)| (*id, ty.clone()))
+                .collect();
+            for (id, ty) in missing {
+                let shape = (self.shape)(&ty).map_err(|e| error(source, e))?;
+                target
+                    .state
+                    .declare(id, &shape, true, &mut self.fuel)
+                    .map_err(|e| {
+                        error(
+                            source,
+                            format!("cannot synchronize external raw storage: {e:?}"),
+                        )
+                    })?;
+                target.types.insert(id, ty);
+            }
+            Ok(())
+        };
+        sync_external_raw(left, right)?;
+        let missing_in_right = left
+            .types
+            .keys()
+            .any(|id| crate::is_external_raw_place(*id) && !right.types.contains_key(id));
+        let right = if missing_in_right {
+            let mut updated = right.clone();
+            sync_external_raw(&mut updated, left)?;
+            synced_right = Some(updated);
+            synced_right.as_ref().unwrap()
+        } else {
+            right
+        };
         if left.types != right.types {
             return Err(error(source, "ownership scope declaration order mismatch"));
         }
@@ -6509,7 +6604,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 Term::Computation { effects, .. } if !effects.is_empty()
             ) {
             let env_types = self.callee_env_parameter_types(package, callee, source)?;
-            effect_result_slots_with_envs(package, &callee.ty, &env_types, &mut self.fuel, source)?
+            self.callee_effect_result_slots(package, callee, &env_types, source)?
         } else {
             vec![]
         };
@@ -7403,8 +7498,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         let mut actual = BTreeSet::new();
                         if let Some(Some(targets)) = footprint.pointer_fields.get(path) {
                             for target in targets {
-                                if let Some(mapped) = self.map_memory_target(
+                                if let Some(mapped) = self.map_or_external_raw_target(
                                     target,
+                                    &leaf.pointee,
                                     &pointer_inputs,
                                     &mut branch,
                                     source,
@@ -7439,7 +7535,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .unwrap_or_else(|| BTreeSet::from([unknown_pointer_target()]));
                     if let Some(targets) = footprint.result_targets {
                         for target in targets {
-                            if let Some(mapped) = self.map_memory_target(
+                            if target.is_external_raw()
+                                && let Term::Pointer(pointee) = completion_type(result)
+                            {
+                                let root =
+                                    self.ensure_external_raw_place(&mut branch, pointee, source)?;
+                                previous.insert(Place {
+                                    root,
+                                    fields: vec![],
+                                });
+                            } else if let Some(mapped) = self.map_memory_target(
                                 &target,
                                 &pointer_inputs,
                                 &mut branch,
@@ -8975,6 +9080,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             return Ok(true);
         }
+        if let Some((elem, len)) = nir::normal_forms::array_element_and_len(self.package, ty) {
+            if len == 0 {
+                return Ok(true);
+            }
+            return self.scalar_packet_shape(elem, source, depth + 1);
+        }
         if let Term::Record(fields) = ty {
             for (_, field) in fields {
                 if !self.scalar_packet_shape(field, source, depth + 1)? {
@@ -9086,6 +9197,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ty,
             Term::Nominal { .. } | Term::Record(_) | Term::ErrorResult { .. } | Term::Optional(_)
         ) || nir::normal_forms::tuple_fields(self.package, ty).is_some()
+            || nir::normal_forms::array_element_and_len(self.package, ty).is_some()
+            || nir::normal_forms::storage_inner_type(self.package, ty).is_some()
         {
             // Copy permits candidate-local delivery; the recursive shape
             // check separately excludes pointers and owned/captured state
@@ -9532,7 +9645,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if owned_observation || matches!(node.kind, K::Closure { .. }) {
                     return Ok(false);
                 }
-                owned_observation = matches!(node.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::OptionalPresent(_)
+                owned_observation = matches!(node.kind, K::Tuple(_) | K::Array(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::OptionalPresent(_)
                 | K::OptionalAbsent
                 | K::Variant { .. }
                 | K::DynCast(_)
@@ -13261,6 +13374,24 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(Some((place, traversal.target.ty)))
     }
 
+    fn map_or_external_raw_target(
+        &mut self,
+        target: &super::memory::ParameterPlace,
+        pointee: &Term,
+        arguments: &MemoryTargets,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if target.is_external_raw() {
+            let root = self.ensure_external_raw_place(flow, pointee, source)?;
+            return Ok(Some(BTreeSet::from([Place {
+                root,
+                fields: vec![],
+            }])));
+        }
+        self.map_memory_target(target, arguments, flow, source)
+    }
+
     fn map_memory_target(
         &mut self,
         target: &super::memory::ParameterPlace,
@@ -14211,7 +14342,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let mut actual = BTreeSet::new();
             if let Some(results) = results {
                 for result in results {
-                    if let Some(targets) = self.map_memory_target(result, &targets, flow, source)? {
+                    if let Some(targets) = self.map_or_external_raw_target(
+                        result,
+                        &leaf.pointee,
+                        &targets,
+                        flow,
+                        source,
+                    )? {
                         actual.extend(targets);
                     } else {
                         actual.insert(unknown_pointer_target());
@@ -15044,6 +15181,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else if !matches!(
             &expr.kind,
             K::Tuple(_)
+                | K::Array(_)
                 | K::AnonymousRecord { .. }
                 | K::Record { .. }
                 | K::OptionalPresent(_)
@@ -15690,7 +15828,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<Option<BTreeSet<Place>>, Error> {
         if matches!(
             nir::intrinsics::checked(expr).map(|checked| checked.operation()),
-            Ok(nir::intrinsics::Operation::MemRawPtr)
+            Ok(nir::intrinsics::Operation::MemRawPtr
+                | nir::intrinsics::Operation::MemRawRead
+                | nir::intrinsics::Operation::MemManuallyDropUnwrap)
         ) {
             self.expr(expr, flow, depth + 1)?;
             if !flow.live {
@@ -15823,6 +15963,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else if !matches!(
             expr.kind,
             K::Tuple(_)
+                | K::Array(_)
                 | K::Closure { .. }
                 | K::Record { .. }
                 | K::AnonymousRecord { .. }
@@ -17184,6 +17325,15 @@ fn ownership_shape_with_cache(
             let fields = nir::normal_forms::tuple_fields(Some(package), ty)
                 .ok_or_else(|| "missing tuple fields in ownership shape".to_string())?;
             ownership_shape_fields(package, fields, cache.as_deref_mut(), fuel, depth)?
+        }
+        Term::NormalForm { .. }
+            if nir::normal_forms::array_element_and_len(Some(package), ty).is_some() =>
+        {
+            super::memory::bound_type(ty, fuel)?;
+            let (elem, len) = nir::normal_forms::array_element_and_len(Some(package), ty)
+                .ok_or_else(|| "missing array layout in ownership shape".to_string())?;
+            let fields = vec![elem.clone(); len];
+            ownership_shape_fields(package, &fields, cache.as_deref_mut(), fuel, depth)?
         }
         Term::Record(fields) => {
             super::memory::bound_type(ty, fuel)?;

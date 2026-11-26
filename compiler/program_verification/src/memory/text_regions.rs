@@ -1390,9 +1390,10 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                     return Err("text pattern field arity mismatch".into());
                 }
                 let values = value.and_then(|value| match &value.kind {
-                    K::Tuple(fields) | K::Record { fields, .. } | K::AnonymousRecord { fields } => {
-                        Some(fields.as_slice())
-                    }
+                    K::Tuple(fields)
+                    | K::Array(fields)
+                    | K::Record { fields, .. }
+                    | K::AnonymousRecord { fields } => Some(fields.as_slice()),
                     _ => None,
                 });
                 let mut matched = Some(true);

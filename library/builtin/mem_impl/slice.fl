@@ -1,4 +1,4 @@
-use mem_impl.raw.{align_up_usize, checked_add_usize, checked_mul_usize, raw_read}
+use mem_impl.raw.{align_up_usize, checked_add_usize, checked_mul_usize, raw_ptr, raw_read}
 use numeric.comparison.Eq;
 use primitives.{Type, bool, usize}
 use protocols.formatting.debug.Debug;
@@ -95,6 +95,15 @@ impl Slice<T> where T {
             return Type.align_of(T);
         }
         self.raw_addr.*
+    }
+
+    pub fn get_ref(*self, index: usize) -> ?*T {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        if index >= len {
+            return null;
+        }
+        unsafe { raw_ptr<T>(slot_address<T>(base, index)) }
     }
 
     pub fn slice(*self, start: usize, end: usize) -> ?Slice<T> {

@@ -423,6 +423,7 @@ fn scan<'a>(
                     work.push(Work::Expr(value, context.clone()));
                 }
                 K::Tuple(fields)
+                | K::Array(fields)
                 | K::Object { fields, .. }
                 | K::AnonymousRecord { fields }
                 | K::Record { fields, .. }

@@ -26,7 +26,7 @@ pub use abi::{AbiEntry, calling_conventions};
 pub use compilation::{IntrinsicEnumMarker, intrinsic_enum_markers};
 pub use derivation::{DefaultStrategyMarker, default_strategy_markers};
 pub use effects::{EffectDirectPassing, direct_passing_effects};
-pub use layout::{PackedStructLayout, packed_structs};
+pub use layout::{AlignTarget, PackedStructLayout, aligned_layouts, packed_structs};
 pub use macros::{MacroHandlerAttr, MacroKindTag, macro_handlers};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
@@ -125,6 +125,7 @@ impl Checker<'_, '_> {
                 .filter(|entry| entry.mode.is_packed())
                 .map(|entry| entry.owner)
                 .collect();
+            let aligned = aligned_layouts(self.package, &selected, &packed_owners, &mut budget)?;
             let volatile = volatile_targets(self.package, &selected, &packed_owners, &mut budget)?;
             let direct_passing = direct_passing_effects(self.package, &selected, &mut budget)?;
             let _metadata = metadata_entries(self.package, &selected, &mut budget)?;
@@ -145,6 +146,7 @@ impl Checker<'_, '_> {
                                 | "__flurry_direct_passing"
                                 | "__flurry_metadata"
                                 | "__flurry_packed_mode"
+                                | "__flurry_align"
                                 | "__flurry_volatile"
                                 | "__flurry_abi"
                                 | "__flurry_purity"
@@ -175,6 +177,7 @@ impl Checker<'_, '_> {
             Ok((
                 phases,
                 packed,
+                aligned,
                 volatile,
                 direct_passing,
                 quote_templates,
@@ -198,6 +201,7 @@ impl Checker<'_, '_> {
         let (
             phases,
             packed,
+            aligned,
             volatile,
             direct_passing,
             quote_templates,
@@ -252,6 +256,26 @@ impl Checker<'_, '_> {
                         .insert(field_index);
                 }
                 _ => {}
+            }
+        }
+        self.layout_alignments = Default::default();
+        for entry in aligned {
+            match entry {
+                AlignTarget::Definition { owner, align, .. } => {
+                    let id = declaration(self.package, &self.package_identities, owner);
+                    self.layout_alignments.declarations.insert(id, align);
+                }
+                AlignTarget::Field {
+                    owner,
+                    field_index,
+                    align,
+                    ..
+                } => {
+                    let id = declaration(self.package, &self.package_identities, owner);
+                    self.layout_alignments
+                        .fields
+                        .insert((id, field_index), align);
+                }
             }
         }
         self.direct_passing_effects = direct_passing

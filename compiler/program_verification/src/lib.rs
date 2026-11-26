@@ -235,6 +235,26 @@ impl<'a> PackageSession<'a> {
             .callable_parameter_paths(self.package, signature, fuel, source)
     }
 
+    pub fn effect_result_slots_for_function(
+        &mut self,
+        function: &nir::program::Function,
+        env_parameter_types: &[nir::Term],
+        fuel: &mut usize,
+    ) -> Result<Vec<usize>, moves::Error> {
+        moves::effect_result_slots_with_body(
+            self.package,
+            self.declarations.as_ref(),
+            self.source,
+            &mut self.methods,
+            &function.signature,
+            env_parameter_types,
+            Some(&function.body),
+            !function.type_parameters.is_empty(),
+            fuel,
+            function.body.source,
+        )
+    }
+
     pub fn cleanup_session<'w>(
         &self,
         world: &'a capabilities::World<'w>,

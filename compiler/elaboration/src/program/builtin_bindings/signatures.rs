@@ -137,6 +137,27 @@ pub(super) fn callable(
             arguments: vec![ty],
         })
     };
+    if name == "bounded_stack_bytes" {
+        return Ok(Some(Term::PureFunction(Box::new(Term::ComptimeFunction(
+            Box::new(Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::Type,
+                        ty: p(P::Type),
+                    },
+                    Parameter {
+                        sort: Sort::Runtime,
+                        ty: Term::Bound {
+                            depth: 0,
+                            index: 0,
+                            sort: Sort::Type,
+                        },
+                    },
+                ],
+                result: Box::new(Term::Optional(Box::new(p(P::Usize)))),
+            }),
+        )))));
+    }
     if matches!(name, "list_length" | "list_concat") {
         let element = Term::Bound {
             depth: 0,
@@ -319,9 +340,19 @@ pub(super) fn callable(
                 },
             )
         }
+        "tuple_len" => (vec![p(P::Type)], Term::Optional(Box::new(p(P::Usize)))),
+        "tuple_elem" => (
+            vec![p(P::Type), p(P::Usize)],
+            Term::Optional(Box::new(p(P::Type))),
+        ),
+        "compile_error" => (vec![p(P::Str)], p(P::Never)),
+        "emit_diagnostic" => (
+            vec![p(P::U8), p(P::Str), p(P::Str), p(P::Usize), p(P::Usize)],
+            p(P::Void),
+        ),
         _ => return Ok(None),
     };
-    Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
+    let comptime_fn = Term::ComptimeFunction(Box::new(Term::Function {
         parameters: inputs
             .into_iter()
             .map(|ty| Parameter {
@@ -330,7 +361,12 @@ pub(super) fn callable(
             })
             .collect(),
         result: Box::new(output),
-    }))))
+    }));
+    Ok(Some(if matches!(name, "tuple_len" | "tuple_elem") {
+        Term::PureFunction(Box::new(comptime_fn))
+    } else {
+        comptime_fn
+    }))
 }
 
 pub(super) fn text_query(name: &str) -> Option<n::TextQueryKind> {

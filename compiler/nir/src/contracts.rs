@@ -417,6 +417,7 @@ pub fn remap_predicate_metered(
                 pending.push(end);
             }
             K::Tuple(fields)
+            | K::Array(fields)
             | K::Record { fields, .. }
             | K::AnonymousRecord { fields, .. }
             | K::Variant { fields, .. } => pending.extend(fields),

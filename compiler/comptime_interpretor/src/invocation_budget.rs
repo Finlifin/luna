@@ -74,6 +74,7 @@ pub(super) fn charge_world_tables(
         runtime_function_identities,
         open_function_identities: _,
         normal_forms,
+        normal_form_results: _,
         dispatch_instances: _,
         traits,
         implementations,
@@ -88,6 +89,7 @@ pub(super) fn charge_world_tables(
         statics: _,
         global_runtime_deliveries,
         reflection_spans: _,
+        layout_alignments: _,
     } = package;
     let cost = [
         volatile_storage.entry_count(),

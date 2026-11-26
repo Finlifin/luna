@@ -374,6 +374,7 @@ impl Analyzer<'_, '_, '_, '_> {
                 self.control(value, n, fuel, depth + 1)
             }
             K::Tuple(fields)
+            | K::Array(fields)
             | K::Record { fields, .. }
             | K::Variant { fields, .. }
             | K::Object { fields, .. }

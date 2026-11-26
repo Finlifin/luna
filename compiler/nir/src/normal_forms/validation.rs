@@ -93,6 +93,25 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                 "meta.List binding has an invalid constructor signature: expected exactly one Type input",
             ));
         }
+        if head.role == Role::Array
+            && (head.parameters.len() != 2
+                || head.parameters[0].kind != Kind::Type
+                || head.parameters[1].kind != Kind::Value
+                || head.parameters[1].ty != Term::Primitive(Primitive::Usize))
+        {
+            return Err(Invalid(
+                "Array binding has an invalid constructor signature: expected (Type, usize)",
+            ));
+        }
+        if matches!(
+            head.role,
+            Role::MaybeUninitStorage | Role::ManuallyDropStorage
+        ) && (head.parameters.len() != 1 || head.parameters[0].kind != Kind::Type)
+        {
+            return Err(Invalid(
+                "storage wrapper binding has an invalid constructor signature: expected (Type)",
+            ));
+        }
         if head
             .collector
             .as_ref()
@@ -127,24 +146,30 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                             "normal-form head cannot accept a runtime lift domain",
                         ));
                     }
-                    let supported = supported_input_type_in_scope(
-                        &parameter.ty,
-                        |id, sort, _| Ok(prior.get(&id) == Some(&sort)),
-                        |id| {
-                            descriptors
-                                .get(&id)
-                                .is_some_and(|head| head.role == Role::Tuple)
-                        },
-                        |id| {
-                            descriptors
-                                .get(&id)
-                                .is_some_and(|head| head.role == Role::TypeList)
-                        },
-                        |id| nominal.contains(&id),
-                        package.target,
-                        fuel,
-                    )
-                    .map_err(|_| ValidationError::Budget)?;
+                    let supported = if head.role == Role::Array
+                        && parameter.ty == Term::Primitive(Primitive::Usize)
+                    {
+                        true
+                    } else {
+                        supported_input_type_in_scope(
+                            &parameter.ty,
+                            |id, sort, _| Ok(prior.get(&id) == Some(&sort)),
+                            |id| {
+                                descriptors
+                                    .get(&id)
+                                    .is_some_and(|head| head.role == Role::Tuple)
+                            },
+                            |id| {
+                                descriptors
+                                    .get(&id)
+                                    .is_some_and(|head| head.role == Role::TypeList)
+                            },
+                            |id| nominal.contains(&id),
+                            package.target,
+                            fuel,
+                        )
+                        .map_err(|_| ValidationError::Budget)?
+                    };
                     if !supported {
                         return Err(Invalid(
                             "normal-form value input has an unsupported or forward-dependent type",
@@ -214,8 +239,14 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
         let Term::Function { parameters, result } = &function.signature else {
             return Err(Invalid("normal-form body signature is not a function"));
         };
-        if (matches!(head.role, Role::Tuple | Role::TypeList)
-            && **result != Term::Primitive(Primitive::Type))
+        if (matches!(
+            head.role,
+            Role::Tuple
+                | Role::TypeList
+                | Role::Array
+                | Role::MaybeUninitStorage
+                | Role::ManuallyDropStorage
+        ) && **result != Term::Primitive(Primitive::Type))
             || result.sort() != Sort::Type
             || parameters.len() != values.len()
             || parameters

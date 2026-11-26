@@ -1857,6 +1857,7 @@ impl<'a> PhaseContext<'a> {
                             )?;
                         }
                         K::TypeList(fields)
+                        | K::Array(fields)
                         | K::Tuple(fields)
                         | K::Record { fields, .. }
                         | K::Variant { fields, .. } => work.extend(
@@ -2059,7 +2060,12 @@ impl<'a> PhaseContext<'a> {
                         | K::EnumVariantSpans(value)
                         | K::EnumVariantFieldSpans(value)
                         | K::ComptimeEnumVariantIndex(value)
-                        | K::ComptimeEnumVariantFieldValues(value) => {
+                        | K::ComptimeEnumVariantFieldValues(value)
+                        | K::TupleLen(value)
+                        | K::TupleElem(value)
+                        | K::CompileError(value)
+                        | K::EmitDiagnostic(value)
+                        | K::BoundedStackBytes(value) => {
                             if !ct {
                                 return Err(fail(
                                     expr.source,

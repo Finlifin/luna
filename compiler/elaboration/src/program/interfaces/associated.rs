@@ -1296,7 +1296,20 @@ impl Checker<'_, '_> {
                             (contract.declaration, true)
                         };
                     let owner = self.associated_owner(declaration).unwrap();
-                    if let Some(mut callee) = self.associated_contract(owner, true)?.default {
+                    let default_callee = if !substitution
+                        && !self
+                            .declaration_or_enclosing_impl_type_parameters(owner)
+                            .is_empty()
+                    {
+                        Some(
+                            self.associated_default_template(owner, &contract.ty)?
+                                .into_expression(&mut self.required_steps)
+                                .map_err(|failure| error(span, failure))?,
+                        )
+                    } else {
+                        self.associated_contract(owner, true)?.default
+                    };
+                    if let Some(mut callee) = default_callee {
                         constants::charge_copy(&callee, &mut self.required_steps, span)?;
                         if substitution {
                             let inputs: Vec<_> = std::iter::once(subject.clone())
@@ -1553,7 +1566,7 @@ impl Checker<'_, '_> {
                     kind: K::TypeValue(p(P::Void)),
                 }
             } else {
-                return Ok(None);
+                return self.try_symbolic_associated_type_call(&callee, call_arguments, span);
             };
             expr_args.push(n::CallArgument {
                 passing: n::ArgumentPassing::Value,
@@ -1616,6 +1629,64 @@ impl Checker<'_, '_> {
             )
         });
         if leaked_abstract {
+            return Ok(None);
+        }
+        Ok(Some(resolved))
+    }
+
+    fn try_symbolic_associated_type_call(
+        &mut self,
+        callee: &n::Expr,
+        call_arguments: &[Term],
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let Some((closure_params, body)) = Self::extract_constant_closure(callee) else {
+            return Ok(None);
+        };
+        if closure_params.len() != call_arguments.len() {
+            return Ok(None);
+        }
+        let mut facts = BTreeMap::new();
+        let mut decl_ids = Vec::new();
+        let mut decl_domains = Vec::new();
+        let mut decl_values = Vec::new();
+        for (&param_id, arg) in closure_params.iter().zip(call_arguments) {
+            facts.insert(param_id, std::sync::Arc::new(arg.clone()));
+            if let Some(Some(staged)) = self.callable_type_inputs.get(&param_id) {
+                decl_ids.push(staged.declaration);
+                decl_domains.push(staged.domain.clone());
+                decl_values.push(arg.clone());
+            }
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let observed = super::super::normal::observation::optional(
+            self.observe_preserved_input_in(body, facts, BTreeSet::new(), &mut budget),
+        );
+        self.required_steps -= (before - budget.steps) as u64;
+        let Ok(Some(mut resolved)) = observed else {
+            return Ok(None);
+        };
+        if !decl_ids.is_empty() {
+            let frames = self.call_input_frames();
+            let mut fuel = 10_000usize;
+            let subst = nir::DeclarationSubstitution::bounded(
+                &decl_ids,
+                &decl_domains,
+                &decl_values,
+                &frames,
+                &mut fuel,
+            )
+            .and_then(|s| s.instantiate_bounded(&resolved, &mut fuel));
+            let Ok(instantiated) = subst else {
+                return Ok(None);
+            };
+            resolved = instantiated;
+        }
+        if resolved.sort() != Sort::Type {
             return Ok(None);
         }
         Ok(Some(resolved))
@@ -1749,7 +1820,23 @@ impl Checker<'_, '_> {
                     initializer,
                 )?
             } else {
-                this.expr(initializer, Some(expected))?
+                let expr = this.expr(initializer, Some(expected))?;
+                if *expected == p(P::Type)
+                    && matches!(
+                        &expr.kind,
+                        K::Block { result: Some(res), .. } if matches!(res.kind, K::TypeValue(_))
+                    )
+                    && let Some(term) =
+                        this.preserved_input_identity(&expr, |_, _| Ok(None), initializer.span)?
+                {
+                    n::Expr {
+                        ty: p(P::Type),
+                        source: expr.source,
+                        kind: K::TypeValue(term),
+                    }
+                } else {
+                    expr
+                }
             };
             let before = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
             let mut fuel = before;

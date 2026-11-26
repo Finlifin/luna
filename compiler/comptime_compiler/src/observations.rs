@@ -22,6 +22,11 @@ pub enum Kind {
     EnumVariantFieldSpans,
     ComptimeEnumVariantIndex,
     ComptimeEnumVariantFieldValues,
+    TupleLen,
+    TupleElem,
+    BoundedStackBytes,
+    CompileError,
+    EmitDiagnostic,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +86,11 @@ impl fmt::Display for Kind {
             Self::ComptimeEnumVariantFieldValues => {
                 f.write_str("comptime-enum-variant-field-values")
             }
+            Self::TupleLen => write!(f, "tuple-len"),
+            Self::TupleElem => write!(f, "tuple-elem"),
+            Self::BoundedStackBytes => write!(f, "bounded-stack-bytes"),
+            Self::CompileError => write!(f, "compile-error"),
+            Self::EmitDiagnostic => write!(f, "emit-diagnostic"),
         }
     }
 }

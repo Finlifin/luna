@@ -2,6 +2,23 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    fn capture_local(&mut self, binding: n::LocalId, ty: &Term) {
+        for frame in &mut self.captures {
+            if frame.outer.contains(&binding)
+                && !frame
+                    .values
+                    .iter()
+                    .any(|capture| capture.binding == binding)
+            {
+                frame.values.push(n::Capture {
+                    value: None,
+                    binding,
+                    ty: ty.clone(),
+                });
+            }
+        }
+    }
+
     #[inline(never)]
     pub(super) fn special_value_expression(
         &mut self,
@@ -38,6 +55,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
+                self.capture_local(binding, &ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
@@ -148,6 +166,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
+                self.capture_local(binding, &ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
@@ -159,20 +178,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
-                for frame in &mut self.captures {
-                    if frame.outer.contains(&binding)
-                        && !frame
-                            .values
-                            .iter()
-                            .any(|capture| capture.binding == binding)
-                    {
-                        frame.values.push(n::Capture {
-                            binding,
-                            ty: ty.clone(),
-                            value: None,
-                        });
-                    }
-                }
+                self.capture_local(binding, &ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
@@ -190,20 +196,7 @@ impl Checker<'_, '_> {
                 if let Some(expected) = expected {
                     self.require_expression(&inner_ty, expected, expr.span)?;
                 }
-                for frame in &mut self.captures {
-                    if frame.outer.contains(&binding)
-                        && !frame
-                            .values
-                            .iter()
-                            .any(|capture| capture.binding == binding)
-                    {
-                        frame.values.push(n::Capture {
-                            value: None,
-                            binding,
-                            ty: inner_ty.clone(),
-                        });
-                    }
-                }
+                self.capture_local(binding, &inner_ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty: inner_ty,
@@ -284,14 +277,16 @@ impl Checker<'_, '_> {
                 .values()
                 .flatten()
                 .find(|(d, _, ty)| *d == declaration && *ty != p(P::Type))
+                .cloned()
             {
                 if let Some(expected) = expected {
-                    self.require(ty, expected, expr.span)?;
+                    self.require(&ty, expected, expr.span)?;
                 }
+                self.capture_local(binding, &ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
-                    ty: ty.clone(),
-                    kind: K::Local(*binding),
+                    ty,
+                    kind: K::Local(binding),
                 }));
             }
             // Container value parameters are generic inputs, not function locals.
@@ -847,6 +842,27 @@ impl Checker<'_, '_> {
                 return self
                     .check_list_fields(expr, items, expected, &element)
                     .map(Some);
+            }
+            if let Some((element, expected_len)) = self.array_element_and_len(expected) {
+                if items.len() != expected_len {
+                    return Err(error(
+                        expr.span,
+                        format!(
+                            "array literal has {} element(s), expected {}",
+                            items.len(),
+                            expected_len
+                        ),
+                    ));
+                }
+                let mut checked = Vec::with_capacity(items.len());
+                for item in *items {
+                    checked.push(self.expr(item, Some(&element))?);
+                }
+                return Ok(Some(n::Expr {
+                    source: source(expr.span),
+                    ty: expected.clone(),
+                    kind: K::Array(checked),
+                }));
             }
         }
         if expected.is_none() && matches!(expr.kind, H::List(_)) {

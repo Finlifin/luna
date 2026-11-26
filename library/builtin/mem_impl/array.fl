@@ -1,0 +1,369 @@
+use bindings.{integer_to_usize, tuple_elem, tuple_len};
+use mem_impl.maybe_uninit.MaybeUninit;
+use mem_impl.raw as raw;
+use mem_impl.slice.Slice;
+use numeric.comparison.{Eq, Ord, Order}
+use primitives.{Type, bool, str, usize, void}
+use protocols.formatting.debug.Debug;
+use protocols.formatting.writer.ByteWriter;
+use protocols.hash.{Hash, Hasher}
+use protocols.iterator.{IntoIterator, Iterator, emit_item}
+use protocols.ops.{Index, IndexMut, VariadicCollector}
+use protocols.resources.{Clone, Copy, Drop}
+use protocols.traits.Default;
+
+pub const Array: pure comptime fn<T: Type, N: usize> -> Type = .Array'builtin;
+
+pub pure comptime fn tuple_len_or_zero(tuple_ty: Type) -> usize {
+    tuple_len(tuple_ty) match {
+        value? => value,
+        null => 0,
+    }
+}
+
+pub comptime fn require_array_variadic_shape(elem_ty: Type, len: usize, tuple_ty: Type) -> Type {
+    if not Type.predicates.is_tuple(tuple_ty) or tuple_len_or_zero(tuple_ty) != len {
+        bindings.compile_error("variadic argument count does not match Array length");
+    }
+    var i: usize = 0;
+    while i < len {
+        tuple_elem(tuple_ty, i) match {
+            actual? => {
+                if actual != elem_ty {
+                    bindings.compile_error("variadic argument type does not match Array element type");
+                }
+            },
+            null => bindings.compile_error("variadic argument count does not match Array length"),
+        }
+        i = i + 1;
+    }
+    void
+}
+
+fn discard_variadic_arg(value: V) where V {}
+
+{-
+    Stack-allocated scratch buffer used for zero-heap-allocation `Slice<T>`
+    variadic collection and exception/early-return-safe incremental `Array<T, N>`
+    initialization. Tracks `initialized` so `Drop` destroys only the initialized
+    prefix if unwinding occurs before completion.
+-}
+pub struct VariadicArrayBuffer
+where
+    T,
+    N: usize,
+{
+    initialized: usize,
+    storage: MaybeUninit<Array<T, N>>,
+}
+
+impl VariadicArrayBuffer<T, N> where T, N: usize {
+    pub fn uninit() -> VariadicArrayBuffer<T, N> {
+        VariadicArrayBuffer<T, N> {
+            initialized: 0,
+            storage: unsafe { MaybeUninit<Array<T, N>>.uninit() },
+        }
+    }
+
+    pub fn write_slot(*self, idx: usize, elem: T) {
+        assumes idx < N;
+        let base = unsafe { raw.ptr_cast<Array<T, N>, T>(self.storage.as_mut_ptr()) };
+        unsafe { raw.write<T>(raw.ptr_add<T>(base, idx), elem) };
+        self.initialized.* = idx + 1;
+    }
+
+    pub fn as_slice(*self) -> Slice<T> {
+        let base = unsafe { raw.ptr_cast<Array<T, N>, T>(self.storage.as_ptr()) };
+        let addr = unsafe { raw.ptr_addr<T>(base) };
+        unsafe { Slice<T>.from_raw_parts(addr, self.initialized.*) }
+    }
+
+    pub fn into_array(*self) -> Array<T, N> {
+        assumes self.initialized.* == N;
+        self.initialized.* = 0;
+        unsafe { raw.read<Array<T, N>>(self.storage.as_ptr()) }
+    }
+}
+
+impl Drop for VariadicArrayBuffer<T, N> where T, N: usize {
+    fn drop(*self) {
+        let count = self.initialized.*;
+        let base = unsafe { raw.ptr_cast<Array<T, N>, T>(self.storage.as_mut_ptr()) };
+        var i: usize = 0;
+        while i < count {
+            unsafe { raw.drop_in_place<T>(raw.ptr_add<T>(base, i)) };
+            i = i + 1;
+        }
+        self.initialized.* = 0;
+    }
+}
+
+{-
+    Owning by-value iterator over `Array<T, N>`. Drops any remaining unconsumed
+    elements in `Drop`.
+-}
+pub struct ArrayIter
+where
+    T,
+    N: usize,
+{
+    index: usize,
+    storage: MaybeUninit<Array<T, N>>,
+}
+
+impl Iterator for ArrayIter<T, N> where T, N: usize {
+    assoc Item: Type = T;
+
+    inline fn iterate(self) -> #emit_item<T> void {
+        var iter = self;
+        while iter.index < N {
+            let idx = iter.index;
+            iter.index = idx + 1;
+            let base = unsafe { raw.ptr_cast<Array<T, N>, T>(iter.storage.as_ptr()) };
+            let elem = unsafe { raw.read<T>(raw.ptr_add<T>(base, idx)) };
+            emit_item<T>(elem)#;
+        }
+    }
+}
+
+impl Drop for ArrayIter<T, N> where T, N: usize {
+    fn drop(*self) {
+        var idx = self.index.*;
+        self.index.* = N;
+        let base = unsafe { raw.ptr_cast<Array<T, N>, T>(self.storage.as_mut_ptr()) };
+        while idx < N {
+            unsafe { raw.drop_in_place<T>(raw.ptr_add<T>(base, idx)) };
+            idx = idx + 1;
+        }
+        self.index.* = N;
+    }
+}
+
+impl Array<T, N> where T, N: usize {
+    pub pure fn len(*self) -> usize {
+        N
+    }
+
+    pub pure fn is_empty(*self) -> bool {
+        N == 0
+    }
+
+    pub unsafe fn as_ptr(*self) -> *T {
+        raw.ptr_cast<Array<T, N>, T>(self)
+    }
+
+    pub unsafe fn as_mut_ptr(*self) -> *T {
+        raw.ptr_cast<Array<T, N>, T>(self)
+    }
+
+    pub fn as_slice(*self) -> Slice<T> {
+        let base = unsafe { self.as_ptr() };
+        let addr = unsafe { raw.ptr_addr<T>(base) };
+        unsafe { Slice<T>.from_raw_parts(addr, N) }
+    }
+
+    pub fn get(*self, index: usize) -> ?T where requires T :- Copy {
+        if index < N {
+            unsafe { raw.read<T>(raw.ptr_add<T>(self.as_ptr(), index)) }
+        } else {
+            null
+        }
+    }
+
+    pub fn get_ref(*self, index: usize) -> ?*T {
+        if index < N {
+            unsafe { raw.ptr_add<T>(self.as_ptr(), index) }
+        } else {
+            null
+        }
+    }
+
+    pub fn first(*self) -> ?*T {
+        self.get_ref(0)
+    }
+
+    pub fn last(*self) -> ?*T {
+        if N == 0 {
+            null
+        } else {
+            self.get_ref(N - 1)
+        }
+    }
+
+    pub fn from_repeat(value: T) -> Array<T, N> where requires T :- Clone {
+        var buf = VariadicArrayBuffer<T, N>.uninit();
+        var i: usize = 0;
+        while i < N {
+            let cloned = value.as(Clone).clone();
+            buf.write_slot(i, cloned);
+            i = i + 1;
+        }
+        buf.into_array()
+    }
+
+    pub fn from_fn(f: %c fn(usize) -> T) -> Array<T, N> where c: Type.vars.Closure {
+        var buf = VariadicArrayBuffer<T, N>.uninit();
+        var i: usize = 0;
+        while i < N {
+            buf.write_slot(i, f(i));
+            i = i + 1;
+        }
+        buf.into_array()
+    }
+}
+
+impl Index<usize> for Array<T, N> where T, N: usize {
+    assoc Output: Type = T;
+
+    fn index(*self, idx: usize) -> *T {
+        assumes idx < N;
+        unsafe { raw.ptr_add<T>(self.as_ptr(), idx) }
+    }
+}
+
+impl IndexMut<usize> for Array<T, N> where T, N: usize {
+    fn index_mut(*self, idx: usize) -> *T {
+        assumes idx < N;
+        unsafe { raw.ptr_add<T>(self.as_mut_ptr(), idx) }
+    }
+}
+
+impl IntoIterator for Array<T, N> where T, N: usize {
+    assoc Iter: Type = ArrayIter<T, N>;
+
+    fn into_iter(self) -> ArrayIter<T, N> {
+        ArrayIter<T, N> {
+            index: 0,
+            storage: MaybeUninit<Array<T, N>>.new(self),
+        }
+    }
+}
+
+impl Clone for Array<T, N> where T :- Clone, N: usize {
+    fn clone(*self) -> Self {
+        var buf = VariadicArrayBuffer<T, N>.uninit();
+        let base = unsafe { self.as_ptr() };
+        var i: usize = 0;
+        while i < N {
+            let slot = unsafe { raw.ptr_add<T>(base, i) };
+            var elem = unsafe { raw.read<T>(slot) };
+            let item = elem.as(Clone).clone();
+            unsafe { raw.write<T>(slot, elem) };
+            buf.write_slot(i, item);
+            i = i + 1;
+        }
+        buf.into_array()
+    }
+}
+
+impl Copy for Array<T, N> where T :- Copy, N: usize {}
+
+impl Default for Array<T, N> where T :- Default, N: usize {
+    fn default() -> Self {
+        var buf = VariadicArrayBuffer<T, N>.uninit();
+        var i: usize = 0;
+        while i < N {
+            buf.write_slot(i, T.default());
+            i = i + 1;
+        }
+        buf.into_array()
+    }
+}
+
+impl Eq for Array<T, N> where T :- Eq, N: usize {
+    fn eq(*self, other: *Self) -> bool {
+        let lhs_base = unsafe { self.as_ptr() };
+        let rhs_base = unsafe { other.as_ptr() };
+        var i: usize = 0;
+        while i < N {
+            let lhs = unsafe { raw.ptr_add<T>(lhs_base, i) };
+            let rhs = unsafe { raw.ptr_add<T>(rhs_base, i) };
+            if not lhs.as(Eq).eq(rhs) {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
+    }
+}
+
+impl Ord for Array<T, N> where T :- Ord, N: usize {
+    fn cmp(*self, other: *Self) -> Order {
+        let lhs_base = unsafe { self.as_ptr() };
+        let rhs_base = unsafe { other.as_ptr() };
+        var i: usize = 0;
+        while i < N {
+            let lhs = unsafe { raw.ptr_add<T>(lhs_base, i) };
+            let rhs = unsafe { raw.ptr_add<T>(rhs_base, i) };
+            lhs.as(Ord).cmp(rhs) match {
+                .less => return .less,
+                .greater => return .greater,
+                .equal => {},
+            }
+            i = i + 1;
+        }
+        .equal
+    }
+}
+
+impl Hash for Array<T, N> where T :- Hash, N: usize {
+    fn hash(*self, state: *H) where H: Type, requires H :- Hasher {
+        let count: usize = N;
+        count.as(Hash).hash(state);
+        let base = unsafe { self.as_ptr() };
+        var i: usize = 0;
+        while i < N {
+            let item = unsafe { raw.ptr_add<T>(base, i) };
+            item.as(Hash).hash(state);
+            i = i + 1;
+        }
+    }
+}
+
+impl Debug for Array<T, N> where T :- Debug, N: usize {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(91)!;
+        let base = unsafe { self.as_ptr() };
+        var i: usize = 0;
+        while i < N {
+            if i > 0 {
+                output.write_byte(44)!;
+                output.write_byte(32)!;
+            }
+            let item = unsafe { raw.ptr_add<T>(base, i) };
+            item.as(Debug).write_debug(output)!;
+            i = i + 1;
+        }
+        output.write_byte(93)
+    }
+}
+
+impl VariadicCollector for Array<T, N> where T, N: usize {
+    assoc Tmp: for<S: Type> Type = |_s: Type| -> Type {
+        require_array_variadic_shape(T, N, _s)
+    };
+
+    fn variadic_init() -> Tmp<S> where S {
+        ()
+    }
+
+    fn variadic_collect(_tmp: *Tmp<S>, args: S) -> Array<T, N> where S {
+        inline if Type.predicates.is_tuple(S) and tuple_len_or_zero(S) == N {
+            var buf = VariadicArrayBuffer<T, N>.uninit();
+            inline for (idx, elem) in args'tuple_indexed {
+                inline if elem'type == T {
+                    buf.write_slot(integer_to_usize(idx), elem);
+                } else {
+                    discard_variadic_arg(elem);
+                    assumes false;
+                }
+            };
+            buf.into_array()
+        } else {
+            discard_variadic_arg(args);
+            assumes false;
+            var empty = VariadicArrayBuffer<T, N>.uninit();
+            empty.into_array()
+        }
+    }
+}

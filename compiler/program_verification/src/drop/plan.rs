@@ -350,6 +350,12 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
     if let Some(fields) = nir::normal_forms::tuple_fields(Some(package), ty) {
         return Ok(Layout::Fields(fields.to_vec()));
     }
+    if let Some((elem, len)) = nir::normal_forms::array_element_and_len(Some(package), ty) {
+        return Ok(Layout::Fields(vec![elem.clone(); len]));
+    }
+    if nir::normal_forms::storage_inner_type(Some(package), ty).is_some() {
+        return Ok(Layout::Atomic);
+    }
     match ty {
         // Optional cleanup uses a private absent/present switch. Only the
         // present branch owns a payload, including any nested optional value.

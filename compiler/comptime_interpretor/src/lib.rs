@@ -13,6 +13,7 @@ mod bytecode;
 mod cleanup;
 mod closure_identity;
 mod code_values;
+mod stack_bounds;
 
 #[cfg(test)]
 mod execution_test_support;
@@ -259,6 +260,10 @@ pub enum Value {
     String(Arc<str>),
     Symbol(Arc<str>),
     Tuple(Vec<Value>),
+    Array {
+        ty: Term,
+        values: Vec<Value>,
+    },
     /// A named structural product; labels survive host calls and storage paths.
     AnonymousRecord(Vec<(String, Value)>),
     /// Invocation-local ordered metadata, distinct from an anonymous record.
@@ -383,6 +388,11 @@ impl Value {
                     }
                 }
                 Value::List { values: fields, .. } => {
+                    for child in fields {
+                        visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::Array { values: fields, .. } => {
                     for child in fields {
                         visit(child, fuel, depth + 1, closures, storage, visitor)?;
                     }
@@ -654,6 +664,7 @@ pub enum ErrorKind {
     EffectControlTransfer,
     EffectValueConsumed,
     MissingImplicitCallSite,
+    CustomDiagnostic(String),
 }
 
 impl From<comptime_runtime::Error> for ErrorKind {
@@ -715,6 +726,7 @@ impl fmt::Display for Error {
                 f,
                 "implicit call-site intrinsic requires an active ImplicitPassing resolution context"
             )?,
+            ErrorKind::CustomDiagnostic(reason) => write!(f, "{reason}")?,
             _ => write!(f, "interpretation {:?}", self.kind)?,
         }
         if self.kind == ErrorKind::StepsExhausted {
@@ -728,6 +740,13 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmittedDiagnostic {
+    pub level: u8,
+    pub message: String,
+    pub source: SourceRange,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -943,6 +962,7 @@ pub struct Interpreter<'a> {
     invocation_depth: usize,
     invocation_depth_limit: usize,
     events: Vec<Event>,
+    emitted_diagnostics: Vec<EmittedDiagnostic>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -957,6 +977,10 @@ impl<'a> Interpreter<'a> {
 
     pub fn target(&self) -> Option<nir::target::TargetData> {
         self.target
+    }
+
+    pub fn take_emitted_diagnostics(&mut self) -> Vec<EmittedDiagnostic> {
+        std::mem::take(&mut self.emitted_diagnostics)
     }
 
     fn integer_layout(&self, primitive: Primitive) -> Option<(bool, u32)> {
@@ -2882,7 +2906,12 @@ impl<'a> Interpreter<'a> {
             | K::EnumVariantSpans(_)
             | K::EnumVariantFieldSpans(_)
             | K::ComptimeEnumVariantIndex(_)
-            | K::ComptimeEnumVariantFieldValues(_) => self.eval_observation(expr, environment),
+            | K::ComptimeEnumVariantFieldValues(_)
+            | K::TupleLen(_)
+            | K::TupleElem(_)
+            | K::BoundedStackBytes(_)
+            | K::CompileError(_)
+            | K::EmitDiagnostic(_) => self.eval_observation(expr, environment),
             K::TypeHasField { .. }
             | K::TypeFieldType { .. }
             | K::StructFieldType { .. }
@@ -2912,6 +2941,7 @@ impl<'a> Interpreter<'a> {
             K::FunctionInstance { .. } => self.eval_function_instance(expr, environment),
             K::Closure { .. } => self.eval_closure(expr, environment),
             K::Tuple(..) => self.eval_tuple(expr, environment),
+            K::Array(..) => self.eval_array(expr, environment),
             K::Match { .. } => self.eval_match(expr, environment),
             K::Block { .. } | K::CallPreparation { .. } => self.eval_block(expr, environment),
             K::LetPattern { .. } => self.eval_let_pattern(expr, environment),
@@ -3860,6 +3890,28 @@ impl<'a> Interpreter<'a> {
                         values.push(value);
                     }
                     Value::Tuple(values)
+                }
+                _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
+            };
+            Ok(Flow::Value(result))
+        })
+    }
+
+    #[inline(never)]
+    fn eval_array(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
+        self.with_prepared_frame(expr.source, |this| {
+            let result = match &expr.kind {
+                K::Array(items) => {
+                    let mut values = Vec::new();
+                    for (slot, item) in items.iter().enumerate() {
+                        let value = value!(this.eval(item, environment));
+                        this.retain_prepared(slot, item.source, &value)?;
+                        values.push(value);
+                    }
+                    Value::Array {
+                        ty: expr.ty.clone(),
+                        values,
+                    }
                 }
                 _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
             };
@@ -5142,6 +5194,13 @@ impl fmt::Display for Value {
             Self::Function(id) => write!(f, "(function {id})"),
             Self::List { ty, values } => {
                 write!(f, "(comptime-list (type {ty}) (values")?;
+                for value in values {
+                    write!(f, " {value}")?;
+                }
+                f.write_str("))")
+            }
+            Self::Array { ty, values } => {
+                write!(f, "(array-value (type {ty}) (values")?;
                 for value in values {
                     write!(f, " {value}")?;
                 }

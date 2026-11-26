@@ -10,6 +10,8 @@ pub(super) fn state_count(fields: &std::sync::Arc<Vec<Ty>>) -> usize {
             | Ty::PackedRecord(fields)
             | Ty::Closure(fields)
             | Ty::TraitObjectClosure(fields) => state_count(fields),
+            Ty::AlignedRecord(layout) => 1 + layout.fields.iter().map(count).sum::<usize>(),
+            Ty::Array { elem, len, .. } => 1 + (*len) * count(elem),
             Ty::BitPackedRecord(layout) => {
                 1 + layout.fields.iter().map(|f| count(&f.ty)).sum::<usize>()
             }
@@ -34,6 +36,8 @@ pub(super) fn state_index(
             | Ty::PackedRecord(children)
             | Ty::Closure(children)
             | Ty::TraitObjectClosure(children) => children.get(index),
+            Ty::AlignedRecord(layout) => layout.fields.get(index),
+            Ty::Array { elem, len, .. } => (index < *len).then_some(elem.as_ref()),
             Ty::BitPackedRecord(layout) => layout.fields.get(index).map(|f| &f.ty),
             _ => None,
         }
@@ -53,6 +57,18 @@ pub(super) fn state_index(
                     .checked_sub(fields.len())
                     .ok_or("host capture state index budget exhausted")?;
                 pending.extend(fields.iter());
+            }
+            Ty::AlignedRecord(layout) => {
+                *fuel = fuel
+                    .checked_sub(layout.fields.len())
+                    .ok_or("host capture state index budget exhausted")?;
+                pending.extend(layout.fields.iter());
+            }
+            Ty::Array { elem, len, .. } => {
+                *fuel = fuel
+                    .checked_sub(*len)
+                    .ok_or("host capture state index budget exhausted")?;
+                pending.extend(std::iter::repeat_n(elem.as_ref(), *len));
             }
             Ty::BitPackedRecord(layout) => {
                 *fuel = fuel
@@ -75,6 +91,8 @@ pub(super) fn state_index(
         if !matches!(
             current,
             Ty::Record(_)
+                | Ty::AlignedRecord(_)
+                | Ty::Array { .. }
                 | Ty::PackedRecord(_)
                 | Ty::Closure(_)
                 | Ty::TraitObjectClosure(_)
@@ -863,24 +881,35 @@ impl Emitter<'_> {
                 let Some(slot) = self.closure_place(value, depth + 1)? else {
                     return Ok(None);
                 };
-                let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &slot.ty else {
-                    return Err("host closure field layout missing".into());
+                let (ty, llvm_index) = match &slot.ty {
+                    Ty::Record(fields) | Ty::PackedRecord(fields) => (
+                        fields
+                            .get(*index)
+                            .cloned()
+                            .ok_or("host closure field out of range")?,
+                        *index,
+                    ),
+                    Ty::AlignedRecord(layout) => (
+                        layout
+                            .fields
+                            .get(*index)
+                            .cloned()
+                            .ok_or("host closure aligned field out of range")?,
+                        layout.field_llvm_indices[*index],
+                    ),
+                    _ => return Err("host closure field layout missing".into()),
                 };
-                let ty = fields
-                    .get(*index)
-                    .cloned()
-                    .ok_or("host closure field out of range")?;
                 let align = if slot.align == Some(1)
                     || matches!(slot.ty, Ty::PackedRecord(_))
                     || matches!(ty, Ty::PackedRecord(_))
                 {
                     Some(1)
                 } else {
-                    slot.align
+                    slot.align.or_else(|| ty.explicit_align())
                 };
                 let name = self.fresh();
                 self.line(format!(
-                    "%{name} = getelementptr {}, ptr {}, i32 0, i32 {index}",
+                    "%{name} = getelementptr {}, ptr {}, i32 0, i32 {llvm_index}",
                     slot.ty.llvm(),
                     slot.pointer
                 ));

@@ -1,0 +1,55 @@
+use bindings;
+use builtin.{Any, isize, str, usize}
+
+{- Errors returned by capability-gated host execution bridges. -}
+pub enum HostInvokeErr {
+    PermissionDenied,
+    CommandFailed,
+    IoError,
+    Unavailable,
+}
+
+{- Explicit capability token kinds for comptime host invocation contracts. -}
+pub enum HostCapability {
+    filesystem,
+    network,
+    process,
+    environment,
+    clock,
+}
+
+{- Captured process output returned by host command invocations. -}
+pub struct HostOutput {
+    exit_code: isize,
+    stdout: str,
+    stderr: str,
+}
+
+impl HostOutput {
+    pub pure comptime fn new(exit_code: isize, stdout: str, stderr: str) -> HostOutput {
+        HostOutput {
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr,
+        }
+    }
+
+    pub pure comptime fn exit_code(self) -> isize {
+        self.exit_code
+    }
+
+    pub pure comptime fn stdout(self) -> str {
+        self.stdout
+    }
+
+    pub pure comptime fn stderr(self) -> str {
+        self.stderr
+    }
+}
+
+{- Compute a static NIR upper bound on stack frame bytes for a direct call graph rooted at `entry_fn`.
+   Returns `null` when recursion, indirect calls, unbounded loops/allocas, or overflow prevent proving a bound.
+   Note: reflects NIR/declared-alignment frame sizes; post-isel LLVM machine spills/stack protectors are not modeled. -}
+pub pure comptime fn bounded_stack_bytes(entry_fn: F) -> ?usize where F: Type {
+    bindings.bounded_stack_bytes(entry_fn)
+}

@@ -1,8 +1,10 @@
 use List;
 use ast_impl.span.SourceSpan;
 use builtin.{
+    Any,
     CallDescription,
     Integer,
+    NoReturn,
     Symbol,
     Type,
     i8,
@@ -11,12 +13,19 @@ use builtin.{
     i64,
     i128,
     isize,
+    str,
     u8,
     u16,
     u32,
     u64,
     u128,
     usize,
+    void,
+}
+use builtin.compiler.{
+    bounded_stack_bytes as compiler_bounded_stack_bytes,
+    compile_error as compiler_compile_error,
+    emit_diagnostic as compiler_emit_diagnostic,
 }
 use numeric.bindings.{
     integer_div_trunc as compiler_comptime_integer_div_trunc,
@@ -536,4 +545,22 @@ where
     S: Type,
 {
     .comptime_field_entry'builtin(value, name, field_ty)
+}
+
+pub comptime fn compile_error(message: str) -> NoReturn {
+    compiler_compile_error(message)
+}
+
+pub comptime fn emit_diagnostic_raw(
+    level: u8,
+    message: str,
+    file: str,
+    line: usize,
+    column: usize,
+) -> void {
+    compiler_emit_diagnostic(level, message, file, line, column)
+}
+
+pub pure comptime fn bounded_stack_bytes(entry_fn: F) -> ?usize where F: Type {
+    compiler_bounded_stack_bytes(entry_fn)
 }

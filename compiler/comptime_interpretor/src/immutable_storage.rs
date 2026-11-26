@@ -53,7 +53,10 @@ impl Interpreter<'_> {
                     })
             }
             Value::Closure(_) => self.check_comptime_graph_with_seen(value, source, depth, seen),
-            Value::Tuple(fields) | Value::Record { fields, .. } | Value::Variant { fields, .. } => {
+            Value::Tuple(fields)
+            | Value::Array { values: fields, .. }
+            | Value::Record { fields, .. }
+            | Value::Variant { fields, .. } => {
                 self.tick(Some(source))?;
                 for field in fields {
                     self.validate_container_replacement_at(field, source, depth + 1, seen)?;

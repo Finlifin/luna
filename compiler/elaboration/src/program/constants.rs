@@ -2328,6 +2328,7 @@ impl Checker<'_, '_> {
                     }
                 }
                 K::TypeList(values)
+                | K::Array(values)
                 | K::Tuple(values)
                 | K::Record { fields: values, .. }
                 | K::AnonymousRecord { fields: values }

@@ -145,6 +145,7 @@ impl Checker<'_, '_> {
             };
             if matches!(receiver, Term::NormalForm { .. }) {
                 index.set_normal_form_metadata(self.normal_form_metadata());
+                index.set_normal_form_results(self.normal_form_results());
             }
             let identity = declaration(self.package, &self.package_identities, owner);
             index
@@ -204,6 +205,7 @@ impl Checker<'_, '_> {
             self.newtypes.values(),
         );
         index.set_normal_form_metadata(self.normal_form_metadata());
+        index.set_normal_form_results(self.normal_form_results());
         // Preparing a candidate may discover List after the caller's context
         // was saved. Refresh its checked head metadata without importing the
         // candidate's binder assumptions into the caller's proof context.

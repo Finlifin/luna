@@ -327,6 +327,8 @@ pub struct Package {
     pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
     /// Checked `__flurry_volatile` declarations and struct fields.
     pub volatile_storage: nir::program::VolatileStorage,
+    /// Checked `__flurry_align` overrides on nominal declarations and struct fields.
+    pub layout_alignments: nir::program::LayoutAlignments,
     /// Compiled pattern-matching decision DAGs and list-view metadata keyed by `(function, source)`.
     pub match_plans: nir::match_plan::MatchPlans,
     pub statics: Vec<nir::program::Static>,
@@ -351,6 +353,33 @@ impl nir::LayoutWorld for IirLayoutWorld<'_> {
             .normal_forms
             .iter()
             .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn is_array_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::Array)
+    }
+
+    fn is_maybe_uninit_storage_head(&self, head: DeclarationId) -> bool {
+        self.0.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == nir::normal_forms::Role::MaybeUninitStorage
+        })
+    }
+
+    fn is_manually_drop_storage_head(&self, head: DeclarationId) -> bool {
+        self.0.normal_forms.iter().any(|nf| {
+            nf.declaration == head && nf.role == nir::normal_forms::Role::ManuallyDropStorage
+        })
+    }
+
+    fn declaration_alignment(&self, declaration: DeclarationId) -> Option<u64> {
+        self.0.layout_alignments.declaration_align(declaration)
+    }
+
+    fn field_alignment(&self, declaration: DeclarationId, index: usize) -> Option<u64> {
+        self.0.layout_alignments.field_align(declaration, index)
     }
 
     fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
@@ -1134,6 +1163,9 @@ impl fmt::Display for Package {
         }
         if !self.volatile_storage.is_empty() {
             write!(f, " {}", self.volatile_storage)?;
+        }
+        if !self.layout_alignments.is_empty() {
+            write!(f, " {}", self.layout_alignments)?;
         }
         if !self.match_plans.is_empty() {
             write!(f, " {}", self.match_plans)?;

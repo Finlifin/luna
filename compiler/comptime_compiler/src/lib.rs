@@ -363,6 +363,11 @@ pub enum Op {
         destination: Register,
         fields: Vec<Register>,
     },
+    Array {
+        destination: Register,
+        fields: Vec<Register>,
+        ty: Arc<Term>,
+    },
     MatchLeaf {
         destination: Register,
         value: Register,
@@ -1097,6 +1102,17 @@ impl fmt::Display for Program {
                     fields,
                 } => {
                     write!(f, "(tuple {destination} (inputs")?;
+                    for field in fields {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::Array {
+                    destination,
+                    fields,
+                    ty,
+                } => {
+                    write!(f, "(array {destination} {ty} (inputs")?;
                     for field in fields {
                         write!(f, " {field}")?;
                     }
@@ -1874,6 +1890,11 @@ fn compile_root<'a>(
                     | K::RecordFieldNames(_)
                     | K::ReflectCallable(_)
                     | K::TypeId(_)
+                    | K::TupleLen(_)
+                    | K::TupleElem(_)
+                    | K::BoundedStackBytes(_)
+                    | K::CompileError(_)
+                    | K::EmitDiagnostic(_)
                     | K::EnumStructure { .. }
                     | K::TypeLayout { .. }
                     | K::ImplicitQuery { .. }
@@ -1933,6 +1954,13 @@ fn compile_root<'a>(
                             K::ComptimeEnumVariantFieldValues(operand) => {
                                 (O::ComptimeEnumVariantFieldValues, operand.as_ref())
                             }
+                            K::TupleLen(operand) => (O::TupleLen, operand.as_ref()),
+                            K::TupleElem(operand) => (O::TupleElem, operand.as_ref()),
+                            K::BoundedStackBytes(operand) => {
+                                (O::BoundedStackBytes, operand.as_ref())
+                            }
+                            K::CompileError(operand) => (O::CompileError, operand.as_ref()),
+                            K::EmitDiagnostic(operand) => (O::EmitDiagnostic, operand.as_ref()),
                             _ => unreachable!(),
                         };
                         let observation = Arc::new(Observation {
@@ -2345,6 +2373,24 @@ fn compile_root<'a>(
                             Op::Tuple {
                                 destination: dst,
                                 fields: slots.clone(),
+                            },
+                        );
+                        for (field, slot) in fields.iter().zip(slots).rev() {
+                            work.push(Work::Expression(field, slot));
+                        }
+                    }
+                    K::Array(fields) => {
+                        *fuel = fuel
+                            .checked_sub(fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let slots: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        let ty = Arc::new(copy_term(&expr.ty, fuel, source)?);
+                        emit(
+                            &mut work,
+                            Op::Array {
+                                destination: dst,
+                                fields: slots.clone(),
+                                ty,
                             },
                         );
                         for (field, slot) in fields.iter().zip(slots).rev() {

@@ -1,4 +1,6 @@
 use bindings.{try_u128_to_usize, usize_representation}
+use mem_impl.manually_drop.ManuallyDropStorage;
+use mem_impl.maybe_uninit.MaybeUninitStorage;
 use numeric.math_intrinsics;
 use primitives.{Type, bool, i32, str, u128, u8, usize}
 
@@ -19,6 +21,10 @@ pub mod target {
         compare_bytes,
         borrow_str,
         ptr_addr,
+        uninit,
+        zeroed,
+        manually_drop_wrap,
+        manually_drop_unwrap,
     }
 }
 
@@ -141,4 +147,118 @@ pub fn align_up_usize(value: usize, align: usize) -> ?usize {
         null => return null,
     }
     math_intrinsics.bit_and(rounded, math_intrinsics.bit_xor(usize_max(), mask))
+}
+
+pub unsafe fn uninit_storage() -> MaybeUninitStorage<T> where T {
+    target.Memory.uninit'intrinsic().as(MaybeUninitStorage<T>)
+}
+
+pub unsafe fn zeroed_storage() -> MaybeUninitStorage<T> where T {
+    target.Memory.zeroed'intrinsic().as(MaybeUninitStorage<T>)
+}
+
+pub fn wrap_manually_drop(value: T) -> ManuallyDropStorage<T> where T {
+    unsafe { target.Memory.manually_drop_wrap'intrinsic(value).as(ManuallyDropStorage<T>) }
+}
+
+pub unsafe fn unwrap_manually_drop(storage: ManuallyDropStorage<T>) -> T where T {
+    target.Memory.manually_drop_unwrap'intrinsic(storage).as(T)
+}
+
+pub unsafe fn read(ptr: *T) -> T where T {
+    raw_read<T>(ptr_addr<T>(ptr))
+}
+
+pub unsafe fn write(ptr: *T, value: T) where T {
+    raw_write<T>(ptr_addr<T>(ptr), value);
+}
+
+pub unsafe fn zeroed() -> T where T {
+    let storage = zeroed_storage<T>();
+    raw_read<T>(ptr_addr<MaybeUninitStorage<T>>(storage.ref))
+}
+
+pub unsafe fn ptr_add(ptr: *T, count: usize) -> *T where T {
+    let elem = Type.size_of(T);
+    let byte_offset = checked_mul_usize(count, elem) match {
+        value? => value,
+        null => 0,
+    }
+    let next = checked_add_usize(ptr_addr<T>(ptr), byte_offset) match {
+        value? => value,
+        null => 0,
+    }
+    raw_ptr<T>(next)
+}
+
+pub unsafe fn ptr_sub(ptr: *T, count: usize) -> *T where T {
+    let elem = Type.size_of(T);
+    let byte_offset = checked_mul_usize(count, elem) match {
+        value? => value,
+        null => 0,
+    }
+    let next = checked_sub_usize(ptr_addr<T>(ptr), byte_offset) match {
+        value? => value,
+        null => 0,
+    }
+    raw_ptr<T>(next)
+}
+
+pub unsafe fn ptr_cast(ptr: *From) -> *To where From, To {
+    raw_ptr<To>(ptr_addr<From>(ptr))
+}
+
+pub unsafe fn ptr_is_null(ptr: *T) -> bool where T {
+    ptr_addr<T>(ptr) == 0
+}
+
+pub unsafe fn null_ptr() -> *T where T {
+    raw_ptr<T>(0)
+}
+
+pub unsafe fn copy(src: *T, dst: *T, count: usize) where T {
+    let elem = Type.size_of(T);
+    let bytes = checked_mul_usize(count, elem) match {
+        value? => value,
+        null => return,
+    }
+    copy_bytes(ptr_addr<T>(dst), ptr_addr<T>(src), bytes);
+}
+
+pub unsafe fn copy_nonoverlapping(src: *T, dst: *T, count: usize) where T {
+    let elem = Type.size_of(T);
+    let bytes = checked_mul_usize(count, elem) match {
+        value? => value,
+        null => return,
+    }
+    copy_bytes_nonoverlapping(ptr_addr<T>(dst), ptr_addr<T>(src), bytes);
+}
+
+pub unsafe fn write_bytes(dst: *T, byte: u8, count: usize) where T {
+    let elem = Type.size_of(T);
+    let bytes = checked_mul_usize(count, elem) match {
+        value? => value,
+        null => return,
+    }
+    set_bytes(ptr_addr<T>(dst), byte, bytes);
+}
+
+pub unsafe fn swap(a: *T, b: *T) where T {
+    let tmp = read<T>(a);
+    write<T>(a, read<T>(b));
+    write<T>(b, tmp);
+}
+
+pub unsafe fn replace(dst: *T, value: T) -> T where T {
+    let old = read<T>(dst);
+    write<T>(dst, value);
+    old
+}
+
+pub unsafe fn drop_in_place(ptr: *T) where T {
+    let _dropped = read<T>(ptr);
+}
+
+pub fn forget(value: T) where T {
+    let _kept = wrap_manually_drop<T>(value);
 }

@@ -343,7 +343,9 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
     );
     let dump = String::from_utf8_lossy(&output.stdout);
     let user_attributes = dump.matches("(property \"enabled\")").count();
-    let phase_attributes = dump.matches("(property \"__flurry_comptime_phase\")").count();
+    let phase_attributes = dump
+        .matches("(property \"__flurry_comptime_phase\")")
+        .count();
     assert_eq!(user_attributes, 1, "{dump}");
     // Comptime-only traits no longer need per-member phase attributes.
     // Any explicit library attributes must still be accounted for below.

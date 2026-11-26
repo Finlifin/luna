@@ -466,6 +466,9 @@ pub struct Protocols {
     pub splice: Option<DeclarationId>,
     pub meta_list: Option<DeclarationId>,
     pub tuple: Option<DeclarationId>,
+    pub array: Option<DeclarationId>,
+    pub maybe_uninit_storage: Option<DeclarationId>,
+    pub manually_drop_storage: Option<DeclarationId>,
 }
 
 impl Protocols {
@@ -495,6 +498,8 @@ pub struct CachedUpstreamFunction {
     pub function: n::Function,
     pub is_template_behavior: bool,
     pub match_plans: Vec<(n::MatchPlanKey, n::MatchPlan)>,
+    pub safety_level: Option<n::SafetyLevel>,
+    pub decreases: Option<Vec<n::Expr>>,
 }
 
 /// Side-effect-free elaborated upstream function bodies reusable across compiles.
@@ -927,6 +932,7 @@ fn elaborate_in_mode(
         warned_unreachable_match_arms: BTreeSet::new(),
         warnings: Vec::new(),
         volatile_storage: n::VolatileStorage::default(),
+        layout_alignments: n::LayoutAlignments::default(),
         match_plans: n::MatchPlans::default(),
         active_body_declaration: None,
         active_implicit_call_site: None,
@@ -1001,6 +1007,8 @@ fn elaborate_in_mode(
         in_program_predicate: 0,
         spec_functions: BTreeMap::new(),
         active_spec_functions: BTreeSet::new(),
+        checked_runtime_functions: BTreeMap::new(),
+        active_source_bodies: BTreeSet::new(),
         old_scope: None,
         tactic_frame: None,
         capabilities: BTreeMap::new(),
@@ -1148,14 +1156,18 @@ struct BodySideState {
     pending_predicate_stability: usize,
     refinements: usize,
     volatile_storage: usize,
+    layout_alignments: usize,
     observed_associated_types: usize,
     delivered_types: usize,
     constants: usize,
     ordinary_behavior_functions: usize,
     default_behavior_functions: usize,
+    safety_other_levels: usize,
+    safety_other_decreases: usize,
+    safety_predicate_roles: usize,
 }
 
-fn checker_body_side_state(checker: &Checker<'_, '_>) -> BodySideState {
+fn checker_body_side_state(checker: &Checker<'_, '_>, decl_id: DeclarationId) -> BodySideState {
     BodySideState {
         next_temporary_binding: checker.next_temporary_binding,
         next_runtime_id: checker.next_runtime_id,
@@ -1175,11 +1187,23 @@ fn checker_body_side_state(checker: &Checker<'_, '_>) -> BodySideState {
         pending_predicate_stability: checker.pending_predicate_stability.len(),
         refinements: checker.refinements.len(),
         volatile_storage: checker.volatile_storage.entry_count(),
+        layout_alignments: checker.layout_alignments.entry_count(),
         observed_associated_types: checker.observed_associated_types.len(),
         delivered_types: checker.delivered_types.len(),
         constants: checker.constants.len(),
         ordinary_behavior_functions: checker.ordinary_behavior_functions.len(),
         default_behavior_functions: checker.default_behavior_functions.len(),
+        safety_other_levels: checker
+            .safety_contracts
+            .levels
+            .len()
+            .saturating_sub(usize::from(
+                checker.safety_contracts.levels.contains_key(&decl_id),
+            )),
+        safety_other_decreases: checker.safety_contracts.decreases.len().saturating_sub(
+            usize::from(checker.safety_contracts.decreases.contains_key(&decl_id)),
+        ),
+        safety_predicate_roles: checker.safety_contracts.predicate_roles.len(),
     }
 }
 
@@ -2103,6 +2127,7 @@ fn elaborate_candidate<'a, 'h>(
     }
 
     output.normal_forms = checker.normal_form_metadata();
+    output.normal_form_results = checker.normal_form_results();
     output.function_parameters = checker.function_parameter_metadata();
     for (owner, info) in package.owners() {
         let item = info.node.expect_item();
@@ -2229,6 +2254,8 @@ fn elaborate_candidate<'a, 'h>(
         let skip_non_pure_template = template_behavior && !sig.modifiers.is_pure;
         let eligible_upstream_decl =
             !skip_non_pure_template && checker.source_declarations.owner(decl_id) == Some(owner);
+        let is_plain_runtime =
+            !template_behavior && !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head;
         if eligible_upstream_decl
             && incremental
                 .verified_upstream_packages
@@ -2241,6 +2268,11 @@ fn elaborate_candidate<'a, 'h>(
             && cached_fn.function.declaration == decl_id
             && cached_fn.function.interface.signature == signature
         {
+            if is_plain_runtime {
+                checker
+                    .checked_runtime_functions
+                    .insert(owner, cached_fn.function.clone());
+            }
             if template_behavior {
                 checker
                     .ordinary_behavior_functions
@@ -2250,6 +2282,15 @@ fn elaborate_candidate<'a, 'h>(
             }
             for (key, plan) in &cached_fn.match_plans {
                 checker.match_plans.insert(*key, plan.clone());
+            }
+            if let Some(level) = cached_fn.safety_level {
+                checker.safety_contracts.levels.insert(decl_id, level);
+            }
+            if let Some(decreases) = &cached_fn.decreases {
+                checker
+                    .safety_contracts
+                    .decreases
+                    .insert(decl_id, decreases.clone());
             }
             continue;
         }
@@ -2264,7 +2305,14 @@ fn elaborate_candidate<'a, 'h>(
             output.functions.push(cached);
             continue;
         }
-        let before_state = should_record.then(|| checker_body_side_state(checker));
+        if !should_record
+            && is_plain_runtime
+            && let Some(cached) = checker.checked_runtime_functions.get(&owner).cloned()
+        {
+            output.functions.push(cached);
+            continue;
+        }
+        let before_state = should_record.then(|| checker_body_side_state(checker, decl_id));
         let function = checker.check_source_function(
             owner,
             signature,
@@ -2276,9 +2324,14 @@ fn elaborate_candidate<'a, 'h>(
                 .spec_functions
                 .entry(owner)
                 .or_insert_with(|| function.clone());
+        } else if is_plain_runtime {
+            checker
+                .checked_runtime_functions
+                .entry(owner)
+                .or_insert_with(|| function.clone());
         }
         if let Some(expected_state) = before_state
-            && checker_body_side_state(checker) == expected_state
+            && checker_body_side_state(checker, decl_id) == expected_state
             && let Some(cache) = recorded_bodies.as_mut()
         {
             let body_match_plans = checker
@@ -2294,6 +2347,8 @@ fn elaborate_candidate<'a, 'h>(
                     function: function.clone(),
                     is_template_behavior: template_behavior,
                     match_plans: body_match_plans,
+                    safety_level: checker.safety_contracts.levels.get(&decl_id).copied(),
+                    decreases: checker.safety_contracts.decreases.get(&decl_id).cloned(),
                 },
             );
         }
@@ -2394,6 +2449,7 @@ fn elaborate_candidate<'a, 'h>(
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     output.definition_attributes = checker.definition_attributes.clone();
     output.volatile_storage = checker.volatile_storage.clone();
+    output.layout_alignments = checker.layout_alignments.clone();
     output.match_plans = checker.match_plans.clone();
     output.safety_contracts = checker.safety_contracts.clone();
     let mut verified_upstream = crate::verification::flow::VerifiedUpstream::default();
@@ -2663,6 +2719,7 @@ impl Checker<'_, '_> {
                 })?;
         }
         default_coherence_index.set_normal_form_metadata(self.normal_form_metadata());
+        default_coherence_index.set_normal_form_results(self.normal_form_results());
         for marker in markers {
             if !marker.enabled {
                 continue;
@@ -4057,6 +4114,7 @@ struct Checker<'a, 'h> {
     warned_unreachable_match_arms: BTreeSet<(Option<DeclarationId>, n::SourceRange)>,
     warnings: Vec<Warning>,
     volatile_storage: n::VolatileStorage,
+    layout_alignments: n::LayoutAlignments,
     match_plans: n::MatchPlans,
     active_body_declaration: Option<DeclarationId>,
     active_implicit_call_site: Option<comptime_interpretor::ImplicitCallSite>,
@@ -4127,6 +4185,8 @@ struct Checker<'a, 'h> {
     in_program_predicate: usize,
     spec_functions: BTreeMap<OwnerId, n::Function>,
     active_spec_functions: BTreeSet<OwnerId>,
+    checked_runtime_functions: BTreeMap<OwnerId, n::Function>,
+    active_source_bodies: BTreeSet<OwnerId>,
     old_scope: Option<OldScope>,
     tactic_frame: Option<(n::SourceRange, Vec<hir::HirId>, bool)>,
     capabilities: BTreeMap<OwnerId, Vec<n::TraitRequirement>>,
@@ -5935,7 +5995,7 @@ impl Checker<'_, '_> {
     }
 
     fn type_identity_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
-        if self.bound_tuple_elements(ty).is_some() || self.context.is_list_type(ty) {
+        if self.bound_tuple_elements(ty).is_some() || self.context.is_builtin_normal_type(ty) {
             return Ok(ty.clone());
         }
         if !matches!(

@@ -133,6 +133,15 @@ impl Inspection<'_> {
         self.include(1)?;
         spend(self.fuel, 1)?;
         let height = match value {
+            Value::Array { ty, values } => {
+                self.domain(ty)?;
+                self.reserve_children(siblings.saturating_add(values.len()))?;
+                let mut height = 0;
+                for (remaining, child) in values.iter().enumerate().rev() {
+                    height = height.max(self.visit(child, depth + 1, siblings + remaining)?);
+                }
+                height + 1
+            }
             Value::List { ty, values } => {
                 self.domain(ty)?;
                 let before = self.expanded;

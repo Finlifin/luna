@@ -1,0 +1,84 @@
+use mem_impl.raw.{
+    drop_in_place, ptr_cast, read, uninit_storage, write as raw_write, zeroed_storage,
+}
+use primitives.Type;
+use protocols.resources.{Clone, Copy}
+
+pub const MaybeUninitStorage: pure comptime fn<T: Type> -> Type = .MaybeUninitStorage'builtin;
+
+{-
+    Wrapper around compiler-recognized uninitialized storage (`MaybeUninitStorage<T>`).
+    Suppresses automatic `Drop` on inner `T`; callers assume responsibility for
+    initialization before `assume_init` or manual cleanup via `assume_init_drop`.
+-}
+pub struct MaybeUninit
+where
+    T,
+{
+    raw: MaybeUninitStorage<T>,
+}
+
+impl MaybeUninit<T> where T {
+    pub unsafe fn uninit() -> MaybeUninit<T> {
+        MaybeUninit<T> {
+            raw: uninit_storage<T>(),
+        }
+    }
+
+    pub unsafe fn zeroed() -> MaybeUninit<T> {
+        MaybeUninit<T> {
+            raw: zeroed_storage<T>(),
+        }
+    }
+
+    pub fn new(value: T) -> MaybeUninit<T> {
+        var slot = unsafe { MaybeUninit<T>.uninit() };
+        unsafe { raw_write<T>(slot.as_mut_ptr(), value) };
+        slot
+    }
+
+    pub unsafe fn as_ptr(*self) -> *T {
+        ptr_cast<MaybeUninitStorage<T>, T>(self.raw)
+    }
+
+    pub unsafe fn as_mut_ptr(*self) -> *T {
+        ptr_cast<MaybeUninitStorage<T>, T>(self.raw)
+    }
+
+    pub unsafe fn write(*self, value: T) -> *T {
+        let ptr = self.as_mut_ptr();
+        raw_write<T>(ptr, value);
+        ptr
+    }
+
+    pub unsafe fn assume_init(self) -> T {
+        let slot = self;
+        read<T>(slot.as_ptr())
+    }
+
+    pub unsafe fn assume_init_read(*self) -> T {
+        read<T>(self.as_ptr())
+    }
+
+    pub unsafe fn assume_init_drop(*self) {
+        drop_in_place<T>(self.as_mut_ptr());
+    }
+}
+
+impl Clone for MaybeUninit<T> where T :- Copy {
+    fn clone(*self) -> Self {
+        MaybeUninit<T> {
+            raw: unsafe { read<MaybeUninitStorage<T>>(self.raw) },
+        }
+    }
+}
+
+impl Clone for MaybeUninitStorage<T> where T :- Copy {
+    fn clone(*self) -> Self {
+        unsafe { read<MaybeUninitStorage<T>>(self) }
+    }
+}
+
+impl Copy for MaybeUninitStorage<T> where T :- Copy {}
+
+impl Copy for MaybeUninit<T> where T :- Copy {}

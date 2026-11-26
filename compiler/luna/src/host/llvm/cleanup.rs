@@ -520,7 +520,12 @@ pub(super) fn admitted_direct_program(
                     let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, _| {
                         if expr.source == *construction {
                             found |= result_slot && (matches!(expr.kind, K::Return(_)) || iir::effects::suspension_boundary(expr));
-                            if let K::Tuple(fields) | K::AnonymousRecord {fields} | K::Record {fields, ..} | K::Variant {fields, ..} = &expr.kind {
+                            if let K::Tuple(fields)
+                            | K::Array(fields)
+                            | K::AnonymousRecord { fields }
+                            | K::Record { fields, .. }
+                            | K::Variant { fields, .. } = &expr.kind
+                            {
                                 found |= fields.get(*slot).is_some_and(|field| field.source == *value_source);
                             }
                             if let K::OptionalPresent(payload) = &expr.kind {
@@ -545,7 +550,9 @@ pub(super) fn admitted_direct_program(
                     result.is_ok() && found
                 }
                 Target::Temporary {source, ..} => {
-                    let mut retained = false;
+                    let mut retained = site.boundary == Boundary::HandlerEnd
+                        && matches!(inline_context.last(), Some(ContextKey::EffectHandler { .. }))
+                        && *source == instance.function.body.source;
                     let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, fuel| {
                         retained |= match &expr.kind {
                             K::Match {arms, ..} => {
@@ -711,6 +718,24 @@ impl Emitter<'_> {
                     ty = fields
                         .get(field)
                         .ok_or("host capture product field missing")?;
+                }
+                Ty::AlignedRecord(layout) => {
+                    let llvm_index = *layout
+                        .field_llvm_indices
+                        .get(field)
+                        .ok_or("host capture aligned product field missing")?;
+                    indices.push(llvm_index);
+                    ty = layout
+                        .fields
+                        .get(field)
+                        .ok_or("host capture aligned product field missing")?;
+                }
+                Ty::Array { elem, len, .. } => {
+                    if field >= *len {
+                        return Err("host capture array field missing".into());
+                    }
+                    indices.push(field);
+                    ty = elem.as_ref();
                 }
                 Ty::BitPackedRecord(layout) => {
                     indices.push(field);
@@ -1624,9 +1649,65 @@ impl Emitter<'_> {
                 self.literal(literal, ty)
             }
             K::Unit => Ok(Value::unit()),
-            K::NewtypeConvert(inner) | K::UnsafeScope(inner) | K::Snapshot(inner) => {
-                self.eval_cleanup_env(inner, depth + 1)
+            K::NewtypeConvert(inner) => {
+                let value = self.eval_cleanup_env(inner, depth + 1)?;
+                let target = repr(self.graph, &expr.ty, self.checked)?;
+                if value.ty == target {
+                    Ok(value)
+                } else if let Ty::Aligned {
+                    inner: expected,
+                    pad_bytes,
+                    ..
+                } = &target
+                    && **expected == value.ty
+                {
+                    let pad_bytes = *pad_bytes;
+                    if pad_bytes == 0 || value.ty == Ty::Unit {
+                        let target_ty = target.clone();
+                        Ok(Value {
+                            ty: target_ty,
+                            text: if pad_bytes == 0 {
+                                value.text
+                            } else {
+                                "zeroinitializer".into()
+                            },
+                        })
+                    } else {
+                        Ok(self.instruction(
+                            target.clone(),
+                            format!(
+                                "insertvalue {} zeroinitializer, {} {}, 0",
+                                target.llvm(),
+                                value.ty.llvm(),
+                                value.text
+                            ),
+                        ))
+                    }
+                } else if let Ty::Aligned {
+                    inner: expected,
+                    pad_bytes,
+                    ..
+                } = &value.ty
+                    && **expected == target
+                {
+                    if target == Ty::Unit {
+                        Ok(Value::unit())
+                    } else if *pad_bytes == 0 {
+                        Ok(Value {
+                            ty: target,
+                            text: value.text,
+                        })
+                    } else {
+                        Ok(self.instruction(
+                            target.clone(),
+                            format!("extractvalue {} {}, 0", value.ty.llvm(), value.text),
+                        ))
+                    }
+                } else {
+                    Err("host cleanup newtype representation edge changes its layout".into())
+                }
             }
+            K::UnsafeScope(inner) | K::Snapshot(inner) => self.eval_cleanup_env(inner, depth + 1),
             _ => Err("host cleanup environment argument requires a pure expression".into()),
         }
     }
@@ -1692,6 +1773,13 @@ fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<(T
     match ty {
         Ty::Record(fields) | Ty::PackedRecord(fields) => {
             Some((fields.get(field)?.clone(), vec![(ty.clone(), vec![field])]))
+        }
+        Ty::AlignedRecord(layout) => Some((
+            layout.fields.get(field)?.clone(),
+            vec![(ty.clone(), vec![layout.field_llvm_indices[field]])],
+        )),
+        Ty::Array { elem, len, .. } => {
+            (field < *len).then(|| ((**elem).clone(), vec![(ty.clone(), vec![field])]))
         }
         Ty::Closure(fields) | Ty::TraitObjectClosure(fields) => Some((
             fields.get(field)?.clone(),
@@ -1799,14 +1887,26 @@ fn cleanup_field_layout(
         }
         Some(Term::Record(fields)) => Some(fields.get(field)?.1.clone()),
         Some(Term::Tuple(fields)) => Some(fields.get(field)?.clone()),
-        Some(ty @ Term::NormalForm { .. }) => Some(
-            graph
+        Some(ty @ Term::NormalForm { .. }) => {
+            if let Some(fields) = graph
                 .normal_forms
                 .iter()
-                .find_map(|head| head.tuple_elements(ty))?
-                .get(field)?
-                .clone(),
-        ),
+                .find_map(|head| head.tuple_elements(ty))
+            {
+                Some(fields.get(field)?.clone())
+            } else if let Some((elem, len)) =
+                nir::normal_forms::array_element_and_len_with(ty, &|id| {
+                    graph.normal_forms.iter().any(|head| {
+                        head.declaration == id && head.role == nir::normal_forms::Role::Array
+                    })
+                })
+                && field < len
+            {
+                Some(elem.clone())
+            } else {
+                return None;
+            }
+        }
         Some(Term::Closure { environment, .. }) => Some(environment.get(field)?.clone()),
         Some(Term::Optional(payload)) if field == 0 && tag == Some(1) => Some((**payload).clone()),
         Some(Term::ErrorResult { errors, result }) if field == 0 => Some(if tag? == 0 {
@@ -2871,6 +2971,20 @@ pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<
                 prefix.pop();
             }
         }
+        Ty::AlignedRecord(layout) => {
+            for (index, field) in layout.fields.iter().enumerate() {
+                prefix.push(index);
+                product_paths(field, prefix, out);
+                prefix.pop();
+            }
+        }
+        Ty::Array { elem, len, .. } => {
+            for index in 0..*len {
+                prefix.push(index);
+                product_paths(elem, prefix, out);
+                prefix.pop();
+            }
+        }
         Ty::BitPackedRecord(layout) => {
             for (index, field) in layout.fields.iter().enumerate() {
                 prefix.push(index);
@@ -2891,6 +3005,8 @@ fn product_projection<'a>(mut ty: &'a Ty, path: &[usize]) -> Option<&'a Ty> {
             | Ty::PackedRecord(fields)
             | Ty::Closure(fields)
             | Ty::TraitObjectClosure(fields) => fields.get(*index)?,
+            Ty::AlignedRecord(layout) => layout.fields.get(*index)?,
+            Ty::Array { elem, len, .. } => (*index < *len).then_some(elem.as_ref())?,
             Ty::BitPackedRecord(layout) => &layout.fields.get(*index)?.ty,
             _ => return None,
         };

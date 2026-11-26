@@ -256,7 +256,6 @@ pub(super) fn check(
             | K::Function(_)
             | K::TraitMethod { .. }
             | K::FunctionInstance { .. }
-            | K::TraitMethod { .. }
             | K::Field { .. }
             | K::AnonymousField { .. }
             | K::AddressOf(_)
@@ -314,6 +313,7 @@ pub(super) fn check(
             | K::FloatBinary { .. }
             | K::Call { .. } => {}
             K::Tuple(_)
+            | K::Array(_)
             | K::Record { .. }
             | K::AnonymousRecord { .. }
             | K::Variant { .. }

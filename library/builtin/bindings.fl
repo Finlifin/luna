@@ -768,3 +768,14 @@ pub pure comptime fn integer_to_i128(value: Integer) -> i128 {
 pub pure comptime fn integer_to_isize(value: Integer) -> isize {
     integer_to_isize_operation(value)
 }
+
+pub const tuple_len: pure comptime fn(Type) -> ?usize = .tuple_len'builtin;
+pub const tuple_elem: pure comptime fn(Type, usize) -> ?Type = .tuple_elem'builtin;
+pub const compile_error: comptime fn(str) -> NoReturn = .compile_error'builtin;
+pub const emit_diagnostic: comptime fn(u8, str, str, usize, usize) -> void = .emit_diagnostic'builtin;
+const bounded_stack_bytes_operation: pure comptime fn(comptime F: Type, F) -> ?usize =
+    .bounded_stack_bytes'builtin;
+
+pub pure comptime fn bounded_stack_bytes(entry_fn: F) -> ?usize where F: Type {
+    bounded_stack_bytes_operation(F, entry_fn)
+}

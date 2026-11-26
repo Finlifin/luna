@@ -737,6 +737,7 @@ fn walk_mut(
                         parameters: fields, ..
                     }
                     | K::TypeList(fields)
+                    | K::Array(fields)
                     | K::Intrinsic { inputs: fields, .. }
                     | K::Tuple(fields) => extend!(work, fuel, fields.iter_mut().map(Node::Expr)),
                     K::BitAssign { value, .. }
@@ -759,6 +760,11 @@ fn walk_mut(
                     | K::OptionalType(value)
                     | K::PointerType(value)
                     | K::ListLength(value)
+                    | K::TupleLen(value)
+                    | K::TupleElem(value)
+                    | K::CompileError(value)
+                    | K::EmitDiagnostic(value)
+                    | K::BoundedStackBytes(value)
                     | K::NewtypeRepresentation(value)
                     | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)

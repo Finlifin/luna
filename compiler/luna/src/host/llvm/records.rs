@@ -67,6 +67,42 @@ impl Emitter<'_> {
             });
             return self.from_bits(packed_bits, ty);
         }
+        if let Ty::AlignedRecord(layout) = &ty {
+            if fields.len() != layout.fields.len() {
+                return Err("host aligned record field count mismatch".into());
+            }
+            let mut value = Value {
+                ty: ty.clone(),
+                text: "zeroinitializer".into(),
+            };
+            for (index, (field, expected)) in fields.iter().zip(layout.fields.iter()).enumerate() {
+                let field_source = field.source;
+                let field = self.expr(field, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if field.ty != *expected {
+                    return Err("host aligned record field representation mismatch".into());
+                }
+                self.retain_prepared_field(source, index, field_source, &field)?;
+                let (storage, text) = if field.ty == Ty::Unit {
+                    ("{}".into(), "zeroinitializer".into())
+                } else {
+                    (field.ty.llvm(), field.text)
+                };
+                let llvm_index = layout.field_llvm_indices[index];
+                value = self.instruction(
+                    ty.clone(),
+                    format!(
+                        "insertvalue {} {}, {storage} {text}, {llvm_index}",
+                        ty.llvm(),
+                        value.text
+                    ),
+                );
+            }
+            self.finish_prepared_construction(source)?;
+            return Ok(value);
+        }
         let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &ty else {
             return Err("host anonymous construction lacks a record layout".into());
         };
@@ -223,6 +259,52 @@ impl Emitter<'_> {
         self.record_from_values(None, evaluated, ty)
     }
 
+    pub(super) fn array(
+        &mut self,
+        source: nir::program::SourceRange,
+        elements: &[Expr],
+        ty: &Term,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let repr_ty = repr(self.graph, ty, self.checked)?;
+        let Ty::Array { elem, len, .. } = &repr_ty else {
+            return Err("host array construction lacks an array layout".into());
+        };
+        if elements.len() != *len {
+            return Err("host array element count mismatch".into());
+        }
+        let mut value = Value {
+            ty: repr_ty.clone(),
+            text: "zeroinitializer".into(),
+        };
+        for (index, element) in elements.iter().enumerate() {
+            let elem_source = element.source;
+            let val = self.expr(element, depth)?;
+            if self.terminated {
+                return Ok(Value::unit());
+            }
+            if val.ty != **elem {
+                return Err("host array element representation mismatch".into());
+            }
+            self.retain_prepared_field(source, index, elem_source, &val)?;
+            let (storage, text) = if val.ty == Ty::Unit {
+                ("{}".into(), "zeroinitializer".into())
+            } else {
+                (val.ty.llvm(), val.text)
+            };
+            value = self.instruction(
+                repr_ty.clone(),
+                format!(
+                    "insertvalue {} {}, {storage} {text}, {index}",
+                    repr_ty.llvm(),
+                    value.text
+                ),
+            );
+        }
+        self.finish_prepared_construction(source)?;
+        Ok(value)
+    }
+
     pub(super) fn record_field(&mut self, value: &Value, index: usize) -> Result<Value, String> {
         if let Ty::BitPackedRecord(layout) = &value.ty {
             let field = layout
@@ -248,6 +330,24 @@ impl Emitter<'_> {
                 (field.bit_offset + field.bit_width) as usize,
             )?;
             return self.from_bits(sliced, field.ty.clone());
+        }
+        if let Ty::AlignedRecord(layout) = &value.ty {
+            let field = layout
+                .fields
+                .get(index)
+                .ok_or("host aligned record projection index out of range")?;
+            if *field == Ty::Unit {
+                return Ok(Value::unit());
+            }
+            let llvm_index = layout.field_llvm_indices[index];
+            return Ok(self.instruction(
+                field.clone(),
+                format!(
+                    "extractvalue {} {}, {llvm_index}",
+                    value.ty.llvm(),
+                    value.text
+                ),
+            ));
         }
         let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &value.ty else {
             return Err("host field projection requires an anonymous record".into());
@@ -304,15 +404,27 @@ impl Emitter<'_> {
                 bit_target = Some((*offset, field.bit_width, field.ty.clone()));
                 continue;
             }
-            match &ty {
+            let next_ty = match &ty {
                 Ty::Record(fields) | Ty::PackedRecord(fields) => {
                     byte_prefix_len += 1;
-                    ty = fields
+                    let next = fields
                         .get(*index)
                         .cloned()
                         .ok_or("host assignment field index out of range")?;
-                    packed |= matches!(ty, Ty::PackedRecord(_));
+                    packed |= matches!(next, Ty::PackedRecord(_));
                     path.push_str(&format!(", i32 {index}"));
+                    Some(next)
+                }
+                Ty::AlignedRecord(layout) => {
+                    byte_prefix_len += 1;
+                    let next = layout
+                        .fields
+                        .get(*index)
+                        .cloned()
+                        .ok_or("host assignment field index out of range")?;
+                    let llvm_index = layout.field_llvm_indices[*index];
+                    path.push_str(&format!(", i32 {llvm_index}"));
+                    Some(next)
                 }
                 Ty::BitPackedRecord(layout) => {
                     let field = layout
@@ -320,8 +432,12 @@ impl Emitter<'_> {
                         .get(*index)
                         .ok_or("host assignment field index out of range")?;
                     bit_target = Some((field.bit_offset, field.bit_width, field.ty.clone()));
+                    None
                 }
                 _ => return Err("host assignment path is not an anonymous record".into()),
+            };
+            if let Some(next_ty) = next_ty {
+                ty = next_ty;
             }
         }
 
