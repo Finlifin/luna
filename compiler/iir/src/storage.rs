@@ -1,13 +1,13 @@
 //! Storage-phase validation in concrete runtime bodies, retaining staged inputs.
-use nir::program::{ExprKind as K, Function, FunctionPhase, Package};
-use nir::{Sort, Term};
-use std::collections::HashSet;
+use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, Package};
+use nir::{OrderedTerm, Sort, Term};
+use std::collections::BTreeSet;
 
 pub(super) fn validate(
     function: &Function,
     metadata: &Package,
     resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
-    validated_closed: &mut HashSet<Term>,
+    validated_closed: &mut BTreeSet<OrderedTerm>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if function.phase != FunctionPhase::Runtime {
@@ -17,26 +17,18 @@ pub(super) fn validate(
         return Err("IIR runtime function has no callable signature".into());
     };
     let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-    let mut validated_in_fn = HashSet::<Term>::new();
-    let mut check_storage = |ty: &Term,
-                             fuel: &mut usize|
-     -> Result<(), nir::phases::StorageError> {
-        if validated_closed.contains(ty) || validated_in_fn.contains(ty) {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or(nir::phases::StorageError::Budget)?;
-            return Ok(());
-        }
-        nir::phases::validate_runtime_storage_with_nominals(ty, metadata, &frames, resolve, fuel)?;
-        if ty.check_scope(&[]).is_ok() {
-            validated_closed.insert(ty.clone());
-        } else {
-            validated_in_fn.insert(ty.clone());
-        }
-        Ok(())
-    };
+    let mut validated_in_fn = BTreeSet::<OrderedTerm>::new();
     for env in &function.env_parameters {
-        check_storage(&env.ty, fuel).map_err(|message| {
+        check_storage(
+            &env.ty,
+            metadata,
+            &frames,
+            resolve,
+            validated_closed,
+            &mut validated_in_fn,
+            fuel,
+        )
+        .map_err(|message| {
             format!(
                 "IIR runtime environment storage in {} at {}: {message}",
                 function.name, function.source
@@ -55,12 +47,91 @@ pub(super) fn validate(
             roots.push(value);
         }
     }
+    validate_expressions_with_local_cache(
+        roots,
+        &frames,
+        metadata,
+        resolve,
+        validated_closed,
+        &mut validated_in_fn,
+        &function.name,
+        fuel,
+    )
+}
+
+pub(super) fn validate_expressions(
+    roots: Vec<&Expr>,
+    frames: &[Vec<Sort>],
+    metadata: &Package,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
+    validated_closed: &mut BTreeSet<OrderedTerm>,
+    owner_name: &str,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let mut validated_in_owner = BTreeSet::<OrderedTerm>::new();
+    validate_expressions_with_local_cache(
+        roots,
+        frames,
+        metadata,
+        resolve,
+        validated_closed,
+        &mut validated_in_owner,
+        owner_name,
+        fuel,
+    )
+}
+
+fn check_storage(
+    ty: &Term,
+    metadata: &Package,
+    frames: &[Vec<Sort>],
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
+    validated_closed: &mut BTreeSet<OrderedTerm>,
+    validated_in_owner: &mut BTreeSet<OrderedTerm>,
+    fuel: &mut usize,
+) -> Result<(), nir::phases::StorageError> {
+    let key = OrderedTerm(ty.clone());
+    if validated_closed.contains(&key) || validated_in_owner.contains(&key) {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(nir::phases::StorageError::Budget)?;
+        return Ok(());
+    }
+    nir::phases::validate_runtime_storage_with_nominals(ty, metadata, frames, resolve, fuel)?;
+    if ty.check_scope(&[]).is_ok() {
+        validated_closed.insert(key);
+    } else {
+        validated_in_owner.insert(key);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_expressions_with_local_cache(
+    mut roots: Vec<&Expr>,
+    frames: &[Vec<Sort>],
+    metadata: &Package,
+    resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
+    validated_closed: &mut BTreeSet<OrderedTerm>,
+    validated_in_owner: &mut BTreeSet<OrderedTerm>,
+    owner_name: &str,
+    fuel: &mut usize,
+) -> Result<(), String> {
     while let Some(root) = roots.pop() {
         nir::visit::expression_pruned(root, fuel, |expression, fuel| {
-            check_storage(&expression.ty, fuel).map_err(|message| {
+            check_storage(
+                &expression.ty,
+                metadata,
+                frames,
+                resolve,
+                validated_closed,
+                validated_in_owner,
+                fuel,
+            )
+            .map_err(|message| {
                 format!(
                     "IIR runtime storage in {} at {}: {message}",
-                    function.name, expression.source
+                    owner_name, expression.source
                 )
             })?;
             match &expression.kind {

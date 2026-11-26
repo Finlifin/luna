@@ -26,20 +26,20 @@ pub(super) fn retain_demanded_methods(
     dispatch: &mut [n::DispatchInstance],
     fuel: &mut usize,
 ) -> Result<(), String> {
-    let mut demanded = HashSet::new();
+    let mut demanded = BTreeSet::new();
     for key in functions
         .iter()
         .map(|f| &f.key)
         .chain(identities.iter().map(|identity| &identity.key))
     {
         charge_key(&key.arguments, fuel)?;
-        demanded.insert((key.declaration, key.arguments.as_ref()));
+        demanded.insert(OrderedFunctionKeyRef(key.declaration, &key.arguments));
     }
     for table in templates {
         spend(fuel, 1)?;
         for target in table.targets() {
             charge_key(&target.arguments, fuel)?;
-            demanded.insert((target.declaration, target.arguments.as_ref()));
+            demanded.insert(OrderedFunctionKeyRef(target.declaration, &target.arguments));
         }
     }
     // Finish reservations before mutating any method list. All records still
@@ -51,9 +51,9 @@ pub(super) fn retain_demanded_methods(
         }
     }
     for interface in dispatch {
-        interface
-            .methods
-            .retain(|method| demanded.contains(&(method.body, method.arguments.as_slice())));
+        interface.methods.retain(|method| {
+            demanded.contains(&OrderedFunctionKeyRef(method.body, &method.arguments))
+        });
     }
     Ok(())
 }

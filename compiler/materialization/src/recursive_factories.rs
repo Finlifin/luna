@@ -117,12 +117,13 @@ impl Builder<'_, '_> {
         let Some(root) = key(callee) else {
             return Ok(false);
         };
-        if !self.recursive_factories.contains_key(&root) {
+        let ordered_root = OrderedInstanceKey(root.clone());
+        if !self.recursive_factories.contains_key(&ordered_root) {
             if !self.prepare_recursive_factories(&root, &callee.ty)? {
                 return Ok(false);
             }
         }
-        let selection = self.recursive_factories[&root].clone();
+        let selection = self.recursive_factories[&ordered_root].clone();
         template_factories::charge(expression, &mut self.fuel)?;
         let result = expression.ty.clone();
         let mut candidate = expression.clone();
@@ -171,11 +172,12 @@ impl Builder<'_, '_> {
         let result = result.as_ref();
         let mut pending = VecDeque::from([root.clone()]);
         let mut nodes = Vec::<Node>::new();
-        let mut indices = HashMap::new();
+        let mut indices = BTreeMap::new();
         let mut targets = Vec::new();
         while let Some(key) = pending.pop_front() {
             work(&mut self.fuel)?;
-            if indices.contains_key(&key) {
+            let ordered_key = OrderedInstanceKey(key.clone());
+            if indices.contains_key(&ordered_key) {
                 continue;
             }
             let Some(template) = self
@@ -289,7 +291,7 @@ impl Builder<'_, '_> {
                 return Ok(false);
             }
             pending.extend(edges.iter().cloned());
-            indices.insert(key.clone(), nodes.len());
+            indices.insert(ordered_key, nodes.len());
             nodes.push(Node {
                 key,
                 function,
@@ -311,7 +313,7 @@ impl Builder<'_, '_> {
             for edge in &node.edges {
                 work(&mut self.fuel)?;
                 let target = *indices
-                    .get(edge)
+                    .get(&OrderedInstanceKey(edge.clone()))
                     .ok_or("recursive factory dependency missing")?;
                 callers[target].push(index);
             }
@@ -422,7 +424,7 @@ impl Builder<'_, '_> {
                 .interface
                 .signature
                 .with_callable_result(tag_type.clone())
-                .unwrap();
+                .ok_or("recursive factory has non-callable interface signature")?;
             if let Some(binding) = function.result_binding {
                 for predicate in &mut function.postconditions {
                     let mut valid = true;
@@ -468,7 +470,7 @@ impl Builder<'_, '_> {
             let helper = function.declaration;
             self.generated_functions.insert(helper, function);
             self.recursive_factories.insert(
-                node.key,
+                OrderedInstanceKey(node.key),
                 Selection {
                     helper,
                     targets: targets.clone(),
@@ -513,7 +515,7 @@ fn encode(
                 .signature
                 .clone()
                 .with_callable_result(Term::Primitive(nir::Primitive::U64))
-                .unwrap();
+                .ok_or("recursive factory callee has non-callable signature")?;
             *parameter_bindings = nodes[index].function.parameters.clone();
         }
         K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } => {

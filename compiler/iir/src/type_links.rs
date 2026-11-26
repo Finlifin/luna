@@ -1,26 +1,26 @@
 //! Invocation-local borrowed indexes for completed type references.
-use crate::{NominalDefinition, Package, Term};
+use crate::{NominalDefinition, Package, Term, TermRef, TermsRef};
 use nir::{DeclarationId, value_admission::Error};
 
 mod applications;
 
 pub(super) type MethodKey<'a> = (
     DeclarationId,
-    &'a [Term],
-    &'a Term,
+    TermsRef<'a>,
+    TermRef<'a>,
     DeclarationId,
-    &'a [Term],
+    TermsRef<'a>,
 );
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct TypeLinks<'a> {
-    methods: HashSet<MethodKey<'a>>,
-    callables: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
-    signatures: HashMap<MethodKey<'a>, &'a Term>,
+    methods: BTreeSet<MethodKey<'a>>,
+    callables: BTreeMap<(DeclarationId, TermsRef<'a>), &'a Term>,
+    signatures: BTreeMap<MethodKey<'a>, &'a Term>,
     target: Option<nir::target::TargetData>,
-    nominals: HashMap<&'a Term, &'a NominalDefinition>,
-    heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
+    nominals: BTreeMap<TermRef<'a>, &'a NominalDefinition>,
+    heads: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
 }
 
 fn tick(fuel: &mut usize) -> Result<(), Error> {
@@ -35,12 +35,12 @@ fn charge(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
 impl<'a> TypeLinks<'a> {
     pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         let mut result = Self {
-            methods: HashSet::new(),
-            callables: HashMap::new(),
-            signatures: HashMap::new(),
+            methods: BTreeSet::new(),
+            callables: BTreeMap::new(),
+            signatures: BTreeMap::new(),
             target: package.target,
-            nominals: HashMap::new(),
-            heads: HashMap::new(),
+            nominals: BTreeMap::new(),
+            heads: BTreeMap::new(),
         };
         for identity in &package.callable_identities {
             tick(fuel)?;
@@ -48,7 +48,7 @@ impl<'a> TypeLinks<'a> {
                 charge(argument, fuel)?;
             }
             result.callables.insert(
-                (identity.key.declaration, &identity.key.arguments),
+                (identity.key.declaration, TermsRef(&identity.key.arguments)),
                 identity.closed_signature()?,
             );
         }
@@ -65,10 +65,10 @@ impl<'a> TypeLinks<'a> {
                 }
                 result.methods.insert((
                     dispatch.interface,
-                    &dispatch.interface_arguments,
-                    &dispatch.subject,
+                    TermsRef(&dispatch.interface_arguments),
+                    TermRef(&dispatch.subject),
                     method.member,
-                    &method.method_arguments,
+                    TermsRef(&method.method_arguments),
                 ));
             }
         }
@@ -87,10 +87,10 @@ impl<'a> TypeLinks<'a> {
                     result.signatures.insert(
                         (
                             contract.interface.declaration,
-                            &contract.interface.arguments,
-                            &contract.subject,
+                            TermsRef(&contract.interface.arguments),
+                            TermRef(&contract.subject),
                             method.declaration,
-                            &method.type_arguments,
+                            TermsRef(&method.type_arguments),
                         ),
                         signature,
                     );
@@ -100,7 +100,9 @@ impl<'a> TypeLinks<'a> {
         for nominal in &package.nominals {
             tick(fuel)?;
             charge(&nominal.ty, fuel)?;
-            result.nominals.insert(&nominal.ty, &nominal.definition);
+            result
+                .nominals
+                .insert(TermRef(&nominal.ty), &nominal.definition);
         }
         for head in &package.normal_forms {
             tick(fuel)?;
@@ -116,7 +118,7 @@ impl<'a> TypeLinks<'a> {
     ) -> Result<Option<&'a NominalDefinition>, Error> {
         tick(fuel)?;
         charge(ty, fuel)?;
-        Ok(self.nominals.get(ty).copied())
+        Ok(self.nominals.get(&TermRef(ty)).copied())
     }
 
     pub(super) fn head(&self, ty: &Term) -> Option<&'a nir::normal_forms::Head> {
@@ -167,10 +169,10 @@ impl<'a> TypeLinks<'a> {
                     }
                     let key: MethodKey<'_> = (
                         method.interface.declaration,
-                        method.interface.arguments.as_slice(),
-                        &method.subject,
+                        TermsRef(method.interface.arguments.as_slice()),
+                        TermRef(&method.subject),
                         method.member,
-                        method.method_arguments.as_slice(),
+                        TermsRef(method.method_arguments.as_slice()),
                     );
                     if !self.methods.contains(&key) {
                         return Err("IIR frozen method has no dispatch evidence".into());
@@ -192,14 +194,14 @@ impl<'a> TypeLinks<'a> {
                     }
                     if !self
                         .callables
-                        .contains_key(&(*declaration, arguments.as_slice()))
+                        .contains_key(&(*declaration, TermsRef(arguments.as_slice())))
                     {
                         return Err("IIR frozen callable has no signature evidence".into());
                     }
                 }
                 Term::Nominal { .. } => {
                     charge(ty, fuel)?;
-                    if !self.nominals.contains_key(ty) {
+                    if !self.nominals.contains_key(&TermRef(ty)) {
                         return Err("IIR nominal reference is dangling".into());
                     }
                 }

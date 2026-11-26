@@ -17,11 +17,41 @@ pub mod template_storage;
 pub mod visit;
 
 use nir::program::{DispatchInstance, Function};
-use nir::{DeclarationId, RuntimeId, Term};
+use nir::{DeclarationId, OrderedTerm, RuntimeId, Term};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fmt,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TermRef<'a>(pub(crate) &'a Term);
+
+impl Ord for TermRef<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        nir::cmp_term(self.0, other.0)
+    }
+}
+
+impl PartialOrd for TermRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TermsRef<'a>(pub(crate) &'a [Term]);
+
+impl Ord for TermsRef<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        nir::cmp_term_slice(self.0, other.0)
+    }
+}
+
+impl PartialOrd for TermsRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InstanceKey {
@@ -542,8 +572,26 @@ impl Package {
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         let callables = self.checked_callables(fuel)?;
         let links = TypeLinks::new(self, fuel)?;
-        let mut validated_types = HashSet::<Term>::new();
-        let mut validated_closed_storage = HashSet::<Term>::new();
+        *fuel = fuel
+            .checked_sub(self.statics.len())
+            .ok_or("IIR static validation budget exhausted")?;
+        let mut declared_statics = BTreeMap::new();
+        for static_def in &self.statics {
+            *fuel = fuel
+                .checked_sub(static_def.name.len().saturating_add(1))
+                .ok_or("IIR static validation budget exhausted")?;
+            if declared_statics
+                .insert(static_def.declaration, static_def)
+                .is_some()
+            {
+                return Err(format!(
+                    "IIR duplicate static declaration {}",
+                    static_def.declaration
+                ));
+            }
+        }
+        let mut validated_types = BTreeSet::<OrderedTerm>::new();
+        let mut validated_closed_storage = BTreeSet::<OrderedTerm>::new();
         for identity in &self.callable_identities {
             let signature = identity.closed_signature()?;
             if !matches!(signature.callable_signature(), Term::Function { .. }) {
@@ -609,7 +657,7 @@ impl Package {
                 }
                 let program = nir::contracts::CallableProgram::method(method)
                     .map_err(|error| error.to_string())?;
-                let mut direct_callees = HashSet::new();
+                let mut direct_callees = BTreeSet::new();
                 visit::program_expressions(program, fuel, |expr, fuel| {
                     if let nir::program::ExprKind::Call { callee, .. } = &expr.kind {
                         direct_callees.insert(std::ptr::from_ref(callee.as_ref()) as usize);
@@ -665,8 +713,8 @@ impl Package {
         use nir::program::ExprKind as K;
         let validate_expr_node = |expr: &nir::program::Expr,
                                   phase: nir::program::FunctionPhase,
-                                  direct_callees: &mut HashSet<usize>,
-                                  validated_types: &mut HashSet<Term>,
+                                  direct_callees: &mut BTreeSet<usize>,
+                                  validated_types: &mut BTreeSet<OrderedTerm>,
                                   fuel: &mut usize|
          -> Result<(), String> {
             if matches!(
@@ -751,6 +799,18 @@ impl Package {
                         return Err("IIR constant address retains free local bindings".into());
                     }
                 }
+                K::StaticAddress(declaration) => {
+                    let Some(static_def) = declared_statics.get(declaration) else {
+                        return Err(format!(
+                            "IIR static address references missing static {declaration}"
+                        ));
+                    };
+                    if expr.ty != Term::Pointer(Box::new(static_def.ty.clone())) {
+                        return Err(format!(
+                            "IIR static address type disagrees with static declaration {declaration}"
+                        ));
+                    }
+                }
                 K::DynCast(cast) => {
                     if phase == nir::program::FunctionPhase::Comptime {
                         return Err("IIR comptime body cannot perform runtime dyn cast".into());
@@ -785,7 +845,7 @@ impl Package {
                 return Err("IIR global runtime delivery retains free local bindings".into());
             }
             self.validate_type_cached(&links, &mut validated_types, &expr.ty, fuel)?;
-            let mut direct_callees = HashSet::new();
+            let mut direct_callees = BTreeSet::new();
             visit::expression(expr, fuel, |node, fuel| {
                 validate_expr_node(
                     node,
@@ -795,6 +855,63 @@ impl Package {
                     fuel,
                 )
             })?;
+        }
+        for static_def in &self.statics {
+            self.validate_type_cached(&links, &mut validated_types, &static_def.ty, fuel)?;
+            let ordered_ty = OrderedTerm(static_def.ty.clone());
+            if validated_closed_storage.contains(&ordered_ty) {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or("storage inspection budget exhausted")?;
+            } else {
+                nir::phases::validate_runtime_storage_with_nominals(
+                    &static_def.ty,
+                    &storage_metadata,
+                    &[],
+                    &resolve_storage,
+                    fuel,
+                )
+                .map_err(|message| {
+                    format!(
+                        "IIR runtime storage for static {}: {message}",
+                        static_def.declaration
+                    )
+                })?;
+                validated_closed_storage.insert(ordered_ty);
+            }
+            if let Some(init) = &static_def.initializer {
+                if init.ty != static_def.ty {
+                    return Err(format!(
+                        "IIR static {} initializer type mismatch",
+                        static_def.declaration
+                    ));
+                }
+                if !nir::free_bindings::collect(init, fuel)?.is_empty() {
+                    return Err(format!(
+                        "IIR static {} initializer retains free local bindings",
+                        static_def.declaration
+                    ));
+                }
+                storage::validate_expressions(
+                    vec![init],
+                    &[],
+                    &storage_metadata,
+                    &resolve_storage,
+                    &mut validated_closed_storage,
+                    &static_def.name,
+                    fuel,
+                )?;
+                let mut direct_callees = BTreeSet::new();
+                visit::expression(init, fuel, |node, fuel| {
+                    validate_expr_node(
+                        node,
+                        nir::program::FunctionPhase::Runtime,
+                        &mut direct_callees,
+                        &mut validated_types,
+                        fuel,
+                    )
+                })?;
+            }
         }
         for instance in &self.functions {
             self.validate_type_cached(
@@ -811,7 +928,8 @@ impl Package {
                 return Err("unsafe entry requires an explicit safe wrapper".into());
             }
             if instance.function.phase == nir::program::FunctionPhase::Runtime {
-                if validated_closed_storage.contains(&instance.function.signature) {
+                let ordered_signature = OrderedTerm(instance.function.signature.clone());
+                if validated_closed_storage.contains(&ordered_signature) {
                     *fuel = fuel
                         .checked_sub(1)
                         .ok_or("storage inspection budget exhausted")?;
@@ -826,7 +944,7 @@ impl Package {
                     .map_err(|message| {
                         format!("IIR runtime signature for {}: {message}", instance.key)
                     })?;
-                    validated_closed_storage.insert(instance.function.signature.clone());
+                    validated_closed_storage.insert(ordered_signature);
                 }
             }
 
@@ -848,7 +966,7 @@ impl Package {
                     ));
                 }
                 self.validate_type_cached(&links, &mut validated_types, &expr.ty, fuel)?;
-                let mut direct_callees = HashSet::new();
+                let mut direct_callees = BTreeSet::new();
                 visit::expression(expr, fuel, |node, fuel| {
                     validate_expr_node(
                         node,
@@ -859,7 +977,7 @@ impl Package {
                     )
                 })?;
             }
-            let mut direct_callees = HashSet::new();
+            let mut direct_callees = BTreeSet::new();
             visit::expressions(&instance.function, fuel, |expr, fuel| {
                 validate_expr_node(
                     expr,
@@ -940,7 +1058,7 @@ impl Package {
     fn validate_expression_types_in(
         &self,
         links: &TypeLinks<'_>,
-        validated: &mut HashSet<Term>,
+        validated: &mut BTreeSet<OrderedTerm>,
         expr: &nir::program::Expr,
         fuel: &mut usize,
     ) -> Result<(), String> {
@@ -1094,11 +1212,12 @@ impl Package {
     fn validate_type_cached(
         &self,
         links: &TypeLinks<'_>,
-        validated: &mut HashSet<Term>,
+        validated: &mut BTreeSet<OrderedTerm>,
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<(), String> {
-        if validated.contains(ty) {
+        let key = OrderedTerm(ty.clone());
+        if validated.contains(&key) {
             *fuel = fuel
                 .checked_sub(1)
                 .ok_or("IIR type validation budget exhausted")?;
@@ -1106,7 +1225,7 @@ impl Package {
         }
         completed_type(ty, &self.runtime_bindings, fuel)?;
         links.validate(ty, fuel)?;
-        validated.insert(ty.clone());
+        validated.insert(key);
         Ok(())
     }
 
@@ -1132,7 +1251,7 @@ impl Package {
         fuel: &mut usize,
     ) -> Result<(), String> {
         let links = TypeLinks::new(self, fuel)?;
-        self.validate_expression_types_in(&links, &mut HashSet::new(), expr, fuel)
+        self.validate_expression_types_in(&links, &mut BTreeSet::new(), expr, fuel)
     }
 }
 
@@ -1230,6 +1349,12 @@ impl fmt::Display for Package {
             f.write_str(") (dyn-vtables")?;
             for vtable in &self.dyn_vtables {
                 write!(f, "\n {vtable}")?;
+            }
+        }
+        if !self.statics.is_empty() {
+            f.write_str(") (statics")?;
+            for entry in &self.statics {
+                write!(f, "\n {entry}")?;
             }
         }
         f.write_str("))\n")
@@ -1562,6 +1687,214 @@ mod validate_memo_tests {
         assert!(
             error.contains("IIR runtime storage"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn statics_validate_types_storage_initializers_and_emit_sexpr() {
+        use nir::program::Literal;
+        let source = SourceRange { start: 1, end: 2 };
+        let struct_decl = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let static_decl = DeclarationId {
+            package: 1,
+            local: 20,
+        };
+        let other_static_decl = DeclarationId {
+            package: 1,
+            local: 21,
+        };
+        let nominal_ty = Term::Nominal {
+            declaration: struct_decl,
+            arguments: vec![],
+        };
+        let valid_pkg = Package {
+            nominals: vec![NominalInstance {
+                ty: nominal_ty.clone(),
+                definition: NominalDefinition::Struct(nir::program::Struct {
+                    parameter_types: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: struct_decl,
+                    name: "Cfg".into(),
+                    fields: vec![("flag".into(), Term::Primitive(nir::Primitive::Bool))],
+                    packed: nir::program::PackedMode::None,
+                }),
+            }],
+            statics: vec![
+                nir::program::Static {
+                    declaration: static_decl,
+                    name: "cfg".into(),
+                    ty: nominal_ty.clone(),
+                    initializer: Some(Expr {
+                        source,
+                        ty: nominal_ty.clone(),
+                        kind: K::Record {
+                            declaration: struct_decl,
+                            fields: vec![Expr {
+                                source,
+                                ty: Term::Primitive(nir::Primitive::Bool),
+                                kind: K::Literal(Literal::Bool(true)),
+                            }],
+                        },
+                    }),
+                },
+                nir::program::Static {
+                    declaration: other_static_decl,
+                    name: "cfg_ptr".into(),
+                    ty: Term::Pointer(Box::new(nominal_ty.clone())),
+                    initializer: Some(Expr {
+                        source,
+                        ty: Term::Pointer(Box::new(nominal_ty.clone())),
+                        kind: K::StaticAddress(static_decl),
+                    }),
+                },
+            ],
+            ..Package::default()
+        };
+        valid_pkg.validate(&mut 100_000).unwrap();
+
+        let dump = valid_pkg.to_string();
+        assert!(
+            dump.contains("(statics\n (static (id (declaration (package 1) (local 20)))"),
+            "{dump}"
+        );
+        assert!(
+            dump.contains("(static (id (declaration (package 1) (local 21)))"),
+            "{dump}"
+        );
+        let open_parens = dump.chars().filter(|&c| c == '(').count();
+        let close_parens = dump.chars().filter(|&c| c == ')').count();
+        assert_eq!(open_parens, close_parens, "unbalanced S-expr:\n{dump}");
+
+        // Duplicate static declaration must be rejected.
+        let mut dup = valid_pkg.clone();
+        dup.statics.push(dup.statics[0].clone());
+        assert!(
+            dup.validate(&mut 100_000)
+                .unwrap_err()
+                .contains("duplicate static")
+        );
+
+        // Dangling nominal type in static must be rejected.
+        let mut dangling_ty = valid_pkg.clone();
+        dangling_ty.nominals.clear();
+        assert!(
+            dangling_ty
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("dangling")
+        );
+
+        // Comptime-only static type must be rejected.
+        let comptime_ty = Package {
+            statics: vec![nir::program::Static {
+                declaration: static_decl,
+                name: "bad".into(),
+                ty: Term::Primitive(nir::Primitive::Type),
+                initializer: None,
+            }],
+            ..Package::default()
+        };
+        assert!(
+            comptime_ty
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("runtime storage")
+        );
+
+        // Initializer type mismatch must be rejected.
+        let mut type_mismatch = valid_pkg.clone();
+        type_mismatch.statics[0].initializer = Some(Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Bool),
+            kind: K::Literal(Literal::Bool(false)),
+        });
+        assert!(
+            type_mismatch
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("type mismatch")
+        );
+
+        // Free local binding in initializer must be rejected.
+        let mut free_local = valid_pkg.clone();
+        free_local.statics[1].initializer = Some(Expr {
+            source,
+            ty: Term::Pointer(Box::new(nominal_ty.clone())),
+            kind: K::Local(nir::program::LocalId { owner: 1, index: 0 }),
+        });
+        assert!(
+            free_local
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("free local")
+        );
+
+        // Unstaged pending literal in initializer must be rejected.
+        let pending_lit = Package {
+            statics: vec![nir::program::Static {
+                declaration: static_decl,
+                name: "n".into(),
+                ty: Term::Primitive(nir::Primitive::U64),
+                initializer: Some(Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::U64),
+                    kind: K::Literal(Literal::PendingInteger {
+                        negative: false,
+                        spelling: "1".into(),
+                    }),
+                }),
+            }],
+            ..Package::default()
+        };
+        assert!(
+            pending_lit
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("unformed")
+        );
+
+        // Dangling StaticAddress in initializer must be rejected.
+        let mut dangling_ref = valid_pkg.clone();
+        dangling_ref.statics[1].initializer = Some(Expr {
+            source,
+            ty: Term::Pointer(Box::new(nominal_ty.clone())),
+            kind: K::StaticAddress(DeclarationId {
+                package: 1,
+                local: 999,
+            }),
+        });
+        assert!(
+            dangling_ref
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("missing static")
+        );
+
+        // Dangling StaticAddress in a runtime function must also be rejected.
+        let mut fn_dangling = valid_pkg.clone();
+        fn_dangling.statics.clear();
+        fn_dangling.functions.push(make_runtime_fn(
+            1,
+            Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Void),
+                kind: K::Discard(Box::new(Expr {
+                    source,
+                    ty: Term::Pointer(Box::new(nominal_ty)),
+                    kind: K::StaticAddress(static_decl),
+                })),
+            },
+        ));
+        assert!(
+            fn_dangling
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("missing static")
         );
     }
 }

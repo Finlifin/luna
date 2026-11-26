@@ -69,7 +69,7 @@ impl TypeLinks<'_> {
                     for argument in arguments {
                         charge(argument, fuel)?;
                     }
-                    self.callables.get(&(declaration, arguments))
+                    self.callables.get(&(declaration, TermsRef(arguments)))
                 }
                 nir::CallableValueRef::Method(method) => {
                     for argument in method.terms() {
@@ -77,10 +77,10 @@ impl TypeLinks<'_> {
                     }
                     self.signatures.get(&(
                         method.interface.declaration,
-                        method.interface.arguments.as_slice(),
-                        &method.subject,
+                        TermsRef(method.interface.arguments.as_slice()),
+                        TermRef(&method.subject),
                         method.member,
-                        method.method_arguments.as_slice(),
+                        TermsRef(method.method_arguments.as_slice()),
                     ))
                 }
             };

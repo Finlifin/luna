@@ -33,8 +33,105 @@ mod expansion;
 
 pub use expansion::{DefinitionPublisher, Expansion};
 use nir::program::{self as n, ExprKind as K, Pattern as P};
-use nir::{DeclarationId as Id, Term};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use nir::{DeclarationId as Id, OrderedTerm, Term};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+#[derive(Clone, PartialEq, Eq)]
+struct OrderedFunctionKey(Id, Vec<OrderedTerm>);
+
+impl OrderedFunctionKey {
+    fn new(id: Id, arguments: &[Term]) -> Self {
+        Self(id, arguments.iter().cloned().map(OrderedTerm).collect())
+    }
+}
+
+impl Ord for OrderedFunctionKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
+    }
+}
+
+impl PartialOrd for OrderedFunctionKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OrderedFunctionKeyRef<'a>(Id, &'a [Term]);
+
+impl Ord for OrderedFunctionKeyRef<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .cmp(&other.0)
+            .then_with(|| nir::cmp_term_slice(self.1, other.1))
+    }
+}
+
+impl PartialOrd for OrderedFunctionKeyRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OrderedInstanceKey(iir::InstanceKey);
+
+impl Ord for OrderedInstanceKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .declaration
+            .cmp(&other.0.declaration)
+            .then_with(|| nir::cmp_term_slice(&self.0.arguments, &other.0.arguments))
+    }
+}
+
+impl PartialOrd for OrderedInstanceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OrderedInterfaceSubject(n::InterfaceInstance, OrderedTerm);
+
+impl OrderedInterfaceSubject {
+    fn new(interface: n::InterfaceInstance, subject: Term) -> Self {
+        Self(interface, OrderedTerm(subject))
+    }
+}
+
+impl Ord for OrderedInterfaceSubject {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .declaration
+            .cmp(&other.0.declaration)
+            .then_with(|| nir::cmp_term_slice(&self.0.arguments, &other.0.arguments))
+            .then_with(|| self.1.cmp(&other.1))
+    }
+}
+
+impl PartialOrd for OrderedInterfaceSubject {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OrderedOperation(nir::effects::Operation);
+
+impl Ord for OrderedOperation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        nir::cmp_effect_operation(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for OrderedOperation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 use type_resolution::dispatch::DeclarationWorld;
 pub use type_resolution::dispatch::{
     BorrowedCatalog, ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource,
@@ -102,6 +199,7 @@ enum Task {
     Function(Id, Vec<Term>),
     Interface(n::InterfaceInstance, Term),
     Type(Term),
+    Static(Id),
 }
 
 #[derive(Clone)]
@@ -121,17 +219,17 @@ struct Builder<'a, 'e> {
     world: DeclarationWorld<'a>,
     value_scope: input_admission::ValueScope,
     queue: VecDeque<Task>,
-    functions: HashSet<(Id, Vec<Term>)>,
-    staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
-    generated_functions: HashMap<Id, n::Function>,
-    recursive_factories: HashMap<iir::InstanceKey, recursive_factories::Selection>,
+    functions: BTreeSet<OrderedFunctionKey>,
+    staged_functions: BTreeMap<OrderedFunctionKey, n::Function>,
+    generated_functions: BTreeMap<Id, n::Function>,
+    recursive_factories: BTreeMap<OrderedInstanceKey, recursive_factories::Selection>,
     invocation_snapshot: Option<staged::Snapshot>,
-    types: HashSet<Term>,
+    types: BTreeSet<OrderedTerm>,
     // Definition-side views may retain abstract projections. Never feed this
     // cache into strict normalization or publish it as completed IIR evidence.
     staging_views: HashMap<Term, Term>,
-    interfaces: HashMap<(n::InterfaceInstance, Term), usize>,
-    associated_demands: HashSet<(usize, Id)>,
+    interfaces: BTreeMap<OrderedInterfaceSubject, usize>,
+    associated_demands: BTreeSet<(usize, Id)>,
     output: Vec<n::DispatchInstance>,
     fuel: usize,
     budget: Budget,
@@ -144,7 +242,9 @@ struct Builder<'a, 'e> {
     dyn_interfaces: Vec<iir::DynInterface>,
     dyn_vtables: Vec<iir::DynVtable>,
     effect_contracts: Vec<iir::effects::Contract>,
-    effect_instances: HashSet<nir::effects::Operation>,
+    effect_instances: BTreeSet<OrderedOperation>,
+    statics: Vec<n::Static>,
+    static_declarations: BTreeSet<Id>,
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
@@ -482,15 +582,15 @@ struct IncrementalIir<'a> {
     quote_sources: Vec<n::ExpansionSource>,
     world: DeclarationWorld<'a>,
     value_scope: input_admission::ValueScope,
-    functions: HashSet<(Id, Vec<Term>)>,
-    staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
-    generated_functions: HashMap<Id, n::Function>,
-    recursive_factories: HashMap<iir::InstanceKey, recursive_factories::Selection>,
+    functions: BTreeSet<OrderedFunctionKey>,
+    staged_functions: BTreeMap<OrderedFunctionKey, n::Function>,
+    generated_functions: BTreeMap<Id, n::Function>,
+    recursive_factories: BTreeMap<OrderedInstanceKey, recursive_factories::Selection>,
     invocation_snapshot: Option<staged::Snapshot>,
-    types: HashSet<Term>,
+    types: BTreeSet<OrderedTerm>,
     staging_views: HashMap<Term, Term>,
-    interfaces: HashMap<(n::InterfaceInstance, Term), usize>,
-    associated_demands: HashSet<(usize, Id)>,
+    interfaces: BTreeMap<OrderedInterfaceSubject, usize>,
+    associated_demands: BTreeSet<(usize, Id)>,
     output: Vec<n::DispatchInstance>,
     instances: Vec<iir::FunctionInstance>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
@@ -501,7 +601,9 @@ struct IncrementalIir<'a> {
     dyn_interfaces: Vec<iir::DynInterface>,
     dyn_vtables: Vec<iir::DynVtable>,
     effect_contracts: Vec<iir::effects::Contract>,
-    effect_instances: HashSet<nir::effects::Operation>,
+    effect_instances: BTreeSet<OrderedOperation>,
+    statics: Vec<n::Static>,
+    static_declarations: BTreeSet<Id>,
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
@@ -567,6 +669,7 @@ impl<'a> InstantiationSession<'a> {
             dyn_vtables,
             expansion_sources,
             effect_contracts,
+            statics,
             callable_identities,
             runtime_domains,
             global_runtime_deliveries,
@@ -637,7 +740,7 @@ impl<'a> InstantiationSession<'a> {
             dyn_vtables,
             normal_forms,
             callable_identities,
-            statics: package.statics.clone(),
+            statics,
             layout_alignments: package.layout_alignments.clone(),
         };
         validate_materialized_bit_convert_safety(
@@ -725,6 +828,8 @@ impl<'a> InstantiationSession<'a> {
                     dyn_vtables: prev.dyn_vtables,
                     effect_contracts: prev.effect_contracts,
                     effect_instances: prev.effect_instances,
+                    statics: prev.statics,
+                    static_declarations: prev.static_declarations,
                     frozen_methods: prev.frozen_methods,
                     callable_identities: prev.callable_identities,
                     type_cores: prev.type_cores,
@@ -763,15 +868,15 @@ impl<'a> InstantiationSession<'a> {
                     world,
                     value_scope,
                     queue: VecDeque::new(),
-                    functions: HashSet::new(),
-                    staged_functions: HashMap::new(),
-                    generated_functions: HashMap::new(),
-                    recursive_factories: HashMap::new(),
+                    functions: BTreeSet::new(),
+                    staged_functions: BTreeMap::new(),
+                    generated_functions: BTreeMap::new(),
+                    recursive_factories: BTreeMap::new(),
                     invocation_snapshot: None,
-                    types: HashSet::new(),
+                    types: BTreeSet::new(),
                     staging_views: HashMap::new(),
-                    interfaces: HashMap::new(),
-                    associated_demands: HashSet::new(),
+                    interfaces: BTreeMap::new(),
+                    associated_demands: BTreeSet::new(),
                     output: vec![],
                     fuel: input_fuel,
                     budget: construction_budget,
@@ -784,7 +889,9 @@ impl<'a> InstantiationSession<'a> {
                     dyn_interfaces: vec![],
                     dyn_vtables: vec![],
                     effect_contracts: vec![],
-                    effect_instances: HashSet::new(),
+                    effect_instances: BTreeSet::new(),
+                    statics: vec![],
+                    static_declarations: BTreeSet::new(),
                     frozen_methods: vec![],
                     callable_identities: vec![],
                     type_cores: nir::TypeInterner::default(),
@@ -822,6 +929,12 @@ impl<'a> InstantiationSession<'a> {
                 builder.normalize_expression(&mut expr)?;
                 builder.expr(&expr, 0, false)?;
                 builder.global_runtime_deliveries.insert(id, expr);
+            }
+            for static_def in &package.statics {
+                builder.tick(0)?;
+                builder
+                    .queue
+                    .push_back(Task::Static(static_def.declaration));
             }
         }
         drain_queue(&mut builder)?;
@@ -864,6 +977,25 @@ impl<'a> InstantiationSession<'a> {
         publication_fuel = publication_fuel
             .checked_sub(source_match_plans.entry_count())
             .ok_or("IIR match plans copy budget exhausted")?;
+        publication_fuel = publication_fuel
+            .checked_sub(builder.statics.len())
+            .ok_or("IIR static copy budget exhausted")?;
+        for static_def in &builder.statics {
+            nir::copy_budget::charge_type_substitution(
+                &static_def.ty,
+                &[],
+                &[],
+                &mut publication_fuel,
+            )
+            .map_err(|reason| format!("IIR static type copy budget exhausted: {reason:?}"))?;
+            if let Some(init) = &static_def.initializer {
+                let mut remaining = u64::try_from(publication_fuel).unwrap_or(u64::MAX);
+                nir::copy_budget::charge_expression(init, &mut remaining).map_err(|reason| {
+                    format!("IIR static initializer copy budget exhausted: {reason:?}")
+                })?;
+                publication_fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+            }
+        }
         let output = iir::Package {
             target: package.target,
             expansion_sources: builder.quote_sources.clone(),
@@ -883,7 +1015,7 @@ impl<'a> InstantiationSession<'a> {
             dyn_vtables: builder.dyn_vtables.clone(),
             normal_forms,
             callable_identities: builder.callable_identities.clone(),
-            statics: package.statics.clone(),
+            statics: builder.statics.clone(),
             layout_alignments: package.layout_alignments.clone(),
         };
         validate_materialized_bit_convert_safety(&output, source_pkg, &mut publication_fuel)?;
@@ -916,6 +1048,8 @@ impl<'a> InstantiationSession<'a> {
             dyn_vtables: builder.dyn_vtables,
             effect_contracts: builder.effect_contracts,
             effect_instances: builder.effect_instances,
+            statics: builder.statics,
+            static_declarations: builder.static_declarations,
             frozen_methods: builder.frozen_methods,
             callable_identities: builder.callable_identities,
             type_cores: builder.type_cores,
@@ -965,6 +1099,7 @@ struct BuildResult {
     remaining: usize,
     expansion_sources: Vec<n::ExpansionSource>,
     effect_contracts: Vec<iir::effects::Contract>,
+    statics: Vec<n::Static>,
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     runtime_domains: BTreeMap<nir::RuntimeId, Term>,
@@ -1053,15 +1188,15 @@ fn build(
         world,
         value_scope,
         queue: VecDeque::new(),
-        functions: HashSet::new(),
-        staged_functions: HashMap::new(),
-        generated_functions: HashMap::new(),
-        recursive_factories: HashMap::new(),
+        functions: BTreeSet::new(),
+        staged_functions: BTreeMap::new(),
+        generated_functions: BTreeMap::new(),
+        recursive_factories: BTreeMap::new(),
         invocation_snapshot: None,
-        types: HashSet::new(),
+        types: BTreeSet::new(),
         staging_views: HashMap::new(),
-        interfaces: HashMap::new(),
-        associated_demands: HashSet::new(),
+        interfaces: BTreeMap::new(),
+        associated_demands: BTreeSet::new(),
         output: vec![],
         fuel: input_fuel,
         budget,
@@ -1074,7 +1209,9 @@ fn build(
         dyn_interfaces: vec![],
         dyn_vtables: vec![],
         effect_contracts: vec![],
-        effect_instances: HashSet::new(),
+        effect_instances: BTreeSet::new(),
+        statics: vec![],
+        static_declarations: BTreeSet::new(),
         frozen_methods: vec![],
         callable_identities: vec![],
         type_cores: nir::TypeInterner::default(),
@@ -1214,6 +1351,12 @@ fn build(
             builder.expr(&expr, 0, false)?;
             builder.global_runtime_deliveries.insert(id, expr);
         }
+        for static_def in &package.statics {
+            builder.tick(0)?;
+            builder
+                .queue
+                .push_back(Task::Static(static_def.declaration));
+        }
     }
     drain_queue(&mut builder)?;
     Ok(BuildResult {
@@ -1227,6 +1370,7 @@ fn build(
         remaining: builder.fuel,
         expansion_sources: builder.quote_sources,
         effect_contracts: builder.effect_contracts,
+        statics: builder.statics,
         frozen_methods: builder.frozen_methods,
         callable_identities: builder.callable_identities,
         runtime_domains: builder.runtime_domains,
@@ -1260,6 +1404,7 @@ fn drain_queue(builder: &mut Builder<'_, '_>) -> Result<(), String> {
                 }
             }
             Task::Type(ty) => builder.ty(ty)?,
+            Task::Static(id) => builder.static_def(id)?,
         }
     }
     Ok(())
@@ -1291,7 +1436,8 @@ impl Builder<'_, '_> {
                 return Err(format!(
                     "runtime function identity {id:?} ({}) staged={} has no executable definition for IIR",
                     identity.signature,
-                    self.staged_functions.contains_key(&(id, arguments.clone())),
+                    self.staged_functions
+                        .contains_key(&OrderedFunctionKey::new(id, &arguments)),
                 ));
             }
             let domains = self
@@ -1312,7 +1458,8 @@ impl Builder<'_, '_> {
             self.queue.push_back(Task::Type(signature));
             return Ok(());
         }
-        if !self.functions.insert((id, arguments.clone())) {
+        let function_key = OrderedFunctionKey::new(id, &arguments);
+        if !self.functions.insert(function_key.clone()) {
             return Ok(());
         }
         if self.instances.is_none() {
@@ -1338,8 +1485,7 @@ impl Builder<'_, '_> {
         }
         // Already-staged functions only need a bounded copy; ordinary templates
         // own their complete expansion preflight inside declaration substitution.
-        let mut function = if let Some(staged) = self.staged_functions.get(&(id, arguments.clone()))
-        {
+        let mut function = if let Some(staged) = self.staged_functions.get(&function_key) {
             nir::copy_budget::charge_function_substitution(staged, &[], &[], &mut self.fuel)
                 .map_err(|reason| format!("dispatch template copy budget exhausted: {reason:?}"))?;
             staged.clone()
@@ -1521,7 +1667,7 @@ impl Builder<'_, '_> {
         }
         self.instances
             .as_mut()
-            .expect("IIR function collection")
+            .ok_or("missing IIR function collection")?
             .push(iir::FunctionInstance::new(
                 iir::InstanceKey {
                     declaration: id,
@@ -1529,6 +1675,65 @@ impl Builder<'_, '_> {
                 },
                 function,
             ));
+        Ok(())
+    }
+
+    fn static_def(&mut self, declaration: Id) -> Result<(), String> {
+        if !self.static_declarations.insert(declaration) {
+            return Ok(());
+        }
+        self.tick(0)?;
+        let static_def = self
+            .package
+            .statics
+            .iter()
+            .find(|entry| entry.declaration == declaration)
+            .ok_or_else(|| format!("missing static declaration {declaration}"))?;
+        self.fuel = self
+            .fuel
+            .checked_sub(static_def.name.len().saturating_add(1))
+            .ok_or("static declaration copy budget exhausted")?;
+        crate::associated::charge_projection_copy(&static_def.ty, &mut self.fuel)
+            .map_err(|_| "static declaration type copy budget exhausted".to_owned())?;
+        let ty = self.normalized_type(&static_def.ty)?;
+        if self.instances.is_some() {
+            iir::completed_type(&ty, &self.runtime_bindings, &mut self.fuel)?;
+        }
+        self.queue.push_back(Task::Type(ty.clone()));
+        let initializer = if let Some(init) = &static_def.initializer {
+            let mut remaining = u64::try_from(self.fuel).unwrap_or(u64::MAX);
+            nir::copy_budget::charge_expression(init, &mut remaining).map_err(|reason| {
+                format!("static initializer copy budget exhausted: {reason:?}")
+            })?;
+            self.fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+            let mut init = init.clone();
+            self.normalize_owned_expression(declaration.package, &mut init)?;
+            if self.instances.is_some() {
+                if !nir::free_bindings::collect(&init, &mut self.fuel)?.is_empty() {
+                    return Err(format!(
+                        "static initializer for {} cannot depend on local bindings",
+                        static_def.declaration
+                    ));
+                }
+                nir::error_results::specialize::anchor_completed_projections(
+                    &mut init,
+                    &mut self.quote_sources,
+                    &mut self.fuel,
+                )?;
+            }
+            self.expr(&init, 0, false)?;
+            Some(init)
+        } else {
+            None
+        };
+        if self.instances.is_some() {
+            self.statics.push(n::Static {
+                declaration: static_def.declaration,
+                name: static_def.name.clone(),
+                ty,
+                initializer,
+            });
+        }
         Ok(())
     }
 
@@ -1553,7 +1758,8 @@ impl Builder<'_, '_> {
                 *argument = selected;
             }
         }
-        if let Some(index) = self.interfaces.get(&(interface.clone(), subject.clone())) {
+        let interface_key = OrderedInterfaceSubject::new(interface.clone(), subject.clone());
+        if let Some(index) = self.interfaces.get(&interface_key) {
             return Ok(*index);
         }
         let (id, implementation_arguments) =
@@ -1712,8 +1918,7 @@ impl Builder<'_, '_> {
             associated: vec![],
             methods: vec![],
         });
-        self.interfaces
-            .insert((interface.clone(), subject.clone()), slot);
+        self.interfaces.insert(interface_key, slot);
         for parent in &contract.parents {
             let arguments = parent
                 .arguments
@@ -2548,7 +2753,9 @@ impl Builder<'_, '_> {
             if escapes {
                 return Ok(());
             }
-            let statement = statements.pop().unwrap();
+            let statement = statements
+                .pop()
+                .ok_or("immediate callable pruning expected statement")?;
             let K::Let { value, .. } = statement.kind else {
                 unreachable!()
             };
@@ -2575,7 +2782,7 @@ impl Builder<'_, '_> {
                 declaration: definition.declaration,
                 arguments: vec![],
             };
-            if !self.types.insert(ty.clone()) {
+            if !self.types.insert(OrderedTerm(ty.clone())) {
                 return Err("materialized quote storage identity collision".into());
             }
             for variant in &definition.variants {
@@ -2866,7 +3073,7 @@ impl Builder<'_, '_> {
         };
         if self
             .staged_functions
-            .contains_key(&(declaration, arguments.clone()))
+            .contains_key(&OrderedFunctionKey::new(declaration, &arguments))
         {
             return Ok(true);
         }
@@ -3060,7 +3267,10 @@ impl Builder<'_, '_> {
             return Ok(false);
         } else {
             self.staged_functions
-                .entry((instance.key.declaration, instance.key.arguments.to_vec()))
+                .entry(OrderedFunctionKey::new(
+                    instance.key.declaration,
+                    &instance.key.arguments,
+                ))
                 .or_insert(instance.function);
         }
         Ok(true)
@@ -3408,7 +3618,7 @@ impl Builder<'_, '_> {
         };
         if let Some(staged) = self
             .staged_functions
-            .get(&(target_decl, target_args.clone()))
+            .get(&OrderedFunctionKey::new(target_decl, &target_args))
         {
             if staged.phase != n::FunctionPhase::Runtime {
                 return Ok(None);
@@ -4004,7 +4214,7 @@ impl Builder<'_, '_> {
         self.queue.extend(
             view.initializer_dependencies
                 .into_iter()
-                .filter(|ty| !self.types.contains(ty))
+                .filter(|ty| !self.types.contains(&OrderedTerm(ty.clone())))
                 .map(Task::Type),
         );
         view.value
@@ -4107,7 +4317,7 @@ impl Builder<'_, '_> {
     }
 
     fn ty(&mut self, ty: Term) -> Result<(), String> {
-        if !self.types.insert(ty.clone()) {
+        if !self.types.insert(OrderedTerm(ty.clone())) {
             return Ok(());
         }
         if self.instances.is_none()
@@ -4600,7 +4810,11 @@ impl Builder<'_, '_> {
             Term::Computation { effects, result } => {
                 for operation in effects {
                     children.extend(operation.arguments.iter().cloned());
-                    if self.instances.is_some() && self.effect_instances.insert(operation.clone()) {
+                    if self.instances.is_some()
+                        && self
+                            .effect_instances
+                            .insert(OrderedOperation(operation.clone()))
+                    {
                         self.fuel = self
                             .fuel
                             .checked_sub(self.package.effects.len())
@@ -5577,8 +5791,18 @@ impl Builder<'_, '_> {
             | K::OptionalAbsent
             | K::Unit
             | K::Break(_)
-            | K::Continue(_)
-            | K::StaticAddress(_) => {}
+            | K::Continue(_) => {}
+            K::StaticAddress(declaration) => {
+                if self.instances.is_some()
+                    || self
+                        .package
+                        .statics
+                        .iter()
+                        .any(|entry| entry.declaration == *declaration)
+                {
+                    self.queue.push_back(Task::Static(*declaration));
+                }
+            }
         }
         Ok(())
     }
@@ -6166,6 +6390,207 @@ mod higher_order_nf_tests {
         assert!(
             iir_err.contains("normal-form callable cannot enter executable IIR"),
             "unexpected error: {iir_err}"
+        );
+    }
+
+    #[test]
+    fn statics_materialize_dependencies_and_charge_fuel_in_instantiate_and_extend() {
+        let source = n::SourceRange { start: 1, end: 5 };
+        let struct_decl = Id {
+            package: 1,
+            local: 10,
+        };
+        let helper_decl = Id {
+            package: 1,
+            local: 11,
+        };
+        let static_decl = Id {
+            package: 1,
+            local: 12,
+        };
+        let root_decl = Id {
+            package: 1,
+            local: 13,
+        };
+        let struct_ty = Term::Nominal {
+            declaration: struct_decl,
+            arguments: vec![],
+        };
+        let struct_def = n::Struct {
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: struct_decl,
+            name: "UnreferencedAtRoot".into(),
+            fields: vec![("flag".into(), Term::Primitive(nir::Primitive::Bool))],
+            packed: n::PackedMode::None,
+        };
+        let helper_fn = n::Function {
+            interface: n::FunctionDeclaration {
+                source,
+                declaration: helper_decl,
+                name: "make_flag".into(),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: n::Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Bool),
+                kind: K::Literal(n::Literal::Bool(true)),
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let root_fn = n::Function {
+            interface: n::FunctionDeclaration {
+                source,
+                declaration: root_decl,
+                name: "entry".into(),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(nir::Primitive::Void)),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: n::Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Void),
+                kind: K::Unit,
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let static_def = n::Static {
+            declaration: static_decl,
+            name: "hidden_cfg".into(),
+            ty: struct_ty.clone(),
+            initializer: Some(n::Expr {
+                source,
+                ty: struct_ty.clone(),
+                kind: K::Record {
+                    declaration: struct_decl,
+                    fields: vec![n::Expr {
+                        source,
+                        ty: Term::Primitive(nir::Primitive::Bool),
+                        kind: K::Call {
+                            callee: Box::new(n::Expr {
+                                source,
+                                ty: helper_fn.interface.signature.clone(),
+                                kind: K::Function(helper_decl),
+                            }),
+                            arguments: vec![],
+                            parameter_bindings: vec![],
+                            env_arguments: vec![],
+                        },
+                    }],
+                },
+            }),
+        };
+        let package = n::Package {
+            structs: vec![struct_def],
+            functions: vec![helper_fn, root_fn],
+            statics: vec![static_def],
+            ..Default::default()
+        };
+        let roots = [iir::InstanceKey {
+            declaration: root_decl,
+            arguments: vec![].into(),
+        }];
+
+        // Both `instantiate` and `extend` materialize the nominal and helper function
+        // referenced only through `static.ty` and `static.initializer`.
+        let instantiated = instantiate(
+            &package,
+            &roots,
+            BTreeSet::new(),
+            Budget::default(),
+            &NoExpansion,
+        )
+        .unwrap();
+        assert_eq!(instantiated.statics.len(), 1);
+        assert!(instantiated.nominals.iter().any(|n| n.ty == struct_ty));
+        assert!(
+            instantiated
+                .functions
+                .iter()
+                .any(|f| f.key.declaration == helper_decl)
+        );
+        assert!(instantiated.to_string().contains("(statics\n (static"));
+
+        let mut session = InstantiationSession::new(DeclarationSource::Borrowed(&package));
+        let mut extend_budget = Budget::default();
+        let extended = session
+            .extend(
+                &roots,
+                &[],
+                BTreeSet::new(),
+                &mut extend_budget,
+                &NoExpansion,
+            )
+            .unwrap();
+        assert_eq!(extended.to_string(), instantiated.to_string());
+        assert!(extend_budget.steps < Budget::default().steps);
+
+        // Repeated warm extension retains materialized statics identically.
+        let mut warm_budget = Budget::default();
+        let warm = session
+            .extend(
+                &[
+                    roots[0].clone(),
+                    iir::InstanceKey {
+                        declaration: helper_decl,
+                        arguments: vec![].into(),
+                    },
+                ],
+                &[],
+                BTreeSet::new(),
+                &mut warm_budget,
+                &NoExpansion,
+            )
+            .unwrap();
+        assert_eq!(warm.statics.len(), 1);
+
+        // Tight fuel on static copy/materialization must fail cleanly without leaking partials.
+        let mut exhausted = Budget {
+            steps: 1,
+            ..Budget::default()
+        };
+        assert!(
+            InstantiationSession::new(DeclarationSource::Borrowed(&package))
+                .extend(&roots, &[], BTreeSet::new(), &mut exhausted, &NoExpansion)
+                .is_err()
         );
     }
 }

@@ -1,16 +1,16 @@
 //! Structural integrity of retained definitions and selected dispatch.
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The validation walk borrows the same executable and template declarations
 /// that established uniqueness and dispatch closure.
 pub(super) struct CallableLinks<'a> {
-    functions: HashMap<(DeclarationId, &'a [Term]), &'a Function>,
-    templates: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
-    identities: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    functions: BTreeMap<(DeclarationId, TermsRef<'a>), &'a Function>,
+    templates: BTreeMap<(DeclarationId, TermsRef<'a>), &'a Term>,
+    identities: BTreeMap<(DeclarationId, TermsRef<'a>), &'a Term>,
     runtime_domains: &'a std::collections::BTreeMap<RuntimeId, Term>,
     global_runtime_deliveries: &'a std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
-    methods: HashMap<
+    methods: BTreeMap<
         crate::type_links::MethodKey<'a>,
         (
             &'a nir::program::MethodContract,
@@ -22,8 +22,8 @@ pub(super) struct CallableLinks<'a> {
 impl CallableLinks<'_> {
     fn resolve_direct_target(&self, expr: &nir::program::Expr) -> Option<&Function> {
         use nir::program::ExprKind as K;
-        let key = if let Some(key) = expr.named_function() {
-            key
+        let key = if let Some((declaration, arguments)) = expr.named_function() {
+            (declaration, TermsRef(arguments))
         } else if let K::TraitMethod {
             interface,
             interface_arguments,
@@ -34,12 +34,12 @@ impl CallableLinks<'_> {
         {
             let (_, target) = self.methods.get(&(
                 *interface,
-                interface_arguments.as_slice(),
-                subject,
+                TermsRef(interface_arguments.as_slice()),
+                TermRef(subject),
                 *member,
-                method_arguments.as_slice(),
+                TermsRef(method_arguments.as_slice()),
             ))?;
-            (target.body, target.arguments.as_slice())
+            (target.body, TermsRef(target.arguments.as_slice()))
         } else {
             return None;
         };
@@ -97,8 +97,8 @@ impl CallableLinks<'_> {
             }
         }
         let transport = comptime && !expr.ty.is_comptime_callable();
-        let key = if let Some(key) = expr.named_function() {
-            key
+        let key = if let Some((declaration, arguments)) = expr.named_function() {
+            (declaration, TermsRef(arguments))
         } else if let K::TraitMethod {
             interface,
             interface_arguments,
@@ -114,10 +114,10 @@ impl CallableLinks<'_> {
                 .methods
                 .get(&(
                     *interface,
-                    interface_arguments.as_slice(),
-                    subject,
+                    TermsRef(interface_arguments.as_slice()),
+                    TermRef(subject),
                     *member,
-                    method_arguments.as_slice(),
+                    TermsRef(method_arguments.as_slice()),
                 ))
                 .ok_or("IIR trait reference has no selected method")?;
             if contract.is_quote {
@@ -129,11 +129,11 @@ impl CallableLinks<'_> {
                     return Err("IIR transported method changed interface signature".into());
                 }
             }
-            (target.body, target.arguments.as_slice())
+            (target.body, TermsRef(target.arguments.as_slice()))
         } else {
             return self.validate_clause(expr, comptime, fuel);
         };
-        terms(key.1, fuel)?;
+        terms(key.1.0, fuel)?;
         if transport && let Some(&signature) = self.identities.get(&key) {
             term(&expr.ty, fuel)?;
             if signature != &expr.ty {
@@ -197,7 +197,7 @@ impl CallableLinks<'_> {
             return Err("IIR clause computation requires comptime invocation".into());
         }
         let arguments = observed_clause_arguments(*declaration, inputs, fuel)?;
-        let key = (*declaration, arguments.as_slice());
+        let key = (*declaration, TermsRef(arguments.as_slice()));
         let target = self
             .functions
             .get(&key)
@@ -224,52 +224,54 @@ impl Package {
 
     pub(super) fn checked_callables(&self, fuel: &mut usize) -> Result<CallableLinks<'_>, String> {
         spend(fuel, 1)?;
-        let mut identities = HashMap::new();
+        let mut identities = BTreeMap::new();
         for identity in &self.callable_identities {
             key(&identity.key, fuel)?;
+            let (decl, args) = identity.key.parts();
             if identities
-                .insert(identity.key.parts(), identity.closed_signature()?)
+                .insert((decl, TermsRef(args)), identity.closed_signature()?)
                 .is_some()
             {
                 return Err("duplicate IIR callable signature evidence".into());
             }
         }
-        let mut template_targets = HashMap::new();
+        let mut template_targets = BTreeMap::new();
         for table in &self.templates {
             term(table.logical_type(), fuel)?;
             for target in table.targets() {
                 key(target, fuel)?;
+                let (decl, args) = target.parts();
+                let parts = (decl, TermsRef(args));
                 if identities
-                    .get(&target.parts())
+                    .get(&parts)
                     .is_some_and(|ty| *ty != table.logical_type())
                 {
                     return Err("IIR template and retained identity disagree on signature".into());
                 }
                 if template_targets
-                    .insert(target.parts(), table.logical_type())
+                    .insert(parts, table.logical_type())
                     .is_some()
                 {
                     return Err("duplicate IIR template identity".into());
                 }
             }
         }
-        let mut functions = HashMap::new();
+        let mut functions = BTreeMap::new();
         for instance in &self.functions {
             key(&instance.key, fuel)?;
             term(&instance.function.signature, fuel)?;
             spend(fuel, instance.function.parameters.len())?;
-            if template_targets.contains_key(&instance.key.parts()) {
+            let (decl, args) = instance.key.parts();
+            let parts = (decl, TermsRef(args));
+            if template_targets.contains_key(&parts) {
                 return Err("IIR identity is both a template and executable instance".into());
             }
-            if let Some(signature) = identities.get(&instance.key.parts())
+            if let Some(signature) = identities.get(&parts)
                 && instance.function.callable_type_view().as_ref() != *signature
             {
                 return Err("IIR executable and retained identity disagree on signature".into());
             }
-            if functions
-                .insert(instance.key.parts(), &instance.function)
-                .is_some()
-            {
+            if functions.insert(parts, &instance.function).is_some() {
                 return Err("duplicate IIR function instance".into());
             }
             let function = &instance.function;
@@ -307,14 +309,15 @@ impl Package {
         }
         for root in &self.roots {
             key(root, fuel)?;
-            if !functions.contains_key(&root.parts()) {
+            let (decl, args) = root.parts();
+            if !functions.contains_key(&(decl, TermsRef(args))) {
                 return Err(format!("missing IIR root {root}"));
             }
         }
-        let mut nominals = HashSet::new();
+        let mut nominals = BTreeSet::new();
         for nominal in &self.nominals {
             term(&nominal.ty, fuel)?;
-            if !nominals.insert(&nominal.ty) {
+            if !nominals.insert(TermRef(&nominal.ty)) {
                 return Err("duplicate IIR nominal instance".into());
             }
             let Term::Nominal { declaration, .. } = &nominal.ty else {
@@ -333,24 +336,24 @@ impl Package {
                 return Err("IIR nominal definition disagrees with its instance key".into());
             }
         }
-        let mut heads = HashSet::new();
+        let mut heads = BTreeSet::new();
         for head in &self.normal_forms {
             spend(fuel, 1)?;
             if !heads.insert(head.declaration) {
                 return Err("duplicate IIR normal-form head".into());
             }
         }
-        let mut contracts = HashMap::new();
+        let mut contracts = BTreeMap::new();
         for contract in &self.interfaces {
             spend(fuel, 1)?;
             terms(&contract.interface.arguments, fuel)?;
             term(&contract.subject, fuel)?;
             let world = (
                 contract.interface.declaration,
-                contract.interface.arguments.as_slice(),
-                &contract.subject,
+                TermsRef(contract.interface.arguments.as_slice()),
+                TermRef(&contract.subject),
             );
-            let mut members = HashMap::new();
+            let mut members = BTreeMap::new();
             for method in &contract.methods {
                 spend(fuel, 1)?;
                 terms(&method.type_arguments, fuel)?;
@@ -361,7 +364,10 @@ impl Package {
                 spend(fuel, method.parameter_bindings.len())?;
                 if members
                     .insert(
-                        (method.declaration, method.type_arguments.as_slice()),
+                        (
+                            method.declaration,
+                            TermsRef(method.type_arguments.as_slice()),
+                        ),
                         method,
                     )
                     .is_some()
@@ -395,15 +401,15 @@ impl Package {
                 return Err("duplicate IIR interface contract".into());
             }
         }
-        let mut methods = HashMap::new();
+        let mut methods = BTreeMap::new();
         for dispatch in &self.dispatch {
             spend(fuel, 1)?;
             terms(&dispatch.interface_arguments, fuel)?;
             term(&dispatch.subject, fuel)?;
             let world = (
                 dispatch.interface,
-                dispatch.interface_arguments.as_slice(),
-                &dispatch.subject,
+                TermsRef(dispatch.interface_arguments.as_slice()),
+                TermRef(&dispatch.subject),
             );
             let (members, selected) = contracts
                 .get_mut(&world)
@@ -416,7 +422,7 @@ impl Package {
                 terms(&method.method_arguments, fuel)?;
                 terms(&method.arguments, fuel)?;
                 let declared = *members
-                    .get(&(method.member, method.method_arguments.as_slice()))
+                    .get(&(method.member, TermsRef(method.method_arguments.as_slice())))
                     .ok_or("IIR dispatch member is absent from its interface")?;
                 terms(&dispatch.interface_arguments, fuel)?;
                 term(&dispatch.subject, fuel)?;
@@ -424,10 +430,10 @@ impl Package {
                     .insert(
                         (
                             dispatch.interface,
-                            dispatch.interface_arguments.as_slice(),
-                            &dispatch.subject,
+                            TermsRef(dispatch.interface_arguments.as_slice()),
+                            TermRef(&dispatch.subject),
                             method.member,
-                            method.method_arguments.as_slice(),
+                            TermsRef(method.method_arguments.as_slice()),
                         ),
                         (declared, method),
                     )
@@ -435,7 +441,7 @@ impl Package {
                 {
                     return Err("duplicate IIR dispatch member".into());
                 }
-                let key = (method.body, method.arguments.as_slice());
+                let key = (method.body, TermsRef(method.arguments.as_slice()));
                 if let Some(&ty) = template_targets.get(&key) {
                     if declared.signature.ordinary().map_err(|e| e.to_string())? != ty
                         || declared.signature.is_comptime_callable()
