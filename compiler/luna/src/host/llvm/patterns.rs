@@ -599,12 +599,56 @@ impl Emitter<'_> {
                     self.commit_pending_then(&pending_then)?;
                     self.retain_pattern(arm.body.source, &value, &receipt)?;
                 }
+                let mut arm_unconsumed_k = false;
+                if let Some(cap) = self.capturing_resume.as_mut() {
+                    let k_binding = effects::capturing_continuation_binding(&arm.pattern);
+                    cap.k_slot = k_binding.and_then(|id| self.locals.get(&id).cloned());
+                    let mentions_k = k_binding.is_some_and(|id| {
+                        effects::arm_mentions_local(&arm.body, arm.guard.as_ref(), id)
+                    });
+                    let has_drop_site = self.cleanup.is_some_and(|schedule| {
+                        schedule.sites.iter().any(|site| {
+                            site.source == arm.body.source
+                                && site.boundary == iir::cleanup::Boundary::HandlerEnd
+                                && k_binding.is_some_and(|id| {
+                                    site.actions.iter().any(|action| {
+                                        matches!(
+                                            &action.target,
+                                            iir::cleanup::Target::Local { binding, fields }
+                                                if *binding == id && fields.is_empty()
+                                        )
+                                    })
+                                })
+                        })
+                    });
+                    arm_unconsumed_k = !mentions_k && !has_drop_site;
+                    if arm_unconsumed_k {
+                        let slot = cap.unconsumed_guard_slot.clone();
+                        self.line(format!("store ptr %k_val, ptr {slot}, align 8"));
+                    }
+                }
                 let selected = self.expr_with_effects(&arm.body, depth, selected)?;
                 if !self.terminated {
                     if handler.is_some() {
                         self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::HandlerEnd)?;
                     } else if !arm.body.opens_block_scope() {
                         self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::ScopeEnd)?;
+                    }
+                    if arm_unconsumed_k
+                        && let Some(guard_slot) = self
+                            .capturing_resume
+                            .as_ref()
+                            .map(|cap| cap.unconsumed_guard_slot.clone())
+                    {
+                        let pending_k = self.instruction(
+                            Ty::Pointer,
+                            format!("load ptr, ptr {guard_slot}, align 8"),
+                        );
+                        self.line(format!("store ptr null, ptr {guard_slot}, align 8"));
+                        self.line(format!(
+                            "call void @flurry_cont_abort(ptr {}, ptr %task)",
+                            pending_k.text
+                        ));
                     }
                     // Checked ordinary matches retain even the impossible
                     // arms. A Never match has no normal edge or result slot
@@ -630,18 +674,70 @@ impl Emitter<'_> {
             self.label(&next);
         }
         if let Some(fallback) = fallback {
-            let selected = self.dispatch_direct(
-                fallback,
-                value,
-                depth + 1,
-                handler
-                    .ok_or("host fallback has no handler invocation")?
-                    .request,
-            )?;
-            if !self.terminated {
-                self.store(&result, &selected)?;
-                self.branch(&end);
-                continues = true;
+            if let Some(cap) = self.capturing_resume.clone() {
+                if fallback.handler.abi != nir::effects::Abi::Capturing {
+                    return Err("host capturing fallback requires a capturing outer handler".into());
+                }
+                let (callee, env) = fallback
+                    .machine
+                    .clone()
+                    .ok_or("host capturing fallback target missing")?;
+                let guard_slot = cap.unconsumed_guard_slot.clone();
+                self.line(format!("store ptr %k_val, ptr {guard_slot}, align 8"));
+                let (y_ptr, y_bytes) = if cap.y_ty == Ty::Unit {
+                    ("null".to_owned(), "0".to_owned())
+                } else {
+                    let sz = self.instruction(
+                        Ty::Int(64, false),
+                        format!(
+                            "ptrtoint ptr getelementptr ({}, ptr null, i32 1) to i64",
+                            cap.y_ty.llvm()
+                        ),
+                    );
+                    (cap.y_slot.clone(), sz.text)
+                };
+                self.emitted_effects.has_external_or_indirect_call = true;
+                self.emitted_effects.has_trap_or_unwind = true;
+                let aborting = self.instruction(
+                    Ty::Int(8, false),
+                    format!(
+                        "call i8 @flurry_cont_suspend(ptr {callee}, ptr {env}, ptr %args_ptr, ptr {y_ptr}, i64 {y_bytes})"
+                    ),
+                );
+                let ok = self.instruction(Ty::Bool, format!("icmp eq i8 {}, 0", aborting.text));
+                let resumed_lbl = self.fresh();
+                let abort_lbl = self.fresh();
+                self.line(format!(
+                    "br i1 {}, label %{resumed_lbl}, label %{abort_lbl}, {}",
+                    ok.text,
+                    control::LIKELY
+                ));
+                self.label(&abort_lbl);
+                let source = handler
+                    .as_ref()
+                    .map(|h| h.request)
+                    .unwrap_or(nir::program::SourceRange { start: 0, end: 0 });
+                self.cleanup_boundary(source, iir::cleanup::Boundary::PredicateFailure)?;
+                self.unwind_resources()?;
+                self.control_return(control::ABORT);
+                self.label(&resumed_lbl);
+                self.line(format!("store ptr null, ptr {guard_slot}, align 8"));
+                self.line(format!("store i8 1, ptr {}, align 1", cap.resumed_slot));
+                self.branch(&cap.exit_label);
+            } else {
+                let selected = self.dispatch_direct(
+                    fallback,
+                    value,
+                    depth + 1,
+                    handler
+                        .ok_or("host fallback has no handler invocation")?
+                        .request,
+                )?;
+                if !self.terminated {
+                    self.store(&result, &selected)?;
+                    self.branch(&end);
+                    continues = true;
+                }
             }
         } else {
             // A total match must never deliver an uninitialized result.

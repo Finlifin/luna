@@ -1722,6 +1722,7 @@ mod tests {
             failure_result: None,
             effects: vec![],
             effect_resume: None,
+            capturing_resume: None,
             native_return: None,
             loop_destinations: Default::default(),
             outlined_return: None,

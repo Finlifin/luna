@@ -138,6 +138,10 @@ pub enum Operation {
     AtomicCompilerFence,
     RuntimePanic,
     RuntimeAbort,
+    ContinuationResumeRaw,
+    ContinuationAbortRaw,
+    ContinuationCrossesCFrame,
+    ContinuationOriginThreadId,
 }
 
 impl Operation {
@@ -227,6 +231,10 @@ impl Operation {
         Self::AtomicCompilerFence,
         Self::RuntimePanic,
         Self::RuntimeAbort,
+        Self::ContinuationResumeRaw,
+        Self::ContinuationAbortRaw,
+        Self::ContinuationCrossesCFrame,
+        Self::ContinuationOriginThreadId,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -315,6 +323,10 @@ impl Operation {
             Self::AtomicCompilerFence => "atomic_compiler_fence",
             Self::RuntimePanic => "runtime_panic",
             Self::RuntimeAbort => "runtime_abort",
+            Self::ContinuationResumeRaw => "continuation_resume_raw",
+            Self::ContinuationAbortRaw => "continuation_abort_raw",
+            Self::ContinuationCrossesCFrame => "continuation_crosses_c_frame",
+            Self::ContinuationOriginThreadId => "continuation_origin_thread_id",
         }
     }
 
@@ -387,6 +399,17 @@ impl Operation {
         matches!(self, Self::RuntimePanic | Self::RuntimeAbort)
     }
 
+    /// Pooled-stack delimited continuation runtime operations are runtime-only.
+    pub fn is_continuation(self) -> bool {
+        matches!(
+            self,
+            Self::ContinuationResumeRaw
+                | Self::ContinuationAbortRaw
+                | Self::ContinuationCrossesCFrame
+                | Self::ContinuationOriginThreadId
+        )
+    }
+
     /// Raw typed reads, writes, and polymorphic atomics accept a `Type` payload instead of a fixed scalar set.
     pub fn is_polymorphic_memory(self) -> bool {
         matches!(
@@ -440,6 +463,7 @@ impl Operation {
             || self.is_memory()
             || self.is_atomic()
             || self.is_control_runtime()
+            || self.is_continuation()
     }
 
     /// Numeric operations exported by the scalar math libraries. Platform and
@@ -607,6 +631,18 @@ impl Operation {
                 (Self::RuntimePanic, 0) => Term::Primitive(Primitive::Str),
                 _ => unreachable!("runtime control operand index validated by arity"),
             }
+        } else if self.is_continuation() {
+            use Primitive::*;
+            match (self, index) {
+                (Self::ContinuationResumeRaw, 0) | (Self::ContinuationAbortRaw, 0) => {
+                    Term::Primitive(Continuation)
+                }
+                (Self::ContinuationResumeRaw, 1 | 2) => Term::Primitive(Usize),
+                (Self::ContinuationCrossesCFrame | Self::ContinuationOriginThreadId, 0) => {
+                    Term::Pointer(Box::new(Term::Primitive(Continuation)))
+                }
+                _ => unreachable!("continuation operand index validated by arity"),
+            }
         } else if self.has_integer_exponent() && index == 1 {
             Term::Primitive(Primitive::I32)
         } else {
@@ -651,6 +687,10 @@ impl Operation {
             | Self::AtomicFetchMax
             | Self::AtomicFetchMin => scalar.clone(),
             Self::RuntimePanic | Self::RuntimeAbort => Term::Primitive(Primitive::Never),
+            Self::ContinuationResumeRaw => Term::Primitive(Primitive::Usize),
+            Self::ContinuationAbortRaw => Term::Primitive(Primitive::Void),
+            Self::ContinuationCrossesCFrame => Term::Primitive(Primitive::Bool),
+            Self::ContinuationOriginThreadId => Term::Primitive(Primitive::U64),
             _ if self.is_platform() => Term::Primitive(Primitive::I64),
             _ if self.is_float_predicate() => Term::Primitive(Primitive::Bool),
             _ => scalar.clone(),
@@ -681,7 +721,8 @@ impl Operation {
             | Self::MemUninit
             | Self::MemZeroed
             | Self::MemManuallyDropWrap
-            | Self::MemManuallyDropUnwrap => &[Usize],
+            | Self::MemManuallyDropUnwrap
+            | Self::ContinuationResumeRaw => &[Usize],
             Self::MemCompareBytes => &[I32],
             Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
@@ -690,7 +731,10 @@ impl Operation {
             | Self::MemCopyNonOverlapping
             | Self::MemSetBytes
             | Self::AtomicFence
-            | Self::AtomicCompilerFence => &[Void],
+            | Self::AtomicCompilerFence
+            | Self::ContinuationAbortRaw => &[Void],
+            Self::ContinuationCrossesCFrame => &[Bool],
+            Self::ContinuationOriginThreadId => &[U64],
             Self::RuntimePanic | Self::RuntimeAbort => &[Never],
             Self::AtomicFetchAdd
             | Self::AtomicFetchSub
@@ -776,7 +820,8 @@ impl Operation {
             | Self::AtomicFetchOr
             | Self::AtomicFetchXor
             | Self::AtomicFetchMax
-            | Self::AtomicFetchMin => 3,
+            | Self::AtomicFetchMin
+            | Self::ContinuationResumeRaw => 3,
             Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite | Self::AtomicLoad => 2,
             Self::LinuxReadByte
             | Self::LinuxClose
@@ -788,7 +833,10 @@ impl Operation {
             | Self::MemManuallyDropUnwrap
             | Self::AtomicFence
             | Self::AtomicCompilerFence
-            | Self::RuntimePanic => 1,
+            | Self::RuntimePanic
+            | Self::ContinuationAbortRaw
+            | Self::ContinuationCrossesCFrame
+            | Self::ContinuationOriginThreadId => 1,
             Self::LinuxGetPid | Self::MemUninit | Self::MemZeroed | Self::RuntimeAbort => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot

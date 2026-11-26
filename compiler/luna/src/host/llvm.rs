@@ -6,6 +6,7 @@ mod bitvec_opt_bridge;
 mod callables;
 mod cleanup;
 mod closures;
+mod continuations;
 mod control;
 mod defaults;
 mod dyn_interfaces;
@@ -1020,6 +1021,14 @@ fn repr_at(
             Ok(Ty::Int(*width as u32, false))
         }
         Term::Primitive(P::Void) => Ok(Ty::Unit),
+        Term::Primitive(P::Continuation) => {
+            if !checked {
+                return Err(
+                    "host Continuation requires paired Copy/Drop resource verification".into(),
+                );
+            }
+            Ok(Ty::Pointer)
+        }
         Term::Primitive(P::Bool) => Ok(Ty::Bool),
         Term::Primitive(P::Str) => Ok(Ty::String),
         Term::Primitive(P::Symbol) => Ok(Ty::Symbol),
@@ -1219,6 +1228,7 @@ struct Emitter<'a> {
     failure_result: Option<Ty>,
     effects: Vec<std::sync::Arc<effects::DirectHandler>>,
     effect_resume: Option<(Slot, String, bool)>,
+    capturing_resume: Option<effects::CapturingResume>,
     native_return: Option<effects::ReturnStorage>,
     loop_destinations: BTreeSet<LocalId>,
     outlined_return: Option<effects::ReturnStorage>,
@@ -2460,6 +2470,10 @@ impl Emitter<'_> {
         }
         if checked.operation().is_control_runtime() {
             return self.control_runtime_intrinsic(checked.operation(), &values, expr.source);
+        }
+        if checked.operation().is_continuation() {
+            let result_ty = repr(self.graph, &expr.ty, self.checked)?;
+            return self.continuation_intrinsic(checked.operation(), &values, result_ty);
         }
         let width = checked
             .validate_target_layout(self.graph.target)
@@ -4009,6 +4023,7 @@ pub(super) fn emit_with_entry_mode_for_target(
             failure_result: (checked && !fast).then(|| result.clone()),
             effects: vec![],
             effect_resume: None,
+            capturing_resume: None,
             native_return: None,
             loop_destinations: Default::default(),
             outlined_return: None,
@@ -5147,6 +5162,7 @@ mod layout_budget_tests {
                 failure_result: Some(Ty::Unit),
                 effects: vec![],
                 effect_resume: None,
+                capturing_resume: None,
                 native_return: None,
                 loop_destinations: Default::default(),
                 outlined_return: None,

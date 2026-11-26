@@ -266,6 +266,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             failure_result: None,
             effects: vec![],
             effect_resume: None,
+            capturing_resume: None,
             native_return: None,
             loop_destinations: Default::default(),
             outlined_return: None,
