@@ -8,12 +8,14 @@ use std::fmt;
 pub(super) struct EmittedBodyEffects {
     pub has_trap_or_unwind: bool,
     pub has_volatile: bool,
+    pub has_external_or_indirect_call: bool,
 }
 
 impl EmittedBodyEffects {
     pub(super) fn merge(&mut self, other: Self) {
         self.has_trap_or_unwind |= other.has_trap_or_unwind;
         self.has_volatile |= other.has_volatile;
+        self.has_external_or_indirect_call |= other.has_external_or_indirect_call;
     }
 }
 
@@ -21,8 +23,8 @@ impl fmt::Display for EmittedBodyEffects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(emitted-body-effects (trap-or-unwind {}) (volatile {}))",
-            self.has_trap_or_unwind, self.has_volatile
+            "(emitted-body-effects (trap-or-unwind {}) (volatile {}) (external-or-indirect-call {}))",
+            self.has_trap_or_unwind, self.has_volatile, self.has_external_or_indirect_call
         )
     }
 }
@@ -75,8 +77,13 @@ pub(super) fn sanitize_for_emitted_body(
     attrs: &mut BehaviorAttributes,
     effects: EmittedBodyEffects,
 ) {
-    if effects.has_trap_or_unwind {
+    if effects.has_trap_or_unwind || effects.has_external_or_indirect_call {
         attrs.degrade_for_runtime_failure_access();
+    }
+    if effects.has_external_or_indirect_call {
+        attrs.terminates = false;
+        attrs.no_free = false;
+        attrs.no_sync = false;
     }
     if effects.has_volatile {
         attrs.degrade_for_volatile_access();
@@ -187,6 +194,7 @@ mod tests {
             EmittedBodyEffects {
                 has_trap_or_unwind: true,
                 has_volatile: false,
+                has_external_or_indirect_call: false,
             },
         );
         let rendered = format_tokens(&trapped);
@@ -201,6 +209,7 @@ mod tests {
             EmittedBodyEffects {
                 has_trap_or_unwind: false,
                 has_volatile: true,
+                has_external_or_indirect_call: false,
             },
         );
         let rendered_vol = format_tokens(&volatile);
@@ -209,6 +218,23 @@ mod tests {
         assert!(!rendered_vol.contains("memory(none)"));
         assert!(!rendered_vol.contains("speculatable"));
 
+        let mut external = p5.clone();
+        sanitize_for_emitted_body(
+            &mut external,
+            EmittedBodyEffects {
+                has_trap_or_unwind: false,
+                has_volatile: false,
+                has_external_or_indirect_call: true,
+            },
+        );
+        let rendered_ext = format_tokens(&external);
+        assert!(!rendered_ext.contains("memory(none)"));
+        assert!(!rendered_ext.contains("speculatable"));
+        assert!(!rendered_ext.contains("nounwind"));
+        assert!(!rendered_ext.contains("willreturn"));
+        assert!(!rendered_ext.contains("nosync"));
+        assert!(!rendered_ext.contains("nofree"));
+
         let mut clean = p5.clone();
         sanitize_for_emitted_body(&mut clean, EmittedBodyEffects::default());
         assert_eq!(clean, p5);
@@ -216,9 +242,10 @@ mod tests {
             EmittedBodyEffects {
                 has_trap_or_unwind: true,
                 has_volatile: false,
+                has_external_or_indirect_call: false,
             }
             .to_string(),
-            "(emitted-body-effects (trap-or-unwind true) (volatile false))"
+            "(emitted-body-effects (trap-or-unwind true) (volatile false) (external-or-indirect-call false))"
         );
     }
 }

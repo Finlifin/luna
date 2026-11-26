@@ -84,6 +84,7 @@ fn make_emitter<'a>(
     text_constants: &'a mut strings::TextConstants,
     attr_table: &'a mut attributes::AttributeTable,
     bitvec_cache: &'a mut bitvec_opt::SynthesisCache,
+    target_triple: Option<&str>,
     fuel: &'a mut usize,
 ) -> Emitter<'a> {
     Emitter {
@@ -97,6 +98,7 @@ fn make_emitter<'a>(
         failure_result,
         effects: vec![],
         effect_resume: None,
+        capturing_resume: None,
         native_return: None,
         loop_destinations: Default::default(),
         outlined_return: None,
@@ -115,6 +117,7 @@ fn make_emitter<'a>(
         prologue: String::new(),
         body: String::new(),
         emitted_effects: attributes::EmittedBodyEffects::default(),
+        target_triple: Some(target_triple.map(str::to_owned)),
         declarations,
         text_constants,
         attr_table: Some(attr_table),
@@ -138,6 +141,7 @@ pub(super) fn emit_dyn_vtables(
     attr_table: &mut attributes::AttributeTable,
     bitvec_cache: &mut bitvec_opt::SynthesisCache,
     schedules: Option<&iir::cleanup::Schedule>,
+    target_triple: Option<&str>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if graph.dyn_vtables.is_empty() {
@@ -175,6 +179,7 @@ pub(super) fn emit_dyn_vtables(
             text_constants,
             attr_table,
             bitvec_cache,
+            target_triple,
             fuel,
         );
         if let Some(program) = cleanup_program
@@ -190,6 +195,7 @@ pub(super) fn emit_dyn_vtables(
         if !e.terminated && layout.size > 0 {
             let addr = e.instruction(Ty::Int(64, false), "ptrtoint ptr %data_ptr to i64".into());
             let eff_align = layout.align.max(ptr_bytes).next_power_of_two();
+            e.emitted_effects.has_external_or_indirect_call = true;
             e.line(format!(
                 "call void @flurry_linux_dealloc(i64 {}, i64 {}, i64 {eff_align})",
                 addr.text, layout.size
@@ -294,6 +300,7 @@ pub(super) fn emit_dyn_vtables(
                 text_constants,
                 attr_table,
                 bitvec_cache,
+                target_triple,
                 fuel,
             );
 
@@ -307,6 +314,7 @@ pub(super) fn emit_dyn_vtables(
                     let addr =
                         e.instruction(Ty::Int(64, false), "ptrtoint ptr %data_ptr to i64".into());
                     let eff_align = subject_layout.align.max(ptr_bytes).next_power_of_two();
+                    e.emitted_effects.has_external_or_indirect_call = true;
                     e.line(format!(
                         "call void @flurry_linux_dealloc(i64 {}, i64 {}, i64 {eff_align})",
                         addr.text, subject_layout.size
@@ -419,6 +427,7 @@ impl Emitter<'_> {
             return Ok("null".into());
         }
         let eff_align = layout.align.max(ptr_bytes).next_power_of_two();
+        self.emitted_effects.has_external_or_indirect_call = true;
         let addr = self.instruction(
             Ty::Int(64, false),
             format!(

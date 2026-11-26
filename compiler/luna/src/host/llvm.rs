@@ -1236,6 +1236,7 @@ struct Emitter<'a> {
     prologue: String,
     body: String,
     emitted_effects: attributes::EmittedBodyEffects,
+    target_triple: Option<Option<String>>,
     declarations: &'a mut BTreeSet<String>,
     text_constants: &'a mut strings::TextConstants,
     attr_table: Option<&'a mut attributes::AttributeTable>,
@@ -1282,6 +1283,13 @@ impl Emitter<'_> {
         self.body.push_str("  ");
         self.body.push_str(s.as_ref());
         self.body.push('\n');
+    }
+
+    pub(super) fn resolved_target_triple(&mut self) -> Option<&str> {
+        if self.target_triple.is_none() {
+            self.target_triple = Some(crate::host::Toolchain::default().host_target_triple().ok());
+        }
+        self.target_triple.as_ref().and_then(|t| t.as_deref())
     }
 
     pub(super) fn emit_trap(&mut self) {
@@ -1608,6 +1616,7 @@ impl Emitter<'_> {
             "@{name} = private constant [{} x i8] c\"{encoded}\\00\"",
             bytes.len() + 1
         ));
+        self.emitted_effects.has_external_or_indirect_call = true;
         self.line(format!(
             "call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @{name})"
         ));
@@ -3745,11 +3754,22 @@ pub(super) fn abi_calling_convention(
     convention: nir::program::CallingConvention,
     target: Option<nir::target::TargetData>,
 ) -> &'static str {
+    abi_calling_convention_for_triple(convention, target, None)
+}
+
+pub(super) fn abi_calling_convention_for_triple(
+    convention: nir::program::CallingConvention,
+    target: Option<nir::target::TargetData>,
+    target_triple: Option<&str>,
+) -> &'static str {
     use nir::program::CallingConvention;
     match convention {
         CallingConvention::C => "",
         CallingConvention::System => {
-            if cfg!(target_os = "windows") && target.is_some_and(|t| t.pointer_bits() == 32) {
+            let is_windows = target_triple.is_some_and(|triple| {
+                crate::host::tools::TargetTripleInfo::parse(triple).is_windows
+            });
+            if is_windows && target.is_some_and(|t| t.pointer_bits() == 32) {
                 "x86_stdcallcc "
             } else {
                 ""
@@ -3791,7 +3811,7 @@ pub(super) fn emit(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_with_entry_mode(
     graph: &iir::Package,
-    mut fuel: usize,
+    fuel: usize,
     checked: bool,
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
@@ -3799,9 +3819,37 @@ pub(super) fn emit_with_entry_mode(
     mode: EntryMode,
     attributes: &nir::program::DefinitionAttributes,
 ) -> Result<String, String> {
+    emit_with_entry_mode_for_target(
+        graph,
+        fuel,
+        checked,
+        schedule,
+        entry,
+        dyn_cleanups,
+        mode,
+        attributes,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_with_entry_mode_for_target(
+    graph: &iir::Package,
+    mut fuel: usize,
+    checked: bool,
+    schedule: Option<&iir::cleanup::Schedule>,
+    entry: Option<&iir::InstanceKey>,
+    dyn_cleanups: &[crate::cleanup::DynCleanup],
+    mode: EntryMode,
+    attributes: &nir::program::DefinitionAttributes,
+    target_triple: Option<&str>,
+) -> Result<String, String> {
     if graph.roots.is_empty() {
         return Err("host pipeline requires one entry".into());
     }
+    let resolved_target_triple = target_triple
+        .map(str::to_owned)
+        .or_else(|| crate::host::Toolchain::default().host_target_triple().ok());
     let root = graph
         .functions
         .iter()
@@ -3971,6 +4019,7 @@ pub(super) fn emit_with_entry_mode(
             prologue: String::new(),
             body: String::new(),
             emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: Some(resolved_target_triple.clone()),
             declarations: &mut declarations,
             text_constants: &mut text_constants,
             attr_table: Some(&mut attr_table),
@@ -4269,11 +4318,19 @@ pub(super) fn emit_with_entry_mode(
         &mut attr_table,
         &mut bitvec_cache,
         schedule,
+        resolved_target_triple.as_deref(),
         &mut fuel,
     )?;
     let attr_defs = attr_table.render_declarations();
     let finish_module = |mut module: String, fuel: &mut usize| -> Result<String, String> {
-        control::export_c_entries(graph, attributes, &mut module, checked, fuel)?;
+        control::export_c_entries(
+            graph,
+            attributes,
+            &mut module,
+            checked,
+            resolved_target_triple.as_deref(),
+            fuel,
+        )?;
         module.push_str(&attr_defs);
         Ok(module)
     };
@@ -4938,14 +4995,21 @@ mod layout_budget_tests {
             "x86_64_sysvcc "
         );
         assert_eq!(abi_calling_convention(CallingConvention::System, t64), "");
-        let expected_system_32 = if cfg!(target_os = "windows") {
-            "x86_stdcallcc "
-        } else {
-            ""
-        };
         assert_eq!(
-            abi_calling_convention(CallingConvention::System, t32),
-            expected_system_32
+            abi_calling_convention_for_triple(
+                CallingConvention::System,
+                t32,
+                Some("i686-pc-windows-msvc"),
+            ),
+            "x86_stdcallcc "
+        );
+        assert_eq!(
+            abi_calling_convention_for_triple(
+                CallingConvention::System,
+                t32,
+                Some("i686-pc-linux-gnu"),
+            ),
+            ""
         );
     }
 
@@ -5022,5 +5086,197 @@ mod layout_budget_tests {
             ir.contains("nounwind willreturn nosync nofree memory(none) speculatable"),
             "string literal content must not falsely downgrade emitted behavior attributes:\n{ir}"
         );
+    }
+
+    #[test]
+    fn layer2_emitted_effects_strip_pure_attrs_for_opaque_calls_and_control_returns() {
+        use iir::{BehaviorAttributes, MemoryEffect};
+
+        let make_p5 = || BehaviorAttributes {
+            memory: MemoryEffect::None,
+            terminates: true,
+            no_trap_or_unwind: true,
+            no_free: true,
+            no_sync: true,
+            pointer_params: vec![],
+        };
+
+        let assert_stripped = |attrs: &BehaviorAttributes, label: &str| {
+            let rendered = attributes::format_tokens(attrs);
+            assert!(
+                !rendered.contains("memory(none)")
+                    && !rendered.contains("speculatable")
+                    && !rendered.contains("nounwind"),
+                "{label} must strip memory(none)/speculatable/nounwind, got `{rendered}`"
+            );
+        };
+
+        let graph = iir::Package {
+            target: Some(nir::target::TargetData::new(64).unwrap()),
+            ..Default::default()
+        };
+        let lambdas = BTreeMap::new();
+        let template_identities = callables::TemplateIdentities::default();
+        let mut text_constants = strings::TextConstants::default();
+        let mut fuel = 100_000usize;
+        fn make_emitter<'a>(
+            graph: &'a iir::Package,
+            lambdas: &'a BTreeMap<usize, usize>,
+            template_identities: &'a callables::TemplateIdentities<'a>,
+            declarations: &'a mut BTreeSet<String>,
+            text_constants: &'a mut strings::TextConstants,
+            fuel: &'a mut usize,
+            triple: Option<&str>,
+        ) -> Emitter<'a> {
+            Emitter {
+                graph,
+                cleanup: None,
+                schedules: None,
+                resource_unwinds: vec![],
+                checked: true,
+                function: None,
+                closure_body: None,
+                failure_result: Some(Ty::Unit),
+                effects: vec![],
+                effect_resume: None,
+                native_return: None,
+                loop_destinations: Default::default(),
+                outlined_return: None,
+                outlined_loops: BTreeMap::new(),
+                lambdas,
+                template_identities,
+                locals: BTreeMap::new(),
+                live: BTreeMap::new(),
+                temporaries: BTreeMap::new(),
+                temporary_live: BTreeMap::new(),
+                prepared: BTreeMap::new(),
+                receipt_paths: vec![],
+                pattern_orders: BTreeMap::new(),
+                temporary_fields: BTreeMap::new(),
+                loops: BTreeMap::new(),
+                prologue: String::new(),
+                body: String::new(),
+                emitted_effects: attributes::EmittedBodyEffects::default(),
+                target_triple: triple.map(|t| Some(t.to_owned())),
+                declarations,
+                text_constants,
+                attr_table: None,
+                bitvec_cache: None,
+                serial: 0,
+                terminated: false,
+                fuel,
+            }
+        }
+
+        // 1. @dprintf call via report_predicate_failure
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("x86_64-pc-linux-gnu"),
+            );
+            e.report_predicate_failure(nir::program::SourceRange { start: 0, end: 1 })
+                .unwrap();
+            let mut attrs = make_p5();
+            attributes::sanitize_for_emitted_body(&mut attrs, e.emitted_effects);
+            assert_stripped(&attrs, "@dprintf");
+        }
+
+        // 2. @flurry_linux_* call via platform_intrinsic (including cross-target aarch64 Linux)
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("aarch64-unknown-linux-gnu"),
+            );
+            e.platform_intrinsic(nir::intrinsics::Operation::LinuxGetPid, &[])
+                .unwrap();
+            let mut attrs = make_p5();
+            attributes::sanitize_for_emitted_body(&mut attrs, e.emitted_effects);
+            assert_stripped(&attrs, "@flurry_linux_getpid");
+        }
+
+        // 2b. Non-Linux triple rejects Linux platform intrinsics without host cfg! lock.
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("x86_64-pc-windows-msvc"),
+            );
+            let Err(err) = e.platform_intrinsic(nir::intrinsics::Operation::LinuxGetPid, &[])
+            else {
+                panic!("expected non-Linux triple to fail");
+            };
+            assert!(err.contains("Linux target triple"), "{err}");
+        }
+
+        // 3. @flurry_task_* call via machine_call
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("x86_64-pc-linux-gnu"),
+            );
+            let _ = e.machine_call("@flurry_task_poll", &[], Ty::Pointer, "");
+            let mut attrs = make_p5();
+            attributes::sanitize_for_emitted_body(&mut attrs, e.emitted_effects);
+            assert_stripped(&attrs, "@flurry_task_poll");
+        }
+
+        // 4. Indirect call via machine_call
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("x86_64-pc-linux-gnu"),
+            );
+            let _ = e.machine_call("%fn_ptr", &[], Ty::Unit, "");
+            let mut attrs = make_p5();
+            attributes::sanitize_for_emitted_body(&mut attrs, e.emitted_effects);
+            assert_stripped(&attrs, "indirect call");
+        }
+
+        // 5. Non-null ControlWord failure return
+        {
+            let mut declarations = BTreeSet::new();
+            let mut e = make_emitter(
+                &graph,
+                &lambdas,
+                &template_identities,
+                &mut declarations,
+                &mut text_constants,
+                &mut fuel,
+                Some("x86_64-pc-linux-gnu"),
+            );
+            e.control_return(control::FAILURE);
+            let mut attrs = make_p5();
+            attributes::sanitize_for_emitted_body(&mut attrs, e.emitted_effects);
+            assert_stripped(&attrs, "non-null ControlWord");
+        }
     }
 }

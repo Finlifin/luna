@@ -30,6 +30,9 @@ impl Emitter<'_> {
     }
 
     pub(super) fn machine_return(&mut self, value: &Value, control: &str) {
+        if control != "null" {
+            self.emitted_effects.has_trap_or_unwind = true;
+        }
         if self.failure_result.is_some() {
             let ty = packet(&value.ty);
             let mut fields = "zeroinitializer".to_string();
@@ -108,6 +111,13 @@ impl Emitter<'_> {
             }
             args.push_str("ptr %task");
         }
+        if !target.starts_with('@')
+            || target.starts_with("@flurry_linux_")
+            || target.starts_with("@flurry_task_")
+            || target == "@dprintf"
+        {
+            self.emitted_effects.has_external_or_indirect_call = true;
+        }
         let call = format!("call {} {symbol}({args}){suffix}", ty.llvm());
         if ty == Ty::Unit {
             self.line(call);
@@ -169,6 +179,7 @@ pub(super) fn export_c_entries(
     attributes: &nir::program::DefinitionAttributes,
     module: &mut String,
     checked: bool,
+    target_triple: Option<&str>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if attributes.is_empty() {
@@ -269,7 +280,7 @@ pub(super) fn export_c_entries(
                 result.llvm()
             )
         };
-        let cc = super::abi_calling_convention(convention, graph.target);
+        let cc = super::abi_calling_convention_for_triple(convention, graph.target, target_triple);
         let symbol: String = name.bytes().map(|b| format!("\\{b:02X}")).collect();
         module.push_str(&format!("define {cc}{}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %r = call {packet} @flurry_{index}({args})\n  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
     }

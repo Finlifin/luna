@@ -791,6 +791,7 @@ impl Emitter<'_> {
             prologue: String::new(),
             body: String::new(),
             emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: self.target_triple.clone(),
             declarations: self.declarations,
             text_constants: self.text_constants,
             attr_table: self.attr_table.as_deref_mut(),

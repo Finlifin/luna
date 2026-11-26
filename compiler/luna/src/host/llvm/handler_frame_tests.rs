@@ -284,6 +284,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             prologue: String::new(),
             body: String::new(),
             emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: None,
             declarations: &mut declarations,
             text_constants: &mut strings::TextConstants::default(),
             attr_table: None,
