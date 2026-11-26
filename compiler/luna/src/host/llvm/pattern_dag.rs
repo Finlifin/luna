@@ -3019,9 +3019,6 @@ impl Emitter<'_> {
         let mut cur = self.load(scrutinee_slot);
         let mut cur_term = value_ty.clone();
         let mut cur_place = Place::root();
-        if let Some(info) = v.place_infos.get(&Place::root()) {
-            cur_term = info.term.clone();
-        }
         for step in &place.steps {
             if self.terminated {
                 return Ok(Value::unit());
@@ -3143,9 +3140,6 @@ impl Emitter<'_> {
                 }
             };
             cur_place.steps.push(step.clone());
-            if let Some(info) = v.place_infos.get(&cur_place) {
-                cur_term = info.term.clone();
-            }
         }
         Ok(cur)
     }

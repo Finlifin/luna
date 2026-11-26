@@ -10,10 +10,7 @@ pub pure comptime trait ComptimeListPatternView {
     comptime fn list_pattern_view_get_len(self) -> usize;
     comptime fn list_pattern_view_get_element(self, index: usize) -> Element;
 
-    comptime fn list_pattern_view_rest(self, start: usize) -> Rest {
-        assumes false;
-        while true {}
-    }
+    comptime fn list_pattern_view_rest(self, start: usize) -> Rest;
 }
 
 pub pure comptime trait ComptimeStableListPatternView :- ComptimeListPatternView {}

@@ -298,45 +298,38 @@ impl Checker<'_, '_> {
                         "list rest patterns require a slicing protocol",
                     )
                 })?;
-                if let Some(default_body) = contract.rest_default {
-                    let resolution = self
-                        .resolve_trait_capability(
-                            &n::InterfaceInstance {
-                                declaration: protocol,
-                                arguments: vec![],
-                            },
-                            ty,
-                            crate::ptc::Budget::default(),
-                        )
-                        .map_err(|e| {
-                            error(rest_pat.span, format!("trait resolution failed: {e:?}"))
-                        })?;
-                    let overridden = matches!(
-                        resolution.selection,
-                        crate::implementation::Selection::Selected(selected_id)
-                            if self
-                                .implementation_positions
-                                .get(&selected_id)
-                                .and_then(|pos| self.checked_implementations.get(*pos))
-                                .is_some_and(|implementation| {
-                                    implementation
-                                        .methods
-                                        .iter()
-                                        .any(|(method, body)| {
-                                            method == rest_name && *body != default_body
-                                        })
+                let resolution = self
+                    .resolve_trait_capability(
+                        &n::InterfaceInstance {
+                            declaration: protocol,
+                            arguments: vec![],
+                        },
+                        ty,
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|e| error(rest_pat.span, format!("trait resolution failed: {e:?}")))?;
+                let overridden = matches!(
+                    resolution.selection,
+                    crate::implementation::Selection::Selected(selected_id)
+                        if self
+                            .implementation_positions
+                            .get(&selected_id)
+                            .and_then(|pos| self.checked_implementations.get(*pos))
+                            .is_some_and(|implementation| {
+                                implementation.methods.iter().any(|(method, body)| {
+                                    method == rest_name && contract.rest_default != Some(*body)
                                 })
-                    );
-                    if !overridden {
-                        return Err(error(
-                            rest_pat.span,
-                            if endless {
-                                "type implements ListPatternViewEndless without overriding list_pattern_view_rest required for '...rest' binding"
-                            } else {
-                                "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding"
-                            },
-                        ));
-                    }
+                            })
+                );
+                if !overridden {
+                    return Err(error(
+                        rest_pat.span,
+                        if endless {
+                            "type implements ListPatternViewEndless without overriding list_pattern_view_rest required for '...rest' binding"
+                        } else {
+                            "type implements ListPatternView without overriding list_pattern_view_rest required for '...rest' binding"
+                        },
+                    ));
                 }
                 let rest_value = call(
                     self,

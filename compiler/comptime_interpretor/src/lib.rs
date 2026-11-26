@@ -1231,7 +1231,12 @@ impl<'a> Interpreter<'a> {
                     }
                     continue;
                 }
-                let body = **supplied.get(&member.name).ok_or_else(invalid)?;
+                let Some(&&body) = supplied.get(&member.name) else {
+                    if member.is_optional {
+                        continue;
+                    }
+                    return Err(invalid());
+                };
                 let (phase, quote, type_parameters) =
                     functions.method_slot(&body).ok_or_else(invalid)?;
                 if member.is_quote != quote {

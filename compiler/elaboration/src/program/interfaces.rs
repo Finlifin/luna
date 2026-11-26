@@ -258,6 +258,7 @@ impl Checker<'_, '_> {
             source: source(item.span),
             phase: self.member_phases.get(&owner).copied().unwrap_or_default(),
             is_quote: signature.modifiers.is_quote,
+            is_optional: false,
             pure: signature.modifiers.is_pure,
             is_unsafe: signature.modifiers.is_unsafe,
             type_arguments: vec![],
@@ -371,6 +372,10 @@ impl Checker<'_, '_> {
             let ItemKind::Trait(def) = &info.node.expect_item().kind else {
                 continue;
             };
+            let trait_decl = declaration(self.package, &self.package_identities, owner);
+            let is_list_pattern_proto = Some(trait_decl) == self.protocols.list_pattern
+                || Some(trait_decl) == self.protocols.comptime_list_pattern
+                || Some(trait_decl) == self.protocols.list_pattern_endless;
             let mut methods = Vec::new();
             for member in &def.items {
                 if !matches!(
@@ -382,13 +387,20 @@ impl Checker<'_, '_> {
                         | ItemKind::Newtype(..)
                         | ItemKind::Const(..)
                 ) {
-                    methods.push(self.method_contract(*member, owner, Some(&premise_traits))?);
+                    let mut contract =
+                        self.method_contract(*member, owner, Some(&premise_traits))?;
+                    if is_list_pattern_proto
+                        && matches!(
+                            contract.name.as_str(),
+                            "list_pattern_view_rest" | "list_pattern_view_rest_comptime"
+                        )
+                    {
+                        contract.is_optional = true;
+                    }
+                    methods.push(contract);
                 }
             }
-            traits
-                .get_mut(&declaration(self.package, &self.package_identities, owner))
-                .unwrap()
-                .methods = methods;
+            traits.get_mut(&trait_decl).unwrap().methods = methods;
         }
         for (owner, info) in self.package.owners() {
             let item = info.node.expect_item();
@@ -753,6 +765,14 @@ impl Checker<'_, '_> {
             }
             let mut methods = Vec::new();
             if let Some(interface) = interface {
+                for name in supplied.keys() {
+                    if !traits[&interface].methods.iter().any(|c| c.name == *name) {
+                        return Err(error(
+                            item.span,
+                            format!("method `{name}` is not declared in trait"),
+                        ));
+                    }
+                }
                 for contract in &traits[&interface].methods {
                     if contract.phase != phase {
                         if supplied.contains_key(&contract.name) {
@@ -1120,6 +1140,10 @@ impl Checker<'_, '_> {
                         methods.push((contract.name.clone(), actual.declaration));
                     } else if let Some(default) = contract.default {
                         methods.push((contract.name.clone(), default));
+                    } else if contract.is_optional {
+                        // Types without `...rest` slicing may omit optional
+                        // protocol rest methods; pattern matching and direct
+                        // calls still diagnose missing overrides.
                     } else {
                         return Err(error(
                             item.span,
@@ -2078,8 +2102,7 @@ impl Checker<'_, '_> {
             .methods
             .iter()
             .find(|(method, _)| method == name)
-            .map(|(_, body)| *body)
-            .ok_or_else(|| error(span, "unknown trait method"))?;
+            .map(|(_, body)| *body);
         if let Some(interface) = interface.as_ref() {
             let is_finite_list_proto = Some(interface.declaration) == self.protocols.list_pattern
                 || Some(interface.declaration) == self.protocols.comptime_list_pattern;
@@ -2091,12 +2114,15 @@ impl Checker<'_, '_> {
                     "list_pattern_view_rest" | "list_pattern_view_rest_comptime"
                 )
             {
-                let is_default = self
-                    .checked_traits
-                    .by_id(interface.declaration)
-                    .and_then(|t| t.methods.iter().find(|method| method.name == name))
-                    .is_some_and(|contract| contract.default == Some(body));
-                if is_default {
+                let is_missing_or_default = match body {
+                    None => true,
+                    Some(body) => self
+                        .checked_traits
+                        .by_id(interface.declaration)
+                        .and_then(|t| t.methods.iter().find(|method| method.name == name))
+                        .is_some_and(|contract| contract.default == Some(body)),
+                };
+                if is_missing_or_default {
                     return Err(error(
                         span,
                         if is_endless_list_proto {
@@ -2108,6 +2134,7 @@ impl Checker<'_, '_> {
                 }
             }
         }
+        let body = body.ok_or_else(|| error(span, "unknown trait method"))?;
         if interface.is_none() && !implementation.phases.runtime {
             let body_owner = self.source_declarations.owner(body);
             let spliceable_comptime_method = self.protocols.splice.is_some()

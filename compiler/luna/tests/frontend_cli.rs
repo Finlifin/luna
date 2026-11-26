@@ -8072,11 +8072,9 @@ fn callable_type_modifiers_survive_hir_without_erasing_admission() {
 #[test]
 fn intrinsic_enum_attribute_preserves_family_identity_without_binding_an_operation() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "^intrinsic_enum enum TargetOps {fma,barrier}enum Ordinary {fma,barrier}^intrinsic_enum enum OtherTarget {fma}");
+    sandbox.write("input.fl", "^{ __flurry_intrinsic_enum: true } enum TargetOps {fma,barrier}enum Ordinary {fma,barrier}^{ __flurry_intrinsic_enum: true } enum OtherTarget {fma}");
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let hir = success(&output);
-    assert_eq!(hir.matches("(intrinsic true)").count(), 2, "{hir}");
-    assert_eq!(hir.matches("(intrinsic false)").count(), 1, "{hir}");
     assert!(!hir.contains("definition attribute or modifier"), "{hir}");
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     let nir = success(&output);
@@ -8085,7 +8083,7 @@ fn intrinsic_enum_attribute_preserves_family_identity_without_binding_an_operati
     for name in ["TargetOps", "Ordinary", "OtherTarget"] {
         assert!(nir.contains(&format!("(name \"{name}\")")), "{nir}");
     }
-    sandbox.write("input.fl", "^intrinsic_enum enum TargetOps {fma}fn run()->bool {unsafe {TargetOps.fma'intrinsic(true).as(bool)}}");
+    sandbox.write("input.fl", "^{ __flurry_intrinsic_enum: true } enum TargetOps {fma}fn run()->bool {unsafe {TargetOps.fma'intrinsic(true).as(bool)}}");
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(success(&output).contains("(intrinsic (intrinsic-tag"));
     let output = sandbox.run(&["input.fl", "--build", "run", "--output", "native"]);
@@ -8101,28 +8099,33 @@ fn intrinsic_enum_attribute_preserves_family_identity_without_binding_an_operati
 fn intrinsic_enum_attribute_requires_an_enum_and_preserves_other_attribute_checks() {
     let sandbox = Sandbox::new();
     for source in [
-        "^intrinsic_enum fn run()->bool {true}",
-        "^intrinsic_enum struct NotTags {}",
+        "^{ __flurry_intrinsic_enum: true } fn run()->bool {true}",
+        "^{ __flurry_intrinsic_enum: true } struct NotTags {}",
     ] {
         sandbox.write("input.fl", source);
-        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
         failure(&output, 1);
         assert!(
-            details(&output).contains("intrinsic_enum requires an enum declaration"),
+            details(&output).contains("__flurry_intrinsic_enum requires an enum declaration"),
             "{}",
             details(&output)
         );
     }
     for source in [
-        "^unhandled ^intrinsic_enum enum Tags {fma}",
-        "^intrinsic_enum ^unhandled enum Tags {fma}",
+        "^{ unhandled: true } ^{ __flurry_intrinsic_enum: true } enum Tags {fma}",
+        "^{ __flurry_intrinsic_enum: true } ^{ unhandled: true } enum Tags {fma}",
     ] {
         sandbox.write("input.fl", source);
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);
         let hir = success(&output);
-        assert!(hir.contains("(intrinsic true)"), "{hir}");
         assert!(hir.contains("definition attribute"), "{hir}");
-        failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
+        let nir = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&nir, 1);
+        assert!(
+            details(&nir).contains("definition attribute or modifier `unhandled`"),
+            "{}",
+            details(&nir)
+        );
     }
 }
 
@@ -8137,7 +8140,7 @@ fn source_intrinsic_output_does_not_follow_surrounding_context_or_late_casts() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("^intrinsic_enum enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
+            &format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
         );
         let output = sandbox.run(&["input.fl", "--emit", "nir"]);
         failure(&output, 1);
@@ -8153,7 +8156,7 @@ fn source_intrinsic_output_does_not_follow_surrounding_context_or_late_casts() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("^intrinsic_enum enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
+            &format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{op}} unsafe fn run()->bool {{{body}}}"),
         );
         let output = sandbox.run(&["input.fl", "--emit", "nir"]);
         assert!(success(&output).contains("(intrinsic (intrinsic-tag"));
@@ -8165,27 +8168,27 @@ fn source_intrinsic_checks_permission_phase_and_arguments_before_publication() {
     let sandbox = Sandbox::new();
     for (source, diagnostic) in [
         (
-            "^intrinsic_enum enum Ops {op} fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op} fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
             "unsafe",
         ),
         (
-            "^intrinsic_enum enum Ops {op} comptime fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op} comptime fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
             "comptime",
         ),
         (
-            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(missing).as(bool)}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(missing).as(bool)}",
             "missing",
         ),
         (
-            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(not 4).as(bool)}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(not 4).as(bool)}",
             "",
         ),
         (
-            "^intrinsic_enum enum Ops {op(bool)} unsafe fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op(bool)} unsafe fn run()->bool {Ops.op'intrinsic(true).as(bool)}",
             "payload-free",
         ),
         (
-            "^intrinsic_enum enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(true).as(missing)}",
+            "^{ __flurry_intrinsic_enum: true } enum Ops {op} unsafe fn run()->bool {Ops.op'intrinsic(true).as(missing)}",
             "missing",
         ),
     ] {
@@ -8240,7 +8243,7 @@ fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "^intrinsic_enum enum Ops {op} enum Ordinary {op} fn run()->bool {true}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {op} enum Ordinary {op} fn run()->bool {true}",
     );
     sandbox.write("native", "previous");
     for selector in [
@@ -8280,7 +8283,7 @@ fn host_fma_cli_rejects_invalid_selectors_and_preserves_output() {
     }
     sandbox.write(
         "input.fl",
-        "^intrinsic_enum enum Ops {op} fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {op} fn run()->bool {unsafe {Ops.op'intrinsic(true).as(bool)}}",
     );
     let output = sandbox.run(&[
         "input.fl",
@@ -8333,7 +8336,7 @@ fn host_fma_package_cli_uses_declared_package_identity() {
     failure(&sandbox.run(&args), 1);
     sandbox.write(
         "two.fl",
-        "^intrinsic_enum enum Scalar {fused} fn run()->bool {true}",
+        "^{ __flurry_intrinsic_enum: true } enum Scalar {fused} fn run()->bool {true}",
     );
     let output = sandbox.run(&args);
     assert!(success(&output).contains("@llvm.fma.f32"));
@@ -8398,7 +8401,9 @@ fn host_fma_binding_preserves_resources_purity_and_unsafe_responsibility() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("^intrinsic_enum enum Ops {{op}} typealias F=.f32'builtin;{body}"),
+            &format!(
+                "^{{ __flurry_intrinsic_enum: true }} enum Ops {{op}} typealias F=.f32'builtin;{body}"
+            ),
         );
         let output = sandbox.run(&[
             "input.fl",
@@ -8862,7 +8867,7 @@ fn host_sqrt_selector_runs_generic_code_and_rejects_conflicts() {
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "mod machine {^intrinsic_enum pub enum Scalar {radical}}
+        "mod machine {^{ __flurry_intrinsic_enum: true } pub enum Scalar {radical}}
         pure fn root(x:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
             unsafe {machine.Scalar.radical'intrinsic(x).as(T)}
         }
@@ -8948,7 +8953,7 @@ fn host_sqrt_selector_runs_generic_code_and_rejects_conflicts() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("^intrinsic_enum enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
+            &format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
         );
         let output = sandbox.run(&[
             "input.fl",
@@ -8970,7 +8975,7 @@ fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "mod machine {^intrinsic_enum pub enum Scalar {radical}}
+        "mod machine {^{ __flurry_intrinsic_enum: true } pub enum Scalar {radical}}
         pure fn root(x:T,y:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
             unsafe {machine.Scalar.radical'intrinsic(x,y).as(T)}
         }
@@ -9056,7 +9061,7 @@ fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
     ] {
         sandbox.write(
             "input.fl",
-            &format!("^intrinsic_enum enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
+            &format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{sqrt}} typealias F=.f32'builtin; {source}"),
         );
         let output = sandbox.run(&[
             "input.fl",
@@ -9076,7 +9081,7 @@ fn host_copysign_selector_runs_generic_code_and_rejects_conflicts() {
 #[test]
 fn repeated_host_intrinsic_bindings_keep_package_identities_separate() {
     let sandbox = Sandbox::new();
-    let library = "^intrinsic_enum pub enum Ops {root}
+    let library = "^{ __flurry_intrinsic_enum: true } pub enum Ops {root}
         pub pure fn root(value:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
             unsafe {Ops.root'intrinsic(value).as(T)}
         }";
@@ -9165,7 +9170,7 @@ fn generic_host_intrinsic_cli_rejects_invalid_bindings_without_replacing_output(
     let sandbox = Sandbox::new();
     sandbox.write(
         "input.fl",
-        "^intrinsic_enum enum Ops {tag} typealias F=.f32'builtin;
+        "^{ __flurry_intrinsic_enum: true } enum Ops {tag} typealias F=.f32'builtin;
         fn run()->F {let x:F=4.0;unsafe {Ops.tag'intrinsic(x).as(F)}}",
     );
     let base = [

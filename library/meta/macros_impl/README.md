@@ -8,6 +8,6 @@
   - `macro3`（Mode 3，`^macro3`）：接收并输出 `TokenBuffer` 的自由 token 构造宏
   - `macro4`（Mode 4，`^macro4`）：接收词法分析前原始文本 `str` 并输出 `TokenBuffer` 的源文本构造宏
 - **内联构造器**：
-  - `@define_macro1`（Mode 1 AST）：按处理器参数类型解析固定、可选（`Optional<T>`）或变长（`...name: Repetition<T>`）Flurry AST 片段
+  - `@define_macro1`（Mode 1 AST）：按处理器参数类型解析固定、可选（`?T`）或变长（`...name: Repetition<T>`）Flurry AST 片段
   - `@define_macro2`（Mode 2 PEG）：声明无左递归的 PEG 文法（以 `Entry` 为入口，支持序列表达 `~`、有序选择 `|`、前瞻 `&`/`!`、重复 `*`/`+`/`?` 及 `Flurry*` 片段），并将匹配结果投影为 `PegNode` 或对应 AST 片段
-- **配套再导出**：`Optional`、`Repetition`、`Token`、`TokenBuffer`、`ToTokens`
+- **配套再导出**：`ast`、`peg`、`Repetition`、`Token`、`TokenBuffer`、`ToTokens`

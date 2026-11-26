@@ -198,30 +198,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 {
                     return self.lower_trait_def(children[1], true);
                 }
-                if self.ast.get_node_kind(children[0]) == Some(NodeKind::Id)
-                    && self.node_to_ident(children[0]).name.as_str() == "intrinsic_enum"
-                {
-                    let owner = self.lower_top_level_node(children[1]);
-                    let mut item = self
-                        .package
-                        .item(owner)
-                        .expect("intrinsic enum target")
-                        .clone();
-                    match &mut item.kind {
-                        ItemKind::Enum(definition) => definition.is_intrinsic = true,
-                        _ => {
-                            self.emit_malformed("intrinsic_enum requires an enum declaration", span)
-                        }
-                    }
-                    let mut info = self
-                        .package
-                        .owner(owner)
-                        .expect("intrinsic enum owner")
-                        .clone();
-                    info.node = OwnerNode::Item(self.arena.alloc_item(item));
-                    self.package.insert_owner(owner, info);
-                    return owner;
-                }
                 // Keyword modifiers are syntax. Attribute expressions retain
                 // their lexical owner and go through ordinary evaluation below.
                 let mut cursor = node;

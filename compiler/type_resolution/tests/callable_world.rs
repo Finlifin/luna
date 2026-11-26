@@ -306,6 +306,7 @@ fn method_signature_queries_preserve_missing_invalid_and_budget_outcomes() {
             source: nir::program::SourceRange { start: 0, end: 0 },
             phase: TraitPhase::Runtime,
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             type_arguments: vec![],

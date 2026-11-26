@@ -3,9 +3,11 @@ use nir::*;
 fn p(primitive: Primitive) -> Term {
     Term::Primitive(primitive)
 }
+
 fn b(depth: u32, index: usize, sort: Sort) -> Term {
     Term::Bound { depth, index, sort }
 }
+
 fn identity_signature() -> Term {
     Term::Function {
         parameters: vec![
@@ -190,6 +192,7 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
         source: nir::program::SourceRange { start: 0, end: 0 },
         phase: Default::default(),
         is_quote: false,
+        is_optional: false,
         pure: true,
         is_unsafe: false,
         type_arguments: vec![],

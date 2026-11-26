@@ -278,7 +278,9 @@ impl TestFnvBuild {{
             "../../../library/builtin/numeric/comparison.fl"
         )),
         literals = include_str!("../../../library/builtin/numeric/literals.fl"),
-        math_intrinsics = include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
+        math_intrinsics = support::with_attrs(include_str!(
+            "../../../library/builtin/numeric/math_intrinsics.fl"
+        )),
         resources = include!("support/resources_source.rs"),
         native_resources = include_str!("../../../library/builtin/protocols/native_resources.fl"),
         staging = include_str!("../../../library/builtin/protocols/staging.fl"),
@@ -286,7 +288,7 @@ impl TestFnvBuild {{
         tuple = include_str!("../../../library/builtin/types/tuple.fl"),
         types_hashing =
             support::with_attrs(include_str!("../../../library/builtin/types/hashing.fl")),
-        mem_raw = include_str!("../../../library/builtin/mem_impl/raw.fl"),
+        mem_raw = support::with_attrs(include_str!("../../../library/builtin/mem_impl/raw.fl")),
         mem_slice = support::with_attrs(include_str!("../../../library/builtin/mem_impl/slice.fl")),
         writer = include_str!("../../../library/builtin/protocols/formatting/writer.fl"),
         patterns = support::with_attrs(include_str!(

@@ -22,9 +22,15 @@ pub trait ByteWriter {
     unsafe fn write_raw_bytes(*self, src: usize, len: usize) -> !Err void {
         var index: usize = 0;
         while index < len {
-            let addr = checked_add_usize(src, index) match {
+            let maybe_addr = checked_add_usize(src, index);
+            let valid = maybe_addr match {
+                _? => true,
+                null => false,
+            }
+            assumes valid;
+            let addr: usize = maybe_addr match {
                 found? => found,
-                null => break,
+                null => src,
             }
             let byte = raw_read<u8>(addr);
             self.write_byte(byte)!;
@@ -36,9 +42,15 @@ pub trait ByteWriter {
         let length = str_byte_length(text);
         var index: u64 = 0;
         while index < length {
-            let byte = str_byte(text, index) match {
+            let maybe_byte = str_byte(text, index);
+            let valid = maybe_byte match {
+                _? => true,
+                null => false,
+            }
+            assumes valid;
+            let byte: u8 = maybe_byte match {
                 found? => found,
-                null => break,
+                null => 0,
             }
             self.write_byte(byte)!;
             index = index + 1;

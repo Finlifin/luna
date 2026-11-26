@@ -1,8 +1,36 @@
 use numeric.math_intrinsics;
 use primitives.*;
-use protocols.formatting.options.{FormatOptions, ProbeWriter, compute_pad_counts, write_char_repeat}
+use protocols.formatting.options.{FormatOptions, compute_pad_counts, write_char_repeat}
 use protocols.formatting.writer.ByteWriter;
 use protocols.resources.{Clone, Copy}
+
+private enum ProbeErr {
+    Overflow,
+}
+
+private struct ProbeWriter {
+    chars: u32,
+}
+
+impl ProbeWriter {
+    fn new() -> Self {
+        ProbeWriter { chars: 0 }
+    }
+}
+
+impl ByteWriter for ProbeWriter {
+    assoc Err: Type = ProbeErr;
+
+    fn write_byte(*self, byte: u8) -> !ProbeErr void {
+        if byte < 128 or byte >= 192 {
+            let c = self.chars.*;
+            if c >= 10000000 {
+                return error ProbeErr.Overflow;
+            }
+            self.chars.* = c + 1;
+        }
+    }
+}
 
 {-
     Zero-allocation IEEE-754 binary-float-to-decimal formatter for f16, bf16,
@@ -1468,10 +1496,11 @@ fn write_unpacked_float_formatted(
     }
 
     var probe = ProbeWriter.new();
-    write_float_abs_body(u_abs, opts, probe.ref) match {
-        _! => {},
-        error _ => return,
+    let probed = write_float_abs_body(u_abs, opts, probe.ref) match {
+        _! => true,
+        error _ => false,
     }
+    assumes probed;
     let sign_len: u32 = if sign_byte != 0 { 1 } else { 0 };
     let probed_chars = probe.chars;
     if probed_chars > 10000000 {

@@ -1,1 +1,1 @@
-pub use attrs.macros.{macro3, macro4};
+pub use attrs.macros.{ast, peg, macro3, macro4};

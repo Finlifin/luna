@@ -9,7 +9,6 @@ pub use nodes.{
     FlurryPattern,
     FlurryStatement,
     FlurryType,
-    Optional,
     PegNode,
     PegTreeNode,
     Repetition,

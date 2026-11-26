@@ -461,6 +461,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             declaration: id(5),

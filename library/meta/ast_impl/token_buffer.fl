@@ -75,7 +75,7 @@ impl TokenBuffer {
         let count = parts.length();
         var i: Integer = 0;
         while i < count {
-            out = out.concat(parts[i].tokens);
+            out.append_all(parts[i].tokens);
             i = i + 1;
         }
         TokenBuffer { tokens: out }
@@ -89,10 +89,10 @@ impl TokenBuffer {
         var out: List<Token> = [];
         var i: Integer = 0;
         while i < count - 1 {
-            out = out.concat([self.tokens[i]]);
+            out.append(self.tokens[i]);
             i = i + 1;
         }
-        out = out.concat([self.tokens[count - 1].with_spacing(spacing)]);
+        out.append(self.tokens[count - 1].with_spacing(spacing));
         TokenBuffer { tokens: out }
     }
 
@@ -108,9 +108,9 @@ impl TokenBuffer {
         var i: Integer = 0;
         while i < count {
             if i > 0 {
-                out = out.concat(separator.tokens);
+                out.append_all(separator.tokens);
             }
-            out = out.concat(parts[i].tokens);
+            out.append_all(parts[i].tokens);
             i = i + 1;
         }
         TokenBuffer { tokens: out }

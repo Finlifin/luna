@@ -1,47 +1,29 @@
-use meta.{
-    isize_representation as comptime_isize_representation,
-    str_from_char,
-    usize_representation as comptime_usize_representation,
-}
 use primitives.*;
 use protocols.formatting.float;
 use protocols.formatting.options.{
     FormatOptions,
     compute_pad_counts,
-    pad_comptime_str,
-    parse_comptime_int_options,
     parse_float_options,
     parse_int_options,
     parse_plain_options,
     parse_text_options,
-    truncate_comptime_str,
     write_char_repeat,
     write_char_utf8,
     write_padded_str,
     write_padded_str_truncated,
 }
-use protocols.formatting.radix.{
-    format_integer_comptime,
-    format_signed_comptime,
-    format_unsigned_comptime,
-    write_signed_formatted,
-    write_unsigned_formatted,
-}
+use protocols.formatting.radix.{write_signed_formatted, write_unsigned_formatted}
 use protocols.formatting.writer.ByteWriter;
 
 {-
-    Two-phase human-facing formatting protocol. Runtime implementations borrow
-    `*self` and write into a `ByteWriter` according to `comptime .format: str`
-    property options without consuming affine `Once` values; comptime phase
-    implementations produce a compile-time `str`.
+    Human-facing formatting protocol. Implementations borrow `*self` and
+    write into a `ByteWriter` according to `comptime .format: str` property
+    options without consuming affine `Once` values.
 -}
 pub trait Display {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
         W :- ByteWriter;
-
-    ^attrs.comptime_phase
-    comptime fn comptime_fmt(self, .format: str = "") -> str;
 }
 
 impl Display for bool {
@@ -55,14 +37,6 @@ impl Display for bool {
     }
 }
 
-comptime impl Display for bool {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_plain_options(format);
-        let text = if self { "true" } else { "false" };
-        pad_comptime_str("", text, opts, false, false)
-    }
-}
-
 impl Display for u8 {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -70,13 +44,6 @@ impl Display for u8 {
     {
         let opts: FormatOptions = parse_int_options(format);
         write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
-    }
-}
-
-comptime impl Display for u8 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
@@ -90,13 +57,6 @@ impl Display for u16 {
     }
 }
 
-comptime impl Display for u16 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(self'bitvec.as(u128), opts)
-    }
-}
-
 impl Display for u32 {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -104,13 +64,6 @@ impl Display for u32 {
     {
         let opts: FormatOptions = parse_int_options(format);
         write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
-    }
-}
-
-comptime impl Display for u32 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
@@ -124,13 +77,6 @@ impl Display for u64 {
     }
 }
 
-comptime impl Display for u64 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(self'bitvec.as(u128), opts)
-    }
-}
-
 impl Display for u128 {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -141,13 +87,6 @@ impl Display for u128 {
     }
 }
 
-comptime impl Display for u128 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(self'bitvec.as(u128), opts)
-    }
-}
-
 impl Display for usize {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -155,13 +94,6 @@ impl Display for usize {
     {
         let opts: FormatOptions = parse_int_options(format);
         write_unsigned_formatted(builtin.compiler.usize_representation(self.*), opts, output)
-    }
-}
-
-comptime impl Display for usize {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        format_unsigned_comptime(comptime_usize_representation(self), opts)
     }
 }
 
@@ -179,20 +111,6 @@ impl Display for i8 {
             write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
             write_signed_formatted(false, twos, twos, opts, output)
-        }
-    }
-}
-
-comptime impl Display for i8 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = self'bitvec.as(u128);
-        if self < 0 {
-            let inv = (-(self + 1))'bitvec.as(u128);
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
@@ -215,20 +133,6 @@ impl Display for i16 {
     }
 }
 
-comptime impl Display for i16 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = self'bitvec.as(u128);
-        if self < 0 {
-            let inv = (-(self + 1))'bitvec.as(u128);
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
-        }
-    }
-}
-
 impl Display for i32 {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -243,20 +147,6 @@ impl Display for i32 {
             write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
             write_signed_formatted(false, twos, twos, opts, output)
-        }
-    }
-}
-
-comptime impl Display for i32 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = self'bitvec.as(u128);
-        if self < 0 {
-            let inv = (-(self + 1))'bitvec.as(u128);
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
@@ -279,20 +169,6 @@ impl Display for i64 {
     }
 }
 
-comptime impl Display for i64 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = self'bitvec.as(u128);
-        if self < 0 {
-            let inv = (-(self + 1))'bitvec.as(u128);
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
-        }
-    }
-}
-
 impl Display for i128 {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -307,20 +183,6 @@ impl Display for i128 {
             write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
             write_signed_formatted(false, twos, twos, opts, output)
-        }
-    }
-}
-
-comptime impl Display for i128 {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = self'bitvec.as(u128);
-        if self < 0 {
-            let inv = (-(self + 1))'bitvec.as(u128);
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
@@ -340,27 +202,6 @@ impl Display for isize {
         } else {
             write_signed_formatted(false, twos, twos, opts, output)
         }
-    }
-}
-
-comptime impl Display for isize {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_int_options(format);
-        let twos = comptime_isize_representation(self);
-        if self < 0 {
-            let inv = comptime_isize_representation(-(self + 1));
-            assumes inv < 340282366920938463463374607431768211455;
-            format_signed_comptime(true, inv + 1, twos, opts)
-        } else {
-            format_signed_comptime(false, twos, twos, opts)
-        }
-    }
-}
-
-comptime impl Display for Integer {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_comptime_int_options(format);
-        format_integer_comptime(self, opts)
     }
 }
 
@@ -384,13 +225,6 @@ impl Display for char {
     }
 }
 
-comptime impl Display for char {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_plain_options(format);
-        pad_comptime_str("", str_from_char(self), opts, false, false)
-    }
-}
-
 impl Display for str {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -401,13 +235,6 @@ impl Display for str {
     }
 }
 
-comptime impl Display for str {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_text_options(format);
-        pad_comptime_str("", truncate_comptime_str(self, opts), opts, false, false)
-    }
-}
-
 impl Display for Symbol {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
@@ -415,13 +242,6 @@ impl Display for Symbol {
     {
         let opts: FormatOptions = parse_plain_options(format);
         write_padded_str(self.*'tag_name, opts, false, output)
-    }
-}
-
-comptime impl Display for Symbol {
-    comptime fn comptime_fmt(self, .format: str = "") -> str {
-        let opts: FormatOptions = parse_plain_options(format);
-        pad_comptime_str("", self'tag_name, opts, false, false)
     }
 }
 

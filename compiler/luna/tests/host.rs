@@ -9645,7 +9645,7 @@ fn native_copysign_preserves_magnitude_bits_and_uses_the_sign_bit() {
             typealias F=.f{width}'builtin;
             impl Duplicate for F {{}}
             impl Duplicate for .BitVec'builtin<{width}> {{}}
-            ^intrinsic_enum enum Ops {{sign}}
+            ^{{ __flurry_intrinsic_enum: true }} enum Ops {{sign}}
             fn copy(magnitude:F,sign:F)->F {{unsafe {{Ops.sign'intrinsic(magnitude,sign).as(F)}}}}
             fn run()->bool {{{cases} true}}"
         );
@@ -9921,7 +9921,7 @@ fn native_rounding_intrinsics_keep_ieee_boundaries() {
             let w = Work::new(&format!(
                 "{RESOURCE_HEADER} typealias F=.f{width}'builtin;
                 impl Duplicate for F {{}} impl Duplicate for .BitVec'builtin<{width}> {{}}
-                ^intrinsic_enum enum Ops {{round}}
+                ^{{ __flurry_intrinsic_enum: true }} enum Ops {{round}}
                 fn apply(input:F)->F {{unsafe {{Ops.round'intrinsic(input).as(F)}}}}
                 fn run()->bool {{{checks} true}}"
             ));
@@ -10526,7 +10526,7 @@ fn native_minimum_maximum_preserve_nan_and_signed_zero() {
                 checks.push_str(&format!("do {{var nan:F=0.0;nan'bitvec[0..{width}]={bits};let first=apply(nan,1.0);let second=apply(1.0,nan);{expected}let both=apply(nan,nan);assumes both != both;}};"));
             }
             let w = Work::new(&format!(
-                "{RESOURCE_HEADER}typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}^intrinsic_enum enum Ops {{bound}}fn apply(a:F,b:F)->F {{unsafe {{Ops.bound'intrinsic(a,b).as(F)}}}}fn run()->bool {{{checks}true}}"
+                "{RESOURCE_HEADER}typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{bound}}fn apply(a:F,b:F)->F {{unsafe {{Ops.bound'intrinsic(a,b).as(F)}}}}fn run()->bool {{{checks}true}}"
             ));
             let binding = format!("{operation}=input.Ops.bound");
             for level in ["0", "3"] {
@@ -15011,7 +15011,7 @@ fn native_intrinsic_predicates_preserve_runtime_failure() {
 #[test]
 fn intrinsic_predicates_do_not_authorize_operand_writes() {
     let w = Work::new(
-        "typealias F=.f32'builtin;^intrinsic_enum enum Ops {fma}fn run()->bool {var value:F=0.0;let b:F=4.0;let c:F=5.0;assumes unsafe {Ops.fma'intrinsic(do {value=3.0;value},b,c).as(F)} == 17.0;true}",
+        "typealias F=.f32'builtin;^{ __flurry_intrinsic_enum: true } enum Ops {fma}fn run()->bool {var value:F=0.0;let b:F=4.0;let c:F=5.0;assumes unsafe {Ops.fma'intrinsic(do {value=3.0;value},b,c).as(F)} == 17.0;true}",
     );
     fs::write(w.0.join("native program"), b"previous executable").unwrap();
     let output = w
@@ -15098,7 +15098,7 @@ fn native_integer_intrinsic_contract_ranges_and_exact_results() {
         declarations.push_str(&format!("fn ordered()->r:U where ensures r == 3 {{var a:U=1;let shift:U=1;unsafe {{Ops.fshl'intrinsic(a,do {{a={high};a}},shift).as(U)}}}}"));
         calls.push_str("test ordered_arguments {let value=ordered();assumes value == 3;}");
         let source = format!(
-            "{RESOURCE_HEADER}typealias U=.u{width}'builtin;impl Duplicate for U {{}}^intrinsic_enum enum Ops {{ctpop,ctlz,cttz,bitreverse,bswap,fshl,fshr}}{declarations}{calls}"
+            "{RESOURCE_HEADER}typealias U=.u{width}'builtin;impl Duplicate for U {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{ctpop,ctlz,cttz,bitreverse,bswap,fshl,fshr}}{declarations}{calls}"
         );
         let w = Work::new(&source);
         for level in ["0", "3"] {
@@ -15146,7 +15146,7 @@ fn integer_intrinsic_contracts_reject_false_and_stale_bounds() {
         ("cttz", "a:U", "var value=a;assumes value > 0;value=0;"),
     ] {
         let source = format!(
-            "typealias U=.u8'builtin;^intrinsic_enum enum Ops {{{op}}}fn invalid({parameter})->r:U where ensures r < 8 {{{preparation}unsafe {{Ops.{op}'intrinsic(value).as(U)}}}}fn run()->U {{invalid(255)}}"
+            "typealias U=.u8'builtin;^{{ __flurry_intrinsic_enum: true }} enum Ops {{{op}}}fn invalid({parameter})->r:U where ensures r < 8 {{{preparation}unsafe {{Ops.{op}'intrinsic(value).as(U)}}}}fn run()->U {{invalid(255)}}"
         );
         let w = Work::new(&source);
         fs::write(w.0.join("native program"), b"previous executable").unwrap();
@@ -15527,7 +15527,7 @@ fn float_classification_rejects_unproved_domains_and_wrong_results() {
         "fn classify(x:bool)->bool {unsafe {Ops.classify'intrinsic(x).as(bool)}}",
     ] {
         let w = Work::new(&format!(
-            "^intrinsic_enum enum Ops {{classify}}{body}fn run()->bool {{true}}"
+            "^{{ __flurry_intrinsic_enum: true }} enum Ops {{classify}}{body}fn run()->bool {{true}}"
         ));
         fs::write(w.0.join("previous.ll"), b"previous artifact").unwrap();
         let output = w
@@ -15576,7 +15576,7 @@ fn native_float_classification_predicates_check_runtime_values_and_evaluate_once
                 let expected = if valid { expected } else { !expected };
                 let source = format!("{RESOURCE_HEADER}
                     typealias F=.f{width}'builtin;impl Duplicate for F {{}}impl Duplicate for .BitVec'builtin<{width}> {{}}
-                    ^intrinsic_enum enum Ops {{classify}}
+                    ^{{ __flurry_intrinsic_enum: true }} enum Ops {{classify}}
                     fn check(value:F) {{assumes unsafe {{Ops.classify'intrinsic(value).as(bool)}} == {expected};}}
                     fn once(value:F)->bool {{
                         var visited=false;
@@ -15999,7 +15999,7 @@ fn native_saturating_contracts_prove_clamped_and_unsaturated_ranges() {
                 )
             };
             let source=format!("{RESOURCE_HEADER}typealias Number=.{prefix}{width}'builtin;impl Duplicate for Number {{}}
-                ^intrinsic_enum enum Ops {{add,sub}}
+                ^{{ __flurry_intrinsic_enum: true }} enum Ops {{add,sub}}
                 fn upper(a:Number,b:Number)->r:Number where requires a >= {near_max}, requires b >= 1, ensures r == {max} {{unsafe {{Ops.add'intrinsic(a,b).as(Number)}}}}
                 fn lower(a:Number,b:Number)->r:Number where requires a <= {near_min}, requires b >= 2, ensures r == {min} {{unsafe {{Ops.sub'intrinsic(a,b).as(Number)}}}}
                 fn middle(a:Number,b:Number)->r:Number where requires a >= 10, requires a <= 20, requires b >= 1, requires b <= 3, ensures r >= 7, ensures r <= 19 {{unsafe {{Ops.sub'intrinsic(a,b).as(Number)}}}}
@@ -16040,7 +16040,7 @@ fn native_saturating_contracts_prove_clamped_and_unsaturated_ranges() {
 #[test]
 fn saturating_contracts_preserve_argument_snapshots_and_reject_false_bounds() {
     let header = format!(
-        "{RESOURCE_HEADER}typealias Byte=.u8'builtin;impl Duplicate for Byte {{}}^intrinsic_enum enum Ops {{add,sub}}"
+        "{RESOURCE_HEADER}typealias Byte=.u8'builtin;impl Duplicate for Byte {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{add,sub}}"
     );
     let valid = "fn ordered()->r:Byte where ensures r==255 {var a:Byte=250;let ten:Byte=10;unsafe {Ops.add'intrinsic(a,do {a=1;ten}).as(Byte)}}fn run()->bool {ordered()==255}";
     let w = Work::new(&format!("{header}{valid}"));
@@ -16174,7 +16174,7 @@ fn native_integer_minmax_contracts_and_argument_snapshots() {
         for width in [8, 16, 32, 64, 128] {
             let source = format!("{RESOURCE_HEADER}
                 typealias Number=.{prefix}{width}'builtin; impl Duplicate for Number {{}}
-                ^intrinsic_enum enum Ops {{min,max}}
+                ^{{ __flurry_intrinsic_enum: true }} enum Ops {{min,max}}
                 fn lower(a:Number,b:Number)->r:Number
                 where requires a>=10, requires a<=20, requires b>=15, requires b<=25,
                     ensures r>=10, ensures r<=20 {{unsafe {{Ops.min'intrinsic(a,b).as(Number)}}}}
@@ -16222,7 +16222,7 @@ fn native_integer_minmax_contracts_and_argument_snapshots() {
         let w = Work::new(&format!(
             "{RESOURCE_HEADER}
             typealias Number=.i32'builtin; impl Duplicate for Number {{}}
-            ^intrinsic_enum enum Ops {{op}}
+            ^{{ __flurry_intrinsic_enum: true }} enum Ops {{op}}
             fn wrong(a:Number,b:Number)->r:Number
             where requires a>=10, requires a<=20, requires b>=15, requires b<=25,
                 ensures {bound} {{unsafe {{Ops.op'intrinsic(a,b).as(Number)}}}}
@@ -16258,7 +16258,7 @@ fn native_integer_minmax_contracts_and_argument_snapshots() {
 fn native_integer_minmax_relations_survive_calls_and_source_writes() {
     for ty in ["i8", "u8", "i128", "u128"] {
         let header = format!(
-            "{RESOURCE_HEADER}typealias Number=.{ty}'builtin;impl Duplicate for Number {{}}^intrinsic_enum enum Ops {{min,max}}"
+            "{RESOURCE_HEADER}typealias Number=.{ty}'builtin;impl Duplicate for Number {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{min,max}}"
         );
         let source = format!("{header}
             fn lower(a:Number,b:Number)->r:Number where ensures r<=a'old, ensures r<=b'old {{unsafe {{Ops.min'intrinsic(a,b).as(Number)}}}}
@@ -16359,7 +16359,7 @@ fn native_integer_minmax_selects_an_input_across_calls() {
     for ty in ["i8", "u8", "i128", "u128"] {
         for operation in ["min", "max"] {
             let header = format!(
-                "{RESOURCE_HEADER}typealias Number=.{ty}'builtin;impl Duplicate for Number {{}}^intrinsic_enum enum Ops {{select}}"
+                "{RESOURCE_HEADER}typealias Number=.{ty}'builtin;impl Duplicate for Number {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{select}}"
             );
             let source=format!("{header}
                 fn select(a:Number,b:Number)->r:Number
@@ -16401,7 +16401,7 @@ fn native_integer_minmax_selects_an_input_across_calls() {
 fn integer_minmax_choice_rejects_false_contracts_and_stale_inputs() {
     for operation in ["min", "max"] {
         let header = format!(
-            "{RESOURCE_HEADER}typealias Number=.i32'builtin;impl Duplicate for Number {{}}^intrinsic_enum enum Ops {{select}}"
+            "{RESOURCE_HEADER}typealias Number=.i32'builtin;impl Duplicate for Number {{}}^{{ __flurry_intrinsic_enum: true }} enum Ops {{select}}"
         );
         for (body, entry) in [
             (
@@ -20347,7 +20347,7 @@ fn native_wrapping_absolute_value_all_widths_and_argument_once() {
 #[test]
 fn wrapping_absolute_llvm_disables_minimum_poison() {
     let work = Work::new(
-        "^intrinsic_enum enum Ops {absolute} fn run()->.i8'builtin {let value:.i8'builtin=-128;unsafe {Ops.absolute'intrinsic(value).as(.i8'builtin)}}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {absolute} fn run()->.i8'builtin {let value:.i8'builtin=-128;unsafe {Ops.absolute'intrinsic(value).as(.i8'builtin)}}",
     );
     let output = work
         .command()
@@ -20380,7 +20380,9 @@ fn wrapping_absolute_contracts_use_input_intervals_and_keep_minimum_exception() 
         } else {
             -(1i128 << (width - 1))
         };
-        let header = format!("typealias I=.i{width}'builtin;^intrinsic_enum enum Ops {{absolute}}");
+        let header = format!(
+            "typealias I=.i{width}'builtin;^{{ __flurry_intrinsic_enum: true }} enum Ops {{absolute}}"
+        );
         let source = format!("{header}
             fn bounded(n:I)->r:I where requires n>=-40 and n<=30, ensures r>=0 and r<=40 {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}}
             fn negative(n:I)->r:I where requires n>=-40 and n<=-10, ensures r>=10 and r<=40 {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}}
@@ -20443,7 +20445,7 @@ fn wrapping_absolute_contracts_use_input_intervals_and_keep_minimum_exception() 
 #[test]
 fn wrapping_absolute_relations_survive_contracts_and_input_writes() {
     for width in [8, 16, 32, 64, 128] {
-        let source = format!("typealias I=.i{width}'builtin;^intrinsic_enum enum Ops {{absolute}}
+        let source = format!("typealias I=.i{width}'builtin;^{{ __flurry_intrinsic_enum: true }} enum Ops {{absolute}}
             fn positive(n:I)->r:I where requires n>=0, ensures r==n'old {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}}
             fn negative(n:I)->r:I where requires n>=-40 and n<=-10, ensures r + n'old == 0 {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}}
             fn choice(n:I)->r:I where requires n>=-40 and n<=30, ensures r==n'old or r + n'old == 0 {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}}
@@ -20476,7 +20478,7 @@ fn wrapping_absolute_relations_survive_contracts_and_input_writes() {
 
 #[test]
 fn wrapping_absolute_relations_do_not_authorize_wrong_or_stale_results() {
-    let header = "typealias I=.i32'builtin;^intrinsic_enum enum Ops {absolute}";
+    let header = "typealias I=.i32'builtin;^{ __flurry_intrinsic_enum: true } enum Ops {absolute}";
     for contract in ["r==n'old", "r==0"] {
         let work = Work::new(&format!(
             "{header} fn wrong(n:I)->r:I where ensures {contract} {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}} fn run()->bool {{true}}"
@@ -20571,7 +20573,7 @@ fn generic_scalar_equality_uses_proved_primitive_families() {
 
 #[test]
 fn generic_integer_contracts_check_every_allowed_width() {
-    let source = "^intrinsic_enum enum Ops {absolute}
+    let source = "^{ __flurry_intrinsic_enum: true } enum Ops {absolute}
         pure fn magnitude(value:T)->result:T where T,
             requires T == .i8'builtin or T == .i16'builtin or T == .i32'builtin or T == .i64'builtin or T == .i128'builtin,
             ensures result == value'old or result == -value'old {
@@ -20613,7 +20615,7 @@ fn generic_integer_contracts_check_every_allowed_width() {
         "pure fn bad(value:T)->result:T where T, requires T == .i8'builtin or T == .i16'builtin, ensures result == -value'old {unsafe {Ops.absolute'intrinsic(value).as(T)}}",
     ] {
         let work = Work::new(&format!(
-            "^intrinsic_enum enum Ops {{absolute}} {body} fn run()->bool {{true}}"
+            "^{{ __flurry_intrinsic_enum: true }} enum Ops {{absolute}} {body} fn run()->bool {{true}}"
         ));
         let result = work
             .command()
@@ -21713,7 +21715,9 @@ fn native_bitwise_intrinsics_reject_invalid_domains_interfaces_and_contracts() {
             "fn bad(a:T,b:T)->T where T {unsafe {Ops.bits'intrinsic(a,b).as(T)}} fn run()->bool {true}",
             "fn bad(a:.u8'builtin,b:.u8'builtin)->r:.u8'builtin where ensures r==a'old {unsafe {Ops.bits'intrinsic(a,b).as(.u8'builtin)}} fn run()->bool {true}",
         ] {
-            let work = Work::new(&format!("^intrinsic_enum enum Ops {{bits}} {body}"));
+            let work = Work::new(&format!(
+                "^{{ __flurry_intrinsic_enum: true }} enum Ops {{bits}} {body}"
+            ));
             let result = work
                 .command()
                 .args([
@@ -21759,7 +21763,7 @@ fn native_bitwise_contracts_preserve_signed_bounds_and_evaluated_values() {
             } else {
                 "fn filled(a:Word)->r:Word where ensures r>=15 {unsafe {let mask:Word=15;Ops.bor'intrinsic(a,mask).as(Word)}}"
             };
-            let source=format!("^intrinsic_enum enum Ops {{band,bor,bxor}} typealias Word=.{primitive}'builtin;
+            let source=format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{band,bor,bxor}} typealias Word=.{primitive}'builtin;
                 fn masked(a:Word)->r:Word where ensures r>=0 and r<=15 {{unsafe {{let mask:Word=15;Ops.band'intrinsic(a,mask).as(Word)}}}}
                 fn annihilate(a:Word)->r:Word where ensures r==0 {{unsafe {{let mask:Word=0;Ops.band'intrinsic(a,mask).as(Word)}}}}
                 fn identity(a:Word)->r:Word where requires a>=3 and a<=5, ensures r>=3 and r<=5 {{unsafe {{let mask:Word=0;Ops.bxor'intrinsic(a,mask).as(Word)}}}}
@@ -21834,7 +21838,7 @@ fn native_bitwise_contracts_reject_sign_confusion_and_stale_operands() {
         ),
     ] {
         let source = format!(
-            "^intrinsic_enum enum Ops {{bits}} typealias Word=.{primitive}'builtin; {body} fn run()->bool {{true}}"
+            "^{{ __flurry_intrinsic_enum: true }} enum Ops {{bits}} typealias Word=.{primitive}'builtin; {body} fn run()->bool {{true}}"
         );
         let work = Work::new(&source);
         let output = work

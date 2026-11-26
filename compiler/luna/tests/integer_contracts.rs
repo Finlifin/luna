@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 use support::{compile, compile_with_protocols, id};
 
@@ -380,7 +381,7 @@ fn residual_contract_validation_avoids_report_snapshots_without_losing_checks() 
 #[test]
 fn wrapping_absolute_contract_uses_bounded_in_place_proof() {
     use elaboration::verification::{Limits, flow};
-    let source = "^intrinsic_enum enum Ops {absolute}
+    let source = "^{ __flurry_intrinsic_enum: true } enum Ops {absolute}
         fn magnitude(value: T) -> result: T
         where T, requires T == .i8'builtin or T == .i128'builtin,
         ensures result == value'old or result == -value'old {

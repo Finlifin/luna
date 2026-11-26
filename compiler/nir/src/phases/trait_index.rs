@@ -278,6 +278,7 @@ mod tests {
             source: crate::program::SourceRange { start: 0, end: 0 },
             phase: TraitPhase::Runtime,
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             declaration: id(3000),

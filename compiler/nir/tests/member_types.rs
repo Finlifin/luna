@@ -25,6 +25,7 @@ fn contract() -> Trait {
             name: "make".into(),
             phase: Default::default(),
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             type_arguments: vec![],

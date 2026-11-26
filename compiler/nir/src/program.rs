@@ -2844,6 +2844,8 @@ pub struct MethodContract {
     /// Deterministic code application required by the interface; independent
     /// of execution phase and purity. Never authorizes a runtime call fallback.
     pub is_quote: bool,
+    /// Protocol method may be omitted by implementations when unused.
+    pub is_optional: bool,
     /// Runtime P4 promise; not a termination guarantee or a type predicate.
     pub pure: bool,
     /// Caller must establish an explicit unsafe boundary; independent of phase/purity.
@@ -2937,12 +2939,13 @@ impl fmt::Display for MethodContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(method {} (name {:?}) {} (phase {}) (quote {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
+            "(method {} (name {:?}) {} (phase {}) (quote {}) (optional {}) (pure {}) (unsafe {}) (by-value-receiver {}) (by-reference-receiver {}) (signature {}) (requires",
             self.declaration,
             self.name,
             self.source,
             self.phase,
             self.is_quote,
+            self.is_optional,
             self.pure,
             self.is_unsafe,
             self.by_value_receiver,

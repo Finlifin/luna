@@ -935,7 +935,7 @@ fn scalar_index_operations_preserve_text_scan_dependencies() {
 fn admitted_scalar_intrinsics_keep_input_reads_and_reject_missing_bindings() {
     let package = support::compile_with_source_bindings(
         "typealias str=.str'builtin;typealias F=.f64'builtin;
-        ^intrinsic_enum enum Ops {fma}
+        ^{ __flurry_intrinsic_enum: true } enum Ops {fma}
         fn observed(value:str)->F {
             let weight:F=if value == \"x\" {2.0}else{3.0};
             unsafe {Ops.fma'intrinsic(-weight + 1.0,weight,weight).as(F)}

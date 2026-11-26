@@ -13,7 +13,7 @@ impl Duplicate for .f32'builtin {}
 
 impl Duplicate for .f64'builtin {}
 
-^intrinsic_enum
+^{ __flurry_intrinsic_enum: true }
 enum Ops {
     fma,
 }

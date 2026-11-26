@@ -3,7 +3,7 @@
 -- Bind ctpop=input.Ops.ctpop; no change to the proof obligation is intended.
 typealias U = .u16'builtin;
 
-^intrinsic_enum
+^{ __flurry_intrinsic_enum: true }
 enum Ops {
     ctpop,
 }

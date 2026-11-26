@@ -458,6 +458,7 @@ fn package_phase_errors_report_declaration_sources_and_sexpr_display() {
             source: method_source,
             phase: crate::program::TraitPhase::Runtime,
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             declaration: crate::DeclarationId {

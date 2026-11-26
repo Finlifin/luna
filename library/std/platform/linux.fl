@@ -4,7 +4,7 @@
     Raw descriptors do not carry ownership. Prefer std.fs.File for ownership.
 -}
 pub mod target {
-    ^intrinsic_enum
+    ^attrs.compilation.intrinsic_enum
     pub enum System {
         write,
         write_byte,

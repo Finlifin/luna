@@ -1,7 +1,7 @@
 -- Regression: finite generic arithmetic domains and universal contract checking.
 -- Use --host-intrinsic abs=input.Ops.absolute.
 -- The result equality short-circuits at INT_MIN, before negating the input.
-^intrinsic_enum
+^{ __flurry_intrinsic_enum: true }
 enum Ops {
     absolute,
 }

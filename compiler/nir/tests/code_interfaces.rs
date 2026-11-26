@@ -288,6 +288,7 @@ fn code_method() -> nir::program::MethodContract {
         source: nir::program::SourceRange { start: 32, end: 46 },
         phase: Default::default(),
         is_quote: false,
+        is_optional: false,
         pure: true,
         is_unsafe: false,
         type_arguments: vec![],

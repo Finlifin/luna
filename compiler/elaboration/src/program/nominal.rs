@@ -733,7 +733,7 @@ impl Checker<'_, '_> {
                     self.enums.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Enum {
-                            is_intrinsic: def.is_intrinsic,
+                            is_intrinsic: def.is_intrinsic || self.intrinsic_enums.contains(&owner),
                             parameter_types,
                             capabilities: self
                                 .capabilities

@@ -3,9 +3,8 @@ use ast_impl.span.SourceSpan;
 use ast_impl.token_buffer.TokenBuffer;
 use builtin.{Integer, Symbol, Type, str}
 
-{- Generic list and optional aliases used by AST and PEG macro signatures. -}
+{- Generic list alias used by AST and PEG macro signatures. -}
 pub typealias Repetition<T: Type> = List<T>;
-pub typealias Optional<T: Type> = ?T;
 
 {- Single arena node inside a `SyntaxTree` AST snapshot. -}
 pub struct SyntaxNode {
@@ -62,7 +61,7 @@ impl SyntaxTree {
         while i < child_count {
             self.nodes.get(target.children[i]) match {
                 child? => {
-                    out = out.concat([child]);
+                    out.append(child);
                 },
                 null => {},
             }
@@ -539,10 +538,10 @@ impl PegNode {
         let count = entry.child_indices.length();
         var i: Integer = 0;
         while i < count {
-            out = out.concat([PegNode {
+            out.append(PegNode {
                 tree: self.tree,
                 root: entry.child_indices[i],
-            }]);
+            });
             i = i + 1;
         }
         out

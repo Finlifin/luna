@@ -1,5 +1,11 @@
-use bindings.{str_byte, str_byte_length}
-use meta.{ComptimeTextBytes, ComptimeTryFrom, List, str_from_char}
+use bindings.{
+    str_byte,
+    str_byte_comptime,
+    str_byte_length,
+    str_byte_length_comptime,
+    str_slice_comptime,
+    try_u32_to_char_comptime,
+}
 use primitives.*;
 use protocols.formatting.writer.ByteWriter;
 use protocols.resources.{Clone, Copy}
@@ -148,62 +154,19 @@ pub pure fn compute_pad_counts(
     }
 }
 
-pub pure comptime fn compute_comptime_pad_counts(
-    opts: FormatOptions,
-    content_chars: u32,
-    is_numeric: bool,
-    allow_zero_pad: bool,
-) -> PadCounts {
-    let target_len = opts.len;
-    if not opts.has_len or target_len <= content_chars {
-        return PadCounts {
-            left: 0,
-            zero_pad: 0,
-            right: 0,
-        };
-    }
-    let pad = target_len - content_chars;
-    if opts.align == 1 {
-        PadCounts {
-            left: 0,
-            zero_pad: 0,
-            right: pad,
-        }
-    } else if opts.align == 2 {
-        let left = pad / 2;
-        PadCounts {
-            left: left,
-            zero_pad: 0,
-            right: pad - left,
-        }
-    } else if opts.align == 3 {
-        PadCounts {
-            left: pad,
-            zero_pad: 0,
-            right: 0,
-        }
-    } else if is_numeric and allow_zero_pad and opts.placeholder == '0' {
-        PadCounts {
-            left: 0,
-            zero_pad: pad,
-            right: 0,
-        }
-    } else if is_numeric {
-        PadCounts {
-            left: pad,
-            zero_pad: 0,
-            right: 0,
-        }
-    } else {
-        PadCounts {
-            left: 0,
-            zero_pad: 0,
-            right: pad,
-        }
-    }
+{- ── Comptime property scanner & parser ────────────────────────────────────── -}
+
+pure comptime fn ct_len(src: str) -> u64 {
+    str_byte_length_comptime(src)
 }
 
-{- ── Comptime property scanner & parser ────────────────────────────────────── -}
+pure comptime fn ct_byte(src: str, index: u64) -> ?u8 {
+    str_byte_comptime(src, index)
+}
+
+pure comptime fn ct_slice(src: str, start: u64, end: u64) -> ?str {
+    str_slice_comptime(src, start, end)
+}
 
 pub pure comptime fn is_ascii_ws(byte: u8) -> bool {
     byte == 32 or byte == 9 or byte == 10 or byte == 13
@@ -239,7 +202,7 @@ pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> 
         return null;
     }
     let p = backslash_pos + 1;
-    let esc = src.byte(p) match {
+    let esc = ct_byte(src, p) match {
         b? => b,
         null => return null,
     }
@@ -272,7 +235,7 @@ pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> 
             return null;
         }
         let brace_pos = p + 1;
-        let brace = src.byte(brace_pos) match {
+        let brace = ct_byte(src, brace_pos) match {
             b? => b,
             null => return null,
         }
@@ -283,7 +246,7 @@ pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> 
         var count: u8 = 0;
         var code: u32 = 0;
         while cur < length {
-            let b = src.byte(cur) match {
+            let b = ct_byte(src, cur) match {
                 v? => v,
                 null => return null,
             }
@@ -291,9 +254,9 @@ pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> 
                 if count == 0 {
                     return null;
                 }
-                let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-                    c! => c,
-                    error _ => return null,
+                let scalar = try_u32_to_char_comptime(code) match {
+                    c? => c,
+                    null => return null,
                 }
                 return ParsedEscape {
                     ch: scalar,
@@ -326,14 +289,14 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
     if pos >= length {
         return null;
     }
-    let b0 = src.byte(pos) match {
+    let b0 = ct_byte(src, pos) match {
         b? => b,
         null => return null,
     }
     if b0 <= 127 {
-        let scalar = char.as(ComptimeTryFrom<u32>).try_from(b0'bitvec.as(u32)) match {
-            c! => c,
-            error _ => return null,
+        let scalar = try_u32_to_char_comptime(b0'bitvec.as(u32)) match {
+            c? => c,
+            null => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -344,7 +307,7 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         if length - pos < 2 {
             return null;
         }
-        let b1 = src.byte(pos + 1) match {
+        let b1 = ct_byte(src, pos + 1) match {
             b? => b,
             null => return null,
         }
@@ -357,9 +320,9 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
             return null;
         }
         let code = hi * 64 + lo;
-        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c! => c,
-            error _ => return null,
+        let scalar = try_u32_to_char_comptime(code) match {
+            c? => c,
+            null => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -370,11 +333,11 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         if length - pos < 3 {
             return null;
         }
-        let b1 = src.byte(pos + 1) match {
+        let b1 = ct_byte(src, pos + 1) match {
             b? => b,
             null => return null,
         }
-        let b2 = src.byte(pos + 2) match {
+        let b2 = ct_byte(src, pos + 2) match {
             b? => b,
             null => return null,
         }
@@ -391,9 +354,9 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         if code < 2048 {
             return null;
         }
-        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c! => c,
-            error _ => return null,
+        let scalar = try_u32_to_char_comptime(code) match {
+            c? => c,
+            null => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -404,15 +367,15 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         if length - pos < 4 {
             return null;
         }
-        let b1 = src.byte(pos + 1) match {
+        let b1 = ct_byte(src, pos + 1) match {
             b? => b,
             null => return null,
         }
-        let b2 = src.byte(pos + 2) match {
+        let b2 = ct_byte(src, pos + 2) match {
             b? => b,
             null => return null,
         }
-        let b3 = src.byte(pos + 3) match {
+        let b3 = ct_byte(src, pos + 3) match {
             b? => b,
             null => return null,
         }
@@ -430,9 +393,9 @@ pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedS
         if code < 65536 or code > 1114111 {
             return null;
         }
-        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
-            c! => c,
-            error _ => return null,
+        let scalar = try_u32_to_char_comptime(code) match {
+            c? => c,
+            null => return null,
         }
         return ParsedScalar {
             ch: scalar,
@@ -446,7 +409,7 @@ pure comptime fn parse_char_literal(src: str, start: u64, length: u64) -> ?Parse
     if start >= length or length - start < 3 {
         return null;
     }
-    let open = src.byte(start) match {
+    let open = ct_byte(src, start) match {
         b? => b,
         null => return null,
     }
@@ -454,7 +417,7 @@ pure comptime fn parse_char_literal(src: str, start: u64, length: u64) -> ?Parse
         return null;
     }
     let p = start + 1;
-    let first = src.byte(p) match {
+    let first = ct_byte(src, p) match {
         b? => b,
         null => return null,
     }
@@ -480,7 +443,7 @@ pure comptime fn parse_char_literal(src: str, start: u64, length: u64) -> ?Parse
     if close_pos >= length {
         return null;
     }
-    let close = src.byte(close_pos) match {
+    let close = ct_byte(src, close_pos) match {
         b? => b,
         null => return null,
     }
@@ -497,7 +460,7 @@ pure comptime fn validate_string_literal(src: str, start: u64, length: u64) -> ?
     if start >= length or length - start < 2 {
         return null;
     }
-    let open = src.byte(start) match {
+    let open = ct_byte(src, start) match {
         b? => b,
         null => return null,
     }
@@ -506,7 +469,7 @@ pure comptime fn validate_string_literal(src: str, start: u64, length: u64) -> ?
     }
     var cur = start + 1;
     while cur < length {
-        let b = src.byte(cur) match {
+        let b = ct_byte(src, cur) match {
             v? => v,
             null => return null,
         }
@@ -532,7 +495,7 @@ pure comptime fn validate_string_literal(src: str, start: u64, length: u64) -> ?
     do not terminate or corrupt the placeholder scan. Returns null if unclosed.
 -}
 pub pure comptime fn scan_braced_field(format: str, open_pos: u64) -> ?u64 {
-    let length = format.byte_length();
+    let length = ct_len(format);
     if open_pos >= length {
         return null;
     }
@@ -540,7 +503,7 @@ pub pure comptime fn scan_braced_field(format: str, open_pos: u64) -> ?u64 {
     -- 0 = outside quotes, 1 = inside '...', 2 = inside "..."
     var quote_kind: u8 = 0;
     while cur < length {
-        let b = format.byte(cur) match {
+        let b = ct_byte(format, cur) match {
             v? => v,
             null => return null,
         }
@@ -574,7 +537,7 @@ pub pure comptime fn scan_braced_field(format: str, open_pos: u64) -> ?u64 {
 pure comptime fn skip_ws(src: str, pos_in: u64, length: u64) -> u64 {
     var pos = pos_in;
     while pos < length {
-        let b = src.byte(pos) match {
+        let b = ct_byte(src, pos) match {
             v? => v,
             null => break,
         }
@@ -586,18 +549,161 @@ pure comptime fn skip_ws(src: str, pos_in: u64, length: u64) -> u64 {
     pos
 }
 
-pure comptime fn has_key(keys: List<str>, needle: str) -> bool {
-    var index: Integer = 0;
-    let count = keys.length();
-    while index < count {
-        let existing = keys.get(index) match {
-            k? => k,
+struct ParsedPropValue {
+    next_pos: u64,
+    is_debug_sym: bool,
+}
+
+pure comptime fn parse_property_value(
+    raw_spec: str,
+    pos_in: u64,
+    length: u64,
+    check_debug: bool,
+) -> ?ParsedPropValue {
+    var cur = pos_in;
+    if cur >= length {
+        return null;
+    }
+    let v_byte = ct_byte(raw_spec, cur) match {
+        b? => b,
+        null => return null,
+    }
+    if v_byte == 46 {
+        -- Symbol literal `.ident`
+        cur = cur + 1;
+        if cur >= length {
+            return null;
+        }
+        let sym_first = ct_byte(raw_spec, cur) match {
+            b? => b,
+            null => return null,
+        }
+        if not is_ident_start(sym_first) {
+            return null;
+        }
+        let sym_start = cur;
+        cur = cur + 1;
+        while cur < length {
+            let b = ct_byte(raw_spec, cur) match {
+                v? => v,
+                null => break,
+            }
+            if not is_ident_cont(b) {
+                break;
+            }
+            cur = cur + 1;
+        }
+        var is_debug_sym = false;
+        if check_debug {
+            let sym_name = ct_slice(raw_spec, sym_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            is_debug_sym = sym_name == "debug";
+        }
+        ParsedPropValue { next_pos: cur, is_debug_sym: is_debug_sym }
+    } else if v_byte == 39 {
+        let ch_res = parse_char_literal(raw_spec, cur, length) match {
+            v? => v,
+            null => return null,
+        }
+        ParsedPropValue { next_pos: ch_res.next_pos, is_debug_sym: false }
+    } else if v_byte == 34 {
+        let str_end = validate_string_literal(raw_spec, cur, length) match {
+            v? => v,
+            null => return null,
+        }
+        ParsedPropValue { next_pos: str_end, is_debug_sym: false }
+    } else if v_byte == 45 or (v_byte >= 48 and v_byte <= 57) {
+        if v_byte == 45 {
+            cur = cur + 1;
+            if cur >= length {
+                return null;
+            }
+            let first_digit = ct_byte(raw_spec, cur) match {
+                b? => b,
+                null => return null,
+            }
+            if first_digit < 48 or first_digit > 57 {
+                return null;
+            }
+        }
+        cur = cur + 1;
+        while cur < length {
+            let b = ct_byte(raw_spec, cur) match {
+                v? => v,
+                null => break,
+            }
+            if (b >= 48 and b <= 57) or b == 95 {
+                cur = cur + 1;
+            } else {
+                break;
+            }
+        }
+        ParsedPropValue { next_pos: cur, is_debug_sym: false }
+    } else if is_ident_start(v_byte) {
+        let word_start = cur;
+        cur = cur + 1;
+        while cur < length {
+            let b = ct_byte(raw_spec, cur) match {
+                v? => v,
+                null => break,
+            }
+            if is_ident_cont(b) {
+                cur = cur + 1;
+            } else {
+                break;
+            }
+        }
+        let word = ct_slice(raw_spec, word_start, cur) match {
+            s? => s,
+            null => return null,
+        }
+        if word != "true" and word != "false" {
+            return null;
+        }
+        ParsedPropValue { next_pos: cur, is_debug_sym: false }
+    } else {
+        null
+    }
+}
+
+pure comptime fn has_prior_key(raw_spec: str, limit: u64, length: u64, needle: str) -> bool {
+    var cur = skip_ws(raw_spec, 0, length);
+    while cur < limit {
+        let key_start = cur;
+        cur = cur + 1;
+        while cur < length {
+            let b = ct_byte(raw_spec, cur) match {
+                v? => v,
+                null => break,
+            }
+            if not is_ident_cont(b) {
+                break;
+            }
+            cur = cur + 1;
+        }
+        let prior = ct_slice(raw_spec, key_start, cur) match {
+            s? => s,
             null => return false,
         }
-        if existing == needle {
+        if prior == needle {
             return true;
         }
-        index = index + 1;
+        cur = skip_ws(raw_spec, cur, length);
+        if cur >= limit {
+            return false;
+        }
+        cur = skip_ws(raw_spec, cur + 1, length);
+        let val = parse_property_value(raw_spec, cur, length, false) match {
+            v? => v,
+            null => return false,
+        }
+        cur = skip_ws(raw_spec, val.next_pos, length);
+        if cur >= limit {
+            return false;
+        }
+        cur = skip_ws(raw_spec, cur + 1, length);
     }
     false
 }
@@ -610,7 +716,7 @@ pure comptime fn has_key(keys: List<str>, needle: str) -> bool {
       - `null` on invalid syntax, duplicate keys, or invalid escapes/literals.
 -}
 pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
-    let length = raw_spec.byte_length();
+    let length = ct_len(raw_spec);
     if length == 0 {
         return false;
     }
@@ -618,10 +724,9 @@ pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
     if cur >= length {
         return null;
     }
-    var seen_keys: List<str> = [];
     var is_debug = false;
     while cur < length {
-        let k_byte = raw_spec.byte(cur) match {
+        let k_byte = ct_byte(raw_spec, cur) match {
             b? => b,
             null => return null,
         }
@@ -631,7 +736,7 @@ pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
         let key_start = cur;
         cur = cur + 1;
         while cur < length {
-            let b = raw_spec.byte(cur) match {
+            let b = ct_byte(raw_spec, cur) match {
                 v? => v,
                 null => break,
             }
@@ -640,20 +745,19 @@ pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
             }
             cur = cur + 1;
         }
-        let key = raw_spec.slice(key_start, cur) match {
+        let key = ct_slice(raw_spec, key_start, cur) match {
             s? => s,
             null => return null,
         }
-        if has_key(seen_keys, key) {
+        if has_prior_key(raw_spec, key_start, length, key) {
             return null;
         }
-        seen_keys = seen_keys.concat([key]);
 
         cur = skip_ws(raw_spec, cur, length);
         if cur >= length {
             return null;
         }
-        let colon = raw_spec.byte(cur) match {
+        let colon = ct_byte(raw_spec, cur) match {
             b? => b,
             null => return null,
         }
@@ -661,114 +765,18 @@ pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
             return null;
         }
         cur = skip_ws(raw_spec, cur + 1, length);
-        if cur >= length {
-            return null;
-        }
-
-        let v_byte = raw_spec.byte(cur) match {
-            b? => b,
+        let parsed_val = parse_property_value(raw_spec, cur, length, key == "format") match {
+            v? => v,
             null => return null,
         }
-        if v_byte == 46 {
-            -- Symbol literal `.ident`
-            cur = cur + 1;
-            if cur >= length {
-                return null;
-            }
-            let sym_first = raw_spec.byte(cur) match {
-                b? => b,
-                null => return null,
-            }
-            if not is_ident_start(sym_first) {
-                return null;
-            }
-            let sym_start = cur;
-            cur = cur + 1;
-            while cur < length {
-                let b = raw_spec.byte(cur) match {
-                    v? => v,
-                    null => break,
-                }
-                if not is_ident_cont(b) {
-                    break;
-                }
-                cur = cur + 1;
-            }
-            let sym_name = raw_spec.slice(sym_start, cur) match {
-                s? => s,
-                null => return null,
-            }
-            if key == "format" and sym_name == "debug" {
-                is_debug = true;
-            }
-        } else if v_byte == 39 {
-            let ch_res = parse_char_literal(raw_spec, cur, length) match {
-                v? => v,
-                null => return null,
-            }
-            cur = ch_res.next_pos;
-        } else if v_byte == 34 {
-            let str_end = validate_string_literal(raw_spec, cur, length) match {
-                v? => v,
-                null => return null,
-            }
-            cur = str_end;
-        } else if v_byte == 45 or (v_byte >= 48 and v_byte <= 57) {
-            if v_byte == 45 {
-                cur = cur + 1;
-                if cur >= length {
-                    return null;
-                }
-                let first_digit = raw_spec.byte(cur) match {
-                    b? => b,
-                    null => return null,
-                }
-                if first_digit < 48 or first_digit > 57 {
-                    return null;
-                }
-            }
-            cur = cur + 1;
-            while cur < length {
-                let b = raw_spec.byte(cur) match {
-                    v? => v,
-                    null => break,
-                }
-                if (b >= 48 and b <= 57) or b == 95 {
-                    cur = cur + 1;
-                } else {
-                    break;
-                }
-            }
-        } else if is_ident_start(v_byte) {
-            let word_start = cur;
-            cur = cur + 1;
-            while cur < length {
-                let b = raw_spec.byte(cur) match {
-                    v? => v,
-                    null => break,
-                }
-                if is_ident_cont(b) {
-                    cur = cur + 1;
-                } else {
-                    break;
-                }
-            }
-            let word = raw_spec.slice(word_start, cur) match {
-                s? => s,
-                null => return null,
-            }
-            if word != "true" and word != "false" {
-                return null;
-            }
-        } else {
-            return null;
+        if parsed_val.is_debug_sym {
+            is_debug = true;
         }
-
-        cur = skip_ws(raw_spec, cur, length);
+        cur = skip_ws(raw_spec, parsed_val.next_pos, length);
         if cur >= length {
             break;
         }
-        let comma = raw_spec.byte(cur) match {
+        let comma = ct_byte(raw_spec, cur) match {
             b? => b,
             null => return null,
         }
@@ -784,7 +792,7 @@ pure comptime fn parse_u32_prop(src: str, pos_in: u64, length: u64) -> ?u32 {
     if pos_in >= length {
         return null;
     }
-    let first = src.byte(pos_in) match {
+    let first = ct_byte(src, pos_in) match {
         b? => b,
         null => return null,
     }
@@ -794,7 +802,7 @@ pure comptime fn parse_u32_prop(src: str, pos_in: u64, length: u64) -> ?u32 {
     var cur = pos_in;
     var value: u32 = 0;
     while cur < length {
-        let b = src.byte(cur) match {
+        let b = ct_byte(src, cur) match {
             v? => v,
             null => break,
         }
@@ -821,7 +829,7 @@ pure comptime fn parse_u32_prop(src: str, pos_in: u64, length: u64) -> ?u32 {
 pure comptime fn advance_int_prop(src: str, pos_in: u64, length: u64) -> u64 {
     var cur = pos_in;
     while cur < length {
-        let b = src.byte(cur) match {
+        let b = ct_byte(src, cur) match {
             v? => v,
             null => break,
         }
@@ -842,7 +850,7 @@ const CLASS_FLOAT: u8 = 4;
 const CLASS_DEBUG: u8 = 5;
 
 pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatOptions {
-    let length = format.byte_length();
+    let length = ct_len(format);
     if length == 0 {
         return default_format_options();
     }
@@ -850,14 +858,18 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
     if cur >= length {
         return null;
     }
-    var seen_keys: List<str> = [];
+    var seen_format = false;
+    var seen_alt = false;
+    var seen_sign = false;
+    var seen_align_to = false;
+    var seen_len = false;
+    var seen_placeholder = false;
+    var seen_precision = false;
     var radix: u8 = 0;
-    var has_alt = false;
     var alt = false;
     var has_sign = false;
     var sign: u8 = 0;
     var align: u8 = 0;
-    var has_len = false;
     var len: u32 = 0;
     var placeholder: char = ' ';
     var has_precision = false;
@@ -865,7 +877,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
     var has_format_debug = false;
 
     while cur < length {
-        let k_byte = format.byte(cur) match {
+        let k_byte = ct_byte(format, cur) match {
             b? => b,
             null => return null,
         }
@@ -875,7 +887,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
         let key_start = cur;
         cur = cur + 1;
         while cur < length {
-            let b = format.byte(cur) match {
+            let b = ct_byte(format, cur) match {
                 v? => v,
                 null => break,
             }
@@ -884,20 +896,54 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             }
             cur = cur + 1;
         }
-        let key = format.slice(key_start, cur) match {
+        let key = ct_slice(format, key_start, cur) match {
             s? => s,
             null => return null,
         }
-        if has_key(seen_keys, key) {
+        if key == "format" {
+            if seen_format {
+                return null;
+            }
+            seen_format = true;
+        } else if key == "alt" {
+            if seen_alt {
+                return null;
+            }
+            seen_alt = true;
+        } else if key == "sign" {
+            if seen_sign {
+                return null;
+            }
+            seen_sign = true;
+        } else if key == "align_to" {
+            if seen_align_to {
+                return null;
+            }
+            seen_align_to = true;
+        } else if key == "len" {
+            if seen_len {
+                return null;
+            }
+            seen_len = true;
+        } else if key == "placeholder" {
+            if seen_placeholder {
+                return null;
+            }
+            seen_placeholder = true;
+        } else if key == "precision" {
+            if seen_precision {
+                return null;
+            }
+            seen_precision = true;
+        } else {
             return null;
         }
-        seen_keys = seen_keys.concat([key]);
 
         cur = skip_ws(format, cur, length);
         if cur >= length {
             return null;
         }
-        let colon = format.byte(cur) match {
+        let colon = ct_byte(format, cur) match {
             b? => b,
             null => return null,
         }
@@ -909,7 +955,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             return null;
         }
 
-        let v_byte = format.byte(cur) match {
+        let v_byte = ct_byte(format, cur) match {
             b? => b,
             null => return null,
         }
@@ -922,7 +968,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 return null;
             }
             let s_start = cur;
-            let s_first = format.byte(cur) match {
+            let s_first = ct_byte(format, cur) match {
                 b? => b,
                 null => return null,
             }
@@ -931,7 +977,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             }
             cur = cur + 1;
             while cur < length {
-                let b = format.byte(cur) match {
+                let b = ct_byte(format, cur) match {
                     v? => v,
                     null => break,
                 }
@@ -940,7 +986,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 }
                 cur = cur + 1;
             }
-            let sym = format.slice(s_start, cur) match {
+            let sym = ct_slice(format, s_start, cur) match {
                 s? => s,
                 null => return null,
             }
@@ -987,7 +1033,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             let w_start = cur;
             cur = cur + 1;
             while cur < length {
-                let b = format.byte(cur) match {
+                let b = ct_byte(format, cur) match {
                     v? => v,
                     null => break,
                 }
@@ -996,11 +1042,10 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 }
                 cur = cur + 1;
             }
-            let word = format.slice(w_start, cur) match {
+            let word = ct_slice(format, w_start, cur) match {
                 s? => s,
                 null => return null,
             }
-            has_alt = true;
             if word == "true" {
                 alt = true;
             } else if word == "false" {
@@ -1019,7 +1064,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             if cur >= length {
                 return null;
             }
-            let s_first = format.byte(cur) match {
+            let s_first = ct_byte(format, cur) match {
                 b? => b,
                 null => return null,
             }
@@ -1029,7 +1074,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             let s_start = cur;
             cur = cur + 1;
             while cur < length {
-                let b = format.byte(cur) match {
+                let b = ct_byte(format, cur) match {
                     v? => v,
                     null => break,
                 }
@@ -1038,7 +1083,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 }
                 cur = cur + 1;
             }
-            let sym = format.slice(s_start, cur) match {
+            let sym = ct_slice(format, s_start, cur) match {
                 s? => s,
                 null => return null,
             }
@@ -1060,7 +1105,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             if cur >= length {
                 return null;
             }
-            let s_first = format.byte(cur) match {
+            let s_first = ct_byte(format, cur) match {
                 b? => b,
                 null => return null,
             }
@@ -1070,7 +1115,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
             let s_start = cur;
             cur = cur + 1;
             while cur < length {
-                let b = format.byte(cur) match {
+                let b = ct_byte(format, cur) match {
                     v? => v,
                     null => break,
                 }
@@ -1079,7 +1124,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 }
                 cur = cur + 1;
             }
-            let sym = format.slice(s_start, cur) match {
+            let sym = ct_slice(format, s_start, cur) match {
                 s? => s,
                 null => return null,
             }
@@ -1097,7 +1142,6 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
                 v? => v,
                 null => return null,
             }
-            has_len = true;
             len = parsed_len;
             cur = advance_int_prop(format, cur, length);
         } else if key == "placeholder" {
@@ -1126,7 +1170,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
         if cur >= length {
             break;
         }
-        let comma = format.byte(cur) match {
+        let comma = ct_byte(format, cur) match {
             b? => b,
             null => return null,
         }
@@ -1139,7 +1183,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
     if class == CLASS_DEBUG and not has_format_debug {
         return null;
     }
-    if has_alt and alt and radix == 0 {
+    if seen_alt and alt and radix == 0 {
         return null;
     }
     if class == CLASS_INT and radix != 0 and has_sign {
@@ -1151,7 +1195,7 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
         alt: alt,
         sign: sign,
         align: align,
-        has_len: has_len,
+        has_len: seen_len,
         len: len,
         placeholder: placeholder,
         has_precision: has_precision,
@@ -1160,12 +1204,15 @@ pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatO
 }
 
 pure comptime fn parse_options_checked(format: str, class: u8) -> FormatOptions {
-    parse_standard_options_impl(format, class) match {
+    let parsed = parse_standard_options_impl(format, class);
+    let valid = parsed match {
+        _? => true,
+        null => false,
+    }
+    assumes valid;
+    parsed match {
         opts? => opts,
-        null => {
-            assumes false;
-            default_format_options()
-        },
+        null => default_format_options(),
     }
 }
 
@@ -1193,7 +1240,7 @@ pub pure comptime fn parse_debug_options(format: str) -> FormatOptions {
     parse_options_checked(format, CLASS_DEBUG)
 }
 
-{- ── Runtime UTF-8, padding, and probe helpers ────────────────────────────── -}
+{- ── Runtime UTF-8 and padding helpers ───────────────────────────────────── -}
 
 pub fn write_char_utf8(ch: char, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     let code = ch'bitvec.as(u32);
@@ -1344,16 +1391,16 @@ pub fn write_padded_str_truncated(
     }
 }
 
-pub enum ProbeErr {
-    None,
+private enum ProbeErr {
+    Overflow,
 }
 
-pub struct ProbeWriter {
+private struct ProbeWriter {
     chars: u32,
 }
 
 impl ProbeWriter {
-    pub fn new() -> Self {
+    fn new() -> Self {
         ProbeWriter { chars: 0 }
     }
 }
@@ -1364,109 +1411,10 @@ impl ByteWriter for ProbeWriter {
     fn write_byte(*self, byte: u8) -> !ProbeErr void {
         if byte < 128 or byte >= 192 {
             let c = self.chars.*;
-            if c < 10000000 {
-                self.chars.* = c + 1;
+            if c >= 10000000 {
+                return error ProbeErr.Overflow;
             }
+            self.chars.* = c + 1;
         }
     }
-}
-
-{- ── Comptime UTF-8 and padding helpers ───────────────────────────────────── -}
-
-pub pure comptime fn count_comptime_str_chars(text: str) -> u32 {
-    let length = text.byte_length();
-    var index: u64 = 0;
-    var chars: u32 = 0;
-    while index < length {
-        let byte = text.byte(index) match {
-            b? => b,
-            null => break,
-        }
-        if byte < 128 or byte >= 192 {
-            if chars < 10000000 {
-                chars = chars + 1;
-            }
-        }
-        index = index + 1;
-    }
-    chars
-}
-
-pub pure comptime fn truncate_comptime_str(text: str, opts: FormatOptions) -> str {
-    if not opts.has_precision {
-        return text;
-    }
-    let length = text.byte_length();
-    var index: u64 = 0;
-    var chars: u32 = 0;
-    while index < length {
-        let byte = text.byte(index) match {
-            b? => b,
-            null => break,
-        }
-        if byte < 128 or byte >= 192 {
-            if chars >= opts.precision {
-                return text.slice(0, index) match {
-                    s? => s,
-                    null => "",
-                };
-            }
-            if chars < 10000000 {
-                chars = chars + 1;
-            }
-        }
-        index = index + 1;
-    }
-    text
-}
-
-pub pure comptime fn repeat_comptime_char(ch: char, count: u32) -> str {
-    var rem = count;
-    var chunk = str_from_char(ch);
-    var out = "";
-    while rem > 0 {
-        if rem % 2 == 1 {
-            out = out.as(ComptimeTextBytes).concat(chunk);
-        }
-        rem = rem / 2;
-        if rem > 0 {
-            chunk = chunk.as(ComptimeTextBytes).concat(chunk);
-        }
-    }
-    out
-}
-
-pub pure comptime fn pad_comptime_str(
-    prefix: str,
-    body: str,
-    opts: FormatOptions,
-    is_numeric: bool,
-    allow_zero_pad: bool,
-) -> str {
-    let content = prefix.as(ComptimeTextBytes).concat(body);
-    if not opts.has_len {
-        return content;
-    }
-    let p_chars = count_comptime_str_chars(prefix);
-    let b_chars = count_comptime_str_chars(body);
-    if p_chars > 10000000 or b_chars > 10000000 {
-        return content;
-    }
-    let content_chars = p_chars + b_chars;
-    let pads = compute_comptime_pad_counts(opts, content_chars, is_numeric, allow_zero_pad);
-    if pads.zero_pad > 0 {
-        return prefix
-            .as(ComptimeTextBytes)
-            .concat(repeat_comptime_char('0', pads.zero_pad))
-            .as(ComptimeTextBytes)
-            .concat(body);
-    }
-    var result = content;
-    if pads.left > 0 {
-        result = repeat_comptime_char(opts.placeholder, pads.left).as(ComptimeTextBytes).concat(result);
-    }
-    if pads.right > 0 {
-        result = result.as(ComptimeTextBytes).concat(repeat_comptime_char(opts.placeholder, pads.right));
-    }
-    result
 }

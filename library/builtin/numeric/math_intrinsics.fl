@@ -8,7 +8,7 @@ use primitives.*;
   fma performs one fused rounding; it is not a multiply followed by an add.
 -}
 pub mod target {
-    ^intrinsic_enum
+    ^attrs.compilation.intrinsic_enum
     pub enum Scalar {
         fma,
         sqrt,

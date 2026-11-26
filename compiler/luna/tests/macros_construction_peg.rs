@@ -301,7 +301,7 @@ fn custom_dsl_peg_node_ordered_choice_and_flurry_projections_work() {
         dir.join("peg_dep/lib.fl"),
         r#"
 @use meta.macros.*;
-use meta.ast.{FlurryExpr, Optional, PegNode, TokenBuffer};
+use meta.ast.{FlurryExpr, PegNode, TokenBuffer};
 use meta.ComptimeTextBytes;
 
 pub const script_dsl = @define_macro2 {
@@ -337,7 +337,7 @@ pub const script_dsl = @define_macro2 {
 pub const opt_expr = @define_macro2 {
     Entry -> FlurryExpr?;
 
-    fn(expr: Optional<FlurryExpr>) -> TokenBuffer {
+    fn(expr: ?FlurryExpr) -> TokenBuffer {
         expr match {
             e? => {{ ($e) + 1 }},
             null => {{ 0 }},

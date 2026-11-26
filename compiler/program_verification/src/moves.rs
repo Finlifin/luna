@@ -20749,6 +20749,7 @@ mod return_result_cache_tests {
                     source,
                     phase: TraitPhase::Runtime,
                     is_quote: false,
+                    is_optional: false,
                     pure: false,
                     is_unsafe: false,
                     type_arguments: vec![],

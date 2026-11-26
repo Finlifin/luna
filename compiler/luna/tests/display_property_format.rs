@@ -1,7 +1,7 @@
 //! End-to-end tests for property-based formatting (`Display` runtime &
-//! `^attrs.comptime_phase` `comptime_fmt`, `std.fmt.comptime_format`,
+//! `meta.ComptimeDisplay` comptime `fmt`, `std.fmt.comptime_format`,
 //! `std.fmt.format` / `write_fmt`, integer/float/text/`Debug` property options,
-//! custom user `Display` property parsing, affine `Once` non-consuming borrows,
+//! custom user `Display`/`ComptimeDisplay` property parsing, affine `Once` non-consuming borrows,
 //! and compile-time rejection of malformed/mismatched options).
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
@@ -305,15 +305,20 @@ fn custom_display_type_parses_custom_properties_in_both_phases() {
             }
         }
 
-        comptime impl Display for Tag {
-            comptime fn comptime_fmt(self, .format: str = "") -> str {
+        comptime impl meta.ComptimeDisplay for Tag {
+            comptime fn fmt(self, .format: str = "") -> str {
                 let mode: u8 = parse_style(format);
                 if mode == 1 {
-                    "TAG=".concat(self.code.as(Display).comptime_fmt(.format = "format: .HEX"))
+                    "TAG=".as(ComptimeTextBytes).concat(
+                        self.code.as(meta.ComptimeDisplay).fmt(.format = "format: .HEX"),
+                    )
                 } else if mode == 2 {
-                    "[tag:".concat(self.code.as(Display).comptime_fmt()).concat("]")
+                    "[tag:".as(ComptimeTextBytes)
+                        .concat(self.code.as(meta.ComptimeDisplay).fmt())
+                        .as(ComptimeTextBytes)
+                        .concat("]")
                 } else {
-                    "tag=".concat(self.code.as(Display).comptime_fmt())
+                    "tag=".as(ComptimeTextBytes).concat(self.code.as(meta.ComptimeDisplay).fmt())
                 }
             }
         }

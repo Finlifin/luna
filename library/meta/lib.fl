@@ -22,6 +22,7 @@ use data.{
     text,
 }
 use definitions.{enums, newtypes, structs}
+use formatting;
 use macros_impl;
 use numeric.{conversions, equality, ordering, scalar_math}
 use ops_impl;
@@ -51,6 +52,7 @@ pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFro
 pub use enums.*;
 pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
+pub use formatting.display.ComptimeDisplay;
 pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
 pub use integer.*;
 pub use map.{Map, MapEntry}
@@ -147,6 +149,11 @@ pub mod convert {
     };
 }
 
+pub mod fmt {
+    pub use formatting.display.ComptimeDisplay;
+    pub use formatting.helpers.*;
+}
+
 pub mod prelude {
     pub use .List;
     pub use .Map;
@@ -157,6 +164,7 @@ pub mod prelude {
     pub use conversions.{ComptimeDefault, ComptimeFrom, ComptimeInto, ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
+    pub use formatting.display.ComptimeDisplay;
     pub use hashing.{ComptimeBuildHasher, ComptimeHash, ComptimeHasher, DefaultComptimeHasher};
     pub use ops_impl.{
         ComptimeAdd,

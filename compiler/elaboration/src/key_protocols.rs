@@ -446,6 +446,7 @@ pub fn select_metered(
         source: member.source,
         phase: member.phase,
         is_quote: member.is_quote,
+        is_optional: member.is_optional,
         pure: member.pure,
         is_unsafe: member.is_unsafe,
         type_arguments: vec![],

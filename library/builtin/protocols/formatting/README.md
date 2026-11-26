@@ -12,9 +12,6 @@ pub trait Display {
     fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
     where
         W :- ByteWriter;
-
-    ^attrs.comptime_phase
-    comptime fn comptime_fmt(self, .format: str = "") -> str;
 }
 
 fn write_value(value: *T, output: *W) -> !W.as(ByteWriter).Err void
@@ -26,14 +23,13 @@ where
 }
 ```
 
-`Display` 将 runtime 与 comptime 两相统一在同一协议上，并由可选默认参数
-`comptime .format: str = ""` 将字段选项下放给具体类型解析：
+`Display` 负责 runtime 格式化，并通过可选默认参数 `comptime .format: str = ""` 将字段选项下放给具体类型解析；对应的编译期文本格式化协议 `ComptimeDisplay`（同名方法 `comptime fn fmt(self, .format: str = "") -> str`）定义于 `meta` 包：
 
 - runtime `fmt(*self, output: *W, comptime .format: str = "")` 借用接收者，
   因此格式化仿射 `Once` 值时不会移动或销毁它；
-- comptime `comptime_fmt(self, .format: str = "") -> str` 在编译期产生格式化文本，
+- comptime `meta.ComptimeDisplay.fmt(self, .format: str = "") -> str` 在编译期产生格式化文本，
   已为 `bool`、全部 12 种机器整数、任意精度 `Integer`、`char`、`str` 与 `Symbol`
-  提供 `comptime impl Display`；
+  提供 `comptime impl ComptimeDisplay`（配合 `meta.fmt` 辅助函数）；
 - 进制与定点精度不再拆成外部 `LowerHex`/`UpperHex`/`Binary`/`Octal` 或
   `FixedPrecision` trait，而是由类型自身的选项解析（例如 `builtin.fmt.options`
   的 `FormatOptions` + `Splice` 传递及内部 helper）在编译期完成验证并在

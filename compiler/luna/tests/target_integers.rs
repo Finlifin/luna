@@ -801,7 +801,7 @@ fn generic_platform_arithmetic_checks_unused_definitions_for_each_target() {
 
 #[test]
 fn platform_bitwise_intrinsics_keep_unspecified_layout_until_consumed() {
-    let source = "^intrinsic_enum enum Ops {bits}
+    let source = "^{ __flurry_intrinsic_enum: true } enum Ops {bits}
         fn combine(a:.usize'builtin,b:.usize'builtin)->.usize'builtin {
             unsafe {Ops.bits'intrinsic(a,b).as(.usize'builtin)}
         }";
@@ -839,7 +839,7 @@ fn platform_bitwise_intrinsics_use_package_target_for_proofs_and_native_layout()
             "9223372036854775807",
         ),
     ] {
-        let source=format!("^intrinsic_enum enum Ops {{band,bor,bxor}}
+        let source=format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{band,bor,bxor}}
             typealias Word=.usize'builtin;typealias Signed=.isize'builtin;
             pure fn mix(a:T,b:T)->T where T,requires T==Word or T==Signed {{unsafe {{Ops.bxor'intrinsic(a,b).as(T)}}}}
             fn low(a:Word)->r:Word where ensures r<=15 {{let mask:Word=15;unsafe {{Ops.band'intrinsic(a,mask).as(Word)}}}}
@@ -978,7 +978,7 @@ fn platform_bit_counts_reversal_and_funnels_use_target_layout() {
                 .unwrap();
             }
         }
-        let invalid = format!("^intrinsic_enum enum Ops {{count}} typealias Word=.usize'builtin;
+        let invalid = format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{count}} typealias Word=.usize'builtin;
             fn wrong(a:Word)->r:Word where ensures r < {width} {{unsafe {{Ops.count'intrinsic(a).as(Word)}}}}");
         let error =
             compile_with_intrinsics(&invalid, Some(width), &["ctpop=input.Ops.count"]).unwrap_err();
@@ -1078,7 +1078,7 @@ fn generic_platform_program_proofs_cover_all_layouts_without_selecting_one() {
 
 #[test]
 fn platform_byte_swap_checks_layout_at_admission_and_after_specialization() {
-    let declaration = "^intrinsic_enum enum Ops {swap}
+    let declaration = "^{ __flurry_intrinsic_enum: true } enum Ops {swap}
         typealias Word=.usize'builtin;
         fn swap(a:Word)->Word {unsafe {Ops.swap'intrinsic(a).as(Word)}}";
     let bindings = ["bswap=input.Ops.swap"];
@@ -1131,7 +1131,7 @@ fn platform_byte_swap_checks_layout_at_admission_and_after_specialization() {
     }
     // Generic scalar admission must not invent layout evidence. Even if the
     // template passes source checking, its executable instance must reject i8.
-    let generic = "^intrinsic_enum enum Ops {swap}
+    let generic = "^{ __flurry_intrinsic_enum: true } enum Ops {swap}
         pure fn swap(a:T)->T where T, requires T == .usize'builtin or T == .u16'builtin {
             unsafe {Ops.swap'intrinsic(a).as(T)}
         }

@@ -1,7 +1,9 @@
 //! Invocation-local borrowed indexes for completed type references.
 use crate::{NominalDefinition, Package, Term};
 use nir::{DeclarationId, value_admission::Error};
+
 mod applications;
+
 pub(super) type MethodKey<'a> = (
     DeclarationId,
     &'a [Term],
@@ -9,6 +11,7 @@ pub(super) type MethodKey<'a> = (
     DeclarationId,
     &'a [Term],
 );
+
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct TypeLinks<'a> {
@@ -24,9 +27,11 @@ fn tick(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
     Ok(())
 }
+
 fn charge(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
     nir::type_computations::charge_term(ty, fuel).map_err(Into::into)
 }
+
 impl<'a> TypeLinks<'a> {
     pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         let mut result = Self {
@@ -244,15 +249,18 @@ impl<'a> TypeLinks<'a> {
 mod tests {
     use super::*;
     use nir::Primitive;
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 95, local }
     }
+
     fn nominal(local: u32, argument: Term) -> Term {
         Term::Nominal {
             declaration: id(local),
             arguments: vec![argument],
         }
     }
+
     fn instance(local: u32, scalar: Primitive) -> crate::NominalInstance {
         let representation = Term::Primitive(scalar);
         crate::NominalInstance {
@@ -269,6 +277,7 @@ mod tests {
             }),
         }
     }
+
     fn value_head(domain: Term) -> nir::normal_forms::Head {
         nir::normal_forms::Head {
             declaration: id(90),
@@ -413,6 +422,7 @@ mod tests {
                     source: nir::program::SourceRange { start: 0, end: 0 },
                     phase: Default::default(),
                     is_quote: false,
+                    is_optional: false,
                     pure: false,
                     is_unsafe: false,
                     declaration: method.member,

@@ -1,0 +1,309 @@
+use builtin.{Integer, bool, char, str, u8, u32, u64, u128}
+use builtin.fmt.options.{FormatOptions, PadCounts}
+use data.text.{ComptimeTextBytes, str_from_char}
+
+{-
+    Comptime UTF-8 character counting, padding, truncation, and radix formatting
+    helpers backing `meta.ComptimeDisplay`.
+-}
+
+pub pure comptime fn compute_comptime_pad_counts(
+    opts: FormatOptions,
+    content_chars: u32,
+    is_numeric: bool,
+    allow_zero_pad: bool,
+) -> PadCounts {
+    let target_len = opts.len;
+    if not opts.has_len or target_len <= content_chars {
+        return PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: 0,
+        };
+    }
+    let pad = target_len - content_chars;
+    if opts.align == 1 {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    } else if opts.align == 2 {
+        let left = pad / 2;
+        PadCounts {
+            left: left,
+            zero_pad: 0,
+            right: pad - left,
+        }
+    } else if opts.align == 3 {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else if is_numeric and allow_zero_pad and opts.placeholder == '0' {
+        PadCounts {
+            left: 0,
+            zero_pad: pad,
+            right: 0,
+        }
+    } else if is_numeric {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    }
+}
+
+pub pure comptime fn count_comptime_str_chars(text: str) -> u32 {
+    let length = text.byte_length();
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    while index < length {
+        let byte = text.byte(index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    chars
+}
+
+pub pure comptime fn truncate_comptime_str(text: str, opts: FormatOptions) -> str {
+    if not opts.has_precision {
+        return text;
+    }
+    let length = text.byte_length();
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    while index < length {
+        let byte = text.byte(index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if chars >= opts.precision {
+                return text.slice(0, index) match {
+                    s? => s,
+                    null => "",
+                };
+            }
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    text
+}
+
+pub pure comptime fn repeat_comptime_char(ch: char, count: u32) -> str {
+    var rem = count;
+    var chunk = str_from_char(ch);
+    var out = "";
+    while rem > 0 {
+        if rem % 2 == 1 {
+            out = out.as(ComptimeTextBytes).concat(chunk);
+        }
+        rem = rem / 2;
+        if rem > 0 {
+            chunk = chunk.as(ComptimeTextBytes).concat(chunk);
+        }
+    }
+    out
+}
+
+pub pure comptime fn pad_comptime_str(
+    prefix: str,
+    body: str,
+    opts: FormatOptions,
+    is_numeric: bool,
+    allow_zero_pad: bool,
+) -> str {
+    let content = prefix.as(ComptimeTextBytes).concat(body);
+    if not opts.has_len {
+        return content;
+    }
+    let p_chars = count_comptime_str_chars(prefix);
+    let b_chars = count_comptime_str_chars(body);
+    if p_chars > 10000000 or b_chars > 10000000 {
+        return content;
+    }
+    let content_chars = p_chars + b_chars;
+    let pads = compute_comptime_pad_counts(opts, content_chars, is_numeric, allow_zero_pad);
+    if pads.zero_pad > 0 {
+        return prefix
+            .as(ComptimeTextBytes)
+            .concat(repeat_comptime_char('0', pads.zero_pad))
+            .as(ComptimeTextBytes)
+            .concat(body);
+    }
+    var result = content;
+    if pads.left > 0 {
+        result = repeat_comptime_char(opts.placeholder, pads.left).as(ComptimeTextBytes).concat(result);
+    }
+    if pads.right > 0 {
+        result = result.as(ComptimeTextBytes).concat(repeat_comptime_char(opts.placeholder, pads.right));
+    }
+    result
+}
+
+pure comptime fn comptime_digit_str(d: u64, uppercase: bool) -> str {
+    let table = if uppercase { "0123456789ABCDEF" } else { "0123456789abcdef" };
+    if d >= 16 {
+        return "0";
+    }
+    table.slice(d, d + 1) match {
+        s? => s,
+        null => "0",
+    }
+}
+
+pure comptime fn format_u128_digits_comptime(value: u128, radix: u8) -> str {
+    if value == 0 {
+        return "0";
+    }
+    let base: u128 = if radix == 1 or radix == 2 {
+        16
+    } else if radix == 3 {
+        8
+    } else if radix == 4 {
+        2
+    } else {
+        10
+    };
+    if base < 2 or base > 16 {
+        return "0";
+    }
+    let uppercase = radix == 2;
+    var v = value;
+    var out = "";
+    while v > 0 {
+        if base < 2 {
+            break;
+        }
+        let d = (v % base)'bitvec[0..8].as(u64);
+        out = comptime_digit_str(d, uppercase).as(ComptimeTextBytes).concat(out);
+        v = v / base;
+    }
+    out
+}
+
+pure comptime fn radix_prefix_str(radix: u8) -> str {
+    if radix == 1 {
+        "0x"
+    } else if radix == 2 {
+        "0X"
+    } else if radix == 3 {
+        "0o"
+    } else if radix == 4 {
+        "0b"
+    } else {
+        ""
+    }
+}
+
+pub pure comptime fn format_unsigned_comptime(value: u128, opts: FormatOptions) -> str {
+    format_signed_comptime(false, value, value, opts)
+}
+
+pub pure comptime fn format_signed_comptime(
+    is_neg: bool,
+    abs_magnitude: u128,
+    twos_comp: u128,
+    opts: FormatOptions,
+) -> str {
+    let digits_value = if opts.radix == 0 { abs_magnitude } else { twos_comp };
+    let prefix = if opts.radix == 0 {
+        if is_neg {
+            "-"
+        } else if opts.sign == 1 {
+            "+"
+        } else if opts.sign == 2 {
+            " "
+        } else {
+            ""
+        }
+    } else if opts.alt {
+        radix_prefix_str(opts.radix)
+    } else {
+        ""
+    };
+    let body = format_u128_digits_comptime(digits_value, opts.radix);
+    pad_comptime_str(prefix, body, opts, true, true)
+}
+
+pure comptime fn integer_digit_str(d: Integer, uppercase: bool) -> str {
+    d match {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => if uppercase { "A" } else { "a" },
+        11 => if uppercase { "B" } else { "b" },
+        12 => if uppercase { "C" } else { "c" },
+        13 => if uppercase { "D" } else { "d" },
+        14 => if uppercase { "E" } else { "e" },
+        15 => if uppercase { "F" } else { "f" },
+        _ => "0",
+    }
+}
+
+pub pure comptime fn format_integer_comptime(value: Integer, opts: FormatOptions) -> str {
+    let sign_prefix = if value < 0 {
+        "-"
+    } else if opts.sign == 1 {
+        "+"
+    } else if opts.sign == 2 {
+        " "
+    } else {
+        ""
+    };
+    let alt_prefix = if opts.radix != 0 and opts.alt {
+        radix_prefix_str(opts.radix)
+    } else {
+        ""
+    };
+    let prefix = sign_prefix.as(ComptimeTextBytes).concat(alt_prefix);
+    let base: Integer = if opts.radix == 1 or opts.radix == 2 {
+        16
+    } else if opts.radix == 3 {
+        8
+    } else if opts.radix == 4 {
+        2
+    } else {
+        10
+    };
+    let uppercase = opts.radix == 2;
+    var mag = if value < 0 { -value } else { value };
+    let body = if mag == 0 {
+        "0"
+    } else {
+        var digits = "";
+        while mag > 0 {
+            let rem = mag.rem_trunc(base);
+            digits = integer_digit_str(rem, uppercase).as(ComptimeTextBytes).concat(digits);
+            mag = mag.div_trunc(base);
+        }
+        digits
+    };
+    pad_comptime_str(prefix, body, opts, true, true)
+}

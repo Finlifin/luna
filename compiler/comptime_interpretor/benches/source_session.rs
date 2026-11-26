@@ -12,25 +12,32 @@ use std::sync::{
 use std::time::Instant;
 
 struct CountingAllocator;
+
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
+
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe { System.dealloc(pointer, layout) }
     }
+
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
+
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn budget() -> Budget {
     Budget {
         steps: 100_000_000,
@@ -110,6 +117,7 @@ fn world(count: u32, reads: usize) -> Arc<Package> {
                 source: nir::program::SourceRange { start: 0, end: 0 },
                 phase: TraitPhase::Comptime,
                 is_quote: false,
+                is_optional: false,
                 pure: true,
                 is_unsafe: false,
                 type_arguments: vec![],

@@ -448,6 +448,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                 source,
                 phase: Default::default(),
                 is_quote: false,
+                is_optional: false,
                 pure: false,
                 is_unsafe: false,
                 type_arguments: vec![],

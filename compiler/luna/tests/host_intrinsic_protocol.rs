@@ -316,7 +316,8 @@ fn math_float_domain_rejects_nonfloat_instantiation() {
 
 #[test]
 fn unsupported_unselected_operations_stay_unbound_and_cannot_reuse_old_evidence() {
-    let source = "^intrinsic_enum enum Ops {fma,unknown} typealias F=.f32'builtin;
+    let source =
+        "^{ __flurry_intrinsic_enum: true } enum Ops {fma,unknown} typealias F=.f32'builtin;
         fn run()->F {let x:F=2.0;unsafe {Ops.fma'intrinsic(x,x,x).as(F)}}
         fn unused() {unsafe {Ops.unknown'intrinsic();}}";
     let bound = bind_fma(support::compile(source));
@@ -338,7 +339,7 @@ fn unsupported_unselected_operations_stay_unbound_and_cannot_reuse_old_evidence(
 #[test]
 fn bound_intrinsic_evaluates_inputs_once_in_order_with_resource_protocols() {
     let source = "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {} impl Duplicate for .f32'builtin {}
-        ^intrinsic_enum enum Ops {fma} typealias F=.f32'builtin;
+        ^{ __flurry_intrinsic_enum: true } enum Ops {fma} typealias F=.f32'builtin;
         fn run() {let a:F=3.0;let b:F=4.0;let c:F=5.0;var seen=false;
             let result=unsafe {Ops.fma'intrinsic(
                 do {assumes not seen;seen=true;a},
@@ -390,7 +391,7 @@ fn bound_intrinsic_evaluates_inputs_once_in_order_with_resource_protocols() {
 #[test]
 fn intrinsic_binding_evidence_cannot_survive_signature_or_identity_forgery() {
     let package = support::compile(
-        "^intrinsic_enum enum Ops {fma} typealias F=.f32'builtin;fn run()->F {let a:F=1.0;unsafe {Ops.fma'intrinsic(a,a,a).as(F)}}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {fma} typealias F=.f32'builtin;fn run()->F {let a:F=1.0;unsafe {Ops.fma'intrinsic(a,a,a).as(F)}}",
     );
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, Operation::FusedMultiplyAdd)]).unwrap();
@@ -461,7 +462,7 @@ fn bound_source_fma_executes_natively_with_single_rounding() {
         ),
     ] {
         let source = format!(
-            "^intrinsic_enum enum Ops {{any_name}} typealias F=.{ty}'builtin; fn fused(a:F,b:F,c:F)->F {{unsafe {{Ops.any_name'intrinsic(a,b,c).as(F)}}}} fn run()->F {{fused({a},{b},{c})}}"
+            "^{{ __flurry_intrinsic_enum: true }} enum Ops {{any_name}} typealias F=.{ty}'builtin; fn fused(a:F,b:F,c:F)->F {{unsafe {{Ops.any_name'intrinsic(a,b,c).as(F)}}}} fn run()->F {{fused({a},{b},{c})}}"
         );
         let package = bind_fma(support::compile(&source));
         let ir = luna::host::llvm_ir(&package, "run", 100000).unwrap();
@@ -549,7 +550,7 @@ fn operation(tag: Tag) -> Expr {
 
 #[test]
 fn operation_ir_preserves_order_identity_types_sources_and_budgets() {
-    let package = support::compile("^intrinsic_enum enum Ops {fma}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {fma}");
     let tag = tag(&package, "Ops", 0);
     let mut expr = operation(tag);
     let original = expr.clone();
@@ -602,7 +603,8 @@ fn operation_ir_preserves_order_identity_types_sources_and_budgets() {
 
 #[test]
 fn operation_ir_requires_lexical_permission_and_runtime_phase() {
-    let mut package = support::compile("^intrinsic_enum enum Ops {fma} fn run()->bool {true}");
+    let mut package =
+        support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {fma} fn run()->bool {true}");
     let tag = tag(&package, "Ops", 0);
     package.functions[0].body = operation(tag);
     assert!(
@@ -639,7 +641,8 @@ fn operation_ir_requires_lexical_permission_and_runtime_phase() {
 
 #[test]
 fn unknown_target_behavior_cannot_be_published_or_proved_from_its_output() {
-    let mut package = support::compile("^intrinsic_enum enum Ops {fma} fn run()->bool {true}");
+    let mut package =
+        support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {fma} fn run()->bool {true}");
     let tag = tag(&package, "Ops", 0);
     package.functions[0].body = operation(tag);
     package.functions[0].is_unsafe = true;
@@ -700,7 +703,7 @@ fn tag(package: &nir::program::Package, name: &str, variant: usize) -> Tag {
 #[test]
 fn source_intrinsic_forms_ordered_operation_with_immediate_output_interface() {
     let package = support::compile(
-        "^intrinsic_enum enum Ops {fma,barrier} typealias F=.f32'builtin; unsafe fn fused(a:F,b:F,c:F)->F {(Ops.fma'intrinsic(a,b,c)).as(F)} unsafe fn wait() {Ops.barrier'intrinsic();}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {fma,barrier} typealias F=.f32'builtin; unsafe fn fused(a:F,b:F,c:F)->F {(Ops.fma'intrinsic(a,b,c)).as(F)} unsafe fn wait() {Ops.barrier'intrinsic();}",
     );
     let mut found = vec![];
     for function in &package.functions {
@@ -747,7 +750,7 @@ fn source_intrinsic_forms_ordered_operation_with_immediate_output_interface() {
 #[test]
 fn source_intrinsic_keeps_generic_operand_and_result_types_without_head_expansion() {
     let package = support::compile(
-        "^intrinsic_enum enum Ops {op} fn project(value:T)->T where T {unsafe {Ops.op'intrinsic(value).as(T)}}",
+        "^{ __flurry_intrinsic_enum: true } enum Ops {op} fn project(value:T)->T where T {unsafe {Ops.op'intrinsic(value).as(T)}}",
     );
     let function = package
         .functions
@@ -771,7 +774,7 @@ fn source_intrinsic_keeps_generic_operand_and_result_types_without_head_expansio
 #[test]
 fn binding_uses_declaration_identity_not_operation_spelling() {
     let package = support::compile(
-        "^intrinsic_enum enum First {arbitrary} ^intrinsic_enum enum Second {arbitrary} enum Ordinary {arbitrary}",
+        "^{ __flurry_intrinsic_enum: true } enum First {arbitrary} ^{ __flurry_intrinsic_enum: true } enum Second {arbitrary} enum Ordinary {arbitrary}",
     );
     let first = tag(&package, "First", 0);
     let second = tag(&package, "Second", 0);
@@ -799,7 +802,7 @@ fn binding_uses_declaration_identity_not_operation_spelling() {
 
 #[test]
 fn fma_requires_three_same_precision_inputs_and_explicit_float_output() {
-    let package = support::compile("^intrinsic_enum enum Ops {fma}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {fma}");
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, Operation::FusedMultiplyAdd)]).unwrap();
     for (primitive, width) in [(P::F32, 32), (P::F64, 64)] {
@@ -839,7 +842,7 @@ fn fma_requires_three_same_precision_inputs_and_explicit_float_output() {
 
 #[test]
 fn invalid_bindings_are_rejected_without_publishing_partial_registry() {
-    let mut package = support::compile("^intrinsic_enum enum Ops {fma}");
+    let mut package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {fma}");
     let tag = tag(&package, "Ops", 0);
     let binding = (tag, Operation::FusedMultiplyAdd);
     assert!(matches!(
@@ -889,7 +892,7 @@ fn invalid_bindings_are_rejected_without_publishing_partial_registry() {
 
 #[test]
 fn generic_fma_specializes_pending_signature_before_host_admission() {
-    let source = "^intrinsic_enum enum Ops {fma}
+    let source = "^{ __flurry_intrinsic_enum: true } enum Ops {fma}
         pure fn fused(a:T,b:T,c:T)->T where T, requires T == .f32'builtin or T == .f64'builtin {
             unsafe {Ops.fma'intrinsic(a,b,c).as(T)}
         }
@@ -984,7 +987,7 @@ fn generic_fma_specializes_pending_signature_before_host_admission() {
 
 #[test]
 fn sqrt_has_unary_same_precision_protocol() {
-    let package = support::compile("^intrinsic_enum enum Ops {sqrt}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {sqrt}");
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, Operation::SquareRoot)]).unwrap();
     for primitive in [P::F32, P::F64] {
@@ -1017,7 +1020,7 @@ fn sqrt_has_unary_same_precision_protocol() {
 fn sqrt_executes_both_precisions_at_o0_and_o3() {
     for width in [32, 64] {
         let source = format!(
-            "^intrinsic_enum enum Ops {{sqrt}}
+            "^{{ __flurry_intrinsic_enum: true }} enum Ops {{sqrt}}
             typealias F=.f{width}'builtin;
             fn root(x:F)->F {{unsafe {{Ops.sqrt'intrinsic(x).as(F)}}}}
             fn run() {{
@@ -1134,7 +1137,7 @@ fn generic_intrinsic_rebinding_preserves_only_existing_source_admission() {
             "-3.5",
         ),
     ] {
-        let source = format!("^intrinsic_enum enum Ops {{{name}}}
+        let source = format!("^{{ __flurry_intrinsic_enum: true }} enum Ops {{{name}}}
             pure fn calculate({parameters})->T where T, requires T == .f32'builtin or T == .f64'builtin {{
                 unsafe {{Ops.{name}'intrinsic({arguments}).as(T)}}
             }}
@@ -1198,7 +1201,7 @@ fn generic_intrinsic_rebinding_preserves_only_existing_source_admission() {
 
 #[test]
 fn copysign_requires_two_same_precision_operands() {
-    let package = support::compile("^intrinsic_enum enum Ops {sign}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {sign}");
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, Operation::CopySign)]).unwrap();
     for primitive in [P::F32, P::F64] {
@@ -1233,7 +1236,7 @@ fn copysign_requires_two_same_precision_operands() {
 #[test]
 fn iir_intrinsic_family_requires_the_exact_unparameterized_instance() {
     let package = bind_fma(support::compile(
-        "^intrinsic_enum enum Ops {fma} typealias F=.f32'builtin;
+        "^{ __flurry_intrinsic_enum: true } enum Ops {fma} typealias F=.f32'builtin;
         fn run()->F {let x:F=2.0;unsafe {Ops.fma'intrinsic(x,x,x).as(F)}}",
     ));
     let graph = luna::instantiation::instantiate(&package, "run", 100000).unwrap();
@@ -1256,7 +1259,7 @@ fn iir_intrinsic_family_requires_the_exact_unparameterized_instance() {
 
 #[test]
 fn unary_math_intrinsics_require_one_matching_float_operand() {
-    let package = support::compile("^intrinsic_enum enum Ops {round}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {round}");
     let tag = tag(&package, "Ops", 0);
     for operation in [
         Operation::AbsoluteValue,
@@ -1308,7 +1311,7 @@ fn unary_math_intrinsics_require_one_matching_float_operand() {
 
 #[test]
 fn binary_math_requires_two_same_precision_operands() {
-    let package = support::compile("^intrinsic_enum enum Ops {sign}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {sign}");
     let tag = tag(&package, "Ops", 0);
     for (name, operation) in [
         ("pow", Operation::Power),
@@ -1420,7 +1423,7 @@ fn native_transcendental_intrinsics_preserve_special_value_classes() {
             let parameters = if operation == Power { "a:F,b:F" } else { "a:F" };
             let arguments = if operation == Power { "a,b" } else { "a" };
             let source = format!(
-                "typealias F=.f{width}'builtin; ^intrinsic_enum enum Ops {{calculate}}
+                "typealias F=.f{width}'builtin; ^{{ __flurry_intrinsic_enum: true }} enum Ops {{calculate}}
                 fn apply({parameters})->F {{unsafe {{Ops.calculate'intrinsic({arguments}).as(F)}}}}
                 fn run() {{{checks}}}"
             );
@@ -1474,7 +1477,7 @@ fn native_fabs_clears_sign_without_changing_nan_payloads() {
             checks.push_str(&format!("do {{var input:F=0.0;input'bitvec[0..{width}]={bits};var seen=false;let result=absolute(do {{assumes not seen;seen=true;input}});assumes seen;assumes result'bitvec == {expected};}};"));
         }
         let source = format!(
-            "typealias F=.f{width}'builtin;^intrinsic_enum enum Ops {{absolute}}
+            "typealias F=.f{width}'builtin;^{{ __flurry_intrinsic_enum: true }} enum Ops {{absolute}}
             fn absolute(input:F)->F {{unsafe {{Ops.absolute'intrinsic(input).as(F)}}}}
             fn run() {{{checks}}}"
         );
@@ -1532,7 +1535,7 @@ fn native_round_away_preserves_special_values_and_halfway_direction() {
             };
             checks.push_str(&format!("do {{var input:F=0.0;input'bitvec[0..{width}]={};let output=apply(input);assumes {comparison};}};",encode(input)));
         }
-        let source=format!("typealias F=.f{width}'builtin;^intrinsic_enum enum Ops {{round}}
+        let source=format!("typealias F=.f{width}'builtin;^{{ __flurry_intrinsic_enum: true }} enum Ops {{round}}
             fn apply(input:F)->F {{unsafe {{Ops.round'intrinsic(input).as(F)}}}} fn run() {{{checks}}}");
         let package = support::compile(&source);
         let registry =
@@ -1556,7 +1559,7 @@ fn native_round_away_preserves_special_values_and_halfway_direction() {
 
 #[test]
 fn integer_intrinsics_enforce_domain_and_revalidate_exact_scalar_types() {
-    let package = support::compile("^intrinsic_enum enum Ops {bits}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {bits}");
     let tag = tag(&package, "Ops", 0);
     for operation in [
         Operation::FunnelShiftLeft,
@@ -1669,7 +1672,7 @@ fn integer_intrinsic_generic_domain_requires_source_proof() {
                 "value"
             };
             let source = format!(
-                "^intrinsic_enum enum Ops {{bits}} pure fn bits({parameters})->T where T, {constraint} {{unsafe {{Ops.bits'intrinsic({arguments}).as(T)}}}}"
+                "^{{ __flurry_intrinsic_enum: true }} enum Ops {{bits}} pure fn bits({parameters})->T where T, {constraint} {{unsafe {{Ops.bits'intrinsic({arguments}).as(T)}}}}"
             );
             let bindings = [(operation, "input.Ops.bits".into())];
             let result = support::compile_with_source_bindings(
@@ -1692,7 +1695,7 @@ fn integer_intrinsic_generic_domain_requires_source_proof() {
 
 #[test]
 fn integer_generic_rebinding_cannot_exchange_same_arity_domains_or_operations() {
-    let source = "^intrinsic_enum enum Ops {bits}
+    let source = "^{ __flurry_intrinsic_enum: true } enum Ops {bits}
         pure fn bits(value:T)->T where T, requires T == .u32'builtin {
             unsafe {Ops.bits'intrinsic(value).as(T)}
         }
@@ -1736,7 +1739,7 @@ fn integer_zero_counts_lower_with_a_defined_zero_flag() {
     for operation in [Operation::LeadingZeros, Operation::TrailingZeros] {
         for width in [8, 16, 32, 64, 128] {
             let source = format!(
-                "^intrinsic_enum enum Ops {{bits}}
+                "^{{ __flurry_intrinsic_enum: true }} enum Ops {{bits}}
                 pure fn bits(value:.u{width}'builtin)->.u{width}'builtin {{
                     unsafe {{Ops.bits'intrinsic(value).as(.u{width}'builtin)}}
                 }}
@@ -1778,7 +1781,7 @@ fn scalar_intrinsic_predicates_revalidate_evidence_and_all_operands() {
     use nir::program::LocalId;
     let checkable_predicate =
         |expr: &Expr| nir::program::checkable_predicate(expr, &mut 10_000).unwrap();
-    let package = support::compile("^intrinsic_enum enum Ops {bound}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {bound}");
     let tag = tag(&package, "Ops", 0);
     let make = |ty, kind| Expr {
         source: SourceRange { start: 0, end: 1 },
@@ -1930,7 +1933,7 @@ fn scalar_intrinsic_predicates_revalidate_evidence_and_all_operands() {
 
 #[test]
 fn float_classification_requires_float_input_and_bool_result() {
-    let package = support::compile("^intrinsic_enum enum Ops {classify}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {classify}");
     let tag = tag(&package, "Ops", 0);
     for op in [
         Operation::IsNan,
@@ -1959,7 +1962,7 @@ fn float_classification_requires_float_input_and_bool_result() {
 
 #[test]
 fn integer_math_intrinsics_reject_mixed_signs_widths_and_nonintegers() {
-    let package = support::compile("^intrinsic_enum enum Ops {sat}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {sat}");
     let tag = tag(&package, "Ops", 0);
     for op in [
         Operation::SaturatingAdd,
@@ -1999,7 +2002,7 @@ fn integer_math_intrinsics_reject_mixed_signs_widths_and_nonintegers() {
 
 #[test]
 fn wrapping_absolute_value_requires_one_signed_input_and_same_result() {
-    let package = support::compile("^intrinsic_enum enum Ops {absolute}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {absolute}");
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, Operation::WrappingAbsoluteValue)]).unwrap();
     for p in [P::I8, P::I16, P::I32, P::I64, P::I128, P::Isize] {
@@ -2031,7 +2034,7 @@ fn wrapping_absolute_value_requires_one_signed_input_and_same_result() {
 
 #[test]
 fn bitwise_intrinsics_keep_signed_unsigned_identity_and_reject_unproved_domains() {
-    let package = support::compile("^intrinsic_enum enum Ops {bits}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {bits}");
     let tag = tag(&package, "Ops", 0);
     for operation in [Operation::BitAnd, Operation::BitOr, Operation::BitXor] {
         let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
@@ -2067,7 +2070,7 @@ fn bitwise_intrinsics_keep_signed_unsigned_identity_and_reject_unproved_domains(
 
 #[test]
 fn platform_bitwise_binding_reads_width_without_erasing_scalar_identity() {
-    let package = support::compile("^intrinsic_enum enum Ops {bits}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {bits}");
     let tag = tag(&package, "Ops", 0);
     for operation in [Operation::BitAnd, Operation::BitOr, Operation::BitXor] {
         let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
@@ -2102,7 +2105,7 @@ fn platform_bitwise_binding_reads_width_without_erasing_scalar_identity() {
 }
 
 fn check_integer_exponent_signature(operation: Operation) {
-    let package = support::compile("^intrinsic_enum enum Ops {power}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {power}");
     let tag = tag(&package, "Ops", 0);
     let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
     let exponent = Term::Primitive(P::I32);
@@ -2180,7 +2183,7 @@ fn ldexp_requires_float_base_and_signed_i32_exponent_including_pending_templates
 
 #[test]
 fn half_math_bindings_preserve_format_identity() {
-    let package = support::compile("^intrinsic_enum enum Ops {operation}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {operation}");
     let tag = tag(&package, "Ops", 0);
     for op in [
         Operation::FusedMultiplyAdd,
@@ -2225,7 +2228,7 @@ fn half_math_bindings_preserve_format_identity() {
 
 #[test]
 fn linux_bindings_check_operand_roles_and_refuse_comptime_evidence() {
-    let package = support::compile("^intrinsic_enum enum Ops {system}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Ops {system}");
     let tag = tag(&package, "Ops", 0);
     for (operation, operands) in [
         (Operation::LinuxWrite, vec![P::I32, P::Str, P::U64]),
@@ -2311,7 +2314,7 @@ fn linux_bindings_check_operand_roles_and_refuse_comptime_evidence() {
 
 #[test]
 fn memory_bindings_check_payloads_defer_templates_and_refuse_comptime_evidence() {
-    let package = support::compile("^intrinsic_enum enum Memory {op}");
+    let package = support::compile("^{ __flurry_intrinsic_enum: true } enum Memory {op}");
     let tag = tag(&package, "Memory", 0);
     for (operation, operands, result) in [
         (

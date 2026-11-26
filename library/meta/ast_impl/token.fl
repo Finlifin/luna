@@ -117,7 +117,7 @@ pub pure comptime fn nonneg_integer_decimal(value: Integer) -> str {
     var n = value;
     var digits: List<str> = [];
     while n > 0 {
-        digits = digits.concat([digit_str(n.rem_trunc(10))]);
+        digits.append(digit_str(n.rem_trunc(10)));
         n = n.div_trunc(10);
     }
     var out: str = "";

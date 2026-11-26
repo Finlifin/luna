@@ -168,7 +168,7 @@ where
         let count = self.length();
         var i: Integer = 0;
         while i < count {
-            out = out.concat([self[i].as(ToTokens).to_tokens()]);
+            out.append(self[i].as(ToTokens).to_tokens());
             i = i + 1;
         }
         TokenBuffer.concat_all(out)

@@ -184,6 +184,7 @@ fn instantiate_contract(
         name: member.name.clone(),
         phase: member.phase,
         is_quote: member.is_quote,
+        is_optional: member.is_optional,
         pure: member.pure,
         is_unsafe: member.is_unsafe,
         by_value_receiver: member.by_value_receiver,

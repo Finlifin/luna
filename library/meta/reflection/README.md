@@ -101,7 +101,7 @@ enum、primitive 和 opaque normal-form 头不能冒充 newtype。
 - `target'attribute` 返回目标声明经由
   attribute merge 后冻结的 `Object`（无属性或非定义值返回空 `{}`；属性仍在
   求值期间发生环引用或目标未完成时诊断拒绝）。
-- `Type.packed_mode(self) -> ?Symbol` 查询合并后的紧凑布局模式：优先读取 `__flurry_packed_mode`（`.byte` 或 `.bit`），过渡期兼容旧 `.packed: true` 返回 `.byte`，未启用返回 `null`。
+- `Type.packed_mode(self) -> ?Symbol` 查询合并后的紧凑布局模式：读取 `__flurry_packed_mode`（`.byte` 或 `.bit`），未启用返回 `null`。
 - `Type.is_packed(self) -> bool` 查询合并后是否启用任一紧凑布局（即 `packed_mode()` 非空）。
 - `Object.{is_empty, has_key, keys, merge}` 保留异构值域与未命名位置项，`merge`
   对重复 Symbol 键按最后一次出现保留条目。

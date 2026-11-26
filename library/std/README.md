@@ -8,7 +8,7 @@
 | `std.collections` | `Vec<T, .A, .allocator>`、`VecDeque<T, .A, .allocator>`、`HashMap<K, V, .A, .allocator>`、`HashSet<T, .A, .allocator>` 与消费迭代器（运行时依赖 allocator、零存储开销、ZST 支持、`Once`/`Drop`、`Clone`/`Eq`/`Debug`/`IntoIterator`/`Iterator`、`ByteWriter`/`Write`） |
 | `std.string` | `String<.A, .allocator>`、`Utf8Err`（RFC 3629 UTF-8 校验与 `from_utf8_lossy`、`Drop`、`Display`/`Debug`/跨 allocator `equals`/`cmp_ref`/`push_string`） |
 | `std.io` | `Reader`、`Write`、`ByteWriter`、`Stdin`（`stdin`）、`Cursor`、`BufReader`、`BufWriter`、`Writer`（stdout/stderr）、完整文本与字节缓冲读写（`write_all`、`write_all_raw`、`write_bytes`、`write_string`、`read_into`/`read_exact`/`read_to_end`/`read_to_string`/`read_until`/`read_line`）、`read_byte`、`IoErr` |
-| `std.fmt` | 泛型 allocator 化的 `format<.A, .allocator>`、`format_debug<.A, .allocator>`、`format_into`、`write_fmt<W :- ByteWriter>`、`comptime_format`、`print`/`println`、`eprint`/`eprintln`、`{}`/`{key: value, ...}`（两相 `Display`）与 `{format: .debug, ...}`（`Debug`，含基础类型、`Symbol`、容器与错误类型） |
+| `std.fmt` | 泛型 allocator 化的 `format<.A, .allocator>`、`format_debug<.A, .allocator>`、`format_into`、`write_fmt<W :- ByteWriter>`、`comptime_format`、`print`/`println`、`eprint`/`eprintln`、`{}`/`{key: value, ...}`（runtime `Display` 与 comptime `ComptimeDisplay`）与 `{format: .debug, ...}`（`Debug`，含基础类型、`Symbol`、容器与错误类型） |
 | `std.fs` | 仿射 `File`、打开/创建、读写（`Reader`/`Write`/`ByteWriter` 与固有 `read_byte`/`write_bytes`/`write_string`）、显式关闭、`Drop`、删除文件及一次性辅助 `read`/`read_to_string`/`write_str`/`write_bytes` |
 | `std.time` | `Duration`（`ZERO`、`NANOS_PER_SEC` 等常量、纳秒归一化、`checked_*`/`saturating_*` 运算与 `Copy`/`Clone`/`Eq`/`Ord`/`Hash`/`Debug`） |
 | `std.process` | `id()`、`ExitCode`（`SUCCESS`/`FAILURE`/`from_u8`/`as_u8`/`is_success` 及 `Copy`/`Clone`/`Eq`/`Debug`） |
@@ -26,10 +26,10 @@ fn greet() -> !std.io.IoErr void {
 }
 ```
 
-公开入口为 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.io.IoErr void`、`fn format(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.mem.AllocErr String<.A = A, .allocator = a>`（可选子句 `.A: Type = DefaultAllocator, quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref`）、`fn format_into(target: *String<.A = A, .allocator = a>, comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.mem.AllocErr void`、泛型 `fn write_fmt(output: *W, comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !W.as(ByteWriter).Err void where W :- ByteWriter` 与编译期 `comptime fn comptime_format(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> str`。
+公开入口为 `fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.io.IoErr void`、`fn format(comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.mem.AllocErr String<.A = A, .allocator = a>`（可选子句 `.A: Type = DefaultAllocator, quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref`）、`fn format_into(target: *String<.A = A, .allocator = a>, comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !std.mem.AllocErr void`、泛型 `fn write_fmt(output: *W, comptime format: str, ...varargs: defer std.fmt.Parse(format)) -> !W.as(ByteWriter).Err void where W :- ByteWriter` 与编译期 `comptime fn comptime_format(comptime format: str, ...varargs: defer std.fmt.ComptimeParse(format)) -> str`。
 `{}` 与 `{key: value, ...}` 顺序借用消费一个实现 `Display` 的值（`{format: .debug, ...}` 选择 `Debug`），`{{` 和 `}}` 分别输出单个花括号。
-参数数量、类型和格式选项在编译期检查。`Display` 来自 `builtin.fmt`，runtime `fmt(*self, output: *W, comptime .format: str = "")` 接收 `*W`，其中
-`W :- builtin.fmt.ByteWriter`，返回 `!W.as(ByteWriter).Err void`；comptime `comptime_fmt(self, .format: str = "") -> str` 用于 `std.fmt.comptime_format`。
+参数数量、类型和格式选项在编译期检查。runtime `Display` 来自 `builtin.fmt`，`fmt(*self, output: *W, comptime .format: str = "")` 接收 `*W`，其中
+`W :- builtin.fmt.ByteWriter`，返回 `!W.as(ByteWriter).Err void`；comptime `meta.ComptimeDisplay` 提供同名 `comptime fn fmt(self, .format: str = "") -> str` 用于 `std.fmt.comptime_format`。
 std.io.Writer、File 与 Vec<u8, .A = A, .allocator = a> 都实现 ByteWriter；`value.ref.as(Display).fmt(file.ref)` 借用写入目标，
 不转移关闭或释放责任。分配型容器通过运行时依赖的 `quote .allocator: lift *A` 区分身份而不增加本体存储开销。泛型 writer 无需 Clone/Copy，也不必使用 std.io.IoErr。
 IEEE 浮点支持 runtime 的最短往返十进制与固定 `precision`/`sign`/对齐选项；位置与命名格式化参数仍未实现。

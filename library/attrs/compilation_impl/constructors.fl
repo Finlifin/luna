@@ -1,0 +1,1 @@
+pub const intrinsic_enum = { __flurry_intrinsic_enum: true }

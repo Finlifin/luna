@@ -175,7 +175,7 @@ impl Type {
         var variants: List<Object> = [];
         let count = types.length();
         inline for index in 0..count {
-            variants = variants.concat([field_object(names[index], types[index])]);
+            variants.append(field_object(names[index], types[index]));
         }
         variants
     }

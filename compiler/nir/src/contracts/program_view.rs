@@ -325,6 +325,7 @@ mod tests {
             name: "check\"value".into(),
             phase: Default::default(),
             is_quote: false,
+            is_optional: false,
             pure: true,
             is_unsafe: false,
             type_parameters: vec![DeclarationId {

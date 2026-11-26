@@ -6353,6 +6353,7 @@ mod pointer_projection_p4_tests {
                 source: src(0, 1),
                 phase: n::TraitPhase::Runtime,
                 is_quote: false,
+                is_optional: false,
                 pure: false,
                 is_unsafe: false,
                 type_arguments: vec![],

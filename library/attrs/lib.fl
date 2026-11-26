@@ -5,6 +5,10 @@ pub use metadata_impl.constructors.metadata;
 pub use stability_impl.constructors.stable_since;
 pub use staging.phase.comptime_phase;
 
+pub mod compilation {
+    pub use .compilation_impl.constructors.intrinsic_enum;
+}
+
 pub mod macros {
     pub use .macros_impl.handlers.{ast, peg, macro3, macro4};
 }

@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 use nir::intrinsics::Operation;
 
@@ -11,8 +12,9 @@ fn compile(body: &str, width: u32) -> Result<nir::program::Package, String> {
         .collect();
     support::compile_with_source_bindings_for_target(
         &format!(
-            "mod builtin {{pub mod primitives {{ {} }} pub use primitives.*; }} use builtin.primitives.*; mod math {{ {} }} {body}",
+            "mod builtin {{pub mod primitives {{ {} }} pub use primitives.*; }} use builtin.primitives.*; mod math {{ mod attrs {{ {} }} {} }} {body}",
             include_str!("../../../library/builtin/primitives.fl"),
+            include!("support/attrs_source.rs"),
             include_str!("../../../library/meta/numeric/scalar_math.fl")
         ),
         &Default::default(),

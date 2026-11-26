@@ -81,7 +81,8 @@ pub mod fmt {
         write_fmt,
     }
     pub use builtin.fmt.{Debug, Display, FormatOptions, options}
-    pub use parse.{FormatErr, FormatKind, FormatPiece, FormatPlan, Parse}
+    pub use meta.ComptimeDisplay;
+    pub use parse.{ComptimeParse, FormatErr, FormatKind, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {
@@ -100,6 +101,7 @@ pub mod prelude {
     }
     pub use boxed.Box;
     pub use builtin.fmt.{Debug, Display}
+    pub use meta.ComptimeDisplay;
     pub use builtin.prelude.*;
     pub use string_mod.String;
     pub use slice.{Slice, SliceBounds};

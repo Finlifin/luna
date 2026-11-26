@@ -7,27 +7,32 @@ use type_resolution::{
     implementation::{ImplementationHead, Index},
     ptc::{Budget, Context},
 };
+
 #[path = "associated/method_queries.rs"]
 mod method_queries;
 
 fn id(local: u32) -> Id {
     Id { package: 1, local }
 }
+
 fn ty(p: P) -> Term {
     Term::Primitive(p)
 }
+
 fn rigid(n: u32) -> Term {
     Term::Rigid {
         declaration: id(n),
         sort: Sort::Type,
     }
 }
+
 fn holder(t: Term) -> Term {
     Term::Nominal {
         declaration: id(10),
         arguments: vec![t],
     }
 }
+
 fn value(t: Term) -> Expr {
     Expr {
         ty: ty(P::Type),
@@ -35,6 +40,7 @@ fn value(t: Term) -> Expr {
         kind: ExprKind::TypeValue(t),
     }
 }
+
 fn projection(t: Term, args: Vec<Term>) -> Term {
     Term::AssociatedType {
         origin: Box::new(AssociatedTypeOrigin {
@@ -45,6 +51,7 @@ fn projection(t: Term, args: Vec<Term>) -> Term {
         arguments: args,
     }
 }
+
 fn contract() -> Trait {
     Trait {
         comptime_only: false,
@@ -66,6 +73,7 @@ fn contract() -> Trait {
         }],
     }
 }
+
 fn implementation(subject: Term, result: Term) -> Implementation {
     Implementation {
         phases: Default::default(),
@@ -432,6 +440,7 @@ fn declaration_selection_preserves_query_fuel_and_failure_categories() {
         "a new query still pays for its own selection"
     );
 }
+
 fn query(
     traits: &[Trait],
     implementations: &[Implementation],
@@ -442,6 +451,7 @@ fn query(
         world.resolve_associated_type(term, budget)
     })
 }
+
 fn normalize(
     traits: &[Trait],
     implementations: &[Implementation],
@@ -452,6 +462,7 @@ fn normalize(
         world.normalize_associated_types(term, budget)
     })
 }
+
 fn with_world<R>(
     traits: &[Trait],
     implementations: &[Implementation],
@@ -1592,6 +1603,7 @@ fn prepared_methods_preserve_default_binders_and_pending_contracts() {
             source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             declaration: id(20),

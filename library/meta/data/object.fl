@@ -259,7 +259,7 @@ impl Object {
         while index < count {
             self.key(index) match {
                 key? => {
-                    result = result.concat([key]);
+                    result.append(key);
                 },
                 null => {},
             }

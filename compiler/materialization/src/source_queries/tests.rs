@@ -5,6 +5,7 @@ use nir::{DeclarationId, Primitive};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn ty(primitive: Primitive) -> Term {
     Term::Primitive(primitive)
 }
@@ -20,6 +21,7 @@ fn fixture() -> (n::Package, n::Expr, n::Expr) {
         name: name.into(),
         phase: Default::default(),
         is_quote: false,
+        is_optional: false,
         pure: false,
         is_unsafe: false,
         type_parameters: vec![],

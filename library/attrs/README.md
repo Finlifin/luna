@@ -14,6 +14,7 @@
 - `attrs.packed.byte` 与 `attrs.packed.bit`：分别产生 `{ __flurry_packed_mode: .byte }` 与 `{ __flurry_packed_mode: .bit }`，对应字节级紧凑布局（`align = 1`）与直接翻译为 `BitVec<W>` 并复用 `bitvec_opt` 的位级紧凑布局（`attrs.packed.bit` 总位宽超过 256 位时发出非致命编译警告）。
 - `attrs.mem.volatile`（及 `attrs.volatile`）：产生 `{ __flurry_volatile: true }`，标示易失内存／MMIO 结构体、newtype 或结构体字段；LLVM 后端对对应访问发射 `load volatile` / `store volatile`，程序纯度分析归入 P0（禁止 `memory(none)`/`speculatable`/`nosync`/`readonly`）。不允许以裸 key 或 definition configuration 形式附着，且不能与 `packed` 混用。
 - `attrs.macros.ast(variadic)`、`attrs.macros.peg(grammar)`、`attrs.macros.macro3` 与 `attrs.macros.macro4` 声明宏处理器的输入模式，展开器读取顶层的 `__flurry_macro_kind` 及对应参数。
+- `attrs.compilation.intrinsic_enum`：产生 `{ __flurry_intrinsic_enum: true }`，标记由编译器提供表示的内置枚举，仅可附着在 `enum` 声明上。
 - `attrs.effects.direct_passing`：产生 `{ __flurry_direct_passing: true }`，供直接传递效应声明检查消费。
 - `attrs.purity.{p0, p1, p2, p3, p4, p5}`：产生 `{ __flurry_purity: .p0 }`..`{ __flurry_purity: .p5 }`，用于为运行时函数声明最低纯度层级（P0 一般行为、P1 有界状态变更、P2 观测只读、P3 稳定观测、P4 值纯、P5 总值纯／有限完成且无 trap），不允许以 definition configuration 形式附着，并由编译器在编译期核验。
 - `attrs.quote_fn_template.{for_match_arms, allow_non_exhaustive_instance}`：分别产生 `{ __flurry_quote_fn_template_for_match_arms: true }` 与 `{ __flurry_quote_fn_template_allow_non_exhaustive_instance: true }`，标记用于 `match` `use` 规则接入的无体 `template quote fn` 声明及其单臂非穷尽许可。

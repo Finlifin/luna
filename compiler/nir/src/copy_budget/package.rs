@@ -550,6 +550,7 @@ impl Meter<'_> {
                 source: _,
                 phase: _,
                 is_quote: _,
+                is_optional: _,
                 pure: _,
                 is_unsafe: _,
                 type_arguments,

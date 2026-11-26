@@ -5,15 +5,19 @@ use nir::{DeclarationId, Parameter, Primitive, Sort, Term, program::*};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 71, local }
 }
+
 fn binding(index: u32) -> LocalId {
     LocalId { owner: 1, index }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn source() -> SourceRange {
     SourceRange { start: 10, end: 20 }
 }
+
 fn local(index: u32) -> Expr {
     Expr {
         source: source(),
@@ -21,6 +25,7 @@ fn local(index: u32) -> Expr {
         kind: ExprKind::Local(binding(index)),
     }
 }
+
 fn function() -> Function {
     Function {
         interface: FunctionDeclaration {
@@ -58,6 +63,7 @@ fn function() -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn package() -> Package {
     Package {
         functions: vec![function()],
@@ -144,6 +150,7 @@ fn bodyless_trait_contracts_cannot_alias_or_omit_input_bindings() {
                 name: "read".into(),
                 phase: Default::default(),
                 is_quote: false,
+                is_optional: false,
                 pure: false,
                 is_unsafe: false,
                 type_parameters: vec![],

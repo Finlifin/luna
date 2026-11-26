@@ -194,6 +194,7 @@ fn fixture(direct: bool) -> (Package, Expr) {
                 name: "read".into(),
                 phase: TraitPhase::Comptime,
                 is_quote: false,
+                is_optional: false,
                 pure: false,
                 is_unsafe: false,
                 type_arguments: vec![],

@@ -16,6 +16,7 @@ fn fixture() -> (Package, Expr) {
         name: "accept".into(),
         phase: Default::default(),
         is_quote: false,
+        is_optional: false,
         pure: false,
         is_unsafe: false,
         type_parameters: vec![],

@@ -257,24 +257,18 @@ comptime fn compare_bytes(
     while index < count {
         let left_byte = byte(left, index);
         let right_byte = byte(right, index);
-        left_byte match {
-            a? =>
-                right_byte match {
-                    b? => {
-                        if a < b {
-                            return .less;
-                        }
-                        if a > b {
-                            return .greater;
-                        }
-                    },
-                    null => {
-                        assumes false;
-                    },
-                },
-            null => {
-                assumes false;
+        (left_byte, right_byte) match {
+            (a?, b?) => {
+                if a < b {
+                    return .less;
+                }
+                if a > b {
+                    return .greater;
+                }
             },
+            (null, _?) => return .less,
+            (_?, null) => return .greater,
+            (null, null) => break,
         }
         index = index + 1;
     }

@@ -139,6 +139,35 @@ impl FormatPlan {
         domains
     }
 
+    {- Each comptime format field requires `meta.ComptimeDisplay`. -}
+    pub pure comptime fn comptime_argument_domains(self) -> meta.List<Type> {
+        let display_field = refines { Itself :- meta.ComptimeDisplay } Any;
+        var domains: meta.List<Type> = [];
+        var index: Integer = 0;
+        let piece_count = self.pieces.length();
+        while index < piece_count {
+            let piece = self.pieces.get(index) match {
+                value? => value,
+                null => {
+                    assumes false;
+                    return domains;
+                },
+            }
+            piece match {
+                FormatPiece.text(_, _) => {},
+                FormatPiece.argument(_, _, _) => {
+                    domains = domains.concat([display_field]);
+                },
+                FormatPiece.debug_argument(_, _, _) => {
+                    assumes false;
+                    return domains;
+                },
+            }
+            index = index + 1;
+        }
+        domains
+    }
+
     pub pure comptime fn argument_kinds(self) -> meta.List<FormatKind> {
         var kinds: meta.List<FormatKind> = [];
         var index: Integer = 0;
@@ -298,6 +327,21 @@ where
     let parsed = FormatPlan.parse(format);
     let domains: meta.List<Type> = parsed match {
         plan! => plan.argument_domains(),
+        error _ => {
+            assumes false;
+            []
+        },
+    }
+    Tuple<.Es = domains>
+}
+
+pub pure comptime fn ComptimeParse(format: str) -> R: Type
+where
+    ensures Type.predicates.is_tuple(R),
+{
+    let parsed = FormatPlan.parse(format);
+    let domains: meta.List<Type> = parsed match {
+        plan! => plan.comptime_argument_domains(),
         error _ => {
             assumes false;
             []

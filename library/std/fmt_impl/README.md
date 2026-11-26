@@ -17,7 +17,7 @@ fn show(value: u32) -> !std.io.IoErr void {
   `bool` / 整数 / `'char'` / `"str"`、支持逗号与尾逗号、引号内屏蔽 `}` 并校验转义、
   禁止重复键）：
   - 当属性列表包含 `format: .debug` 时，生成 `FormatPiece.debug_argument(index, start, end)`（要求 `Debug`，并支持 `align_to` / `len` / `placeholder`）；
-  - 其他属性列表生成 `FormatPiece.argument(index, start, end)`（要求 `Display`），并将原始属性切片经 `FormatPlan.argument_specs` 原样传给目标类型的 `Display.fmt` 或 `Display.comptime_fmt`；
+  - 其他属性列表生成 `FormatPiece.argument(index, start, end)`（要求 `Display` 或 comptime `ComptimeDisplay`），并将原始属性切片经 `FormatPlan.argument_specs` 原样传给目标类型的 `Display.fmt` 或 `ComptimeDisplay.fmt`；
 - `{{`／`}}` 保留其中一个花括号的原文字节；NUL 不终止扫描。
 
 未闭合的左括号、孤立的右括号和非法字段语法（包括旧版 `{:x}` / `{:?}` / `{:#x}`、
@@ -25,14 +25,14 @@ fn show(value: u32) -> !std.io.IoErr void {
 `UnclosedField`、`UnmatchedClose` 与 `UnsupportedField`，附带原文字节偏移。
 计划不检查实参、不赋予格式化能力，也不创建 runtime 字符串。
 
-`std.fmt.Parse(format)` 调用扫描器，按字段顺序构造普通的 `meta.List<Type>`，
-仅携带 `refines { Itself :- Display } Any` 或 `refines { Itself :- Debug } Any`，
-再把列表具名交给 `Tuple`。外部不再拆出 `LowerHex`/`UpperHex`/`Binary`/`Octal` 或
-`FixedPrecision` 等 trait，格式选项的解释权完全归各类型的两相 `Display` 实现所有。
+`std.fmt.Parse(format)` 与 `std.fmt.ComptimeParse(format)` 调用扫描器，按字段顺序构造普通的 `meta.List<Type>`，
+分别携带 `refines { Itself :- Display } Any` / `refines { Itself :- Debug } Any` 与
+`refines { Itself :- meta.ComptimeDisplay } Any`，再把列表具名交给 `Tuple`。外部不再拆出
+`LowerHex`/`UpperHex`/`Binary`/`Octal` 或 `FixedPrecision` 等 trait，格式选项的解释权完全归各类型的 `Display` / `ComptimeDisplay` 实现所有。
 字段分发在 `write_fmt_tuple`（与 comptime `comptime_format`）中通过
 `'tuple_indexed` 按槽位展开：runtime 借用实参并调用
 `value.ref.as(Display).fmt(output, .format = field_fmt)`（不会消费仿射 `Once` 值），
-comptime 调用 `value.as(Display).comptime_fmt(.format = field_fmt)`。
+comptime 调用 `value.as(meta.ComptimeDisplay).fmt(.format = field_fmt)`。
 
 `println`/`eprintln`/`print`/`eprint` 与泛型 `write_fmt<W :- ByteWriter>`、`format`、
 `format_into` 与 `comptime_format` 按格式写出文本与字段；其中 `println`/`eprintln`

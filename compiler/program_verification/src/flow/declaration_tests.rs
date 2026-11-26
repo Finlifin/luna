@@ -184,6 +184,7 @@ fn method_contract_domains_do_not_conflate_budget_with_invalid_inputs() {
             name: "invoke".into(),
             phase: nir::program::TraitPhase::Runtime,
             is_quote: false,
+            is_optional: false,
             pure: true,
             is_unsafe: false,
             type_arguments: vec![],

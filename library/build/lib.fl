@@ -3,4 +3,12 @@ pub use info.mode.mode;
 pub use info.package.{MetadataFeatures, PackageMetadata, package_metadata}
 pub use info.target.{Target, TargetFeatures, target}
 
-pub mod prelude {}
+pub mod prelude {
+    pub use .mode;
+    pub use .MetadataFeatures;
+    pub use .PackageMetadata;
+    pub use .package_metadata;
+    pub use .Target;
+    pub use .TargetFeatures;
+    pub use .target;
+}

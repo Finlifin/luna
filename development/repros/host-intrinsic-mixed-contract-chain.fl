@@ -12,7 +12,7 @@ typealias U = .u16'builtin;
 
 impl Duplicate for U {}
 
-^intrinsic_enum
+^{ __flurry_intrinsic_enum: true }
 enum Ops {
     ctpop,
     ctlz,

@@ -79,6 +79,7 @@ fn method() -> n::MethodContract {
         source: n::SourceRange { start: 0, end: 0 },
         phase: n::TraitPhase::Runtime,
         is_quote: false,
+        is_optional: false,
         pure: false,
         is_unsafe: false,
         type_arguments: vec![],

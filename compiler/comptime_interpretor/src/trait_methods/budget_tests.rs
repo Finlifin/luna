@@ -30,6 +30,7 @@ fn method_host_unwind_and_refill_cannot_leave_budget_or_selection() {
                 name: "accept".into(),
                 phase: TraitPhase::Comptime,
                 is_quote: false,
+                is_optional: false,
                 pure: false,
                 is_unsafe: false,
                 type_arguments: vec![],

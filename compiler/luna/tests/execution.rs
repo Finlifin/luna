@@ -11882,6 +11882,7 @@ fn parameterized_interface_package() -> Package {
             source: nir::program::SourceRange { start: 0, end: 0 },
             phase: Default::default(),
             is_quote: false,
+            is_optional: false,
             pure: false,
             is_unsafe: false,
             type_arguments: vec![],

@@ -327,7 +327,7 @@ const wrap_default = @define_macro1 {
 };
 
 const add_optional = @define_macro1 {
-    fn(base: FlurryExpr, extra: Optional<FlurryExpr>) -> TokenBuffer {
+    fn(base: FlurryExpr, extra: ?FlurryExpr) -> TokenBuffer {
         extra match {
             ext? => {{ ($base) + ($ext) }},
             null => {{ $base }},

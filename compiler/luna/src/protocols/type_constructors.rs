@@ -180,9 +180,6 @@ fn resolve_host_tag(
     let Some(hir::ItemKind::Enum(family)) = hir.item(owner).map(|item| &item.kind) else {
         return Err(format!("host {label} selector requires an enum"));
     };
-    if !family.is_intrinsic {
-        return Err(format!("host {label} enum requires intrinsic_enum"));
-    }
     let variant = parts[parts.len() - 1];
     if !family
         .variants

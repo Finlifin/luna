@@ -9,6 +9,7 @@ pub const str_slice = .str_slice'builtin;
 pub const str_byte_length_comptime: comptime fn(str) -> u64 = .str_byte_length'builtin;
 pub const str_byte_comptime: comptime fn(str, u64) -> ?u8 = .str_byte'builtin;
 pub const str_slice_comptime: comptime fn(str, u64, u64) -> ?str = .str_slice'builtin;
+pub const try_u32_to_char_comptime: comptime fn(u32) -> ?char = .try_integer_convert'builtin;
 const symbol_byte_length_operation: fn(Symbol) -> u64 = .symbol_byte_length'builtin;
 const symbol_byte_operation: fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;
 const usize_representation_operation: fn(usize) -> u128 = .integer_representation'builtin;

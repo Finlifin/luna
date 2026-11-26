@@ -930,6 +930,7 @@ fn elaborate_in_mode(
         bitvec_pattern_infos: BTreeMap::new(),
         case_pattern_infos: BTreeMap::new(),
         pattern_stable_cases: BTreeSet::new(),
+        intrinsic_enums: BTreeSet::new(),
         direct_passing_effects: BTreeMap::new(),
         quote_fn_template_flags: BTreeMap::new(),
         checked_quote_fn_arms: BTreeMap::new(),
@@ -1949,6 +1950,25 @@ fn elaborate_candidate<'a, 'h>(
     checker.context = checker.nominal_context();
     checker.check_struct_cycles()?;
     checker.validate_bit_packed_structs()?;
+    for ((id, _), _) in checker.protocols.host_bindings().chain(
+        checker
+            .protocols
+            .comptime_intrinsics
+            .iter()
+            .map(|(tag, op)| (tag, *op)),
+    ) {
+        if let Some(family) = checker.enums.get(id)
+            && !family.is_intrinsic
+        {
+            let span = checker
+                .source_declarations
+                .owner(*id)
+                .and_then(|owner| package.item(owner))
+                .map(|item| item.span)
+                .unwrap_or_default();
+            return Err(error(span, "host intrinsic enum requires intrinsic_enum"));
+        }
+    }
     // Resolve formation only after the complete concrete implementation world
     // exists. Contract operands may use binder capabilities, not their own
     // unproved requires predicates.
@@ -3993,6 +4013,7 @@ struct Checker<'a, 'h> {
     bitvec_pattern_infos: BTreeMap<n::LocalId, crate::automata::BitVecPatternInfo>,
     case_pattern_infos: BTreeMap<n::LocalId, crate::automata::CasePatternInfo>,
     pattern_stable_cases: BTreeSet<OwnerId>,
+    intrinsic_enums: BTreeSet<OwnerId>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
     quote_fn_template_flags: BTreeMap<OwnerId, attributes::QuoteFnTemplateFlags>,
     checked_quote_fn_arms: BTreeMap<OwnerId, CheckedQuoteFnArm>,

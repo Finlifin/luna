@@ -2206,6 +2206,7 @@ fn borrowed_method_contracts_keep_predicate_and_snapshot_admission() {
                     .into(),
                 phase: Default::default(),
                 is_quote: false,
+                is_optional: false,
                 pure: true,
                 is_unsafe: false,
                 type_parameters: vec![],
