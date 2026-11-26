@@ -9882,7 +9882,7 @@ impl MethodCallees {
         callee: &Expr,
         fuel: &mut usize,
     ) -> Result<Expr, String> {
-        self.select_for(package, callee, fuel, false)
+        self.select_for(package, None, callee, fuel, false)
     }
 
     /// Select only code identity for behavior analysis. The original interface
@@ -9893,19 +9893,39 @@ impl MethodCallees {
         callee: &Expr,
         fuel: &mut usize,
     ) -> Result<Expr, String> {
-        self.select_for(package, callee, fuel, true)
+        self.select_behavior_in_source(package, None, callee, fuel)
+    }
+
+    /// Select behavior code identity using an optional pre-prepared declaration
+    /// catalog so repeated queries reuse shared declaration metadata.
+    pub fn select_behavior_in_source(
+        &mut self,
+        package: &Package,
+        source: Option<::materialization::DeclarationSource<'_>>,
+        callee: &Expr,
+        fuel: &mut usize,
+    ) -> Result<Expr, String> {
+        self.select_for(package, source, callee, fuel, true)
     }
 
     fn select_for(
         &mut self,
         package: &Package,
+        source: Option<::materialization::DeclarationSource<'_>>,
         callee: &Expr,
         fuel: &mut usize,
         behavior_only: bool,
     ) -> Result<Expr, String> {
         let mut domains = self.domains.take();
-        let selected =
-            self.select_with_domains(package, callee, None, &mut domains, fuel, behavior_only);
+        let selected = self.select_with_context(
+            package,
+            callee,
+            source,
+            None,
+            &mut domains,
+            fuel,
+            behavior_only,
+        );
         self.domains = domains;
         selected
     }
