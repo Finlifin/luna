@@ -21,7 +21,7 @@ mod runtime_storage;
 mod storage_cache;
 mod storage_domains;
 mod storage_error;
-mod storage_key;
+pub(crate) mod storage_key;
 mod trait_index;
 mod worklist;
 
@@ -1599,18 +1599,6 @@ impl<'a> PhaseContext<'a> {
                                         .ok_or_else(|| {
                                             error("normal-form constructor metadata is missing")
                                         })?;
-                                    if matches!(
-                                        meta.role,
-                                        crate::normal_forms::Role::Tuple
-                                            | crate::normal_forms::Role::TypeList
-                                    ) && !matches!(
-                                        expr.ty,
-                                        Term::Primitive(Primitive::Type | Primitive::Never)
-                                    ) {
-                                        return Err(error(
-                                            "normal-form application must produce Type",
-                                        ));
-                                    }
                                     if let Some(function) =
                                         package.functions.iter().find(|f| f.declaration == *head)
                                         && let Term::Function { result, .. } = &function.signature

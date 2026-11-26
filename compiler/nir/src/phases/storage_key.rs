@@ -18,7 +18,7 @@ impl PartialOrd for OrderedSort {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct OrderedTerm(pub(super) Term);
+pub struct OrderedTerm(pub Term);
 
 impl Ord for OrderedTerm {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -58,7 +58,7 @@ fn cmp_sort(a: Sort, b: Sort) -> Ordering {
     rank(a).cmp(&rank(b))
 }
 
-fn cmp_effect_operation(a: &effects::Operation, b: &effects::Operation) -> Ordering {
+pub fn cmp_effect_operation(a: &effects::Operation, b: &effects::Operation) -> Ordering {
     a.declaration
         .cmp(&b.declaration)
         .then_with(|| cmp_term_slice(&a.arguments, &b.arguments))
@@ -147,11 +147,11 @@ fn term_rank(term: &Term) -> u8 {
     }
 }
 
-fn cmp_term_slice(a: &[Term], b: &[Term]) -> Ordering {
+pub fn cmp_term_slice(a: &[Term], b: &[Term]) -> Ordering {
     cmp_slice_by(a, b, cmp_term)
 }
 
-pub(super) fn cmp_term(a: &Term, b: &Term) -> Ordering {
+pub fn cmp_term(a: &Term, b: &Term) -> Ordering {
     let ord = term_rank(a).cmp(&term_rank(b));
     if ord != Ordering::Equal {
         return ord;

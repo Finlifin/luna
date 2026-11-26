@@ -2418,6 +2418,18 @@ pub struct Static {
     pub initializer: Option<Expr>,
 }
 
+impl fmt::Display for Static {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(static (id {}) (name ", self.declaration)?;
+        string(f, &self.name)?;
+        write!(f, ") (type {})", self.ty)?;
+        if let Some(initializer) = &self.initializer {
+            write!(f, " (initializer {initializer})")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// Canonical package-level naming and semantic version metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageMetadata {
@@ -4451,6 +4463,13 @@ impl fmt::Display for Package {
             f.write_str("\n (global-runtime-deliveries")?;
             for (runtime, expr) in &self.global_runtime_deliveries {
                 write!(f, " (delivery {runtime} {expr})")?;
+            }
+            f.write_str(")")?;
+        }
+        if !self.statics.is_empty() {
+            f.write_str("\n (statics")?;
+            for entry in &self.statics {
+                write!(f, " {entry}")?;
             }
             f.write_str(")")?;
         }
