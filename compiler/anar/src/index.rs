@@ -182,7 +182,7 @@ pub mod semantic_token_modifier {
 }
 
 /// Unique cross-package symbol identity across top-level definitions, members, and locals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SymbolKey {
     Def(DefId),
     Local { pkg: u32, hir_id: HirId },
@@ -237,19 +237,21 @@ pub struct MemberEntry {
 /// Indexed semantic snapshot across a user package and any loaded sysroot packages.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolIndex {
-    pub symbols: HashMap<SymbolKey, SymbolInfo>,
+    pub symbols: BTreeMap<SymbolKey, SymbolInfo>,
     /// Per-file top-level outline roots in source order.
-    pub file_roots: HashMap<PathBuf, Vec<SymbolKey>>,
+    pub file_roots: BTreeMap<PathBuf, Vec<SymbolKey>>,
     /// Per-file occurrences sorted by `(span.0, span.1)`.
-    pub file_occurrences: HashMap<PathBuf, Vec<Occurrence>>,
+    pub file_occurrences: BTreeMap<PathBuf, Vec<Occurrence>>,
     /// Members of a nominal `DefId` (fields, variants, nested items, inherent/trait methods).
-    pub nominal_members: HashMap<DefId, Vec<MemberEntry>>,
+    pub nominal_members: BTreeMap<DefId, Vec<MemberEntry>>,
     /// Nominal `DefId` lookup by simple type/module name (user package prioritized first).
-    pub defs_by_name: HashMap<String, Vec<DefId>>,
+    pub defs_by_name: BTreeMap<String, Vec<DefId>>,
     /// Local/parameter receiver type hints: `(file, var_name, decl_offset) -> nominal DefId`.
-    pub local_type_hints: HashMap<SymbolKey, DefId>,
+    pub local_type_hints: BTreeMap<SymbolKey, DefId>,
+    /// HIR-resolved type hints for fields (`Field`) and callable return types (`Def`).
+    pub symbol_type_hints: BTreeMap<SymbolKey, DefId>,
     /// Visible module/prelude/package names per file for top-level completion.
-    pub file_visible_defs: HashMap<PathBuf, Vec<(String, SymbolKey)>>,
+    pub file_visible_defs: BTreeMap<PathBuf, Vec<(String, SymbolKey)>>,
 }
 
 impl SymbolIndex {
@@ -318,6 +320,13 @@ impl SymbolIndex {
             .get(&def_id)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub fn type_hint(&self, key: SymbolKey) -> Option<DefId> {
+        self.symbol_type_hints
+            .get(&key)
+            .copied()
+            .or_else(|| self.local_type_hints.get(&key).copied())
     }
 }
 
@@ -807,13 +816,33 @@ impl<'a> IndexBuilder<'a> {
                 self.index_clause_param(pkg, clause, &display_name);
             }
 
-            // Index struct fields and enum variants!
+            // Index struct fields and enum variants, and record HIR return-type hints!
             match &item.kind {
                 ItemKind::Struct(sdef) => {
                     self.index_struct_fields(pkg, def_id, &display_name, sdef.fields, key);
                 }
                 ItemKind::Enum(edef) => {
                     self.index_enum_variants(pkg, def_id, &display_name, edef.variants, key);
+                }
+                ItemKind::Fn(sig, _)
+                | ItemKind::Case(sig, _)
+                | ItemKind::FnDeclaration(sig)
+                | ItemKind::Effect(sig, _) => {
+                    if let Some(ret_ty) = sig.return_ty
+                        && let Some(nom) = extract_head_def_id(ret_ty)
+                    {
+                        self.index.symbol_type_hints.insert(key, nom);
+                    }
+                }
+                ItemKind::FunctionTemplateInstance {
+                    signature: Some(sig),
+                    ..
+                } => {
+                    if let Some(ret_ty) = sig.return_ty
+                        && let Some(nom) = extract_head_def_id(ret_ty)
+                    {
+                        self.index.symbol_type_hints.insert(key, nom);
+                    }
                 }
                 _ => {}
             }
@@ -919,6 +948,9 @@ impl<'a> IndexBuilder<'a> {
                 },
             );
             self.add_child(parent_key, fkey);
+            if let Some(nom) = extract_head_def_id(field.ty) {
+                self.index.symbol_type_hints.insert(fkey, nom);
+            }
             self.add_nominal_member(owner_def, fname, fkey, true);
             self.record_occurrence(file, sel_span, fkey, true, false);
         }
@@ -2660,6 +2692,9 @@ impl<'a> IndexBuilder<'a> {
     }
 
     fn fn_return_nominal(&self, ctx: &WalkCtx<'_, '_>, fn_def: DefId) -> Option<DefId> {
+        if let Some(&nom) = self.index.symbol_type_hints.get(&SymbolKey::Def(fn_def)) {
+            return Some(nom);
+        }
         if fn_def.pkg == ctx.pkg.pkg_id
             && let Some(owner) = ctx.pkg.hir_pkg.definition_owner(fn_def)
             && let Some(item) = ctx.pkg.hir_pkg.item(owner)
@@ -2674,17 +2709,7 @@ impl<'a> IndexBuilder<'a> {
                 _ => {}
             }
         }
-        // Fallback: parse return type from indexed `detail` `fn foo(...) -> Point` across packages!
-        let sym = self.index.symbols.get(&SymbolKey::Def(fn_def))?;
-        let arrow = sym.detail.rfind("->")?;
-        let ret_part = sym.detail[arrow + 2..].trim();
-        let clean = ret_part
-            .trim_start_matches(['*', '?', '!'])
-            .split(['<', ' ', '{', '('])
-            .next()?
-            .trim();
-        let last_seg = clean.rsplit('.').next()?;
-        self.index.defs_by_name.get(last_seg)?.first().copied()
+        None
     }
 
     fn field_nominal(
@@ -2693,6 +2718,13 @@ impl<'a> IndexBuilder<'a> {
         struct_def: DefId,
         field_idx: u32,
     ) -> Option<DefId> {
+        let fkey = SymbolKey::Field {
+            owner: struct_def,
+            index: field_idx,
+        };
+        if let Some(&nom) = self.index.symbol_type_hints.get(&fkey) {
+            return Some(nom);
+        }
         if struct_def.pkg == ctx.pkg.pkg_id
             && let Some(owner) = ctx.pkg.hir_pkg.definition_owner(struct_def)
             && let Some(item) = ctx.pkg.hir_pkg.item(owner)
@@ -2701,19 +2733,7 @@ impl<'a> IndexBuilder<'a> {
         {
             return extract_head_def_id(field.ty);
         }
-        let sym = self.index.symbols.get(&SymbolKey::Field {
-            owner: struct_def,
-            index: field_idx,
-        })?;
-        let colon = sym.detail.find(':')?;
-        let ty_part = sym.detail[colon + 1..].split('=').next()?.trim();
-        let clean = ty_part
-            .trim_start_matches(['*', '?'])
-            .split(['<', ' ', '('])
-            .next()?
-            .trim();
-        let last_seg = clean.rsplit('.').next()?;
-        self.index.defs_by_name.get(last_seg)?.first().copied()
+        None
     }
 
     fn index_visible_scope_defs(&mut self, vfs_files: &[(u32, vfs::FileId, PathBuf)]) {
@@ -2870,6 +2890,7 @@ impl<'a> IndexBuilder<'a> {
                     }
                 }
             }
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             self.index.file_visible_defs.insert(path.clone(), entries);
         }
     }
@@ -2964,6 +2985,7 @@ pub fn extract_head_def_id(expr: &Expr<'_>) -> Option<DefId> {
         | ExprKind::TyPtr(head)
         | ExprKind::TyOptional(head)
         | ExprKind::TyTraitObject(head)
+        | ExprKind::LiftType(head)
         | ExprKind::Ref(head)
         | ExprKind::Deref(head) => extract_head_def_id(head),
         ExprKind::ErrorQualifiedType(_, ok_ty) | ExprKind::EffectQualifiedType(_, ok_ty) => {

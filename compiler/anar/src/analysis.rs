@@ -1,7 +1,7 @@
 //! Live workspace analyzer, in-memory buffer overlays, multi-package HIR lowering,
-//! and LSP query providers for `anar`.
+//! and LSP query providers for `luna lsp`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -76,7 +76,7 @@ impl LspDiagnostic {
         let mut fields = vec![
             ("range", self.range.to_json()),
             ("severity", JsonValue::from(self.severity)),
-            ("source", JsonValue::from("anar")),
+            ("source", JsonValue::from("luna")),
             ("message", JsonValue::from(self.message.as_str())),
         ];
         if let Some(ref code) = self.code {
@@ -139,18 +139,18 @@ impl DocumentState {
 pub struct PackageSnapshot {
     pub pkg_root: PathBuf,
     pub index: SymbolIndex,
-    pub diagnostics: HashMap<PathBuf, Vec<LspDiagnostic>>,
-    pub parsed_cleanly: HashSet<PathBuf>,
+    pub diagnostics: BTreeMap<PathBuf, Vec<LspDiagnostic>>,
+    pub parsed_cleanly: BTreeSet<PathBuf>,
 }
 
 /// Central stateful analyzer managing open buffers, package roots, sysroot, and snapshots.
 pub struct WorkspaceAnalyzer {
     pub workspace_roots: Vec<PathBuf>,
     pub sysroot_override: Option<PathBuf>,
-    pub open_docs: HashMap<PathBuf, DocumentState>,
-    snapshots: HashMap<PathBuf, PackageSnapshot>,
+    pub open_docs: BTreeMap<PathBuf, DocumentState>,
+    snapshots: BTreeMap<PathBuf, PackageSnapshot>,
     /// Last-known-good per-file symbols & occurrences when a buffer temporarily fails to parse.
-    last_good_index: HashMap<PathBuf, SymbolIndex>,
+    last_good_index: BTreeMap<PathBuf, SymbolIndex>,
     /// Emit compiler ariadne reports to stderr? Disabled during LSP stdio operation to keep logs quiet.
     pub quiet_diagnostics: bool,
 }
@@ -166,9 +166,9 @@ impl WorkspaceAnalyzer {
         Self {
             workspace_roots: Vec::new(),
             sysroot_override,
-            open_docs: HashMap::new(),
-            snapshots: HashMap::new(),
-            last_good_index: HashMap::new(),
+            open_docs: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
+            last_good_index: BTreeMap::new(),
             quiet_diagnostics: true,
         }
     }
@@ -300,7 +300,8 @@ impl WorkspaceAnalyzer {
     }
 
     /// Discover the package root directory containing `file`.
-    /// Walks upwards looking for `lib.fl` or `main.fl`, stopping at workspace roots or `library/<pkg>`.
+    /// Walks upwards looking for `package.fl` (preferred) or `lib.fl`/`main.fl`,
+    /// stopping at workspace roots or `library/<pkg>`.
     pub fn find_package_root(&self, file: &Path) -> PathBuf {
         let start_dir = if file.is_dir() {
             file.to_path_buf()
@@ -308,13 +309,25 @@ impl WorkspaceAnalyzer {
             file.parent().unwrap_or(Path::new(".")).to_path_buf()
         };
 
+        // First check if `file` lives inside a `package.fl` package (e.g. `pkg/package.fl` + `pkg/src/main.fl`).
         let mut cur = start_dir.as_path();
         loop {
-            if cur.join("lib.fl").is_file()
-                || cur.join("main.fl").is_file()
-                || self.open_docs.contains_key(&cur.join("lib.fl"))
-                || self.open_docs.contains_key(&cur.join("main.fl"))
-            {
+            if self.has_package_manifest(cur) {
+                return cur.to_path_buf();
+            }
+            if self.workspace_roots.iter().any(|r| r == cur) {
+                break;
+            }
+            let Some(parent) = cur.parent() else {
+                break;
+            };
+            cur = parent;
+        }
+
+        // Fallback for manifest-less packages anchored directly by `lib.fl` or `main.fl`.
+        let mut cur = start_dir.as_path();
+        loop {
+            if self.has_entry_file(cur) {
                 return cur.to_path_buf();
             }
             if self.workspace_roots.iter().any(|r| r == cur) {
@@ -326,6 +339,22 @@ impl WorkspaceAnalyzer {
             cur = parent;
         }
         start_dir
+    }
+
+    fn has_package_manifest(&self, dir: &Path) -> bool {
+        let p = dir.join("package.fl");
+        p.is_file() || self.open_docs.contains_key(&p)
+    }
+
+    fn has_entry_file(&self, dir: &Path) -> bool {
+        ["lib.fl", "main.fl"].iter().any(|marker| {
+            let p = dir.join(marker);
+            p.is_file() || self.open_docs.contains_key(&p)
+        })
+    }
+
+    fn is_package_root_dir(&self, dir: &Path) -> bool {
+        self.has_package_manifest(dir) || self.has_entry_file(dir)
     }
 
     /// Discover the `library/` sysroot directory if available.
@@ -414,6 +443,23 @@ impl WorkspaceAnalyzer {
         let (mut user_vfs, user_clean_files, mut raw_parse_diags) =
             self.load_package_vfs(&pkg_name, pkg_root, active_file, &exclusions, &source_map);
 
+        let anchor_file = active_file
+            .filter(|p| p.starts_with(pkg_root))
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                ["lib.fl", "main.fl", "package.fl"]
+                    .iter()
+                    .map(|m| normalize_path(&pkg_root.join(m)))
+                    .find(|p| p.is_file() || self.open_docs.contains_key(p))
+            })
+            .or_else(|| {
+                user_vfs
+                    .files()
+                    .next()
+                    .map(|(_, entry)| normalize_path(&user_vfs.root.join(&entry.rel_path)))
+            })
+            .unwrap_or_else(|| normalize_path(&pkg_root.join("lib.fl")));
+
         // Build package list: `0` = user package, `1..=N` = sysroot packages.
         let mut packages: Vec<(u32, bool, String, Vfs)> = Vec::new();
         packages.push((0, true, pkg_name.clone(), user_vfs));
@@ -435,8 +481,19 @@ impl WorkspaceAnalyzer {
                 if sr_root == pkg_root || !sr_root.join("lib.fl").is_file() {
                     continue;
                 }
-                let (sr_vfs, _, _) =
+                let (sr_vfs, _, sr_diags) =
                     self.load_package_vfs(sr_name, &sr_root, None, &[], &source_map);
+                for (sr_file, diags) in sr_diags {
+                    for d in diags {
+                        let mut surfaced = d;
+                        surfaced.message = format!(
+                            "[sysroot `{sr_name}`: {}] {}",
+                            sr_file.display(),
+                            surfaced.message
+                        );
+                        push_unique_diag(&mut raw_parse_diags, anchor_file.clone(), surfaced);
+                    }
+                }
                 let id = next_id;
                 next_id += 1;
                 if sr_name == "builtin" {
@@ -492,13 +549,35 @@ impl WorkspaceAnalyzer {
         let (module_tree, file_offsets) = match resolved_res {
             Ok(pkg_set) => (pkg_set.tree, pkg_set.file_offsets),
             Err(err) => {
-                // Fallback: resolve user package standalone so one broken graph edge never kills IDE features.
+                // Surface the package-graph resolution error directly instead of silently dropping it,
+                // while still resolving the user package standalone so navigation remains alive.
+                let (err_file, err_range) = if let Some((fpath, (lo, hi))) =
+                    span_to_file_offsets(&source_map, err.span())
+                    && let Some((text, line_idx)) = self.file_text(&fpath)
+                {
+                    (fpath, line_idx.span_to_range(&text, lo, hi))
+                } else {
+                    (
+                        anchor_file.clone(),
+                        LspRange::new(LspPosition::new(0, 0), LspPosition::new(0, 0)),
+                    )
+                };
+                push_unique_diag(
+                    &mut raw_parse_diags,
+                    err_file,
+                    LspDiagnostic {
+                        range: err_range,
+                        severity: lsp_severity::ERROR,
+                        code: Some(format!("E{:04}", err.error_code())),
+                        message: err.message(),
+                        related: Vec::new(),
+                    },
+                );
                 user_vfs = packages.remove(0).3;
                 let tree = resolve::build_module_tree(&source_map, &diag_ctx, &mut user_vfs);
-                let _ = err;
                 packages.clear();
                 packages.push((0, true, pkg_name.clone(), user_vfs));
-                let mut fo = HashMap::new();
+                let mut fo = std::collections::HashMap::new();
                 fo.insert(0u32, 0u32);
                 (tree, fo)
             }
@@ -597,8 +676,8 @@ impl WorkspaceAnalyzer {
         // 3) `diag_ctx.diagnostics()` (emitted by `ast_lowering` / `Resolver`)
         for r_err in &module_tree.errors {
             if let Some((fpath, (lo, hi))) = span_to_file_offsets(&source_map, r_err.span()) {
-                // Only report diagnostics on files that parsed cleanly (don't cascade bogus
-                // "unresolved identifier" errors caused by substituting an empty AST on syntax-broken files!).
+                // Only report secondary resolution diagnostics on files that parsed cleanly
+                // (so a syntax-broken file keeps its own parse diagnostics without cascading noise).
                 if user_clean_files.contains(&fpath) {
                     if let Some((text, line_idx)) = self.file_text(&fpath) {
                         let range = line_idx.span_to_range(&text, lo, hi);
@@ -615,6 +694,18 @@ impl WorkspaceAnalyzer {
                         );
                     }
                 }
+            } else {
+                push_unique_diag(
+                    &mut raw_parse_diags,
+                    anchor_file.clone(),
+                    LspDiagnostic {
+                        range: LspRange::new(LspPosition::new(0, 0), LspPosition::new(0, 0)),
+                        severity: lsp_severity::ERROR,
+                        code: Some(format!("E{:04}", r_err.error_code())),
+                        message: r_err.message(),
+                        related: Vec::new(),
+                    },
+                );
             }
         }
 
@@ -624,6 +715,19 @@ impl WorkspaceAnalyzer {
                 .or_else(|| d.labels.first().map(|l| l.span))
                 .unwrap_or(rustc_span::DUMMY_SP);
             let Some((fpath, (lo, hi))) = span_to_file_offsets(&source_map, primary) else {
+                if d.level == Level::Error {
+                    push_unique_diag(
+                        &mut raw_parse_diags,
+                        anchor_file.clone(),
+                        LspDiagnostic {
+                            range: LspRange::new(LspPosition::new(0, 0), LspPosition::new(0, 0)),
+                            severity: lsp_severity::ERROR,
+                            code: d.code.map(|c| format!("E{c:04}")),
+                            message: d.message.clone(),
+                            related: Vec::new(),
+                        },
+                    );
+                }
                 continue;
             };
             if !fpath.starts_with(pkg_root) && Some(fpath.as_path()) != active_file {
@@ -695,7 +799,11 @@ impl WorkspaceAnalyzer {
         active_file: Option<&Path>,
         exclusions: &[PathBuf],
         source_map: &SourceMap,
-    ) -> (Vfs, HashSet<PathBuf>, HashMap<PathBuf, Vec<LspDiagnostic>>) {
+    ) -> (
+        Vfs,
+        BTreeSet<PathBuf>,
+        BTreeMap<PathBuf, Vec<LspDiagnostic>>,
+    ) {
         let mut vfs = Vfs::new(pkg_name, pkg_root.to_path_buf());
         let (mut rel_files, dirs) = discover_package_files(pkg_root, exclusions);
         vfs.source_directories = dirs;
@@ -721,19 +829,25 @@ impl WorkspaceAnalyzer {
         rel_files.dedup();
 
         // Avoid `"multiple source bodies for one module"` if a directory has BOTH `lib.fl` and `main.fl`!
-        let has_lib = rel_files.iter().any(|p| p == Path::new("lib.fl"));
-        let has_main = rel_files.iter().any(|p| p == Path::new("main.fl"));
+        let has_lib = rel_files
+            .iter()
+            .any(|p| p == Path::new("lib.fl") || p == Path::new("src/lib.fl"));
+        let has_main = rel_files
+            .iter()
+            .any(|p| p == Path::new("main.fl") || p == Path::new("src/main.fl"));
         let active_rel = active_file.and_then(|a| a.strip_prefix(pkg_root).ok());
         if has_lib && has_main {
-            if active_rel == Some(Path::new("main.fl")) {
-                rel_files.retain(|p| p != Path::new("lib.fl"));
+            if active_rel == Some(Path::new("main.fl"))
+                || active_rel == Some(Path::new("src/main.fl"))
+            {
+                rel_files.retain(|p| p != Path::new("lib.fl") && p != Path::new("src/lib.fl"));
             } else {
-                rel_files.retain(|p| p != Path::new("main.fl"));
+                rel_files.retain(|p| p != Path::new("main.fl") && p != Path::new("src/main.fl"));
             }
         }
 
-        let mut clean_files = HashSet::new();
-        let mut parse_diags: HashMap<PathBuf, Vec<LspDiagnostic>> = HashMap::new();
+        let mut clean_files = BTreeSet::new();
+        let mut parse_diags: BTreeMap<PathBuf, Vec<LspDiagnostic>> = BTreeMap::new();
 
         for rel in rel_files {
             let abs = normalize_path(&pkg_root.join(&rel));
@@ -751,7 +865,11 @@ impl WorkspaceAnalyzer {
             );
             let fid = vfs.add_file(rel.clone(), sf.clone());
 
-            if rel == Path::new("lib.fl") || rel == Path::new("main.fl") {
+            if rel == Path::new("lib.fl")
+                || rel == Path::new("main.fl")
+                || rel == Path::new("src/lib.fl")
+                || rel == Path::new("src/main.fl")
+            {
                 vfs.selected_root = Some(fid);
             }
 
@@ -828,18 +946,52 @@ impl WorkspaceAnalyzer {
                 );
             }
 
-            if file_ok {
-                let ast = parser.finalize();
-                if ast.validate_structure().is_ok() {
-                    clean_files.insert(abs);
+            let ast = parser.finalize();
+            match ast.validate_structure() {
+                Ok(()) => {
+                    if file_ok {
+                        clean_files.insert(abs);
+                    } else if parse_diags.get(&abs).is_none_or(Vec::is_empty) {
+                        push_unique_diag(
+                            &mut parse_diags,
+                            abs,
+                            LspDiagnostic {
+                                range: LspRange::new(
+                                    LspPosition::new(0, 0),
+                                    LspPosition::new(0, 0),
+                                ),
+                                severity: lsp_severity::ERROR,
+                                code: None,
+                                message: String::from("syntax or lexical error during parsing"),
+                                related: Vec::new(),
+                            },
+                        );
+                    }
+                    // Retain the parser's recovered AST even when `!file_ok` so sibling
+                    // items in the same file remain resolvable without masking parse errors.
                     vfs.set_ast(fid, ast);
-                    continue;
+                }
+                Err(validation_err) => {
+                    if parse_diags.get(&abs).is_none_or(Vec::is_empty) {
+                        push_unique_diag(
+                            &mut parse_diags,
+                            abs,
+                            LspDiagnostic {
+                                range: LspRange::new(
+                                    LspPosition::new(0, 0),
+                                    LspPosition::new(0, 0),
+                                ),
+                                severity: lsp_severity::ERROR,
+                                code: None,
+                                message: format!("AST validation failed: {validation_err}"),
+                                related: Vec::new(),
+                            },
+                        );
+                    }
+                    let empty_ast = build_empty_ast(source_map, sf.start_pos);
+                    vfs.set_ast(fid, empty_ast);
                 }
             }
-
-            // Substitute a valid empty AST for this broken file so sibling files & sysroot still resolve!
-            let empty_ast = build_empty_ast(source_map, sf.start_pos);
-            vfs.set_ast(fid, empty_ast);
         }
 
         // If a standalone single-file directory has no `lib.fl`/`main.fl`, mark that single file as root.
@@ -940,7 +1092,7 @@ impl WorkspaceAnalyzer {
 
         // Lexical fallback when cursor is on `receiver.member` or `Ident` in an unparsed edit!
         if let Some((recv, member)) = dot_access_at(&text, offset) {
-            for sym in self.lookup_dot_members(&snap, &text, offset, &recv) {
+            for sym in self.lookup_dot_members(&snap, &norm, &text, offset, &recv) {
                 if sym.name == member
                     && let Some(loc) = self.symbol_location_json(&sym)
                 {
@@ -1034,7 +1186,7 @@ impl WorkspaceAnalyzer {
         }
 
         if let Some((recv, member)) = dot_access_at(&text, offset) {
-            for sym in self.lookup_dot_members(&snap, &text, offset, &recv) {
+            for sym in self.lookup_dot_members(&snap, &norm, &text, offset, &recv) {
                 if sym.name == member {
                     let range = word_at(&text, offset)
                         .map(|(_, (lo, hi))| line_idx.span_to_range(&text, lo, hi));
@@ -1101,7 +1253,7 @@ impl WorkspaceAnalyzer {
             let mut seen = HashSet::new();
 
             if !receiver_chain.is_empty() {
-                for sym in self.lookup_dot_members(&snap, &text, offset, &receiver_chain) {
+                for sym in self.lookup_dot_members(&snap, &norm, &text, offset, &receiver_chain) {
                     if sym.name.starts_with(&partial) && seen.insert(sym.name.clone()) {
                         items.push(symbol_to_completion_item(&sym, "0"));
                     }
@@ -1245,6 +1397,7 @@ impl WorkspaceAnalyzer {
     fn lookup_dot_members(
         &self,
         snap: &PackageSnapshot,
+        file: &Path,
         src: &str,
         cursor_offset: usize,
         receiver_chain: &str,
@@ -1259,29 +1412,34 @@ impl WorkspaceAnalyzer {
         }
 
         // Resolve first segment:
-        // 1) Local variable / parameter at cursor (`local_type_hints` or `lexical_local_types_before`)
-        // 2) Nominal type / module in `defs_by_name` (including sysroot packages `std`, `builtin`, `meta`)
+        // 1) Local variable / parameter at cursor in `file` via HIR `local_type_hints`
+        // 2) Lexical fallback only if the file failed to parse cleanly
+        // 3) Nominal type / module in `defs_by_name` (including sysroot packages `std`, `builtin`, `meta`)
         let first = segments[0];
         let mut candidate_defs: Vec<DefId> = Vec::new();
 
         // Check HIR local occurrences in this file declared before `cursor_offset`.
         for sym in snap.index.symbols.values() {
-            if sym.name == first
+            if sym.file == file
+                && sym.name == first
                 && sym.selection_span.0 <= cursor_offset
                 && let Some(&nom_def) = snap.index.local_type_hints.get(&sym.key)
+                && !candidate_defs.contains(&nom_def)
             {
                 candidate_defs.push(nom_def);
             }
         }
 
-        // Check token-level local type declarations (works even when the current edit has a syntax error!).
-        let lex_locals = lexical_local_types_before(src, cursor_offset);
-        if let Some(ty_name) = lex_locals.get(first)
-            && let Some(defs) = snap.index.defs_by_name.get(ty_name)
-        {
-            for &d in defs {
-                if !candidate_defs.contains(&d) {
-                    candidate_defs.push(d);
+        // Only fall back to lexical local scanning when HIR didn't already resolve `first`.
+        if candidate_defs.is_empty() {
+            let lex_locals = lexical_local_types_before(src, cursor_offset);
+            if let Some(ty_name) = lex_locals.get(first)
+                && let Some(defs) = snap.index.defs_by_name.get(ty_name)
+            {
+                for &d in defs {
+                    if !candidate_defs.contains(&d) {
+                        candidate_defs.push(d);
+                    }
                 }
             }
         }
@@ -1295,33 +1453,23 @@ impl WorkspaceAnalyzer {
             }
         }
 
-        // Walk remaining chain segments (`a.b.c.`).
+        // Walk remaining chain segments (`a.b.c.`) using HIR-resolved member & type hints.
         for &seg in &segments[1..] {
             let mut next_defs = Vec::new();
             for cur_def in candidate_defs {
                 for m in snap.index.members_of(cur_def) {
                     if m.name == seg {
                         match m.key {
-                            SymbolKey::Def(d) => next_defs.push(d),
+                            SymbolKey::Def(d) => {
+                                if let Some(ret_nom) = snap.index.type_hint(m.key) {
+                                    next_defs.push(ret_nom);
+                                } else {
+                                    next_defs.push(d);
+                                }
+                            }
                             SymbolKey::Field { .. } => {
-                                if let Some(fsym) = snap.index.symbol(m.key)
-                                    && let Some(colon) = fsym.detail.find(':')
-                                {
-                                    let tname = fsym.detail[colon + 1..]
-                                        .split('=')
-                                        .next()
-                                        .unwrap_or("")
-                                        .trim()
-                                        .trim_start_matches(['*', '?'])
-                                        .split(['<', ' ', '('])
-                                        .next()
-                                        .unwrap_or("")
-                                        .rsplit('.')
-                                        .next()
-                                        .unwrap_or("");
-                                    if let Some(defs) = snap.index.defs_by_name.get(tname) {
-                                        next_defs.extend(defs.iter().copied());
-                                    }
+                                if let Some(field_nom) = snap.index.type_hint(m.key) {
+                                    next_defs.push(field_nom);
                                 }
                             }
                             _ => {}
@@ -1366,7 +1514,7 @@ impl WorkspaceAnalyzer {
         if target_sym.is_none() {
             if let Some((recv, method)) = callee_text.rsplit_once('.') {
                 target_sym = self
-                    .lookup_dot_members(&snap, &text, callee_span.0, recv.trim())
+                    .lookup_dot_members(&snap, &norm, &text, callee_span.0, recv.trim())
                     .into_iter()
                     .find(|s| s.name == method.trim());
             } else if let Some(defs) = snap.index.defs_by_name.get(callee_text) {
@@ -1426,7 +1574,8 @@ impl WorkspaceAnalyzer {
         };
         let snap = self.ensure_snapshot(&norm).clone();
 
-        if let Some(roots) = snap.index.file_roots.get(&norm)
+        if (snap.parsed_cleanly.contains(&norm) || self.last_good_index.contains_key(&norm))
+            && let Some(roots) = snap.index.file_roots.get(&norm)
             && !roots.is_empty()
         {
             return roots
@@ -1456,7 +1605,7 @@ impl WorkspaceAnalyzer {
         // Ensure all workspace roots and open documents are indexed.
         let roots = self.workspace_roots.clone();
         for r in roots {
-            if r.join("lib.fl").is_file() || r.join("main.fl").is_file() {
+            if self.is_package_root_dir(&r) {
                 let _ = self.ensure_snapshot(&r);
             }
         }
@@ -1500,12 +1649,10 @@ impl WorkspaceAnalyzer {
                         JsonValue::object(fields),
                     ));
                 }
-                if results.len() >= 250 {
-                    break;
-                }
             }
         }
         results.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        results.truncate(250);
         results.into_iter().map(|(_, _, j)| j).collect()
     }
 
@@ -1740,8 +1887,15 @@ fn walk_pkg_dir(
             continue;
         }
         if path.is_dir() {
-            // Skip nested independent packages that define their own `lib.fl` / `main.fl`.
-            if path != root && (path.join("lib.fl").is_file() || path.join("main.fl").is_file()) {
+            // Skip nested independent packages that define their own `package.fl` / `lib.fl` / `main.fl`
+            // (except `<root>/src`, which holds the package's own entry root under `package.fl` layouts).
+            let is_pkg_src_dir = dir == root && name == "src";
+            if path != root
+                && !is_pkg_src_dir
+                && (path.join("package.fl").is_file()
+                    || path.join("lib.fl").is_file()
+                    || path.join("main.fl").is_file())
+            {
                 continue;
             }
             if let Ok(rel) = path.strip_prefix(root) {
@@ -1750,6 +1904,7 @@ fn walk_pkg_dir(
             walk_pkg_dir(root, &path, exclusions, files, dirs);
         } else if path.extension().is_some_and(|e| e == "fl")
             && name != "flurryfmt.fl"
+            && name != "package.fl"
             && let Ok(rel) = path.strip_prefix(root)
         {
             files.push(rel.to_path_buf());
@@ -1766,7 +1921,7 @@ fn build_empty_ast(source_map: &SourceMap, start_pos: BytePos) -> Ast {
 }
 
 fn push_unique_diag(
-    map: &mut HashMap<PathBuf, Vec<LspDiagnostic>>,
+    map: &mut BTreeMap<PathBuf, Vec<LspDiagnostic>>,
     file: PathBuf,
     diag: LspDiagnostic,
 ) {

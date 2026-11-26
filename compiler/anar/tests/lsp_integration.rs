@@ -318,7 +318,7 @@ fn run(pt: Point) -> i32 {
     let init_res = find_response(&responses, 1);
     assert_eq!(
         init_res.get("serverInfo").and_then(|s| s.get_str("name")),
-        Some("anar")
+        Some("luna")
     );
     assert_eq!(
         init_res
@@ -725,5 +725,209 @@ test smoke use fixture {
     assert!(
         ctx_md.contains("context ctx"),
         "unexpected context port hover: {ctx_md}"
+    );
+}
+
+#[test]
+fn lsp_branding_settings_package_fl_root_field_dot_completion_and_determinism() {
+    // 1. `package.fl` root recognition for `src/main.fl` + field HIR type hint dot completion.
+    let tmp = TempDir::new("pkg_fl_and_fields");
+    tmp.write("package.fl", "const name = \"demo\";\n");
+    let main_src = "\
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Wrapper {
+    pt: Point,
+}
+
+fn inspect(w: Wrapper) -> i32 {
+    w.pt.
+    0
+}
+";
+    let main_path = tmp.write("src/main.fl", main_src);
+    let mut analyzer = anar::WorkspaceAnalyzer::new(None);
+    assert_eq!(analyzer.find_package_root(&main_path), tmp.path);
+
+    let main_uri = path_to_uri(&main_path);
+    analyzer.open_document(&main_uri, 1, main_src.to_owned());
+    let completions = analyzer.complete(&main_path, anar::LspPosition::new(10, 9));
+    let labels: Vec<&str> = completions
+        .iter()
+        .filter_map(|i| i.get_str("label"))
+        .collect();
+    assert!(labels.contains(&"x"), "expected field x: {labels:?}");
+    assert!(labels.contains(&"y"), "expected field y: {labels:?}");
+
+    // 2. Package-graph error surfacing (package directory named `std` collides with sysroot `std`).
+    let collide_tmp = TempDir::new("std");
+    let std_pkg_dir = collide_tmp.path.join("std");
+    fs::create_dir_all(&std_pkg_dir).unwrap();
+    let app_file = std_pkg_dir.join("lib.fl");
+    fs::write(&app_file, "pub fn ok() -> i32 { 1 }\n").unwrap();
+    let mut collide_analyzer = anar::WorkspaceAnalyzer::new(Some(repo_library_dir()));
+    let diags = collide_analyzer.diagnostics_for(&app_file);
+    assert!(
+        !diags.is_empty(),
+        "package-graph conflict with sysroot `std` must surface an LSP diagnostic instead of silent Ok"
+    );
+    assert_eq!(diags[0].to_json().get_str("source"), Some("luna"));
+
+    // 3. `workspace/didChangeConfiguration` supports `flurry.lsp.sysroot`, `flurry.sysroot`,
+    //    and legacy `flurry.anar.sysroot`, and `republish_open_diagnostics` emits deterministically.
+    let cfg_tmp = TempDir::new("cfg_and_order");
+    let a_path = cfg_tmp.write("a.fl", "fn broken_a( {\n");
+    let z_path = cfg_tmp.write("z.fl", "fn broken_z( {\n");
+    let a_uri = path_to_uri(&a_path);
+    let z_uri = path_to_uri(&z_path);
+    let sr = repo_library_dir().to_string_lossy().into_owned();
+
+    let requests = vec![
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("id", JsonValue::from(1)),
+            ("method", JsonValue::from("initialize")),
+            ("params", JsonValue::object([("rootUri", JsonValue::Null)])),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("method", JsonValue::from("initialized")),
+            ("params", JsonValue::Object(Vec::new())),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("method", JsonValue::from("textDocument/didOpen")),
+            (
+                "params",
+                JsonValue::object([(
+                    "textDocument",
+                    JsonValue::object([
+                        ("uri", JsonValue::from(z_uri.as_str())),
+                        ("languageId", JsonValue::from("flurry")),
+                        ("version", JsonValue::from(1)),
+                        ("text", JsonValue::from("fn broken_z( {\n")),
+                    ]),
+                )]),
+            ),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("method", JsonValue::from("textDocument/didOpen")),
+            (
+                "params",
+                JsonValue::object([(
+                    "textDocument",
+                    JsonValue::object([
+                        ("uri", JsonValue::from(a_uri.as_str())),
+                        ("languageId", JsonValue::from("flurry")),
+                        ("version", JsonValue::from(1)),
+                        ("text", JsonValue::from("fn broken_a( {\n")),
+                    ]),
+                )]),
+            ),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            (
+                "method",
+                JsonValue::from("workspace/didChangeConfiguration"),
+            ),
+            (
+                "params",
+                JsonValue::object([(
+                    "settings",
+                    JsonValue::object([(
+                        "flurry",
+                        JsonValue::object([(
+                            "lsp",
+                            JsonValue::object([("sysroot", JsonValue::from(sr.as_str()))]),
+                        )]),
+                    )]),
+                )]),
+            ),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            (
+                "method",
+                JsonValue::from("workspace/didChangeConfiguration"),
+            ),
+            (
+                "params",
+                JsonValue::object([(
+                    "settings",
+                    JsonValue::object([(
+                        "flurry",
+                        JsonValue::object([("sysroot", JsonValue::from(sr.as_str()))]),
+                    )]),
+                )]),
+            ),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            (
+                "method",
+                JsonValue::from("workspace/didChangeConfiguration"),
+            ),
+            (
+                "params",
+                JsonValue::object([(
+                    "settings",
+                    JsonValue::object([(
+                        "flurry",
+                        JsonValue::object([(
+                            "anar",
+                            JsonValue::object([("sysroot", JsonValue::from(sr.as_str()))]),
+                        )]),
+                    )]),
+                )]),
+            ),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("id", JsonValue::from(2)),
+            ("method", JsonValue::from("shutdown")),
+            ("params", JsonValue::Null),
+        ]),
+        JsonValue::object([
+            ("jsonrpc", JsonValue::from("2.0")),
+            ("method", JsonValue::from("exit")),
+            ("params", JsonValue::Null),
+        ]),
+    ];
+
+    let input_bytes = encode_messages(&requests);
+    let mut reader = BufReader::new(Cursor::new(input_bytes));
+    let mut output_bytes = Vec::new();
+    let mut server = LanguageServer::new(None);
+    let exit_code = server.run(&mut reader, &mut output_bytes).unwrap();
+    assert_eq!(exit_code, 0);
+    assert_eq!(
+        server.analyzer.sysroot_override,
+        Some(anar::analysis::normalize_path(&repo_library_dir()))
+    );
+
+    let messages = decode_messages(&output_bytes);
+    let diag_sources: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| match m {
+            RpcMessage::Notification { method, params }
+                if method == "textDocument/publishDiagnostics" =>
+            {
+                params
+                    .get_array("diagnostics")
+                    .and_then(|arr| arr.first())
+                    .and_then(|d| d.get_str("source"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!diag_sources.is_empty());
+    assert!(
+        diag_sources.iter().all(|&s| s == "luna"),
+        "{diag_sources:?}"
     );
 }

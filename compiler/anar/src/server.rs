@@ -1,6 +1,6 @@
-//! LSP 3.17 JSON-RPC 2.0 server dispatcher for `anar`.
+//! LSP 3.17 JSON-RPC 2.0 server dispatcher for `luna lsp`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -20,7 +20,7 @@ pub struct LanguageServer {
     initialized: bool,
     shutdown_requested: bool,
     cancelled_ids: HashSet<RequestId>,
-    published_files: HashSet<PathBuf>,
+    published_files: BTreeSet<PathBuf>,
     format_enabled: bool,
 }
 
@@ -31,7 +31,7 @@ impl LanguageServer {
             initialized: false,
             shutdown_requested: false,
             cancelled_ids: HashSet::new(),
-            published_files: HashSet::new(),
+            published_files: BTreeSet::new(),
             format_enabled: true,
         }
     }
@@ -85,9 +85,10 @@ impl LanguageServer {
             "workspace/didChangeConfiguration" => {
                 if let Some(settings) = params.get("settings").and_then(|s| s.get("flurry")) {
                     if let Some(sr) = settings
-                        .get("anar")
-                        .and_then(|a| a.get_str("sysroot"))
+                        .get("lsp")
+                        .and_then(|l| l.get_str("sysroot"))
                         .or_else(|| settings.get_str("sysroot"))
+                        .or_else(|| settings.get("anar").and_then(|a| a.get_str("sysroot")))
                     {
                         let trimmed = sr.trim();
                         if trimmed.is_empty() {
@@ -97,7 +98,11 @@ impl LanguageServer {
                                 .set_sysroot_override(Some(PathBuf::from(trimmed)));
                         }
                     }
-                    if let Some(fmt_en) = settings.get("format").and_then(|f| f.get_bool("enable"))
+                    if let Some(fmt_en) = settings
+                        .get("lsp")
+                        .and_then(|l| l.get("format"))
+                        .and_then(|f| f.get_bool("enable"))
+                        .or_else(|| settings.get("format").and_then(|f| f.get_bool("enable")))
                     {
                         self.format_enabled = fmt_en;
                     }
@@ -421,7 +426,7 @@ impl LanguageServer {
         let pkg_root = self.analyzer.find_package_root(file);
         let snap = self.analyzer.ensure_snapshot(file).clone();
 
-        let mut targets: HashSet<PathBuf> = snap.diagnostics.keys().cloned().collect();
+        let mut targets: BTreeSet<PathBuf> = snap.diagnostics.keys().cloned().collect();
         for prev in &self.published_files {
             if prev.starts_with(&pkg_root) {
                 targets.insert(prev.clone());
@@ -429,10 +434,7 @@ impl LanguageServer {
         }
         targets.insert(file.clone());
 
-        let mut sorted: Vec<PathBuf> = targets.into_iter().collect();
-        sorted.sort();
-
-        for target in sorted {
+        for target in targets {
             let diags = snap
                 .diagnostics
                 .get(&target)
@@ -449,7 +451,8 @@ impl LanguageServer {
     }
 
     fn republish_open_diagnostics<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
-        let open_paths: Vec<PathBuf> = self.analyzer.open_docs.keys().cloned().collect();
+        let mut open_paths: Vec<PathBuf> = self.analyzer.open_docs.keys().cloned().collect();
+        open_paths.sort();
         for p in open_paths {
             self.publish_package_diagnostics(&p, writer)?;
         }
@@ -577,7 +580,7 @@ fn build_initialize_result() -> JsonValue {
         (
             "serverInfo",
             JsonValue::object([
-                ("name", JsonValue::from("anar")),
+                ("name", JsonValue::from("luna")),
                 ("version", JsonValue::from(ANAR_VERSION)),
             ]),
         ),

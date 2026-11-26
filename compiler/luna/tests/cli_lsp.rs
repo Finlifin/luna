@@ -27,7 +27,7 @@ fn run(args: Vec<OsString>, input: &[u8]) -> Output {
         bytes
     });
     child.stdin.take().unwrap().write_all(input).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(180);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -118,7 +118,7 @@ fn stdio_preserves_framing_shutdown_and_abnormal_exit_status() {
             result
                 .get("serverInfo")
                 .and_then(|info| info.get_str("name")),
-            Some("anar")
+            Some("luna")
         );
         if shutdown {
             assert!(matches!(

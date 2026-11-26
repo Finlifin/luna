@@ -9,7 +9,7 @@ pub fn help() -> String {
     format!(
         "\
 Usage: luna lsp [options]
-HIR-stage Language Server for Flurry (anar {ANAR_VERSION})
+HIR-stage Language Server for Flurry (luna {ANAR_VERSION})
 
   --stdio             Communicate over standard input/output (default)
   --sysroot <DIR>      Explicit Flurry library directory
