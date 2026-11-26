@@ -9,7 +9,9 @@ pub struct Selectors<'a> {
     pub host_copysign: Option<&'a str>,
     pub comptime_intrinsics: &'a [(nir::intrinsics::Operation, String)],
     pub host_intrinsics: &'a [(nir::intrinsics::Operation, String)],
+    pub clone: Option<&'a str>,
     pub copy: Option<&'a str>,
+    pub default_trait: Option<&'a str>,
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
     pub index_mut: Option<&'a str>,
@@ -83,7 +85,9 @@ impl Selectors<'_> {
                 self.host_fma,
                 self.host_sqrt,
                 self.host_copysign,
+                self.clone,
                 self.copy,
+                self.default_trait,
                 self.drop,
                 self.index,
                 self.index_mut,
@@ -487,7 +491,13 @@ pub(crate) fn resolve_source(
                 selectors.implicit_passing,
                 &mut result.implicit_passing,
             ),
+            ("Clone".into(), selectors.clone, &mut result.clone),
             ("Copy".into(), selectors.copy, &mut result.copy),
+            (
+                "Default".into(),
+                selectors.default_trait,
+                &mut result.default_trait,
+            ),
             ("Drop".into(), selectors.drop, &mut result.drop),
         ])
     {
@@ -818,7 +828,9 @@ pub(crate) fn validate(
 pub(crate) struct SysrootBindings {
     comptime_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
     host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
+    clone: Option<String>,
     copy: Option<String>,
+    default_trait: Option<String>,
     drop: Option<String>,
     index: Option<String>,
     index_mut: Option<String>,
@@ -997,7 +1009,9 @@ impl SysrootBindings {
                 "implicit-passing-protocol" => &mut result.implicit_passing,
                 "call-context-type" => &mut result.call_context,
                 "call-description-type" => &mut result.call_description,
+                "clone-protocol" => &mut result.clone,
                 "copy-protocol" => &mut result.copy,
+                "default-protocol" => &mut result.default_trait,
                 "drop-protocol" => &mut result.drop,
                 "add-protocol" => &mut result.arithmetic[0],
                 "sub-protocol" => &mut result.arithmetic[1],
@@ -1115,11 +1129,25 @@ impl SysrootBindings {
             host_copysign: explicit.host_copysign,
             comptime_intrinsics: explicit.comptime_intrinsics,
             host_intrinsics: explicit.host_intrinsics,
+            clone: explicit.clone.or_else(|| {
+                identities
+                    .clone
+                    .is_none()
+                    .then_some(self.clone.as_deref())
+                    .flatten()
+            }),
             copy: explicit.copy.or_else(|| {
                 identities
                     .copy
                     .is_none()
                     .then_some(self.copy.as_deref())
+                    .flatten()
+            }),
+            default_trait: explicit.default_trait.or_else(|| {
+                identities
+                    .default_trait
+                    .is_none()
+                    .then_some(self.default_trait.as_deref())
                     .flatten()
             }),
             drop: explicit.drop.or_else(|| {

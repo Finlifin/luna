@@ -330,7 +330,7 @@ impl Key {
         build(ty, fuel, 0, max_depth.min(128))
     }
 
-    pub fn precision(&self) -> usize {
+    pub fn precision(&self) -> (usize, usize) {
         let mut pending = vec![(self, 0)];
         let mut minimum = None;
         let mut maximum = 0;
@@ -344,7 +344,25 @@ impl Key {
                 }
             }
         }
-        minimum.unwrap_or(maximum)
+        let depth = minimum.unwrap_or(maximum);
+        let concrete_assigned = if depth == 0 {
+            0
+        } else {
+            let target_layer = depth - 1;
+            let mut count = 0usize;
+            let mut layer = vec![(self, 0usize)];
+            while let Some((key, d)) = layer.pop() {
+                if let Key::Node(_, children) = key {
+                    if d == target_layer {
+                        count += children.iter().filter(|child| !child.is_open()).count();
+                    } else if d < target_layer {
+                        layer.extend(children.iter().map(|child| (child, d + 1)));
+                    }
+                }
+            }
+            count
+        };
+        (depth, concrete_assigned)
     }
 
     pub fn cut(&self, depth: usize) -> Self {
@@ -471,7 +489,7 @@ struct Entry {
     head: ImplementationHead,
     key: Key,
     arguments: Vec<Key>,
-    precision: usize,
+    precision: (usize, usize),
     phases: [Option<DeclarationId>; 2],
 }
 
@@ -816,11 +834,7 @@ impl Index {
         domain: Term,
         fuel: &mut usize,
     ) -> Result<(), nir::NominalAdmissionError> {
-        nir::type_computations::charge_term(&domain, fuel)?;
-        if !matches!(domain, Term::Lift(_)) || domain.sort() != nir::Sort::Type {
-            return Err("runtime dependency domain must be a lift Type".into());
-        }
-        domain.check_scope(&[]).map_err(|error| error.to_string())?;
+        Self::validate_runtime_domain(&domain, fuel)?;
         if let Some(previous) = self.runtime_domains.get(&runtime) {
             nir::type_computations::charge_term(previous, fuel)?;
             return if previous == &domain {
@@ -831,6 +845,30 @@ impl Index {
         }
         self.runtime_domains.insert(runtime, domain);
         self.revision += 1;
+        Ok(())
+    }
+
+    pub fn replace_runtime_domain(
+        &mut self,
+        runtime: nir::RuntimeId,
+        domain: Term,
+    ) -> Result<(), String> {
+        let mut fuel = 100_000;
+        Self::validate_runtime_domain(&domain, &mut fuel).map_err(String::from)?;
+        self.runtime_domains.insert(runtime, domain);
+        self.revision += 1;
+        Ok(())
+    }
+
+    fn validate_runtime_domain(
+        domain: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), nir::NominalAdmissionError> {
+        nir::type_computations::charge_term(domain, fuel)?;
+        if !matches!(domain, Term::Lift(_)) || domain.sort() != nir::Sort::Type {
+            return Err("runtime dependency domain must be a lift Type".into());
+        }
+        domain.check_scope(&[]).map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -890,7 +928,7 @@ impl Index {
             .map(|ty| Key::with_fuel(ty, fuel, budget.max_depth))
             .collect::<Result<_, _>>()?;
         // Publish only after all keys have validated successfully.
-        let cut_key = key.cut(precision);
+        let cut_key = key.cut(precision.0);
         self.contributions.insert(head.declaration);
         self.buckets.entry(head.interface).or_default().insert(
             head.declaration,
@@ -1008,7 +1046,7 @@ impl Index {
         if !candidates.fixed_interface {
             return Selection::UnresolvedInterface;
         }
-        let mut levels: BTreeMap<usize, BTreeSet<DeclarationId>> = BTreeMap::new();
+        let mut levels: BTreeMap<(usize, usize), BTreeSet<DeclarationId>> = BTreeMap::new();
         for id in &candidates.declarations {
             let Some(entry) = self.entries.get(id) else {
                 return Selection::InvalidCandidate(*id);
@@ -1151,8 +1189,8 @@ impl fmt::Display for Index {
             }
             write!(
                 f,
-                ") (subject {}) (precision {}) (key {}) (interface-arguments",
-                entry.head.subject, entry.precision, entry.key
+                ") (subject {}) (precision ({} {})) (key {}) (interface-arguments",
+                entry.head.subject, entry.precision.0, entry.precision.1, entry.key
             )?;
             for arg in &entry.head.interface_arguments {
                 write!(f, " {arg}")?;

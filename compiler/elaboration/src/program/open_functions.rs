@@ -2331,8 +2331,16 @@ impl Checker<'_, '_> {
                     let ty = &ty;
                     let binding = local(parameter.hir_id);
                     this.locals.insert(binding, ty.clone());
+                    let self_ty_expr = matches!(parameter.ty.kind, TyParamKind::Itself { .. })
+                        .then(|| this.self_containers.get(&owner).copied())
+                        .flatten()
+                        .and_then(|container| match &this.package.item(container)?.kind {
+                            ItemKind::Impl(def) => Some(def.self_ty),
+                            _ => None,
+                        });
                     if let Some(ty_expr) = match parameter.ty.kind {
                         TyParamKind::Positional(ty) | TyParamKind::Optional(_, ty, _) => Some(ty),
+                        TyParamKind::Itself { .. } => self_ty_expr,
                         _ => None,
                     } && matches!(ty_expr.kind, H::Cast(..))
                     {

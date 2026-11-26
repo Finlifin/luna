@@ -652,15 +652,19 @@ impl Checker<'_, '_> {
             let saved_observing = std::mem::replace(&mut self.observing_type, false);
             let saved_code_body = std::mem::replace(&mut self.in_code_body, true);
             let saved_captures = std::mem::take(&mut self.captures);
-            let checked = expected
+            let expected_view = expected
                 .map(|ty| self.callable_input_view(ty, value.span))
-                .transpose()
-                .and_then(|ty| self.expr(value, ty.as_ref()));
+                .transpose();
+            let checked = match &expected_view {
+                Ok(ty) => self.expr(value, ty.as_ref()),
+                Err(_) => Err(error(value.span, "")),
+            };
             self.captures = saved_captures;
             self.in_code_body = saved_code_body;
             self.observing_type = saved_observing;
             self.in_staged_input = saved_staged;
             self.in_required_comptime = saved_required;
+            let expected_view = expected_view?;
             if let Ok(checked) = checked
                 && !is_never(&checked.ty)
                 && let Some(crate::program::runtime_origins::Place::Global(origin)) =
@@ -669,6 +673,16 @@ impl Checker<'_, '_> {
                 return self
                     .intern_global_runtime_operand(origin, checked, value.span)
                     .map(Term::Runtime);
+            }
+            if !self.interfaces_ready
+                && let H::Ref(inner) = &value.kind
+                && let Some(identity) = self.try_pending_const_address_operand(
+                    value.span,
+                    inner,
+                    expected_view.as_ref(),
+                )?
+            {
+                return Ok(identity);
             }
             return Err(error(
                 value.span,
@@ -696,6 +710,165 @@ impl Checker<'_, '_> {
             .sources
             .insert(value.hir_id, root.clone());
         Ok(identity)
+    }
+
+    fn try_pending_const_address_operand(
+        &mut self,
+        ref_span: Span,
+        inner: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<Option<Term>, Error> {
+        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+        let saved_observing = std::mem::replace(&mut self.observing_type, false);
+        let saved_code_body = std::mem::replace(&mut self.in_code_body, true);
+        let saved_captures = std::mem::take(&mut self.captures);
+        let resolved = (|| -> Result<Option<(OwnerId, n::Expr)>, Error> {
+            match inner.kind {
+                H::ResolvedDef { def_id, .. } => {
+                    let Some(owner) = self.package.definition_owner(def_id) else {
+                        return Ok(None);
+                    };
+                    if !self
+                        .package
+                        .item(owner)
+                        .is_some_and(|item| matches!(item.kind, ItemKind::Const(..)))
+                        || self.is_build_context(owner)
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some((owner, self.constant_value(owner, inner.span)?)))
+                }
+                H::Projection(..) => {
+                    let Some(owner) = self.projected_constant_owner(inner)? else {
+                        return Ok(None);
+                    };
+                    if self.is_build_context(owner) {
+                        return Ok(None);
+                    }
+                    let value = self.with_staged_input(true, |this| this.expr(inner, None))?;
+                    Ok(Some((owner, value)))
+                }
+                _ => Ok(None),
+            }
+        })();
+        self.captures = saved_captures;
+        self.in_code_body = saved_code_body;
+        self.observing_type = saved_observing;
+        self.in_staged_input = saved_staged;
+        self.in_required_comptime = saved_required;
+        let Some((owner, const_expr)) = resolved? else {
+            return Ok(None);
+        };
+        let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = work;
+        let free = nir::free_bindings::collect(&const_expr, &mut work);
+        self.required_steps = self.required_steps.saturating_sub((before - work) as u64);
+        let free = free.map_err(|reason| error(ref_span, reason.to_string()))?;
+        if !free.is_empty() {
+            return Err(error(
+                ref_span,
+                "cannot take the address of a constant expression with local dependencies",
+            ));
+        }
+        let decl = declaration(self.package, &self.package_identities, owner);
+        let const_ty = self.copy_alias_type(&const_expr.ty, inner.span)?;
+        let key = (decl, const_ty.clone());
+        let id = if let Some(&existing) = self.pending_const_address_ids.get(&key) {
+            existing
+        } else {
+            let provisional_ptr = match expected {
+                Some(expected_ty)
+                    if matches!(expected_ty, Term::Pointer(_))
+                        && expected_ty.check_scope(&[]).is_ok() =>
+                {
+                    expected_ty.clone()
+                }
+                _ => Term::Pointer(Box::new(const_ty)),
+            };
+            let id = self.intern_runtime_id(Term::Lift(Box::new(provisional_ptr)), ref_span)?;
+            self.pending_const_address_ids.insert(key, id);
+            self.pending_const_addresses.push(PendingConstAddress {
+                id,
+                declaration: decl,
+                ref_span,
+                inner_hir_id: inner.hir_id,
+                inner_span: inner.span,
+                const_expr,
+            });
+            id
+        };
+        if let Some(expected) = expected {
+            self.pending_const_address_expectations
+                .push((id, expected.clone(), ref_span));
+        }
+        Ok(Some(Term::Runtime(id)))
+    }
+
+    pub(super) fn finish_pending_const_addresses(&mut self) -> Result<(), Error> {
+        let pending = std::mem::take(&mut self.pending_const_addresses);
+        let expectations = std::mem::take(&mut self.pending_const_address_expectations);
+        self.pending_const_address_ids.clear();
+        for entry in pending {
+            let fallback = Expr {
+                hir_id: entry.inner_hir_id,
+                kind: H::TyPlaceholder,
+                span: entry.inner_span,
+            };
+            let inner_expr = match self.package.node(entry.inner_hir_id) {
+                Some(hir::Node::Expr(expr)) => expr,
+                _ => &fallback,
+            };
+            let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+            let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+            let saved_observing = std::mem::replace(&mut self.observing_type, false);
+            let saved_code_body = std::mem::replace(&mut self.in_code_body, true);
+            let saved_captures = std::mem::take(&mut self.captures);
+            let spliced = self.splice_value(inner_expr, entry.const_expr, None);
+            self.captures = saved_captures;
+            self.in_code_body = saved_code_body;
+            self.observing_type = saved_observing;
+            self.in_staged_input = saved_staged;
+            self.in_required_comptime = saved_required;
+            let spliced = spliced?;
+            let result = n::Expr {
+                ty: Term::Pointer(Box::new(spliced.ty.clone())),
+                source: source(entry.ref_span),
+                kind: K::ConstAddress {
+                    declaration: entry.declaration,
+                    value: Box::new(spliced),
+                },
+            };
+            if let Some(message) = n::pointer_operation_error_in(&result, self.target) {
+                return Err(error(entry.ref_span, message));
+            }
+            let domain = Term::Lift(Box::new(result.ty.clone()));
+            self.implementation_index
+                .replace_runtime_domain(entry.id, domain.clone())
+                .map_err(|message| error(entry.ref_span, message))?;
+            self.inherent_index
+                .replace_runtime_domain(entry.id, domain.clone())
+                .map_err(|message| error(entry.ref_span, message))?;
+            self.runtime_domains.insert(entry.id, domain);
+            let ty_alias = self.copy_alias_type(&result.ty, entry.ref_span)?;
+            self.global_runtime_deliveries.insert(entry.id, result);
+            self.global_runtime_origin_ids.insert(
+                GlobalRuntimeOrigin::ConstAddress {
+                    declaration: entry.declaration,
+                    ty: ty_alias,
+                },
+                entry.id,
+            );
+        }
+        for (id, expected, span) in expectations {
+            let actual = self
+                .global_runtime_deliveries
+                .get(&id)
+                .map(|expr| expr.ty.clone())
+                .ok_or_else(|| error(span, "missing deferred constant address"))?;
+            self.require(&actual, &expected, span)?;
+        }
+        Ok(())
     }
 }
 

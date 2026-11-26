@@ -174,14 +174,6 @@ pub(super) fn expand<'h>(
             let ItemKind::Deriver(generator) = &source.item(strategy).unwrap().kind else {
                 unreachable!()
             };
-            if (!generator.parameters.is_empty() || !strategies[&strategy].computations.is_empty())
-                && !request.clause_params.is_empty()
-            {
-                return Err(unsupported(
-                    selection_span,
-                    "strategy inputs in generic request environments",
-                ));
-            }
             validate_strategy_parameters(generator.parameters, fuel)?;
             *fuel = fuel
                 .checked_sub(arguments.len().saturating_add(generator.parameters.len()))
@@ -362,7 +354,7 @@ pub(super) fn expand<'h>(
                     }
                     hir::clause::ClauseParamKind::Positional(_, ty_expr)
                     | hir::clause::ClauseParamKind::Optional(_, ty_expr, _)
-                        if !parameter.kind.is_quote() && request.clause_params.is_empty() =>
+                        if !parameter.kind.is_quote() =>
                     {
                         let rhs = arena.alloc_expr(hir::Expr {
                             hir_id: hir::HirId::new(
@@ -431,13 +423,10 @@ pub(super) fn expand<'h>(
         let mut inputs = Vec::new();
         let mut input_stages = BTreeMap::new();
         let local_bindings = &strategies[&strategy].locals;
-        let has_generic_req_check =
-            !request.clause_params.is_empty() && !combined_constraints.is_empty();
-        let group = if !request.clause_params.is_empty()
-            || (generator.parameters.is_empty()
-                && combined_constraints.is_empty()
-                && combined_computations.is_empty()
-                && resolved_clauses.inferred.is_empty())
+        let group = if generator.parameters.is_empty()
+            && (combined_constraints.is_empty() || !request.clause_params.is_empty())
+            && combined_computations.is_empty()
+            && resolved_clauses.inferred.is_empty()
         {
             None
         } else {
@@ -447,6 +436,25 @@ pub(super) fn expand<'h>(
                 .map_err(|e| error(span, e.to_string()))?;
             Some((owner, identity))
         };
+        let mut static_req_constraints = Vec::new();
+        let mut exec_constraints = Vec::new();
+        for constraint in &combined_constraints {
+            let mentions_fn_param = match constraint.kind {
+                hir::clause::ClauseConstraintKind::Requires(e)
+                | hir::clause::ClauseConstraintKind::Ensures(e)
+                | hir::clause::ClauseConstraintKind::Decreases(e) => {
+                    clauses::expr_mentions_fn_param(e, fuel)?
+                }
+                hir::clause::ClauseConstraintKind::Outcome => false,
+            };
+            if request.clause_params.is_empty() || mentions_fn_param {
+                exec_constraints.push(constraint.clone());
+            } else {
+                static_req_constraints.push(constraint.clone());
+            }
+        }
+        let has_generic_req_check =
+            !request.clause_params.is_empty() && !static_req_constraints.is_empty();
         let execution = if group.is_some() {
             Some((
                 batch.reserve().map_err(|e| error(span, e.to_string()))?,
@@ -457,7 +465,7 @@ pub(super) fn expand<'h>(
         } else {
             None
         };
-        let subject_capture = if group.is_some() {
+        let subject_capture = if group.is_some() && request.clause_params.is_empty() {
             Some((
                 batch.reserve().map_err(|e| error(span, e.to_string()))?,
                 batch
@@ -550,6 +558,12 @@ pub(super) fn expand<'h>(
                 .iter()
                 .map(|(owner, _)| *owner)
                 .chain(subject_capture.iter().map(|(owner, _)| *owner))
+                .chain(
+                    execution
+                        .filter(|_| request.clause_params.is_empty())
+                        .iter()
+                        .map(|(owner, _)| *owner),
+                )
                 .chain(inputs.iter().map(|(_, owner, _)| *owner))
                 .chain(locals.iter().map(|(_, owner, _)| *owner))
                 .chain(owners.iter().map(|(_, owner, _)| *owner))
@@ -626,20 +640,57 @@ pub(super) fn expand<'h>(
         )?;
         if let Some((owner, identity)) = group {
             let (execution_owner, execution_identity) = execution.unwrap();
-            let (subject_owner, subject_identity) = subject_capture.unwrap();
-            drafts.push((
-                function_templates::subject_draft(arena, subject_owner, span, fuel)?,
-                subject_identity,
-            ));
-            let subject = arena.alloc_expr(hir::Expr {
-                hir_id: hir::HirId::new(subject_owner, hir::ItemLocalId::new(3)),
-                span,
-                kind: E::ResolvedDef {
-                    name: hir::Symbol::intern("$derive_subject"),
-                    def_id: subject_identity,
-                    has_clause_param: false,
-                },
-            });
+            let mut exec_clause_defs = BTreeMap::new();
+            let mut quote_request_defs = BTreeSet::new();
+            let mut exec_clause_args = Vec::new();
+            for parameter in request.clause_params {
+                let old = parameter.definition.unwrap();
+                if parameter.kind.is_quote() {
+                    quote_request_defs.insert(old);
+                    continue;
+                }
+                let fresh = batch
+                    .reserve_identity(pkg, fuel)
+                    .map_err(|e| error(parameter.span, e.to_string()))?;
+                exec_clause_defs.insert(old, fresh);
+                exec_clause_args.push((parameter.name, old));
+            }
+            let subject = if let Some((subject_owner, subject_identity)) = subject_capture {
+                drafts.push((
+                    function_templates::subject_draft(arena, subject_owner, span, fuel)?,
+                    subject_identity,
+                ));
+                arena.alloc_expr(hir::Expr {
+                    hir_id: hir::HirId::new(subject_owner, hir::ItemLocalId::new(3)),
+                    span,
+                    kind: E::ResolvedDef {
+                        name: hir::Symbol::intern("$derive_subject"),
+                        def_id: subject_identity,
+                        has_clause_param: false,
+                    },
+                })
+            } else {
+                let mentions_quote =
+                    clauses::expr_mentions_any_def(request.self_ty, &quote_request_defs, fuel)?;
+                if mentions_quote {
+                    // Self cannot be inspected at comptime if it references an open
+                    // runtime quote parameter; emit a placeholder unless unused.
+                    arena.alloc_expr(hir::Expr {
+                        hir_id: hir::HirId::new(execution_owner, hir::ItemLocalId::new(3)),
+                        span,
+                        kind: E::TyVoid,
+                    })
+                } else {
+                    clauses::rewrite_request_self_for_exec(
+                        source,
+                        arena,
+                        execution_owner,
+                        request.self_ty,
+                        &exec_clause_defs,
+                        fuel,
+                    )?
+                }
+            };
             let mut exec_draft = function_templates::execution_draft(
                 source,
                 arena,
@@ -647,7 +698,7 @@ pub(super) fn expand<'h>(
                 strategy,
                 subject,
                 generator.parameters,
-                &combined_constraints,
+                &exec_constraints,
                 &input_stages,
                 local_bindings,
                 &combined_computations,
@@ -656,7 +707,19 @@ pub(super) fn expand<'h>(
                 span,
                 fuel,
             )?;
-            if !resolved_clauses.inferred.is_empty() {
+            if !request.clause_params.is_empty() {
+                extra_module_items.push((source.root_mod, execution_owner));
+                clauses::attach_execution_clauses(
+                    source,
+                    arena,
+                    request,
+                    &mut exec_draft,
+                    &exec_clause_defs,
+                    &resolved_clauses.inferred,
+                    &inferred_clause_defs,
+                    fuel,
+                )?;
+            } else if !resolved_clauses.inferred.is_empty() {
                 let mut exec_clauses = Vec::with_capacity(resolved_clauses.inferred.len());
                 let mut next_local = exec_draft
                     .bindings
@@ -687,16 +750,30 @@ pub(super) fn expand<'h>(
                     sig.clause_params = exec_clause_slice;
                 }
             }
+            let exec_request_mapping = if request.clause_params.is_empty() {
+                &mapping
+            } else {
+                &exec_clause_defs
+            };
             clauses::substitute_draft(
                 source,
                 arena,
                 &mut exec_draft,
                 &temp_to_expr,
                 &strategy_to_temp,
-                &mapping,
+                exec_request_mapping,
                 Some(subject),
                 fuel,
             )?;
+            if !request.clause_params.is_empty() {
+                clauses::prune_unused_execution_clauses(
+                    arena,
+                    &mut exec_draft,
+                    &exec_clause_defs,
+                    &mut exec_clause_args,
+                    fuel,
+                )?;
+            }
             drafts.push((exec_draft, execution_identity));
             drafts.push((
                 function_templates::input_group(
@@ -704,6 +781,8 @@ pub(super) fn expand<'h>(
                     arena,
                     owner,
                     execution_identity,
+                    &mapping,
+                    &exec_clause_args,
                     arguments,
                     extended,
                     span,
@@ -742,7 +821,7 @@ pub(super) fn expand<'h>(
                 source,
                 arena,
                 request,
-                &combined_constraints,
+                &static_req_constraints,
                 &temp_to_expr,
                 &strategy_to_temp,
                 target_owner,

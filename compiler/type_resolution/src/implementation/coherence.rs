@@ -9,7 +9,10 @@ use nir::program::TypePredicate;
 pub enum PairAssessment {
     DifferentInterfaces,
     DistinctTypeHeads,
-    OrderedPrecision { left: usize, right: usize },
+    OrderedPrecision {
+        left: (usize, usize),
+        right: (usize, usize),
+    },
     Disjoint(Proof),
     NotDisjoint(Witness),
     Unresolved(String),
@@ -61,7 +64,7 @@ fn distinct_type_heads(left: &ImplementationHead, right: &ImplementationHead) ->
 fn interface_group_allowances(
     entries: &[&Entry],
     budget: Budget,
-) -> Option<(usize, std::collections::BTreeMap<usize, usize>)> {
+) -> Option<(usize, std::collections::BTreeMap<(usize, usize), usize>)> {
     let count = entries.len();
     let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
     let remaining = budget
@@ -613,7 +616,7 @@ impl Index {
         budget: Budget,
     ) -> Option<(
         usize,
-        std::collections::BTreeMap<(DeclarationId, usize), usize>,
+        std::collections::BTreeMap<(DeclarationId, (usize, usize)), usize>,
     )> {
         let count = self.entries.len();
         let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
@@ -837,7 +840,11 @@ impl fmt::Display for PairAssessment {
             Self::DifferentInterfaces => write!(f, "(different-interfaces)"),
             Self::DistinctTypeHeads => write!(f, "(distinct-type-heads)"),
             Self::OrderedPrecision { left, right } => {
-                write!(f, "(ordered-precision {left} {right})")
+                write!(
+                    f,
+                    "(ordered-precision ({} {}) ({} {}))",
+                    left.0, left.1, right.0, right.1
+                )
             }
             Self::Disjoint(proof) => write!(f, "(disjoint {proof})"),
             Self::NotDisjoint(witness) => write!(

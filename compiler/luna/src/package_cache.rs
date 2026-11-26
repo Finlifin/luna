@@ -1872,7 +1872,9 @@ pub fn encode_selectors_tag(
         host_copysign,
         comptime_intrinsics,
         host_intrinsics,
+        clone,
         copy,
+        default_trait,
         drop,
         index,
         index_mut,
@@ -1964,7 +1966,9 @@ pub fn encode_selectors_tag(
     write_intrinsics(&mut writer, comptime_intrinsics);
     write_intrinsics(&mut writer, host_intrinsics);
     for opt in [
+        *clone,
         *copy,
+        *default_trait,
         *drop,
         *index,
         *index_mut,

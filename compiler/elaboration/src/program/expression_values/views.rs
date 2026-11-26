@@ -309,6 +309,17 @@ impl Checker<'_, '_> {
                         kind: K::NewtypeConvert(Box::new(value)),
                     });
                 }
+                if let K::TypeValue(base_ty) = value.kind {
+                    self.validate_type_view(&base_ty, &target, expr.span)?;
+                    if let Some(expected) = expected {
+                        self.require_expression(&p(P::Type), expected, expr.span)?;
+                    }
+                    return Ok(n::Expr {
+                        ty: p(P::Type),
+                        source: source(expr.span),
+                        kind: K::TypeValue(base_ty),
+                    });
+                }
                 let Term::Primitive(P::BitVec(width)) =
                     self.structural_type(&value.ty, expr.span)?
                 else {

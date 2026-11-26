@@ -138,7 +138,6 @@ pub(super) fn resolve_strategy_clauses<'h>(
             continue;
         }
         if !parameter.kind.is_quote()
-            && request.clause_params.is_empty()
             && parameters_mention_clause(generator.parameters, def_id, fuel)?
         {
             inferred.push(parameter);
@@ -270,8 +269,154 @@ fn expr_mentions_clause<'h>(
             Ok(expr_mentions_clause(requirement, target, fuel, d)?
                 || expr_mentions_clause(base, target, fuel, d)?)
         }
+        E::If(cond, block, other) => Ok(expr_mentions_clause(cond, target, fuel, d)?
+            || block_mentions_clause(block, target, fuel, d)?
+            || other
+                .map(|e| expr_mentions_clause(e, target, fuel, d))
+                .transpose()?
+                .unwrap_or(false)),
+        E::InlineIf {
+            cond,
+            then_expr,
+            else_expr,
+        } => Ok(expr_mentions_clause(cond, target, fuel, d)?
+            || expr_mentions_clause(then_expr, target, fuel, d)?
+            || else_expr
+                .map(|e| expr_mentions_clause(e, target, fuel, d))
+                .transpose()?
+                .unwrap_or(false)),
+        E::Block(block) | E::UnsafeBlock(block) | E::Loop(block) => {
+            block_mentions_clause(block, target, fuel, d)
+        }
+        E::Let(decl) => {
+            for e in [decl.ty, decl.init, decl.guard, decl.otherwise]
+                .into_iter()
+                .flatten()
+            {
+                if expr_mentions_clause(e, target, fuel, d)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        E::Match(val, arms) | E::EffectHandle(val, arms) => {
+            if expr_mentions_clause(val, target, fuel, d)? {
+                return Ok(true);
+            }
+            arms_mention_clause(arms, target, fuel, d)
+        }
+        E::InlineMatch(arms) => arms_mention_clause(arms, target, fuel, d),
+        E::When(arms) => {
+            for arm in *arms {
+                if arm
+                    .cond
+                    .map(|e| expr_mentions_clause(e, target, fuel, d))
+                    .transpose()?
+                    .unwrap_or(false)
+                    || expr_mentions_clause(arm.body, target, fuel, d)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        E::Object(entries) => {
+            for entry in entries {
+                let inner = match entry {
+                    hir::expr::ObjectEntry::Value(e) => e,
+                    hir::expr::ObjectEntry::Property(f) => f.expr,
+                };
+                if expr_mentions_clause(inner, target, fuel, d)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        E::CollectedProperties(fields) => {
+            for field in *fields {
+                if expr_mentions_clause(field.expr, target, fuel, d)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        E::Assign(a, b) | E::AssignOp(_, a, b) | E::HandlerApplication(a, b) => {
+            Ok(expr_mentions_clause(a, target, fuel, d)?
+                || expr_mentions_clause(b, target, fuel, d)?)
+        }
+        E::Semi(e)
+        | E::Assumes(e)
+        | E::Asserts(e)
+        | E::Invariant(e)
+        | E::Decreases(e)
+        | E::InlineControl(e)
+        | E::ErrorNew(e)
+        | E::ErrorPropagate(e)
+        | E::OptionPropagate(e)
+        | E::TakeOld(e)
+        | E::TakeBitVec(e)
+        | E::TakeIntrinsic(e)
+        | E::TakeAttribute(e)
+        | E::TakeTagName(e)
+        | E::TakeTupleEnumerate(e)
+        | E::TakeTupleIndexed(e)
+        | E::MultiDeref(e)
+        | E::TacticArgument(e)
+        | E::ConstantObjectEntry(e, _) => expr_mentions_clause(e, target, fuel, d),
+        E::Resume(e) | E::Return(e) => e
+            .map(|e| expr_mentions_clause(e, target, fuel, d))
+            .transpose()
+            .map(|found| found.unwrap_or(false)),
+        E::Range { start, end, .. } => Ok(start
+            .map(|e| expr_mentions_clause(e, target, fuel, d))
+            .transpose()?
+            .unwrap_or(false)
+            || end
+                .map(|e| expr_mentions_clause(e, target, fuel, d))
+                .transpose()?
+                .unwrap_or(false)),
         _ => Ok(false),
     }
+}
+
+fn block_mentions_clause<'h>(
+    block: &'h Block<'h>,
+    target: DefId,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, Error> {
+    check_depth(depth, block.span)?;
+    charge(fuel, block.span)?;
+    for stmt in block.stmts {
+        if expr_mentions_clause(stmt, target, fuel, depth + 1)? {
+            return Ok(true);
+        }
+    }
+    block
+        .expr
+        .map(|e| expr_mentions_clause(e, target, fuel, depth + 1))
+        .transpose()
+        .map(|found| found.unwrap_or(false))
+}
+
+fn arms_mention_clause<'h>(
+    arms: &'h [PatternArm<'h>],
+    target: DefId,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, Error> {
+    for arm in arms {
+        if arm
+            .guard
+            .map(|e| expr_mentions_clause(e, target, fuel, depth + 1))
+            .transpose()?
+            .unwrap_or(false)
+            || expr_mentions_clause(arm.body, target, fuel, depth + 1)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn flatten_error_chain<'h>(
@@ -1698,6 +1843,324 @@ fn clone_source_clause_kind<'h>(
     })
 }
 
+pub(super) fn expr_mentions_fn_param<'h>(
+    expr: &'h Expr<'h>,
+    fuel: &mut usize,
+) -> Result<bool, Error> {
+    fn visit<'h>(expr: &'h Expr<'h>, fuel: &mut usize, depth: usize) -> Result<bool, Error> {
+        check_depth(depth, expr.span)?;
+        charge(fuel, expr.span)?;
+        let d = depth + 1;
+        match &expr.kind {
+            E::ResolvedFnParam(..) => Ok(true),
+            E::Application(head, args)
+            | E::ExtendedApplication(head, args)
+            | E::NFApplication(head, args)
+            | E::Index(head, args) => {
+                if visit(head, fuel, d)? {
+                    return Ok(true);
+                }
+                for arg in *args {
+                    let inner = match arg {
+                        Arg::Positional(e)
+                        | Arg::Named(_, e)
+                        | Arg::Expand(e)
+                        | Arg::Implicit(e)
+                        | Arg::PostLambda(e) => e,
+                    };
+                    if visit(inner, fuel, d)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            E::TyPtr(inner)
+            | E::TyOptional(inner)
+            | E::TyTraitObject(inner)
+            | E::LiftType(inner)
+            | E::Ref(inner)
+            | E::Deref(inner)
+            | E::Unary(_, inner)
+            | E::Projection(inner, _)
+            | E::TypeOf(inner)
+            | E::Defer(inner) => visit(inner, fuel, d),
+            E::Binary(_, a, b)
+            | E::TyFnArrow(a, b)
+            | E::ErrorQualifiedType(a, b)
+            | E::EffectQualifiedType(a, b)
+            | E::TraitBound(a, b)
+            | E::Cast(a, b)
+            | E::DynCast(a, b)
+            | E::TyClosure(a, b) => Ok(visit(a, fuel, d)? || visit(b, fuel, d)?),
+            E::Tuple(items) | E::List(items) => {
+                for item in *items {
+                    if visit(item, fuel, d)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+    visit(expr, fuel, 0)
+}
+
+pub(super) fn expr_mentions_any_def<'h>(
+    expr: &'h Expr<'h>,
+    targets: &BTreeSet<DefId>,
+    fuel: &mut usize,
+) -> Result<bool, Error> {
+    if targets.is_empty() {
+        return Ok(false);
+    }
+    hir_expr_has_strategy_param(expr, targets, fuel, 0)
+}
+
+pub(super) fn rewrite_request_self_for_exec<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    exec_owner: OwnerId,
+    self_ty: &'h Expr<'h>,
+    exec_clause_defs: &BTreeMap<DefId, DefId>,
+    fuel: &mut usize,
+) -> Result<&'h Expr<'h>, Error> {
+    let empty_exprs = BTreeMap::new();
+    let empty_defs = BTreeMap::new();
+    let empty_owners = BTreeMap::new();
+    let mut subst = DraftSubst {
+        source,
+        arena,
+        owner: exec_owner,
+        next_local: 1,
+        temp_to_expr: &empty_exprs,
+        strategy_to_temp: &empty_defs,
+        request_mapping: exec_clause_defs,
+        self_replacement: None,
+        owner_replacements: &empty_owners,
+        resolution: Vec::new(),
+        bodies: Vec::new(),
+        body_map: BTreeMap::new(),
+        fuel: *fuel,
+    };
+    let rewritten = subst.subst_source_expr(self_ty, 0)?;
+    *fuel = subst.fuel;
+    Ok(rewritten)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attach_execution_clauses<'h>(
+    source: &Package<'h>,
+    arena: &'h HirArena,
+    request: &hir::item::DeriveRequest<'h>,
+    exec_draft: &mut function_templates::ClonedMember<'h>,
+    exec_clause_defs: &BTreeMap<DefId, DefId>,
+    inferred: &[&'h hir::clause::ClauseParam<'h>],
+    inferred_clause_defs: &BTreeMap<DefId, DefId>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    let empty_exprs = BTreeMap::new();
+    let empty_defs = BTreeMap::new();
+    let empty_owners = BTreeMap::new();
+    let next_local = exec_draft
+        .bindings
+        .values()
+        .map(|id| id.local_id.raw())
+        .chain(
+            exec_draft
+                .resolution
+                .iter()
+                .map(|(id, _)| id.local_id.raw()),
+        )
+        .max()
+        .unwrap_or(0)
+        + 16;
+    let mut subst = DraftSubst {
+        source,
+        arena,
+        owner: exec_draft.item.owner_id,
+        next_local,
+        temp_to_expr: &empty_exprs,
+        strategy_to_temp: &empty_defs,
+        request_mapping: exec_clause_defs,
+        self_replacement: None,
+        owner_replacements: &empty_owners,
+        resolution: Vec::new(),
+        bodies: Vec::new(),
+        body_map: BTreeMap::new(),
+        fuel: *fuel,
+    };
+    let mut exec_clauses = Vec::new();
+    for cp in request.clause_params {
+        if cp.kind.is_quote() {
+            continue;
+        }
+        let orig = cp.definition.unwrap();
+        let fresh_def = exec_clause_defs[&orig];
+        let mut cloned = cp.clone();
+        cloned.hir_id = subst.alloc_id(cp.span)?;
+        cloned.definition = Some(fresh_def);
+        cloned.kind = match clone_source_clause_kind(&mut subst, &cp.kind, 0)? {
+            // Non-quote request clauses are supplied positionally by `$derive_inputs`,
+            // while trait bounds on generic requests are verified statically by
+            // `generic_request_requirement_check_drafts` so `$derive_execute` does
+            // not carry unresolved runtime contract obligations during comptime VM calls.
+            K::Optional(name, ty, _) => K::Positional(name, ty),
+            K::TraitBound(name, _) => K::Type(name),
+            other => other,
+        };
+        exec_clauses.push(cloned);
+    }
+    for &cp in inferred {
+        let orig_def = cp.definition.unwrap();
+        let fresh_def = inferred_clause_defs[&orig_def];
+        let mut cloned = (*cp).clone();
+        cloned.hir_id = subst.alloc_id(cp.span)?;
+        cloned.definition = Some(fresh_def);
+        exec_clauses.push(cloned);
+    }
+    *fuel = subst.fuel;
+    exec_draft.resolution.extend(subst.resolution);
+    let exec_clause_slice = arena.alloc_clause_param_slice(exec_clauses);
+    for cp in exec_clause_slice {
+        exec_draft.nodes.insert(
+            cp.hir_id.local_id,
+            ItemLocalId::new(0),
+            hir::Node::ClauseParam(cp),
+        );
+    }
+    if let ItemKind::Fn(sig, _) = &mut exec_draft.item.kind {
+        sig.clause_params = exec_clause_slice;
+    }
+    Ok(())
+}
+
+/// Remove unreferenced generic request clauses from `$derive_execute` so
+/// closed strategy executions in generic requests do not receive unresolved
+/// rigid type arguments when invoked at comptime.
+pub(super) fn prune_unused_execution_clauses<'h>(
+    arena: &'h HirArena,
+    exec_draft: &mut function_templates::ClonedMember<'h>,
+    exec_clause_defs: &BTreeMap<DefId, DefId>,
+    exec_clause_args: &mut Vec<(Ident, DefId)>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    let ItemKind::Fn(sig, _) = &mut exec_draft.item.kind else {
+        return Ok(());
+    };
+    let request_fresh: BTreeSet<DefId> = exec_clause_defs.values().copied().collect();
+    let mut used = BTreeSet::new();
+    for &fresh in &request_fresh {
+        let mut referenced = false;
+        for param in sig.params {
+            let (ty_expr, default_expr) = match param.ty.kind {
+                T::Positional(e) | T::PositionalDependencyCatched(_, e) | T::Varadic(_, e) => {
+                    (Some(e), None)
+                }
+                T::Optional(_, e, def) => (Some(e), Some(def)),
+                T::Itself { .. } | T::Case(_) => (None, None),
+            };
+            if [param.template_annotation, ty_expr, default_expr]
+                .into_iter()
+                .flatten()
+                .any(|e| expr_mentions_clause(e, fresh, fuel, 0).unwrap_or(true))
+            {
+                // Re-check explicitly to propagate exact budget/depth errors.
+                for e in [param.template_annotation, ty_expr, default_expr]
+                    .into_iter()
+                    .flatten()
+                {
+                    if expr_mentions_clause(e, fresh, fuel, 0)? {
+                        referenced = true;
+                        break;
+                    }
+                }
+                if referenced {
+                    break;
+                }
+            }
+        }
+        if !referenced
+            && sig
+                .return_ty
+                .map(|e| expr_mentions_clause(e, fresh, fuel, 0))
+                .transpose()?
+                .unwrap_or(false)
+        {
+            referenced = true;
+        }
+        if !referenced {
+            for c in sig.clause_constraints {
+                let expr = match c.kind {
+                    C::Requires(e) | C::Ensures(e) | C::Decreases(e) => Some(e),
+                    C::Outcome => None,
+                };
+                if expr
+                    .map(|e| expr_mentions_clause(e, fresh, fuel, 0))
+                    .transpose()?
+                    .unwrap_or(false)
+                {
+                    referenced = true;
+                    break;
+                }
+            }
+        }
+        if !referenced {
+            for (_, body) in &exec_draft.bodies {
+                if expr_mentions_clause(body.value, fresh, fuel, 0)? {
+                    referenced = true;
+                    break;
+                }
+            }
+        }
+        if referenced {
+            used.insert(fresh);
+        }
+    }
+    for cp in sig.clause_params.iter().rev() {
+        let keep = cp
+            .definition
+            .is_none_or(|def| !request_fresh.contains(&def) || used.contains(&def));
+        if !keep {
+            continue;
+        }
+        let kind_exprs: Vec<&'h Expr<'h>> = match cp.kind.unquoted() {
+            K::Positional(_, e) | K::TraitBound(_, e) | K::Varadic(_, e) => vec![e],
+            K::Optional(_, ty, def) => vec![ty, def],
+            K::Type(_) => Vec::new(),
+            K::Quote(..) => unreachable!(),
+        };
+        for &candidate in &request_fresh {
+            if !used.contains(&candidate) {
+                for expr in &kind_exprs {
+                    if expr_mentions_clause(expr, candidate, fuel, 0)? {
+                        used.insert(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let filtered: Vec<_> = sig
+        .clause_params
+        .iter()
+        .filter(|cp| {
+            cp.definition
+                .is_none_or(|def| !request_fresh.contains(&def) || used.contains(&def))
+        })
+        .cloned()
+        .collect();
+    if filtered.len() != sig.clause_params.len() {
+        sig.clause_params = arena.alloc_clause_param_slice(filtered);
+    }
+    exec_clause_args.retain(|(_, old)| {
+        exec_clause_defs
+            .get(old)
+            .is_some_and(|fresh| used.contains(fresh))
+    });
+    Ok(())
+}
+
 /// For generic `derive` requests whose selected strategy imposes `where` trait
 /// bounds or `requires` constraints, emit a pair of uncalled private check
 /// functions verifying that the request's own `where` clauses discharge the
@@ -1724,7 +2187,6 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
     ),
     Error,
 > {
-    let has_quote = request.clause_params.iter().any(|cp| cp.kind.is_quote());
     let empty_owners = BTreeMap::new();
     let empty_exprs = BTreeMap::new();
     let empty_defs = BTreeMap::new();
@@ -1800,7 +2262,10 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
                     return_bind: None,
                     return_binding: None,
                     modifiers: hir::item::FnModifiers {
-                        is_comptime: !has_quote,
+                        // Static requirement verification must inspect trait bounds
+                        // and predicates without invoking the comptime VM on open
+                        // rigid request parameters.
+                        is_comptime: false,
                         ..Default::default()
                     },
                     clause_params: target_clause_slice,
@@ -1925,7 +2390,10 @@ pub(super) fn generic_request_requirement_check_drafts<'h>(
                     return_bind: None,
                     return_binding: None,
                     modifiers: hir::item::FnModifiers {
-                        is_comptime: !has_quote,
+                        // Static requirement verification must inspect trait bounds
+                        // and predicates without invoking the comptime VM on open
+                        // rigid request parameters.
+                        is_comptime: false,
                         ..Default::default()
                     },
                     clause_params: caller_clause_slice,

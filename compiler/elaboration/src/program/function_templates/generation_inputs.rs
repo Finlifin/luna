@@ -216,11 +216,14 @@ pub(in crate::program) fn execution_draft<'h>(
     Ok(draft)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::program) fn input_group<'h>(
     source: &Package<'h>,
     arena: &'h HirArena,
     owner: OwnerId,
     execution: DefId,
+    definitions: &BTreeMap<DefId, DefId>,
+    exec_clause_args: &[(Ident, DefId)],
     arguments: &[Arg<'h>],
     extended: bool,
     span: rustc_span::Span,
@@ -233,7 +236,7 @@ pub(in crate::program) fn input_group<'h>(
         bindings: BTreeMap::new(),
         budget: *fuel,
         bodies: Vec::new(),
-        definitions: BTreeMap::new(),
+        definitions: definitions.clone(),
         captures: BTreeMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: None,
@@ -246,16 +249,34 @@ pub(in crate::program) fn input_group<'h>(
         kind: E::ResolvedDef {
             name: hir::Symbol::intern("$derive_execute"),
             def_id: execution,
-            has_clause_param: false,
+            has_clause_param: !exec_clause_args.is_empty(),
         },
     });
+    let callee = if exec_clause_args.is_empty() {
+        head
+    } else {
+        let mut clause_args = Vec::with_capacity(exec_clause_args.len());
+        for (index, (ident, def_id)) in exec_clause_args.iter().enumerate() {
+            let arg_expr = arena.alloc_expr(Expr {
+                hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(100 + index as u32)),
+                span: ident.span,
+                kind: E::ResolvedClauseParam(ident.name, *def_id),
+            });
+            clause_args.push(Arg::Positional(arg_expr));
+        }
+        arena.alloc_expr(Expr {
+            hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(99)),
+            span,
+            kind: E::NFApplication(head, arena.alloc_arg_slice(clause_args)),
+        })
+    };
     let call = arena.alloc_expr(Expr {
         hir_id: HirId::new(OwnerId::INVALID, hir::ItemLocalId::new(1)),
         span,
         kind: if extended {
-            E::ExtendedApplication(head, arena.alloc_arg_slice(arguments.to_vec()))
+            E::ExtendedApplication(callee, arena.alloc_arg_slice(arguments.to_vec()))
         } else {
-            E::Application(head, arena.alloc_arg_slice(arguments.to_vec()))
+            E::Application(callee, arena.alloc_arg_slice(arguments.to_vec()))
         },
     });
     let result = rebind.expr(call, 0);

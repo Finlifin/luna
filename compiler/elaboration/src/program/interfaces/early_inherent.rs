@@ -44,7 +44,10 @@ impl Checker<'_, '_> {
         result
     }
 
-    fn declared_nominal_receiver(&self, receiver: &Expr<'_>) -> Option<OwnerId> {
+    fn declared_nominal_receiver(&self, mut receiver: &Expr<'_>) -> Option<OwnerId> {
+        while let H::Cast(base, _) = receiver.kind {
+            receiver = base;
+        }
         let head = match receiver.kind {
             H::NFApplication(head, _) => head,
             _ => receiver,

@@ -1,0 +1,5 @@
+{-
+    Default derivation strategy marker consumed by the compiler's derivation
+    pre-expansion (`{ __flurry_derivation_default: bool }`).
+-}
+pub const default = { __flurry_derivation_default: true }

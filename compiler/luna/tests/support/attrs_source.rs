@@ -24,6 +24,8 @@ concat!(
     include_str!("../../../../library/attrs/mem_impl/volatile.fl"),
     "\n}} mod purity_impl { mod tiers {\n",
     include_str!("../../../../library/attrs/purity_impl/tiers.fl"),
+    "\n}} mod derivation_impl { mod markers {\n",
+    include_str!("../../../../library/attrs/derivation_impl/markers.fl"),
     "\n}}\n",
     include_str!("../../../../library/attrs/lib.fl"),
 )

@@ -136,6 +136,10 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         describe_input: bool,
     ) -> Result<CompletedType, Error> {
+        if let H::Cast(..) = &expr.kind {
+            let (base_ty, _) = self.resolve_type_annotation_with_views(expr)?;
+            return Ok(CompletedType::Identity(base_ty));
+        }
         if let H::DeliveredType(ty) = &expr.kind {
             return self
                 .delivered_type(expr.hir_id, ty, expr.span)

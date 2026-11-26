@@ -408,7 +408,9 @@ pub struct Protocols {
     pub host_copysign: Option<(DeclarationId, String)>,
     pub comptime_intrinsics: Vec<((DeclarationId, String), nir::intrinsics::Operation)>,
     pub host_intrinsics: Vec<((DeclarationId, String), nir::intrinsics::Operation)>,
+    pub clone: Option<DeclarationId>,
     pub copy: Option<DeclarationId>,
+    pub default_trait: Option<DeclarationId>,
     pub drop: Option<DeclarationId>,
     pub index: Option<DeclarationId>,
     pub index_mut: Option<DeclarationId>,
@@ -1088,6 +1090,9 @@ fn elaborate_in_mode(
         runtime_domains: BTreeMap::new(),
         global_runtime_origin_ids: std::collections::HashMap::new(),
         global_runtime_deliveries: BTreeMap::new(),
+        pending_const_addresses: Vec::new(),
+        pending_const_address_ids: std::collections::HashMap::new(),
+        pending_const_address_expectations: Vec::new(),
         local_runtime_origins: Default::default(),
         local_runtime_deliveries: BTreeMap::new(),
         local_write_versions: BTreeMap::new(),
@@ -1234,6 +1239,8 @@ fn elaborate_candidate<'a, 'h>(
                             | ItemKind::Struct(_)
                             | ItemKind::Enum(_)
                             | ItemKind::Impl(_)
+                            | ItemKind::Deriver(_)
+                            | ItemKind::Derive(_)
                             | ItemKind::Trait(_)
                             | ItemKind::EffectGroup(_)
                     ) || matches!(
@@ -1311,6 +1318,8 @@ fn elaborate_candidate<'a, 'h>(
                                 | ItemKind::TypeAlias(..)
                                 | ItemKind::Trait(_)
                                 | ItemKind::Impl(_)
+                                | ItemKind::Deriver(_)
+                                | ItemKind::Derive(_)
                         ) || !matches!(
                             unquoted,
                             hir::clause::ClauseParamKind::Positional(..)
@@ -1768,6 +1777,7 @@ fn elaborate_candidate<'a, 'h>(
     checker.finish_signature_refinements()?;
     checker.associated_signature_values.clear();
     checker.complete_associated_values()?;
+    checker.finish_pending_const_addresses()?;
     for (owner, info) in package.owners() {
         if matches!(
             info.node.expect_item().kind,
@@ -2850,7 +2860,7 @@ impl Checker<'_, '_> {
                                     return Ok(crate::derivation::Applicability::Rejected);
                                 };
                                 let goal = crate::ptc::Formula::from_predicate(&instantiated);
-                                match coherence_context.prove(goal, crate::ptc::Budget::default()) {
+                                match self.context.prove(goal, crate::ptc::Budget::default()) {
                                     crate::ptc::Outcome::Entailed(_) => {}
                                     crate::ptc::Outcome::NotEntailed(_)
                                     | crate::ptc::Outcome::IllFormed(_) => {
@@ -3912,6 +3922,15 @@ struct LocalRuntimeDelivery {
     checked_epoch: Option<(n::LocalId, u64)>,
 }
 
+struct PendingConstAddress {
+    id: nir::RuntimeId,
+    declaration: DeclarationId,
+    ref_span: Span,
+    inner_hir_id: hir::HirId,
+    inner_span: Span,
+    const_expr: n::Expr,
+}
+
 struct Checker<'a, 'h> {
     // Declaration authority only. Lexical premises never enter this shared root.
     declared_theory: crate::ptc::Context,
@@ -4142,6 +4161,9 @@ struct Checker<'a, 'h> {
     runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     global_runtime_origin_ids: std::collections::HashMap<GlobalRuntimeOrigin, nir::RuntimeId>,
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
+    pending_const_addresses: Vec<PendingConstAddress>,
+    pending_const_address_ids: std::collections::HashMap<(DeclarationId, Term), nir::RuntimeId>,
+    pending_const_address_expectations: Vec<(nir::RuntimeId, Term, Span)>,
     local_runtime_origins: runtime_origins::LocalOrigins,
     local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
     local_write_versions: BTreeMap<n::LocalId, u64>,

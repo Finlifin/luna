@@ -1844,7 +1844,7 @@ impl Checker<'_, '_> {
             // An unrelated open binder must not turn closed work abstract.
             let mut available_types: BTreeSet<_> = self
                 .signature_owner
-                .and_then(|owner| self.type_parameters.get(&owner))
+                .map(|owner| self.declaration_or_enclosing_impl_type_parameters(owner))
                 .into_iter()
                 .flatten()
                 .copied()
@@ -3052,7 +3052,9 @@ fn scope_for_required(
         protos.str(version);
     }
     for slot in [
+        protocols_cfg.clone,
         protocols_cfg.copy,
+        protocols_cfg.default_trait,
         protocols_cfg.drop,
         protocols_cfg.index,
         protocols_cfg.index_mut,

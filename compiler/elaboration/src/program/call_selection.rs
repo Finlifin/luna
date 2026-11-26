@@ -435,17 +435,21 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expr: &Expr<'_>,
         callee: n::Expr,
         args: &[Arg<'_>],
-        prefix: Vec<n::Expr>,
+        mut prefix: Vec<n::Expr>,
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        if prefix.is_empty()
+        let hoisted = if !callee.ty.is_comptime_callable() {
+            hoist_prefix_receiver_temps(&mut prefix)
+        } else {
+            Vec::new()
+        };
+        let result = if prefix.is_empty()
             || !matches!(
                 callee.kind,
                 K::PlannedFunctionInstance { .. } | K::ComptimeFunctionInstance { .. }
-            )
-        {
-            return self.finish_prepared_call(
+            ) {
+            self.finish_prepared_call(
                 expr,
                 callee,
                 args,
@@ -453,9 +457,22 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                 expected,
                 partial,
                 CallUse::Invocation,
-            );
+            )?
+        } else {
+            self.finish_planned_prefix_call(expr, callee, args, prefix, expected, partial)?
+        };
+        if hoisted.is_empty() {
+            Ok(result)
+        } else {
+            Ok(n::Expr {
+                ty: result.ty.clone(),
+                source: result.source,
+                kind: K::Block {
+                    statements: hoisted,
+                    result: Some(Box::new(result)),
+                },
+            })
         }
-        self.finish_planned_prefix_call(expr, callee, args, prefix, expected, partial)
     }
 
     #[inline(never)]
@@ -733,4 +750,40 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         };
         Some((impl_owner, clauses))
     }
+}
+
+fn hoist_prefix_receiver_temps(prefix: &mut [n::Expr]) -> Vec<n::Expr> {
+    let mut hoisted = Vec::new();
+    for item in prefix {
+        let should_hoist = matches!(
+            &item.kind,
+            K::Block {
+                statements,
+                result: Some(result),
+            } if !statements.is_empty()
+                && matches!(
+                    &result.kind,
+                    K::AddressOf(place) if matches!(place.kind, K::Local(_))
+                )
+        );
+        if !should_hoist {
+            continue;
+        }
+        let placeholder = n::Expr {
+            ty: item.ty.clone(),
+            source: item.source,
+            kind: K::Unit,
+        };
+        let block = std::mem::replace(item, placeholder);
+        let K::Block {
+            mut statements,
+            result: Some(result),
+        } = block.kind
+        else {
+            unreachable!()
+        };
+        hoisted.append(&mut statements);
+        *item = *result;
+    }
+    hoisted
 }

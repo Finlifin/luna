@@ -441,6 +441,15 @@ impl Checker<'_, '_> {
         // implementation; keep this index private until all checks succeed.
         let mut headers = Vec::new();
         let mut relationships = BTreeMap::new();
+        let saved_associated_initializers = self.associated_initializers.clone();
+        let outcome = (|| -> Result<
+            (
+                crate::implementation::Index,
+                crate::implementation::InherentIndex,
+                Vec<n::Implementation>,
+            ),
+            Error,
+        > {
         for (owner, info) in self.package.owners() {
             let item = info.node.expect_item();
             self.signature_owner = Some(owner);
@@ -501,6 +510,35 @@ impl Checker<'_, '_> {
                 .unwrap_or_default();
             let interface = instance.as_ref().map(|i| i.declaration);
             if let Some(interface) = interface {
+                if matches!(&item.kind, ItemKind::Impl(def) if def.generation_trait.is_some())
+                    && (Some(interface) == self.protocols.clone
+                        || Some(interface) == self.protocols.default_trait)
+                {
+                    let has_quote_param = matches!(
+                        &item.kind,
+                        ItemKind::Impl(def) if def.clause_params.iter().any(|cp| cp.kind.is_quote())
+                    ) || parameters.iter().any(|id| {
+                        self.trait_input_domain(*id)
+                            .is_some_and(|domain| matches!(domain, Term::Lift(_)))
+                    }) || {
+                        let mut found = false;
+                        for term in std::iter::once(&subject).chain(&interface_arguments) {
+                            if term_has_open_runtime_quote(term, &mut self.required_steps)
+                                .map_err(|msg| error(item.span, msg))?
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    };
+                    if has_quote_param {
+                        return Err(error(
+                            item.span,
+                            "derived Clone or Default implementation requires closed quote arguments and does not accept open runtime quote parameters",
+                        ));
+                    }
+                }
                 let contract = &traits[&interface];
                 if contract.comptime_only
                     && !matches!(&item.kind, ItemKind::Impl(def)
@@ -1279,7 +1317,7 @@ impl Checker<'_, '_> {
             });
         }
         self.prepare_complementary_associated(&implementations, &relationships)?;
-        let mut implementations = phase_contributions::merge(
+        let implementations = phase_contributions::merge(
             implementations,
             &relationships,
             &traits,
@@ -1567,10 +1605,96 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        self.implementation_index = index;
-        self.inherent_index = inherent_index;
-        Ok(implementations)
+        Ok((index, inherent_index, implementations))
+        })();
+        match outcome {
+            Ok((index, inherent_index, implementations)) => {
+                self.implementation_index = index;
+                self.inherent_index = inherent_index;
+                Ok(implementations)
+            }
+            Err(err) => {
+                self.associated_initializers = saved_associated_initializers;
+                Err(err)
+            }
+        }
     }
+}
+
+fn term_has_open_runtime_quote(term: &Term, fuel: &mut u64) -> Result<bool, String> {
+    let mut stack = vec![term];
+    while let Some(current) = stack.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| "type traversal budget exhausted".to_string())?;
+        match current {
+            Term::Rigid {
+                sort: Sort::Runtime,
+                ..
+            }
+            | Term::Bound {
+                sort: Sort::Runtime,
+                ..
+            } => return Ok(true),
+            Term::Nominal { arguments, .. }
+            | Term::NormalForm { arguments, .. }
+            | Term::Tuple(arguments)
+            | Term::TupleValue(arguments)
+            | Term::ClosureContextValue(arguments) => stack.extend(arguments),
+            Term::ErrorResult { errors, result } => {
+                stack.extend(errors);
+                stack.push(result);
+            }
+            Term::Optional(inner)
+            | Term::Pointer(inner)
+            | Term::Lift(inner)
+            | Term::ComptimeFunction(inner)
+            | Term::NormalFormFunction(inner, _)
+            | Term::UnsafeFunction(inner)
+            | Term::PureFunction(inner) => stack.push(inner),
+            Term::AssociatedType {
+                subject, arguments, ..
+            } => {
+                stack.push(subject);
+                stack.extend(arguments);
+            }
+            Term::Record(fields) | Term::RecordValue(fields) => {
+                stack.extend(fields.iter().map(|(_, ty)| ty));
+            }
+            Term::Function { parameters, result } => {
+                stack.extend(parameters.iter().map(|parameter| &parameter.ty));
+                stack.push(result);
+            }
+            Term::RuntimeField { base, .. } => stack.push(base),
+            Term::OptionalValue { ty, value } => {
+                stack.push(ty);
+                if let Some(value) = value {
+                    stack.push(value);
+                }
+            }
+            Term::ErrorValue { ty, label, value } => {
+                stack.push(ty);
+                if let Some(label) = label {
+                    stack.push(label);
+                }
+                stack.push(value);
+            }
+            Term::ListConcat { ty, parts }
+            | Term::NominalValue {
+                ty, fields: parts, ..
+            }
+            | Term::ClosureValue {
+                ty,
+                captures: parts,
+                ..
+            } => {
+                stack.push(ty);
+                stack.extend(parts);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 /// Covariant method-level purity widening: a `pure fn` implementation method
@@ -2650,10 +2774,31 @@ impl Checker<'_, '_> {
                         kind: K::NewtypeConvert(Box::new(receiver)),
                     };
                     let adapted = if matches!(&target, Term::Pointer(inner) if **inner == view_ty) {
+                        let binding = self.spread_binding(base.span)?;
+                        self.locals.insert(binding, view_ty.clone());
+                        self.immutable.insert(binding);
                         n::Expr {
                             ty: target.clone(),
                             source: source(base.span),
-                            kind: K::AddressOf(Box::new(converted)),
+                            kind: K::Block {
+                                statements: vec![n::Expr {
+                                    ty: p(P::Void),
+                                    source: source(base.span),
+                                    kind: K::Let {
+                                        binding,
+                                        value: Box::new(converted),
+                                    },
+                                }],
+                                result: Some(Box::new(n::Expr {
+                                    ty: target.clone(),
+                                    source: source(base.span),
+                                    kind: K::AddressOf(Box::new(n::Expr {
+                                        ty: view_ty.clone(),
+                                        source: source(base.span),
+                                        kind: K::Local(binding),
+                                    })),
+                                })),
+                            },
                         }
                     } else {
                         converted

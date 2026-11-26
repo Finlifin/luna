@@ -17,7 +17,7 @@
 - `attrs.effects.direct_passing`：产生 `{ __flurry_direct_passing: true }`，供直接传递效应声明检查消费。
 - `attrs.purity.{p0, p1, p2, p3, p4, p5}`：产生 `{ __flurry_purity: .p0 }`..`{ __flurry_purity: .p5 }`，用于为运行时函数声明最低纯度层级（P0 一般行为、P1 有界状态变更、P2 观测只读、P3 稳定观测、P4 值纯、P5 总值纯／有限完成且无 trap），不允许以 definition configuration 形式附着，并由编译器在编译期核验。
 - `attrs.quote_fn_template.{for_match_arms, allow_non_exhaustive_instance}`：分别产生 `{ __flurry_quote_fn_template_for_match_arms: true }` 与 `{ __flurry_quote_fn_template_allow_non_exhaustive_instance: true }`，标记用于 `match` `use` 规则接入的无体 `template quote fn` 声明及其单臂非穷尽许可。
-- `attrs.derivation`：编译器已消费 `{ __flurry_derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
+- `attrs.derivation.default`：产生 `{ __flurry_derivation_default: true }`，标记可在无 `.use(...)` 时参与可见默认策略选择的 `derive fn`。
 
 Object 通过 `meta.Object` 导入，attrs 不重复建立原始 builtin 绑定。
 meta 的基础域绑定与集合操作分开；属性消费者仍通过普通包依赖取得同一域。

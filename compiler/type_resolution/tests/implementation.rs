@@ -340,7 +340,7 @@ fn associated_type_queries_do_not_claim_structural_precision_or_ownership() {
         Key::from_type(&projection, Budget::default())
             .unwrap()
             .precision(),
-        0
+        (0, 0)
     );
     let mut declaration = head(200, projection.clone());
     declaration.interface = Some(Id {
@@ -362,7 +362,7 @@ fn associated_type_queries_do_not_claim_structural_precision_or_ownership() {
         Key::from_type(&outer, Budget::default())
             .unwrap()
             .precision(),
-        0
+        (0, 0)
     );
     let wide = Term::AssociatedType {
         origin: Box::new(nir::AssociatedTypeOrigin {
@@ -395,13 +395,16 @@ fn uniform_precision_stops_at_the_shallowest_unknown_branch() {
     let u = var(2);
     let int = ty(P::I32);
     for (term, expected) in [
-        (t.clone(), 0),
-        (node(10, vec![t.clone()]), 1),
-        (node(10, vec![node(11, vec![t.clone(), u.clone()])]), 2),
-        (node(10, vec![node(11, vec![int.clone(), ty(P::U32)])]), 3),
-        (node(11, vec![node(10, vec![t.clone()]), u]), 1),
-        (node(11, vec![node(10, vec![t.clone()]), int]), 2),
-        (node(11, vec![t.clone(), t]), 1),
+        (t.clone(), (0, 0)),
+        (node(10, vec![t.clone()]), (1, 0)),
+        (node(10, vec![node(11, vec![t.clone(), u.clone()])]), (2, 0)),
+        (
+            node(10, vec![node(11, vec![int.clone(), ty(P::U32)])]),
+            (3, 0),
+        ),
+        (node(11, vec![node(10, vec![t.clone()]), u]), (1, 0)),
+        (node(11, vec![node(10, vec![t.clone()]), int]), (2, 0)),
+        (node(11, vec![t.clone(), t]), (1, 0)),
     ] {
         assert_eq!(
             Key::from_type(&term, Budget::default())
@@ -410,6 +413,86 @@ fn uniform_precision_stops_at_the_shallowest_unknown_branch() {
             expected
         );
     }
+}
+
+#[test]
+fn concrete_assigned_precision_orders_same_depth_heads_and_allows_coexistence() {
+    use type_resolution::{implementation::PairAssessment, ptc::Context};
+    let t = var(1);
+    let a = var(2);
+    let alloc = var(3);
+    let closed_type = node(20, vec![]);
+    let closed_runtime = Term::Runtime(nir::RuntimeId {
+        instance: 30,
+        local: 0,
+    });
+
+    let open_vec = node(10, vec![t.clone(), a, alloc]);
+    let partially_assigned_vec = node(10, vec![t.clone(), var(4), closed_runtime.clone()]);
+    let closed_quote_vec = node(10, vec![t, closed_type.clone(), closed_runtime.clone()]);
+    let concrete_vec = node(10, vec![ty(P::Bool), closed_type, closed_runtime]);
+
+    assert_eq!(
+        Key::from_type(&open_vec, Budget::default())
+            .unwrap()
+            .precision(),
+        (1, 0)
+    );
+    assert_eq!(
+        Key::from_type(&partially_assigned_vec, Budget::default())
+            .unwrap()
+            .precision(),
+        (1, 1)
+    );
+    assert_eq!(
+        Key::from_type(&closed_quote_vec, Budget::default())
+            .unwrap()
+            .precision(),
+        (1, 2)
+    );
+    assert_eq!(
+        Key::from_type(&concrete_vec, Budget::default())
+            .unwrap()
+            .precision(),
+        (2, 0)
+    );
+
+    let mut index = Index::default();
+    let mut low = head(200, open_vec);
+    low.type_parameters = vec![id(1), id(2), id(3)];
+    let mut high = head(201, closed_quote_vec);
+    high.type_parameters = vec![id(1)];
+    index.insert(low, Budget::default()).unwrap();
+    index.insert(high, Budget::default()).unwrap();
+
+    let context = Context::default();
+    let report = index.check_type_coherence(&context, Budget::default());
+    assert!(report.is_proved(), "{report}");
+    assert!(matches!(
+        report.pairs[0].2,
+        PairAssessment::OrderedPrecision {
+            left: (1, 0),
+            right: (1, 2)
+        }
+    ));
+    assert!(index.verify_type_coherence(&report, &context, Budget::default()));
+
+    let candidates = index
+        .candidates(Some(id(100)), &[], &concrete_vec, Budget::default())
+        .unwrap();
+    assert_eq!(candidates.declarations(), &[id(201), id(200)]);
+    assert_eq!(
+        index.select(&candidates, |_| A::Applicable),
+        Selection::Selected(id(201))
+    );
+    assert_eq!(
+        index.select(&candidates, |head| if head.declaration == id(201) {
+            A::Excluded
+        } else {
+            A::Applicable
+        }),
+        Selection::Selected(id(200))
+    );
 }
 
 #[test]
@@ -3261,7 +3344,7 @@ fn optional_candidates_preserve_payload_inference_and_distinct_outer_heads() {
         Key::from_type(&opaque, Budget::default())
             .unwrap()
             .precision(),
-        0
+        (0, 0)
     );
     let mut generic = head(200, optional(var(1)));
     generic.type_parameters = vec![id(1)];
@@ -3339,7 +3422,7 @@ fn optional_value_indices_infer_type_leaves_and_replay_presence() {
         Key::from_type(&wrap(Some(Box::new(var(1)))), Budget::default())
             .unwrap()
             .precision(),
-        0
+        (0, 0)
     );
 }
 

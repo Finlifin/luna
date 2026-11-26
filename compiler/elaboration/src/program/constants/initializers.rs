@@ -70,6 +70,35 @@ impl Checker<'_, '_> {
         Ok(static_def)
     }
 
+    /// Return the enclosing `impl` owner when `owner` is a member constant
+    /// inside an implementation block so generic `impl` clause parameters and
+    /// capabilities remain visible during initializer checking.
+    pub(in crate::program) fn enclosing_impl_owner(&self, owner: OwnerId) -> Option<OwnerId> {
+        self.self_containers
+            .get(&owner)
+            .copied()
+            .filter(|container| {
+                matches!(
+                    self.package.item(*container).map(|item| &item.kind),
+                    Some(ItemKind::Impl(_))
+                )
+            })
+    }
+
+    pub(in crate::program) fn declaration_or_enclosing_impl_type_parameters(
+        &self,
+        owner: OwnerId,
+    ) -> &[DeclarationId] {
+        self.type_parameters
+            .get(&owner)
+            .or_else(|| {
+                self.enclosing_impl_owner(owner)
+                    .and_then(|impl_owner| self.type_parameters.get(&impl_owner))
+            })
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     pub(in crate::program) fn constant_value(
         &mut self,
         owner: OwnerId,
@@ -122,6 +151,7 @@ impl Checker<'_, '_> {
                 this.context = this
                     .initializer_implementation()
                     .and_then(|implementation| this.associated_owner(implementation.declaration))
+                    .or_else(|| this.enclosing_impl_owner(owner))
                     .map(|implementation| this.definition_context(implementation))
                     .unwrap_or_else(|| this.nominal_context());
                 this.materialize_initializer(owner, span)

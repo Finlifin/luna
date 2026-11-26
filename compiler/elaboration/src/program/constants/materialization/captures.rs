@@ -35,7 +35,7 @@ impl Checker<'_, '_> {
     ) -> Result<BTreeSet<DeclarationId>, Error> {
         let mut type_scope: BTreeSet<_> = self
             .signature_owner
-            .and_then(|owner| self.type_parameters.get(&owner))
+            .map(|owner| self.declaration_or_enclosing_impl_type_parameters(owner))
             .into_iter()
             .flat_map(|parameters| self.input_binders(parameters))
             .filter(|parameter| parameter.sort == Sort::Type)

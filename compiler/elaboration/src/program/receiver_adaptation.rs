@@ -391,6 +391,8 @@ impl Checker<'_, '_> {
         view: &Term,
         span: Span,
     ) -> Result<(), Error> {
+        self.ensure_nominal_type(base, span)?;
+        self.ensure_nominal_type(view, span)?;
         let frames = self.call_input_frames();
         let fuel_limit = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = fuel_limit;
@@ -452,13 +454,56 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn receiver_type_views(&self, expr: &Expr<'_>) -> Vec<Term> {
-        let binding = match expr.kind {
+        let mut cursor = expr;
+        let mut deref = false;
+        if let H::Deref(inner) = cursor.kind {
+            deref = true;
+            cursor = inner;
+        }
+        let binding = match cursor.kind {
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => Some(local(id)),
+            H::SelfValue => self.self_param_local(cursor.hir_id.owner),
             _ => None,
         };
-        binding
-            .and_then(|id| self.local_type_views.get(&id))
+        let Some(id) = binding else {
+            return Vec::new();
+        };
+        let is_ref_self =
+            matches!(cursor.kind, H::SelfValue) && self.self_param_is_ref(cursor.hir_id.owner);
+        if is_ref_self != deref {
+            return Vec::new();
+        }
+        self.local_type_views
+            .get(&id)
             .map(|views| views.iter().rev().cloned().collect())
             .unwrap_or_default()
+    }
+
+    fn self_param_local(&self, owner: OwnerId) -> Option<n::LocalId> {
+        let item = self.package.item(owner)?;
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &item.kind
+        else {
+            return None;
+        };
+        let param = sig
+            .params
+            .first()
+            .filter(|p| matches!(p.ty.kind, TyParamKind::Itself { .. }))?;
+        Some(local(param.hir_id))
+    }
+
+    fn self_param_is_ref(&self, owner: OwnerId) -> bool {
+        let Some(item) = self.package.item(owner) else {
+            return false;
+        };
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &item.kind
+        else {
+            return false;
+        };
+        sig.params
+            .first()
+            .is_some_and(|p| matches!(p.ty.kind, TyParamKind::Itself { is_ref: true }))
     }
 }
