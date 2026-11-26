@@ -1,3 +1,4 @@
+mod atomics;
 mod attributes;
 mod bfloat;
 mod bits;
@@ -2452,6 +2453,13 @@ impl Emitter<'_> {
         if checked.operation().is_memory() {
             let result_ty = repr(self.graph, &expr.ty, self.checked)?;
             return self.memory_intrinsic(checked.operation(), &values, result_ty);
+        }
+        if checked.operation().is_atomic() {
+            let result_ty = repr(self.graph, &expr.ty, self.checked)?;
+            return self.atomic_intrinsic(checked.operation(), &values, result_ty);
+        }
+        if checked.operation().is_control_runtime() {
+            return self.control_runtime_intrinsic(checked.operation(), &values, expr.source);
         }
         let width = checked
             .validate_target_layout(self.graph.target)

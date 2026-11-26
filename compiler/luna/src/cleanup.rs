@@ -1369,6 +1369,7 @@ fn prepare_source_impl(
                                 Some((condition.source, Boundary::PredicateFailure))
                             }
                             K::Call { .. }
+                            | K::Intrinsic { .. }
                             | K::EffectRequest {
                                 abi: nir::effects::Abi::Direct,
                                 ..
