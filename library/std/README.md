@@ -11,7 +11,10 @@
 | `std.fmt` | 泛型 allocator 化的 `format<.A, .allocator>`、`format_debug<.A, .allocator>`、`format_into`、`write_fmt<W :- ByteWriter>`、`comptime_format`、`print`/`println`、`eprint`/`eprintln`、`{}`/`{key: value, ...}`（runtime `Display` 与 comptime `ComptimeDisplay`）与 `{format: .debug, ...}`（`Debug`，含基础类型、`Symbol`、容器与错误类型） |
 | `std.fs` | 仿射 `File`、打开/创建、读写（`Reader`/`Write`/`ByteWriter` 与固有 `read_byte`/`write_bytes`/`write_string`）、显式关闭、`Drop`、删除文件及一次性辅助 `read`/`read_to_string`/`write_str`/`write_bytes` |
 | `std.time` | `Duration`（`ZERO`、`NANOS_PER_SEC` 等常量、纳秒归一化、`checked_*`/`saturating_*` 运算与 `Copy`/`Clone`/`Eq`/`Ord`/`Hash`/`Debug`） |
-| `std.process` | `id()`、`ExitCode`（`SUCCESS`/`FAILURE`/`from_u8`/`as_u8`/`is_success` 及 `Copy`/`Clone`/`Eq`/`Debug`） |
+| `std.process` | `id()`、`ExitCode`（`SUCCESS`/`FAILURE`/`from_u8`/`as_u8`/`is_success` 及 `Copy`/`Clone`/`Eq`/`Debug`）、`CallerLocation`、`PanicStrategy`、`PanicInfo`、`set_panic_hook`、`panic`（unwind 策略，`CallerLocation` 隐式参数等待 `03` 接线）、`abort` |
+| `std.sync` | `Send`/`Sync`、`atomics`（`AtomicOrdering`、`CompareExchangeErr<T>`、`AtomicScalar`、`Atomic<T>`、`AtomicPtr<T>`、`fence`/`compiler_fence`、`AtomicBool`..`AtomicUsize`，同步直接从 `std.sync` 重导出）、锁与同步原语（`TryLockErr`、`PoisonErr<G>`、`Mutex`/`MutexGuard`、`RwLock`/guards、`Condvar`/`WaitTimeoutResult`、`OnceLock`/`OnceInitErr`、`LazyLock`、`Barrier`/`BarrierWaitResult`、`Semaphore`/`SemaphorePermit`）、allocator 参数化通道（`mpsc`/`mpmc`/`oneshot`/`broadcast`）与 `thread`（`ThreadId`/`Thread`/`ThreadBuilder`/`ThreadJoinHandle`/`ScopedJoinHandle`/`ThreadScope`/`spawn`/`scope` 等） |
+| `std.runtime` | `TypedContinuation<Y, B>`（`Once`、`!Send`/`!Sync`）、地址稳定栈池（`StackPoolErr`、`StackSlot`、`StackPool`、`BoundedStackPool<slot_bytes, .A, .allocator>`、`GuardedStackPool<.A, .allocator>`）、任务与结构化并发（`TaskId`、`CancelErr`、`TaskErr`、`RuntimeErr`、`FutureState`、`TaskContext`、`CancelToken`、`Future`/`JoinHandle`/`TaskScope`/`AsyncCore`/`Select2`、`scoped`/`yield_now`/`sleep`/`join_pair`/`select_pair`/`race_pair`/`timeout`） |
+| `std.net` | `AddrParseErr`、`NetErr`、`Shutdown`、`Ipv4Addr`、`Ipv6Addr`、`IpAddr`、`SocketAddrV4`、`SocketAddrV6`、`SocketAddr`、`ToSocketAddrs`（allocator 参数化）、`TcpListener`/`TcpStream`/`UdpSocket`/`UnixListener`/`UnixStream`/`Incoming`（使用 `Slice<u8>`，无 `MutSlice`；`Reader`/`Write`/`Drop`；`NetIoWait` async effect bridge） |
 | `std.mem` | `AllocErr`/`ReallocErr`、`RawBlock`、`Allocator`、`SystemAllocator`（`GLOBAL`）、`DefaultAllocator`、`FixedBufferAllocator`、`ArenaAllocator`、`Box<T, .A, .allocator>` 与 `Layout` |
 | `std.os.linux` | 原始系统调用包装，负 errno 结果 |
 | `std.os.unix` | Linux 上的错误转换、EINTR 重试、EOF 转换与原始缓冲区读写 |
@@ -39,11 +42,9 @@ IEEE 浮点支持 runtime 的最短往返十进制与固定 `precision`/`sign`/�
 `Display` 选项字符串原样传给具体类型的实现自行解析。详见
 [`fmt_impl/README.md`](fmt_impl/README.md)。
 
-静态文本字面量仍为 `str`；`std.fs.File.open`/`create`/`write_all` 的路径与字面量参数使用 comptime `str` 子句，而 `Writer`/`File` 的 `write_bytes`/`write_string`、`std.os.unix.write_raw`/`read_raw` 与 `std.string.String` 已支持运行时字节序列与拥有型文本。其它 Unix 平台、`process`、`time` 与 `sync` 仍未实现。`Layout` 不执行分配。
+静态文本字面量仍为 `str`；`std.fs.File.open`/`create`/`write_all` 的路径与字面量参数使用 comptime `str` 子句，而 `Writer`/`File` 的 `write_bytes`/`write_string`、`std.os.unix.write_raw`/`read_raw` 与 `std.string.String` 已支持运行时字节序列与拥有型文本。其它 Unix 平台实现（macOS/Windows）、OS 线程/socket/futex 系统调用后端及 `CallerLocation` 隐式参数与 `async` handler 降码仍待后续分支集成。`Layout` 不执行分配。
 
-公开模块在 `lib.fl` 组织；实现分别放在 `io_impl`、`fmt_impl`、`fs_impl`、
-`mem_impl` 与 `platform`。这避免把包内实现模块误当成公开路径，也避免内联
-模块与同名自动目录模块冲突。
+公开模块在 `lib.fl` 组织；实现分别放在 `collections_impl`、`fmt_impl`、`fs_impl`、`hash_impl`、`io_impl`、`mem_impl`、`net_impl`、`platform`、`process_impl`、`runtime_impl`、`string_impl`、`sync_impl` 与 `time_impl`。这避免把包内实现模块误当成公开路径，也避免内联模块与同名自动目录模块冲突。
 
 演示入口：在仓库根目录执行 `python3 -B development/demo_println.py`。
 此入口编译并运行 Linux 原生的异构变参演示。源码见

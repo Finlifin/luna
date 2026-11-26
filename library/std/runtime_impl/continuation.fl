@@ -1,0 +1,63 @@
+use process_impl.process.panic;
+
+{-
+    Typed delimited continuation wrapper `TypedContinuation<Y, B>`.
+
+    `TypedContinuation<Y, B>` is affine (`Once`) and intentionally does NOT
+    implement `Copy`, `Clone`, `Send`, or `Sync` (a captured continuation must
+    be consumed at most once on its origin thread).
+
+    HOOK(@llvm-effects #17): `builtin.Continuation` primitive exists at `HEAD`, while
+    Commit 3 intrinsics (`host-intrinsic.continuation_resume_raw(k, arg_addr, out_addr) -> usize`,
+    `host-intrinsic.continuation_abort_raw(k) -> ()`,
+    `host-intrinsic.continuation_crosses_c_frame(*k) -> bool`,
+    `host-intrinsic.continuation_origin_thread_id(*k) -> u64`) and `builtin.mem.MaybeUninit`
+    (`08-library`) are not yet merged. Those leaf calls are clearly marked below.
+-}
+pub struct TypedContinuation
+where
+    Y: Type,
+    B: Type,
+{
+    inner: builtin.Continuation,
+}
+
+impl TypedContinuation<Y, B>
+where
+    Y: Type,
+    B: Type,
+{
+    pub unsafe fn from_raw(inner: builtin.Continuation) -> Self {
+        TypedContinuation<Y, B> { inner: inner }
+    }
+
+    pub fn into_raw(self) -> builtin.Continuation {
+        self.inner
+    }
+
+    pub fn crosses_c_frame(*self) -> bool {
+        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_crosses_c_frame(self.inner.ref)`.
+        false
+    }
+
+    pub fn origin_thread_id(*self) -> u64 {
+        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_origin_thread_id(self.inner.ref)`.
+        0
+    }
+
+    pub fn resume_with(self, value: Y) -> B {
+        let _ = self.inner;
+        let _ = value;
+        -- HOOK(@llvm-effects #17) & TODO(08-library): allocate `out_slot: MaybeUninit<B>`,
+        -- call `host-intrinsic.continuation_resume_raw(k, in_addr, out_addr)`, panic on non-zero control word,
+        -- and return `out_slot.assume_init()`.
+        panic("TypedContinuation.resume_with awaits @llvm-effects continuation runtime")
+    }
+
+    pub fn abort(self) {
+        let _ = self.inner;
+        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_abort_raw(self.into_raw())`
+        -- to unwind along the hidden abort channel and trap if crossing `^attrs.abi(.c)`.
+        panic("TypedContinuation.abort awaits @llvm-effects continuation runtime")
+    }
+}

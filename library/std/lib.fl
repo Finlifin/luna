@@ -7,9 +7,12 @@ use fs_impl.file;
 use hash_impl.sip;
 use io_impl.{buffered, errors, reader, writer}
 use mem_impl.{allocator, arena, boxed, layout}
+use net_impl.{addr as net_addr, socket as net_socket}
 use platform.{linux as linux_impl, unix as unix_impl}
 use process_impl.process as process_mod;
+use runtime_impl.{continuation as runtime_cont, stack_pool as runtime_pool, task as runtime_task}
 use string_impl.string as string_mod;
+use sync_impl.{atomics as sync_atomics, channel as sync_channel_impl, locks as sync_locks, marker as sync_marker, thread as sync_thread}
 use time_impl.duration;
 
 pub mod os {
@@ -116,6 +119,219 @@ pub mod fmt {
     pub use builtin.fmt.{Debug, Display, FormatOptions, options}
     pub use meta.ComptimeDisplay;
     pub use parse.{ComptimeParse, FormatErr, FormatKind, FormatPiece, FormatPlan, Parse}
+}
+
+pub mod sync {
+    pub use sync_marker.{Send, Sync}
+    pub use sync_locks.{
+        Barrier,
+        BarrierWaitResult,
+        Condvar,
+        LazyLock,
+        Mutex,
+        MutexGuard,
+        OnceInitErr,
+        OnceLock,
+        PoisonErr,
+        RwLock,
+        RwLockReadGuard,
+        RwLockWriteGuard,
+        Semaphore,
+        SemaphorePermit,
+        TryLockErr,
+        WaitTimeoutResult,
+    }
+    pub use sync_channel_impl.{
+        BroadcastReceiver,
+        BroadcastSender,
+        MpmcReceiver,
+        MpmcSender,
+        MpscReceiver,
+        MpscSender,
+        OneshotReceiver,
+        OneshotSender,
+        RecvErr,
+        RecvTimeoutErr,
+        SendErr,
+        TryRecvErr,
+        TrySendErr,
+        broadcast_channel,
+        mpmc_channel,
+        mpsc_channel,
+        mpsc_sync_channel,
+        oneshot_channel,
+    }
+
+    pub use sync_atomics.{
+        Atomic,
+        AtomicBool,
+        AtomicI16,
+        AtomicI32,
+        AtomicI64,
+        AtomicI8,
+        AtomicIsize,
+        AtomicOrdering,
+        AtomicPtr,
+        AtomicScalar,
+        AtomicU16,
+        AtomicU32,
+        AtomicU64,
+        AtomicU8,
+        AtomicUsize,
+        CompareExchangeErr,
+        compiler_fence,
+        fence,
+        is_atomic_int,
+        is_atomic_scalar,
+    }
+
+    pub mod atomics {
+        pub use sync_atomics.{
+            Atomic,
+            AtomicBool,
+            AtomicI16,
+            AtomicI32,
+            AtomicI64,
+            AtomicI8,
+            AtomicIsize,
+            AtomicOrdering,
+            AtomicPtr,
+            AtomicScalar,
+            AtomicU16,
+            AtomicU32,
+            AtomicU64,
+            AtomicU8,
+            AtomicUsize,
+            CompareExchangeErr,
+            compiler_fence,
+            fence,
+            is_atomic_int,
+            is_atomic_scalar,
+        }
+    }
+
+    pub mod mpsc {
+        pub use sync_channel_impl.{
+            MpscReceiver as Receiver,
+            MpscSender as Sender,
+            RecvErr,
+            RecvTimeoutErr,
+            SendErr,
+            TryRecvErr,
+            TrySendErr,
+            mpsc_channel as channel,
+            mpsc_sync_channel as sync_channel,
+        }
+    }
+
+    pub mod mpmc {
+        pub use sync_channel_impl.{
+            MpmcReceiver as Receiver,
+            MpmcSender as Sender,
+            RecvErr,
+            SendErr,
+            TryRecvErr,
+            TrySendErr,
+            mpmc_channel as channel,
+        }
+    }
+
+    pub mod oneshot {
+        pub use sync_channel_impl.{
+            OneshotReceiver as Receiver,
+            OneshotSender as Sender,
+            RecvErr,
+            SendErr,
+            TryRecvErr,
+            oneshot_channel as channel,
+        }
+    }
+
+    pub mod broadcast {
+        pub use sync_channel_impl.{
+            BroadcastReceiver as Receiver,
+            BroadcastSender as Sender,
+            RecvErr,
+            SendErr,
+            TryRecvErr,
+            broadcast_channel as channel,
+        }
+    }
+
+    pub mod thread {
+        pub use sync_thread.{
+            ScopedJoinHandle,
+            Thread,
+            ThreadBuilder,
+            ThreadId,
+            ThreadJoinHandle,
+            ThreadScope,
+            available_parallelism,
+            current,
+            park,
+            park_timeout,
+            scope,
+            sleep,
+            spawn,
+            yield_now,
+        }
+    }
+}
+
+pub mod runtime {
+    pub use runtime_cont.TypedContinuation;
+    pub use runtime_pool.{
+        BoundedStackPool,
+        GuardedStackPool,
+        StackPool,
+        StackPoolErr,
+        StackSlot,
+    }
+    pub use runtime_task.{
+        AsyncCore,
+        CancelErr,
+        CancelToken,
+        Future,
+        FutureState,
+        JoinHandle,
+        RuntimeErr,
+        Select2,
+        TaskContext,
+        TaskErr,
+        TaskId,
+        TaskScope,
+        join_pair,
+        race_pair,
+        scoped,
+        select_pair,
+        sleep,
+        timeout,
+        yield_now,
+    }
+}
+
+pub mod net {
+    pub use net_addr.{
+        AddrParseErr,
+        IpAddr,
+        Ipv4Addr,
+        Ipv6Addr,
+        NetErr,
+        Shutdown,
+        SocketAddr,
+        SocketAddrV4,
+        SocketAddrV6,
+        ToSocketAddrs,
+    }
+    pub use net_socket.{
+        Incoming,
+        NetIoWait,
+        TcpListener,
+        TcpStream,
+        UdpSocket,
+        UnixListener,
+        UnixStream,
+    }
 }
 
 pub mod prelude {

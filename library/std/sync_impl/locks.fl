@@ -1,0 +1,1064 @@
+use builtin.fmt.{ByteWriter, Debug}
+use process_impl.process.panic;
+use sync_impl.atomics.{AtomicBool, AtomicOrdering, AtomicU32, AtomicU8, AtomicUsize}
+use sync_impl.marker.{Send, Sync}
+use time_impl.duration.Duration;
+
+{-
+    Synchronization primitives:
+    - `TryLockErr`, `PoisonErr<G>` (OQ-08-04: poisoning enabled on Mutex & RwLock)
+    - `Mutex<T>`, `MutexGuard<T>`
+    - `RwLock<T>`, `RwLockReadGuard<T>`, `RwLockWriteGuard<T>`
+    - `Condvar`, `WaitTimeoutResult`
+    - `OnceLock<T>`, `OnceInitErr<T>`, `LazyLock<T, c>`
+    - `Barrier`, `BarrierWaitResult`
+    - `Semaphore`, `SemaphorePermit`
+
+    HOOK(@llvm-effects): OS futex wait/wake and panic-unwind detection in guard
+    `Drop` await `@llvm-effects` runtime intrinsics.
+-}
+pub enum TryLockErr {
+    WouldBlock,
+    Poisoned,
+}
+
+impl Clone for TryLockErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .WouldBlock => .WouldBlock,
+            .Poisoned => .Poisoned,
+        }
+    }
+}
+
+impl Copy for TryLockErr {}
+
+impl Eq for TryLockErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .WouldBlock =>
+                other.* match {
+                    .WouldBlock => true,
+                    .Poisoned => false,
+                },
+            .Poisoned =>
+                other.* match {
+                    .WouldBlock => false,
+                    .Poisoned => true,
+                },
+        }
+    }
+}
+
+impl Debug for TryLockErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .WouldBlock => output.write_str("TryLockErr.WouldBlock"),
+            .Poisoned => output.write_str("TryLockErr.Poisoned"),
+        }
+    }
+}
+
+impl Send for TryLockErr {}
+impl Sync for TryLockErr {}
+
+pub struct PoisonErr
+where
+    G: Type,
+{
+    guard: G,
+}
+
+impl PoisonErr<G>
+where
+    G: Type,
+{
+    pub fn new(guard: G) -> Self {
+        PoisonErr<G> { guard: guard }
+    }
+
+    pub fn into_inner(self) -> G {
+        self.guard
+    }
+
+    pub fn get_ref(*self) -> *G {
+        self.guard
+    }
+}
+
+impl Debug for PoisonErr<G>
+where
+    G: Type,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("PoisonErr { .. }")
+    }
+}
+
+impl Send for PoisonErr<G> where G :- Send {}
+impl Sync for PoisonErr<G> where G :- Sync {}
+
+-- ── Mutex & MutexGuard ───────────────────────────────────────────────────────
+
+-- state: 0 = unlocked, 1 = locked
+pub struct Mutex
+where
+    T: Type,
+    requires T :- Send,
+{
+    state: AtomicU32,
+    poisoned: AtomicBool,
+    data: T,
+}
+
+-- Affine (`Once`); intentionally does NOT implement Copy, Clone, Send, or Sync.
+pub struct MutexGuard
+where
+    T: Type,
+    requires T :- Send,
+{
+    lock: *Mutex<T>,
+}
+
+impl Mutex<T>
+where
+    T: Type,
+    requires T :- Send,
+{
+    pub fn new(value: T) -> Self {
+        Mutex<T> {
+            state: AtomicU32.new(0),
+            poisoned: AtomicBool.new(false),
+            data: value,
+        }
+    }
+
+    pub fn try_lock(*self) -> !TryLockErr MutexGuard<T> {
+        self.state.compare_exchange(
+            0,
+            1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                if self.poisoned.load(AtomicOrdering.acquire) {
+                    self.state.store(0, AtomicOrdering.release);
+                    return error TryLockErr.Poisoned;
+                }
+                MutexGuard<T> { lock: self }
+            },
+            error _ => error TryLockErr.WouldBlock,
+        }
+    }
+
+    pub fn lock(*self) -> !PoisonErr<MutexGuard<T>> MutexGuard<T> {
+        while true {
+            self.state.compare_exchange_weak(
+                0,
+                1,
+                AtomicOrdering.acquire,
+                AtomicOrdering.relaxed,
+            ) match {
+                _! => {
+                    let guard = MutexGuard<T> { lock: self };
+                    if self.poisoned.load(AtomicOrdering.acquire) {
+                        return error PoisonErr<MutexGuard<T>>.new(guard);
+                    }
+                    return guard;
+                },
+                error _ => {
+                    -- HOOK(@llvm-effects): futex_wait on `self.state` when contended.
+                },
+            }
+        }
+        error PoisonErr<MutexGuard<T>>.new(MutexGuard<T> { lock: self })
+    }
+
+    pub fn is_poisoned(*self) -> bool {
+        self.poisoned.load(AtomicOrdering.acquire)
+    }
+
+    pub fn clear_poison(*self) {
+        self.poisoned.store(false, AtomicOrdering.release);
+    }
+
+    pub fn into_inner(self) -> !PoisonErr<T> T {
+        if self.poisoned.load(AtomicOrdering.acquire) {
+            error PoisonErr<T>.new(self.data)
+        } else {
+            self.data
+        }
+    }
+
+    pub fn get_mut(*self) -> !PoisonErr<*T> *T {
+        if self.poisoned.load(AtomicOrdering.acquire) {
+            error PoisonErr<*T>.new(self.data)
+        } else {
+            self.data
+        }
+    }
+
+    pub fn mark_poisoned(*self) {
+        self.poisoned.store(true, AtomicOrdering.release);
+    }
+
+    pub fn unlock_raw(*self) {
+        self.state.store(0, AtomicOrdering.release);
+        -- HOOK(@llvm-effects): futex_wake on `self.state`.
+    }
+}
+
+impl MutexGuard<T>
+where
+    T: Type,
+    requires T :- Send,
+{
+    pub fn as_ptr(*self) -> *T {
+        let lock_ptr = self.lock.*;
+        lock_ptr.data
+    }
+
+    pub fn with_ref(*self, f: %c fn(*T) -> R) -> R
+    where
+        R: Type,
+        c: Type.vars.Closure,
+    {
+        let lock_ptr = self.lock.*;
+        f(lock_ptr.data)
+    }
+}
+
+impl Drop for MutexGuard<T>
+where
+    T: Type,
+    requires T :- Send,
+{
+    fn drop(*self) {
+        -- HOOK(@llvm-effects): if unwinding on panic (`{ T, ptr = 1 }`), call
+        -- `self.lock.*.poisoned.store(true, AtomicOrdering.release)` before unlock.
+        let lock_ptr = self.lock.*;
+        lock_ptr.state.store(0, AtomicOrdering.release);
+    }
+}
+
+impl Send for Mutex<T> where T :- Send {}
+impl Sync for Mutex<T> where T :- Send {}
+
+-- ── RwLock & Guards ──────────────────────────────────────────────────────────
+
+-- state: 0 = unlocked, >0 = reader count, 4294967295 (0xFFFF_FFFF) = writer locked
+const RWLOCK_WRITER_LOCKED: u32 = 4294967295;
+const RWLOCK_MAX_READERS: u32 = 4294967294;
+
+pub struct RwLock
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    state: AtomicU32,
+    writer_waiting: AtomicU32,
+    poisoned: AtomicBool,
+    data: T,
+}
+
+pub struct RwLockReadGuard
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    lock: *RwLock<T>,
+}
+
+pub struct RwLockWriteGuard
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    lock: *RwLock<T>,
+}
+
+impl RwLock<T>
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    pub fn new(value: T) -> Self {
+        RwLock<T> {
+            state: AtomicU32.new(0),
+            writer_waiting: AtomicU32.new(0),
+            poisoned: AtomicBool.new(false),
+            data: value,
+        }
+    }
+
+    pub fn try_read(*self) -> !TryLockErr RwLockReadGuard<T> {
+        let cur = self.state.load(AtomicOrdering.acquire);
+        if cur >= 4294967294 or cur >= RWLOCK_MAX_READERS {
+            return error TryLockErr.WouldBlock;
+        }
+        self.state.compare_exchange(
+            cur,
+            cur + 1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                if self.poisoned.load(AtomicOrdering.acquire) {
+                    let _ = self.state.fetch_sub(1, AtomicOrdering.release);
+                    return error TryLockErr.Poisoned;
+                }
+                RwLockReadGuard<T> { lock: self }
+            },
+            error _ => error TryLockErr.WouldBlock,
+        }
+    }
+
+    pub fn read(*self) -> !PoisonErr<RwLockReadGuard<T>> RwLockReadGuard<T> {
+        while true {
+            let cur = self.state.load(AtomicOrdering.acquire);
+            if cur >= 4294967294 or cur >= RWLOCK_MAX_READERS {
+                -- HOOK(@llvm-effects): futex_wait on `self.state`.
+                continue;
+            }
+            self.state.compare_exchange_weak(
+                cur,
+                cur + 1,
+                AtomicOrdering.acquire,
+                AtomicOrdering.relaxed,
+            ) match {
+                _! => {
+                    let guard = RwLockReadGuard<T> { lock: self };
+                    if self.poisoned.load(AtomicOrdering.acquire) {
+                        return error PoisonErr<RwLockReadGuard<T>>.new(guard);
+                    }
+                    return guard;
+                },
+                error _ => {},
+            }
+        }
+        error PoisonErr<RwLockReadGuard<T>>.new(RwLockReadGuard<T> { lock: self })
+    }
+
+    pub fn try_write(*self) -> !TryLockErr RwLockWriteGuard<T> {
+        self.state.compare_exchange(
+            0,
+            RWLOCK_WRITER_LOCKED,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                if self.poisoned.load(AtomicOrdering.acquire) {
+                    self.state.store(0, AtomicOrdering.release);
+                    return error TryLockErr.Poisoned;
+                }
+                RwLockWriteGuard<T> { lock: self }
+            },
+            error _ => error TryLockErr.WouldBlock,
+        }
+    }
+
+    pub fn write(*self) -> !PoisonErr<RwLockWriteGuard<T>> RwLockWriteGuard<T> {
+        let _ = self.writer_waiting.fetch_add(1, AtomicOrdering.relaxed);
+        while true {
+            self.state.compare_exchange_weak(
+                0,
+                RWLOCK_WRITER_LOCKED,
+                AtomicOrdering.acquire,
+                AtomicOrdering.relaxed,
+            ) match {
+                _! => {
+                    let _ = self.writer_waiting.fetch_sub(1, AtomicOrdering.relaxed);
+                    let guard = RwLockWriteGuard<T> { lock: self };
+                    if self.poisoned.load(AtomicOrdering.acquire) {
+                        return error PoisonErr<RwLockWriteGuard<T>>.new(guard);
+                    }
+                    return guard;
+                },
+                error _ => {
+                    -- HOOK(@llvm-effects): futex_wait on `self.state`.
+                },
+            }
+        }
+        error PoisonErr<RwLockWriteGuard<T>>.new(RwLockWriteGuard<T> { lock: self })
+    }
+
+    pub fn is_poisoned(*self) -> bool {
+        self.poisoned.load(AtomicOrdering.acquire)
+    }
+
+    pub fn clear_poison(*self) {
+        self.poisoned.store(false, AtomicOrdering.release);
+    }
+
+    pub fn into_inner(self) -> !PoisonErr<T> T {
+        if self.poisoned.load(AtomicOrdering.acquire) {
+            error PoisonErr<T>.new(self.data)
+        } else {
+            self.data
+        }
+    }
+
+    pub fn get_mut(*self) -> !PoisonErr<*T> *T {
+        if self.poisoned.load(AtomicOrdering.acquire) {
+            error PoisonErr<*T>.new(self.data)
+        } else {
+            self.data
+        }
+    }
+}
+
+impl RwLockReadGuard<T>
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    pub fn as_ptr(*self) -> *T {
+        let lock_ptr = self.lock.*;
+        lock_ptr.data
+    }
+}
+
+impl Drop for RwLockReadGuard<T>
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    fn drop(*self) {
+        let lock_ptr = self.lock.*;
+        let _ = lock_ptr.state.fetch_sub(1, AtomicOrdering.release);
+    }
+}
+
+impl RwLockWriteGuard<T>
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    pub fn as_ptr(*self) -> *T {
+        let lock_ptr = self.lock.*;
+        lock_ptr.data
+    }
+
+    pub fn with_ref(*self, f: %c fn(*T) -> R) -> R
+    where
+        R: Type,
+        c: Type.vars.Closure,
+    {
+        let lock_ptr = self.lock.*;
+        f(lock_ptr.data)
+    }
+}
+
+impl Drop for RwLockWriteGuard<T>
+where
+    T: Type,
+    requires T :- Send + Sync,
+{
+    fn drop(*self) {
+        -- HOOK(@llvm-effects): set poisoned on panic unwind before releasing.
+        let lock_ptr = self.lock.*;
+        lock_ptr.state.store(0, AtomicOrdering.release);
+    }
+}
+
+impl Send for RwLock<T> where T :- Send + Sync {}
+impl Sync for RwLock<T> where T :- Send + Sync {}
+
+-- ── Condvar & WaitTimeoutResult ──────────────────────────────────────────────
+
+pub struct WaitTimeoutResult {
+    timed_out_flag: bool,
+}
+
+impl WaitTimeoutResult {
+    pub pure fn new(timed_out: bool) -> Self {
+        WaitTimeoutResult { timed_out_flag: timed_out }
+    }
+
+    pub pure fn timed_out(self) -> bool {
+        self.timed_out_flag
+    }
+}
+
+impl Clone for WaitTimeoutResult {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for WaitTimeoutResult {}
+
+impl Eq for WaitTimeoutResult {
+    fn eq(*self, other: *Self) -> bool {
+        self.timed_out_flag.* == other.timed_out_flag.*
+    }
+}
+
+impl Debug for WaitTimeoutResult {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("WaitTimeoutResult { timed_out: ")!;
+        self.timed_out_flag.as(builtin.fmt.Display).fmt(output)!;
+        output.write_str(" }")
+    }
+}
+
+impl Send for WaitTimeoutResult {}
+impl Sync for WaitTimeoutResult {}
+
+pub struct Condvar {
+    seq: AtomicU32,
+}
+
+impl Condvar {
+    pub fn new() -> Self {
+        Condvar {
+            seq: AtomicU32.new(0),
+        }
+    }
+
+    pub fn wait(*self, guard: MutexGuard<T>) -> !PoisonErr<MutexGuard<T>> MutexGuard<T>
+    where
+        T: Type,
+        requires T :- Send,
+    {
+        let m = guard.lock;
+        let seen_seq = self.seq.load(AtomicOrdering.relaxed);
+        let _ = guard;
+        let _ = seen_seq;
+        -- HOOK(@llvm-effects): futex_wait(&self.seq, seen_seq) before re-locking `m`.
+        m.lock()
+    }
+
+    pub fn wait_while(
+        *self,
+        guard: MutexGuard<T>,
+        cond: %c fn(*T) -> bool,
+    ) -> !PoisonErr<MutexGuard<T>> MutexGuard<T>
+    where
+        T: Type,
+        requires T :- Send,
+        c: Type.vars.Closure,
+    {
+        var cur = guard;
+        while cond(cur.ref.as_ptr()) {
+            cur = self.wait(cur)!;
+        }
+        cur
+    }
+
+    pub fn wait_timeout(
+        *self,
+        guard: MutexGuard<T>,
+        dur: Duration,
+    ) -> !PoisonErr<Tuple<MutexGuard<T>, WaitTimeoutResult>> Tuple<MutexGuard<T>, WaitTimeoutResult>
+    where
+        T: Type,
+        requires T :- Send,
+    {
+        let m = guard.lock;
+        let _ = dur;
+        let seen_seq = self.seq.load(AtomicOrdering.relaxed);
+        let _ = guard;
+        let _ = seen_seq;
+        -- HOOK(@llvm-effects): futex_wait_timeout(&self.seq, seen_seq, dur).
+        m.lock() match {
+            g! => (g, WaitTimeoutResult.new(true)),
+            error err => error PoisonErr<Tuple<MutexGuard<T>, WaitTimeoutResult>>.new(
+                (err.into_inner(), WaitTimeoutResult.new(true)),
+            ),
+        }
+    }
+
+    pub fn notify_one(*self) {
+        let _ = self.seq.fetch_add(1, AtomicOrdering.release);
+        -- HOOK(@llvm-effects): futex_wake(&self.seq, 1).
+    }
+
+    pub fn notify_all(*self) {
+        let _ = self.seq.fetch_add(1, AtomicOrdering.release);
+        -- HOOK(@llvm-effects): futex_wake(&self.seq, INT_MAX).
+    }
+}
+
+impl Default for Condvar {
+    fn default() -> Self {
+        Condvar.new()
+    }
+}
+
+impl Send for Condvar {}
+impl Sync for Condvar {}
+
+-- ── OnceLock & LazyLock ──────────────────────────────────────────────────────
+
+pub struct OnceInitErr
+where
+    T: Type,
+{
+    value: T,
+}
+
+impl OnceInitErr<T>
+where
+    T: Type,
+{
+    pub fn new(value: T) -> Self {
+        OnceInitErr<T> { value: value }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+}
+
+impl Debug for OnceInitErr<T>
+where
+    T: Type,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("OnceInitErr { .. }")
+    }
+}
+
+impl Send for OnceInitErr<T> where T :- Send {}
+impl Sync for OnceInitErr<T> where T :- Sync {}
+
+{-
+    Thread-safe one-time cell `OnceLock<T>`.
+
+    Note on `08-library` dependency (`builtin.mem.MaybeUninit<T>`):
+    Until `builtin.mem.MaybeUninit<T>` lands, `OnceLock` stores `value: ?T`
+    (supporting all affine `Once` types safely for `new`/`set`/`take`/`with_ref`),
+    while `get(*self) -> ?*T` / `get_or_init` / `get_or_try_init` await
+    `MaybeUninit<T>` for in-place `*T` projection.
+-}
+pub struct OnceLock
+where
+    T: Type,
+{
+    state: AtomicU8,
+    value: ?T,
+}
+
+impl OnceLock<T>
+where
+    T: Type,
+{
+    pub fn new() -> Self {
+        OnceLock<T> {
+            state: AtomicU8.new(0),
+            value: null,
+        }
+    }
+
+    pub fn is_initialized(*self) -> bool {
+        self.state.load(AtomicOrdering.acquire) == 2
+    }
+
+    pub fn set(*self, value: T) -> !OnceInitErr<T> void {
+        self.state.compare_exchange(
+            0,
+            1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                let wrapped: ?T = value;
+                unsafe {
+                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), wrapped);
+                }
+                self.state.store(2, AtomicOrdering.release);
+            },
+            error _ => {
+                -- Wait if another thread is currently initializing.
+                while self.state.load(AtomicOrdering.acquire) == 1 {
+                }
+                if self.state.load(AtomicOrdering.acquire) == 2 {
+                    return error OnceInitErr<T>.new(value);
+                }
+                -- Retry if initialization failed/aborted.
+                self.set(value)!;
+            },
+        }
+    }
+
+    pub fn take(*self) -> ?T {
+        if self.state.load(AtomicOrdering.acquire) != 2 {
+            return null;
+        }
+        self.state.compare_exchange(
+            2,
+            1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                let taken = unsafe { builtin.mem.raw_read<?T>(builtin.mem.ptr_addr(self.value)) }
+                let empty: ?T = null;
+                unsafe {
+                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), empty);
+                }
+                self.state.store(0, AtomicOrdering.release);
+                taken
+            },
+            error _ => null,
+        }
+    }
+
+    pub fn with_ref(*self, f: %c fn(*T) -> R) -> ?R
+    where
+        R: Type,
+        c: Type.vars.Closure,
+    {
+        if self.state.load(AtomicOrdering.acquire) != 2 {
+            return null;
+        }
+        let taken = unsafe { builtin.mem.raw_read<?T>(builtin.mem.ptr_addr(self.value)) }
+        let empty: ?T = null;
+        unsafe {
+            builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), empty);
+        }
+        taken match {
+            val? => {
+                var slot = val;
+                let out = f(slot.ref);
+                let restored: ?T = slot;
+                unsafe {
+                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), restored);
+                }
+                out
+            },
+            null => null,
+        }
+    }
+
+    pub fn get(*self) -> ?*T {
+        if self.state.load(AtomicOrdering.acquire) != 2 {
+            return null;
+        }
+        -- TODO(08-library): return `self.value.assume_init_ref()` once `builtin.mem.MaybeUninit<T>` lands.
+        panic("OnceLock.get(*self) -> ?*T awaits builtin.mem.MaybeUninit<T>")
+    }
+
+    pub fn get_or_init(*self, f: %c fn() -> T) -> *T
+    where
+        c: Type.vars.Closure,
+    {
+        if self.state.load(AtomicOrdering.acquire) != 2 {
+            let v = f();
+            let _ = self.set(v) match {
+                _! => {},
+                error _ => {},
+            }
+        }
+        self.get() match {
+            p? => p,
+            null => panic("OnceLock.get_or_init failed"),
+        }
+    }
+
+    pub fn get_or_try_init(*self, f: %c fn() -> !E T) -> !E *T
+    where
+        E: Type,
+        c: Type.vars.Closure,
+    {
+        if self.state.load(AtomicOrdering.acquire) != 2 {
+            let v = f()!;
+            let _ = self.set(v) match {
+                _! => {},
+                error _ => {},
+            }
+        }
+        self.get() match {
+            p? => p,
+            null => panic("OnceLock.get_or_try_init failed"),
+        }
+    }
+}
+
+impl Default for OnceLock<T>
+where
+    T: Type,
+{
+    fn default() -> Self {
+        OnceLock<T>.new()
+    }
+}
+
+impl Send for OnceLock<T> where T :- Send {}
+impl Sync for OnceLock<T> where T :- Send + Sync {}
+
+pub struct LazyLock
+where
+    T: Type,
+    c: Type.vars.Closure,
+{
+    once: OnceLock<T>,
+    init: ?(%c fn() -> T),
+}
+
+impl LazyLock<T, c>
+where
+    T: Type,
+    c: Type.vars.Closure,
+{
+    pub fn new(init_fn: %c fn() -> T) -> Self {
+        LazyLock<T, c> {
+            once: OnceLock<T>.new(),
+            init: init_fn,
+        }
+    }
+
+    pub fn is_initialized(*self) -> bool {
+        self.once.is_initialized()
+    }
+
+    pub fn with_ref(*self, f: %u fn(*T) -> R) -> R
+    where
+        R: Type,
+        u: Type.vars.Closure,
+    {
+        if not self.once.is_initialized() {
+            let init_fn = unsafe { builtin.mem.raw_read<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init)) }
+            let empty: ?(%c fn() -> T) = null;
+            unsafe {
+                builtin.mem.raw_write<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init), empty);
+            }
+            init_fn match {
+                cb? => {
+                    let val = cb();
+                    let _ = self.once.set(val) match {
+                        _! => {},
+                        error _ => {},
+                    }
+                },
+                null => {},
+            }
+        }
+        self.once.with_ref(f) match {
+            res? => res,
+            null => panic("LazyLock value unavailable"),
+        }
+    }
+
+    pub fn force(*self) -> *T {
+        if not self.once.is_initialized() {
+            let init_fn = unsafe { builtin.mem.raw_read<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init)) }
+            let empty: ?(%c fn() -> T) = null;
+            unsafe {
+                builtin.mem.raw_write<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init), empty);
+            }
+            init_fn match {
+                cb? => {
+                    let val = cb();
+                    let _ = self.once.set(val) match {
+                        _! => {},
+                        error _ => {},
+                    }
+                },
+                null => {},
+            }
+        }
+        self.once.get() match {
+            p? => p,
+            null => panic("LazyLock.force failed"),
+        }
+    }
+
+    pub fn get(*self) -> ?*T {
+        self.once.get()
+    }
+}
+
+-- TODO(auto-traits): enforce `Send` on captured closure environment `c` once
+-- compiler auto-trait derivation supports `Type.vars.Closure` captures.
+impl Send for LazyLock<T, c>
+where
+    T :- Send,
+    c: Type.vars.Closure,
+{}
+
+impl Sync for LazyLock<T, c>
+where
+    T :- Send + Sync,
+    c: Type.vars.Closure,
+{}
+
+-- ── Barrier & BarrierWaitResult ──────────────────────────────────────────────
+
+pub struct BarrierWaitResult {
+    is_leader_flag: bool,
+}
+
+impl BarrierWaitResult {
+    pub pure fn new(is_leader: bool) -> Self {
+        BarrierWaitResult { is_leader_flag: is_leader }
+    }
+
+    pub pure fn is_leader(self) -> bool {
+        self.is_leader_flag
+    }
+}
+
+impl Clone for BarrierWaitResult {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for BarrierWaitResult {}
+
+impl Eq for BarrierWaitResult {
+    fn eq(*self, other: *Self) -> bool {
+        self.is_leader_flag.* == other.is_leader_flag.*
+    }
+}
+
+impl Debug for BarrierWaitResult {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("BarrierWaitResult { is_leader: ")!;
+        self.is_leader_flag.as(builtin.fmt.Display).fmt(output)!;
+        output.write_str(" }")
+    }
+}
+
+impl Send for BarrierWaitResult {}
+impl Sync for BarrierWaitResult {}
+
+pub struct Barrier {
+    num_threads: usize,
+    count: AtomicUsize,
+    generation: AtomicUsize,
+}
+
+impl Barrier {
+    pub fn new(n: usize) -> Self {
+        Barrier {
+            num_threads: if n == 0 { 1 } else { n },
+            count: AtomicUsize.new(0),
+            generation: AtomicUsize.new(0),
+        }
+    }
+
+    pub fn wait(*self) -> BarrierWaitResult {
+        let gen = self.generation.load(AtomicOrdering.acquire);
+        let prev = self.count.fetch_add(1, AtomicOrdering.acq_rel);
+        let arrived = builtin.mem.checked_add_usize(prev, 1) match {
+            v? => v,
+            null => self.num_threads.*,
+        };
+        if arrived >= self.num_threads.* {
+            self.count.store(0, AtomicOrdering.release);
+            let _ = self.generation.fetch_add(1, AtomicOrdering.release);
+            -- HOOK(@llvm-effects): futex_wake(&self.generation, INT_MAX).
+            BarrierWaitResult.new(true)
+        } else {
+            while self.generation.load(AtomicOrdering.acquire) == gen {
+                -- HOOK(@llvm-effects): futex_wait(&self.generation, gen).
+            }
+            BarrierWaitResult.new(false)
+        }
+    }
+}
+
+impl Send for Barrier {}
+impl Sync for Barrier {}
+
+-- ── Semaphore & SemaphorePermit ──────────────────────────────────────────────
+
+pub struct Semaphore {
+    permits: AtomicUsize,
+    wait_seq: AtomicU32,
+}
+
+pub struct SemaphorePermit {
+    sem: *Semaphore,
+    raw_count: usize,
+}
+
+impl Semaphore {
+    pub fn new(permits: usize) -> Self {
+        Semaphore {
+            permits: AtomicUsize.new(permits),
+            wait_seq: AtomicU32.new(0),
+        }
+    }
+
+    pub fn available_permits(*self) -> usize {
+        self.permits.load(AtomicOrdering.acquire)
+    }
+
+    pub fn add_permits(*self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let _ = self.permits.fetch_add(n, AtomicOrdering.release);
+        let _ = self.wait_seq.fetch_add(1, AtomicOrdering.release);
+        -- HOOK(@llvm-effects): futex_wake(&self.wait_seq, INT_MAX).
+    }
+
+    pub fn try_acquire_many(*self, n: usize) -> ?SemaphorePermit {
+        var cur = self.permits.load(AtomicOrdering.acquire);
+        while true {
+            if cur < n {
+                return null;
+            }
+            self.permits.compare_exchange_weak(
+                cur,
+                cur - n,
+                AtomicOrdering.acquire,
+                AtomicOrdering.relaxed,
+            ) match {
+                _! => return SemaphorePermit { sem: self, raw_count: n },
+                error err => {
+                    cur = err.current();
+                },
+            }
+        }
+        null
+    }
+
+    pub fn try_acquire(*self) -> ?SemaphorePermit {
+        self.try_acquire_many(1)
+    }
+
+    pub fn acquire_many(*self, n: usize) -> SemaphorePermit {
+        while true {
+            self.try_acquire_many(n) match {
+                permit? => return permit,
+                null => {
+                    -- HOOK(@llvm-effects): futex_wait on `self.wait_seq`.
+                },
+            }
+        }
+        SemaphorePermit { sem: self, raw_count: n }
+    }
+
+    pub fn acquire(*self) -> SemaphorePermit {
+        self.acquire_many(1)
+    }
+}
+
+impl SemaphorePermit {
+    pub fn count(*self) -> usize {
+        self.raw_count.*
+    }
+
+    pub fn forget(self) {
+        var this = self;
+        this.raw_count = 0;
+    }
+}
+
+impl Drop for SemaphorePermit {
+    fn drop(*self) {
+        let n = self.raw_count.*;
+        if n > 0 {
+            self.raw_count.* = 0;
+            self.sem.*.add_permits(n);
+        }
+    }
+}
+
+impl Send for Semaphore {}
+impl Sync for Semaphore {}

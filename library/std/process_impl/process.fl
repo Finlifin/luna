@@ -69,3 +69,232 @@ impl Splice for ExitCode {
         }
     }
 }
+
+{-
+    Source call-site location metadata for panic reporting.
+    OQ-08-02: Implicit CallerLocation wiring is deferred until parameter
+    elaboration (`03`) merges; callers currently see `location: ?CallerLocation = null`.
+-}
+pub struct CallerLocation {
+    raw_file: str,
+    raw_line: u32,
+    raw_column: u32,
+}
+
+impl CallerLocation {
+    pub pure fn new(file: str, line: u32, column: u32) -> Self {
+        CallerLocation {
+            raw_file: file,
+            raw_line: line,
+            raw_column: column,
+        }
+    }
+
+    pub pure fn file(self) -> str {
+        self.raw_file
+    }
+
+    pub pure fn line(self) -> u32 {
+        self.raw_line
+    }
+
+    pub pure fn column(self) -> u32 {
+        self.raw_column
+    }
+}
+
+impl Clone for CallerLocation {
+    fn clone(*self) -> Self {
+        CallerLocation {
+            raw_file: self.raw_file.*,
+            raw_line: self.raw_line.*,
+            raw_column: self.raw_column.*,
+        }
+    }
+}
+
+impl Copy for CallerLocation {}
+
+impl Eq for CallerLocation {
+    fn eq(*self, other: *Self) -> bool {
+        self.raw_file.* == other.raw_file.*
+            and self.raw_line.* == other.raw_line.*
+            and self.raw_column.* == other.raw_column.*
+    }
+}
+
+impl Debug for CallerLocation {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str(self.raw_file.*)!;
+        output.write_byte(58)!;
+        self.raw_line.as(Display).fmt(output)!;
+        output.write_byte(58)!;
+        self.raw_column.as(Display).fmt(output)
+    }
+}
+
+pub enum PanicStrategy {
+    unwind,
+    abort,
+}
+
+impl Clone for PanicStrategy {
+    fn clone(*self) -> Self {
+        self.* match {
+            .unwind => .unwind,
+            .abort => .abort,
+        }
+    }
+}
+
+impl Copy for PanicStrategy {}
+
+impl Eq for PanicStrategy {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .unwind =>
+                other.* match {
+                    .unwind => true,
+                    .abort => false,
+                },
+            .abort =>
+                other.* match {
+                    .unwind => false,
+                    .abort => true,
+                },
+        }
+    }
+}
+
+impl Debug for PanicStrategy {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .unwind => output.write_str("PanicStrategy.unwind"),
+            .abort => output.write_str("PanicStrategy.abort"),
+        }
+    }
+}
+
+pub struct PanicInfo {
+    raw_message: str,
+    raw_location: ?CallerLocation,
+    raw_is_unwind: bool,
+}
+
+impl PanicInfo {
+    pub pure fn new(message: str, location: ?CallerLocation, is_unwind: bool) -> Self {
+        PanicInfo {
+            raw_message: message,
+            raw_location: location,
+            raw_is_unwind: is_unwind,
+        }
+    }
+
+    pub pure fn message(self) -> str {
+        self.raw_message
+    }
+
+    pub pure fn location(self) -> ?CallerLocation {
+        self.raw_location
+    }
+
+    pub pure fn is_unwind(self) -> bool {
+        self.raw_is_unwind
+    }
+}
+
+impl Clone for PanicInfo {
+    fn clone(*self) -> Self {
+        PanicInfo {
+            raw_message: self.raw_message.*,
+            raw_location: self.raw_location.*,
+            raw_is_unwind: self.raw_is_unwind.*,
+        }
+    }
+}
+
+impl Copy for PanicInfo {}
+
+impl Debug for PanicInfo {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("PanicInfo { message: ")!;
+        self.raw_message.as(Debug).write_debug(output)!;
+        output.write_str(", location: ")!;
+        self.raw_location.* match {
+            loc? => loc.ref.as(Debug).write_debug(output)!,
+            null => output.write_str("null")!,
+        }
+        output.write_str(", is_unwind: ")!;
+        self.raw_is_unwind.as(Display).fmt(output)!;
+        output.write_str(" }")
+    }
+}
+
+{-
+    Panic hook slot.
+    HOOK(@llvm-effects #17): wire `host-intrinsic.runtime_panic(message: str) -> Never`
+    (`{ T, ptr = 1 }` unwind) and `host-intrinsic.runtime_abort() -> Never` (`@llvm.trap()`)
+    once Commit 2 intrinsics merge from `@llvm-effects`.
+-}
+static panic_hook_slot: ?fn(*PanicInfo) = null;
+
+pub fn set_panic_hook(hook: fn(*PanicInfo)) -> void {
+    let wrapped: ?fn(*PanicInfo) = hook;
+    unsafe {
+        builtin.mem.raw_write<?fn(*PanicInfo)>(builtin.mem.ptr_addr(panic_hook_slot.ref), wrapped);
+    }
+}
+
+pub fn abort() -> NoReturn {
+    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.runtime_abort() -> Never` (`@llvm.trap()`).
+    -- Keeps empty effect row; diverges unconditionally without running Drop.
+    let _ = unix.write_str(unix.stderr, "flurry: process aborted\n", 0) match {
+        _! => 0,
+        error _ => 0,
+    }
+    while true {
+    }
+}
+
+pub fn panic(message: str, .location: ?CallerLocation = null) -> NoReturn {
+    -- OQ-08-02: Unwind strategy via `{ T, ptr = 1 }` control word once
+    -- `@llvm-effects` lands the panic unwind intrinsic; implicit CallerLocation
+    -- wiring awaits `03` parameter elaboration.
+    let info = PanicInfo {
+        raw_message: message,
+        raw_location: location,
+        raw_is_unwind: true,
+    }
+    let current = unsafe {
+        builtin.mem.raw_read<?fn(*PanicInfo)>(builtin.mem.ptr_addr(panic_hook_slot.ref))
+    };
+    let copy_for_restore = unsafe {
+        builtin.mem.raw_read<?fn(*PanicInfo)>(builtin.mem.ptr_addr(panic_hook_slot.ref))
+    };
+    unsafe {
+        builtin.mem.raw_write<?fn(*PanicInfo)>(
+            builtin.mem.ptr_addr(panic_hook_slot.ref),
+            copy_for_restore,
+        );
+    }
+    current match {
+        hook? => hook(info.ref),
+        null => {
+            let _ = unix.write_str(unix.stderr, "panic: ", 0) match {
+                _! => 0,
+                error _ => 0,
+            }
+            let _ = unix.write_str(unix.stderr, message, 0) match {
+                _! => 0,
+                error _ => 0,
+            }
+            let _ = unix.write_str(unix.stderr, "\n", 0) match {
+                _! => 0,
+                error _ => 0,
+            }
+        },
+    }
+    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.runtime_panic(message) -> Never`
+    -- (`{ T, ptr = 1 }` unwind control signal).
+    abort()
+}

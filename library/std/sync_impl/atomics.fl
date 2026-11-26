@@ -1,0 +1,638 @@
+use builtin.fmt.{ByteWriter, Debug}
+use process_impl.process.panic;
+use sync_impl.marker.{Send, Sync}
+
+{-
+    Atomic memory orderings, atomic scalar/pointer types, and memory fences.
+
+    HOOK(@llvm-effects #17): Atomic load/store/swap/cmpxchg/fetch_* and fence
+    operations currently execute single-threaded in-memory fallbacks until
+    `@llvm-effects` Commit 2 merges `host-intrinsic.atomic_{load,store,swap,
+    cmpxchg,cmpxchg_weak,fetch_add,fetch_sub,fetch_and,fetch_or,fetch_xor,
+    fetch_max,fetch_min,fence,compiler_fence}` (`u8` order tag `0..4`).
+    Ordering validation is enforced eagerly here.
+-}
+pub enum AtomicOrdering {
+    relaxed,
+    consume,
+    acquire,
+    release,
+    acq_rel,
+    seq_cst,
+}
+
+impl Clone for AtomicOrdering {
+    fn clone(*self) -> Self {
+        self.* match {
+            .relaxed => .relaxed,
+            .consume => .consume,
+            .acquire => .acquire,
+            .release => .release,
+            .acq_rel => .acq_rel,
+            .seq_cst => .seq_cst,
+        }
+    }
+}
+
+impl Copy for AtomicOrdering {}
+
+pure fn ordering_rank(order: AtomicOrdering) -> u8 {
+    order match {
+        .relaxed => 0,
+        .consume => 1,
+        .acquire => 2,
+        .release => 3,
+        .acq_rel => 4,
+        .seq_cst => 5,
+    }
+}
+
+pure fn ordering_llvm_tag(order: AtomicOrdering) -> u8 {
+    order match {
+        .relaxed => 0,
+        .consume => 1,
+        .acquire => 1,
+        .release => 2,
+        .acq_rel => 3,
+        .seq_cst => 4,
+    }
+}
+
+impl Eq for AtomicOrdering {
+    fn eq(*self, other: *Self) -> bool {
+        ordering_rank(self.*) == ordering_rank(other.*)
+    }
+}
+
+impl Debug for AtomicOrdering {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .relaxed => output.write_str("AtomicOrdering.relaxed"),
+            .consume => output.write_str("AtomicOrdering.consume"),
+            .acquire => output.write_str("AtomicOrdering.acquire"),
+            .release => output.write_str("AtomicOrdering.release"),
+            .acq_rel => output.write_str("AtomicOrdering.acq_rel"),
+            .seq_cst => output.write_str("AtomicOrdering.seq_cst"),
+        }
+    }
+}
+
+impl Send for AtomicOrdering {}
+impl Sync for AtomicOrdering {}
+
+fn validate_load_order(order: AtomicOrdering) {
+    order match {
+        .release => panic("atomic load ordering cannot be release"),
+        .acq_rel => panic("atomic load ordering cannot be acq_rel"),
+        _ => {},
+    }
+}
+
+fn validate_store_order(order: AtomicOrdering) {
+    order match {
+        .consume => panic("atomic store ordering cannot be consume"),
+        .acquire => panic("atomic store ordering cannot be acquire"),
+        .acq_rel => panic("atomic store ordering cannot be acq_rel"),
+        _ => {},
+    }
+}
+
+fn validate_cmpxchg_orders(success: AtomicOrdering, failure: AtomicOrdering) {
+    let bad_failure = failure match {
+        .release => true,
+        .acq_rel => true,
+        _ => false,
+    }
+    if bad_failure {
+        panic("atomic compare_exchange failure ordering cannot be release or acq_rel");
+    }
+    if ordering_rank(failure) > ordering_rank(success) {
+        panic("atomic compare_exchange failure ordering cannot be stronger than success ordering");
+    }
+}
+
+pub struct CompareExchangeErr
+where
+    T: Type,
+{
+    raw_current: T,
+}
+
+impl CompareExchangeErr<T>
+where
+    T: Type,
+{
+    pub fn new(current: T) -> Self {
+        CompareExchangeErr<T> { raw_current: current }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.raw_current
+    }
+}
+
+impl CompareExchangeErr<T>
+where
+    T :- Copy,
+{
+    pub fn current(self) -> T {
+        self.raw_current
+    }
+}
+
+impl Clone for CompareExchangeErr<T> where T :- Clone {
+    fn clone(*self) -> Self {
+        CompareExchangeErr<T> {
+            raw_current: T.as(Clone).clone(self.raw_current),
+        }
+    }
+}
+
+impl Copy for CompareExchangeErr<T> where T :- Copy {}
+
+impl Eq for CompareExchangeErr<T> where T :- Eq {
+    fn eq(*self, other: *Self) -> bool {
+        T.as(Eq).eq(self.raw_current, other.raw_current)
+    }
+}
+
+impl Debug for CompareExchangeErr<T> where T :- Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("CompareExchangeErr(")!;
+        T.as(Debug).write_debug(self.raw_current, output)!;
+        output.write_byte(41)
+    }
+}
+
+impl Send for CompareExchangeErr<T> where T :- Send {}
+impl Sync for CompareExchangeErr<T> where T :- Sync {}
+
+pub pure comptime fn is_atomic_scalar(t: Type) -> bool {
+    t == bool
+        or t == i8
+        or t == u8
+        or t == i16
+        or t == u16
+        or t == i32
+        or t == u32
+        or t == i64
+        or t == u64
+        or t == isize
+        or t == usize
+}
+
+pub pure comptime fn is_atomic_int(t: Type) -> bool {
+    t == i8
+        or t == u8
+        or t == i16
+        or t == u16
+        or t == i32
+        or t == u32
+        or t == i64
+        or t == u64
+        or t == isize
+        or t == usize
+}
+
+pub trait AtomicScalar :- Copy + Eq {}
+
+impl AtomicScalar for bool {}
+impl AtomicScalar for i8 {}
+impl AtomicScalar for u8 {}
+impl AtomicScalar for i16 {}
+impl AtomicScalar for u16 {}
+impl AtomicScalar for i32 {}
+impl AtomicScalar for u32 {}
+impl AtomicScalar for i64 {}
+impl AtomicScalar for u64 {}
+impl AtomicScalar for isize {}
+impl AtomicScalar for usize {}
+
+pub struct Atomic
+where
+    T: Type,
+    requires T :- AtomicScalar,
+{
+    inner: T,
+}
+
+impl Send for Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar,
+{}
+
+impl Sync for Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar,
+{}
+
+impl Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar,
+{
+    pub fn new(value: T) -> Self {
+        Atomic<T> { inner: value }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    pub fn get_mut(*self) -> *T {
+        self.inner
+    }
+
+    pub fn load(*self, order: AtomicOrdering) -> T {
+        validate_load_order(order);
+        -- HOOK(@llvm-effects): emit LLVM atomic load with `order`.
+        self.inner.*
+    }
+
+    pub fn store(*self, val: T, order: AtomicOrdering) {
+        validate_store_order(order);
+        -- HOOK(@llvm-effects): emit LLVM atomic store with `order`.
+        self.inner.* = val;
+    }
+
+    pub fn swap(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw xchg with `order`.
+        let prev = self.inner.*;
+        self.inner.* = val;
+        prev
+    }
+
+    pub fn compare_exchange(
+        *self,
+        current: T,
+        new: T,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+    ) -> !CompareExchangeErr<T> T
+    {
+        validate_cmpxchg_orders(success, failure);
+        -- HOOK(@llvm-effects): emit LLVM strong cmpxchg.
+        let observed = self.inner.*;
+        if observed.ref.as(Eq).eq(current.ref) {
+            self.inner.* = new;
+            observed
+        } else {
+            error CompareExchangeErr<T>.new(observed)
+        }
+    }
+
+    pub fn compare_exchange_weak(
+        *self,
+        current: T,
+        new: T,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+    ) -> !CompareExchangeErr<T> T
+    {
+        validate_cmpxchg_orders(success, failure);
+        -- HOOK(@llvm-effects): emit LLVM weak cmpxchg.
+        let observed = self.inner.*;
+        if observed.ref.as(Eq).eq(current.ref) {
+            self.inner.* = new;
+            observed
+        } else {
+            error CompareExchangeErr<T>.new(observed)
+        }
+    }
+
+    pub fn fetch_update(
+        *self,
+        set_order: AtomicOrdering,
+        fetch_order: AtomicOrdering,
+        f: %c fn(T) -> ?T,
+    ) -> !CompareExchangeErr<T> T
+    where
+        c: Type.vars.Closure,
+    {
+        validate_load_order(fetch_order);
+        var prev = self.load(fetch_order);
+        while true {
+            let next = f(prev) match {
+                val? => val,
+                null => return error CompareExchangeErr<T>.new(prev),
+            }
+            self.compare_exchange_weak(prev, next, set_order, fetch_order) match {
+                ok! => return ok,
+                error err => {
+                    prev = err.current();
+                },
+            }
+        }
+        error CompareExchangeErr<T>.new(prev)
+    }
+}
+
+pure fn wrapping_step_u64(a: u64, b: u64, sub: bool) -> u64 {
+    let a128 = a'bitvec.as(u128);
+    let b128 = b'bitvec.as(u128);
+    assumes a128 <= 18446744073709551615 and b128 <= 18446744073709551615;
+    if sub {
+        let shifted = a128 + 18446744073709551616;
+        (shifted - b128)'bitvec[0..64].as(u64)
+    } else {
+        (a128 + b128)'bitvec[0..64].as(u64)
+    }
+}
+
+fn wrapping_step_atomic(a: T, b: T, sub: bool) -> T
+where
+    T: Type,
+    requires
+        T == i8
+            or T == u8
+            or T == i16
+            or T == u16
+            or T == i32
+            or T == u32
+            or T == i64
+            or T == u64
+            or T == isize
+            or T == usize,
+{
+    inline if T == u8 {
+        let au: u8 = a;
+        let bu: u8 = b;
+        wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..8].as(u8)
+    } else {
+        inline if T == i8 {
+            let ai: i8 = a;
+            let bi: i8 = b;
+            wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..8].as(i8)
+        } else {
+            inline if T == u16 {
+                let au: u16 = a;
+                let bu: u16 = b;
+                wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..16].as(u16)
+            } else {
+                inline if T == i16 {
+                    let ai: i16 = a;
+                    let bi: i16 = b;
+                    wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..16].as(i16)
+                } else {
+                    inline if T == u32 {
+                        let au: u32 = a;
+                        let bu: u32 = b;
+                        wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..32].as(u32)
+                    } else {
+                        inline if T == i32 {
+                            let ai: i32 = a;
+                            let bi: i32 = b;
+                            wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..32].as(i32)
+                        } else {
+                            inline if T == u64 {
+                                let au: u64 = a;
+                                let bu: u64 = b;
+                                wrapping_step_u64(au, bu, sub)
+                            } else {
+                                inline if T == i64 {
+                                    let ai: i64 = a;
+                                    let bi: i64 = b;
+                                    wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..64].as(i64)
+                                } else {
+                                    inline if T == usize {
+                                        let au: u64 = builtin.compiler.try_usize_to_u64(a) match {
+                                            v? => v,
+                                            null => 0,
+                                        };
+                                        let bu: u64 = builtin.compiler.try_usize_to_u64(b) match {
+                                            v? => v,
+                                            null => 0,
+                                        };
+                                        let ru = wrapping_step_u64(au, bu, sub);
+                                        builtin.compiler.try_u64_to_usize(ru) match {
+                                            v? => v,
+                                            null => a,
+                                        }
+                                    } else {
+                                        inline if T == isize {
+                                            let ai: i64 = builtin.compiler.try_isize_to_i64(a) match {
+                                                v? => v,
+                                                null => 0,
+                                            };
+                                            let bi: i64 = builtin.compiler.try_isize_to_i64(b) match {
+                                                v? => v,
+                                                null => 0,
+                                            };
+                                            let ru = wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub);
+                                            let ri = ru'bitvec[0..64].as(i64);
+                                            builtin.compiler.try_i64_to_isize(ri) match {
+                                                v? => v,
+                                                null => a,
+                                            }
+                                        } else {
+                                            a
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar,
+    requires
+        T == i8
+            or T == u8
+            or T == i16
+            or T == u16
+            or T == i32
+            or T == u32
+            or T == i64
+            or T == u64
+            or T == isize
+            or T == usize,
+{
+    pub fn fetch_add(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw add.
+        let prev = self.inner.*;
+        self.inner.* = wrapping_step_atomic<T>(prev, val, false);
+        prev
+    }
+
+    pub fn fetch_sub(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw sub.
+        let prev = self.inner.*;
+        self.inner.* = wrapping_step_atomic<T>(prev, val, true);
+        prev
+    }
+
+    pub fn fetch_and(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw and.
+        let prev = self.inner.*;
+        self.inner.* = builtin.math.bit_and(prev, val);
+        prev
+    }
+
+    pub fn fetch_or(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw or.
+        let prev = self.inner.*;
+        self.inner.* = builtin.math.bit_or(prev, val);
+        prev
+    }
+
+    pub fn fetch_xor(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw xor.
+        let prev = self.inner.*;
+        self.inner.* = builtin.math.bit_xor(prev, val);
+        prev
+    }
+
+    pub fn fetch_max(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw max/umax.
+        let prev = self.inner.*;
+        self.inner.* = builtin.math.max(prev, val);
+        prev
+    }
+
+    pub fn fetch_min(*self, val: T, order: AtomicOrdering) -> T {
+        let _ = order;
+        -- HOOK(@llvm-effects): emit LLVM atomicrmw min/umin.
+        let prev = self.inner.*;
+        self.inner.* = builtin.math.min(prev, val);
+        prev
+    }
+}
+
+impl Default for Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar + Default,
+{
+    fn default() -> Self {
+        Atomic<T>.new(T.as(Default).default())
+    }
+}
+
+impl Debug for Atomic<T>
+where
+    T: Type,
+    requires T :- AtomicScalar + Debug,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        let val = self.load(AtomicOrdering.seq_cst);
+        val.ref.as(Debug).write_debug(output)
+    }
+}
+
+-- Internal comptime helper for `std` static counters; intentionally omitted from `std.sync`.
+pub pure comptime fn static_atomic_u64(value: u64) -> Atomic<u64> {
+    Atomic<u64> { inner: value }
+}
+
+pub struct AtomicPtr
+where
+    T: Type,
+{
+    ptr_addr: Atomic<usize>,
+}
+
+impl Send for AtomicPtr<T> where T: Type {}
+impl Sync for AtomicPtr<T> where T: Type {}
+
+impl AtomicPtr<T>
+where
+    T: Type,
+{
+    pub fn new(ptr: *T) -> Self {
+        AtomicPtr<T> {
+            ptr_addr: Atomic<usize>.new(unsafe { builtin.mem.ptr_addr(ptr) }),
+        }
+    }
+
+    pub fn load(*self, order: AtomicOrdering) -> *T {
+        unsafe { builtin.mem.raw_ptr<T>(self.ptr_addr.load(order)) }
+    }
+
+    pub fn store(*self, ptr: *T, order: AtomicOrdering) {
+        self.ptr_addr.store(unsafe { builtin.mem.ptr_addr(ptr) }, order);
+    }
+
+    pub fn swap(*self, ptr: *T, order: AtomicOrdering) -> *T {
+        let old = self.ptr_addr.swap(unsafe { builtin.mem.ptr_addr(ptr) }, order);
+        unsafe { builtin.mem.raw_ptr<T>(old) }
+    }
+
+    pub fn compare_exchange(
+        *self,
+        current: *T,
+        new: *T,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+    ) -> !CompareExchangeErr<*T> *T
+    {
+        let cur_addr = unsafe { builtin.mem.ptr_addr(current) }
+        let new_addr = unsafe { builtin.mem.ptr_addr(new) }
+        self.ptr_addr.compare_exchange(cur_addr, new_addr, success, failure) match {
+            ok! => unsafe { builtin.mem.raw_ptr<T>(ok) },
+            error err => error CompareExchangeErr<*T>.new(unsafe { builtin.mem.raw_ptr<T>(err.current()) }),
+        }
+    }
+
+    pub fn compare_exchange_weak(
+        *self,
+        current: *T,
+        new: *T,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+    ) -> !CompareExchangeErr<*T> *T
+    {
+        let cur_addr = unsafe { builtin.mem.ptr_addr(current) }
+        let new_addr = unsafe { builtin.mem.ptr_addr(new) }
+        self.ptr_addr.compare_exchange_weak(cur_addr, new_addr, success, failure) match {
+            ok! => unsafe { builtin.mem.raw_ptr<T>(ok) },
+            error err => error CompareExchangeErr<*T>.new(unsafe { builtin.mem.raw_ptr<T>(err.current()) }),
+        }
+    }
+}
+
+fn validate_fence_order(order: AtomicOrdering) {
+    order match {
+        .relaxed => panic("atomic fence ordering cannot be relaxed"),
+        _ => {},
+    }
+}
+
+pub fn fence(order: AtomicOrdering) {
+    validate_fence_order(order);
+    let _ = ordering_llvm_tag(order);
+    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.atomic_fence(ordering_llvm_tag(order))`.
+}
+
+pub fn compiler_fence(order: AtomicOrdering) {
+    validate_fence_order(order);
+    let _ = ordering_llvm_tag(order);
+    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.atomic_compiler_fence(ordering_llvm_tag(order))`.
+}
+
+pub typealias AtomicBool = Atomic<bool>;
+pub typealias AtomicI8 = Atomic<i8>;
+pub typealias AtomicU8 = Atomic<u8>;
+pub typealias AtomicI16 = Atomic<i16>;
+pub typealias AtomicU16 = Atomic<u16>;
+pub typealias AtomicI32 = Atomic<i32>;
+pub typealias AtomicU32 = Atomic<u32>;
+pub typealias AtomicI64 = Atomic<i64>;
+pub typealias AtomicU64 = Atomic<u64>;
+pub typealias AtomicIsize = Atomic<isize>;
+pub typealias AtomicUsize = Atomic<usize>;

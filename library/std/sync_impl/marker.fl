@@ -1,0 +1,308 @@
+use collections_impl.hash_map.HashMap;
+use collections_impl.hash_set.HashSet;
+use collections_impl.slice.Slice;
+use collections_impl.vec.Vec;
+use collections_impl.vec_deque.VecDeque;
+use fs_impl.file.File;
+use hash_impl.sip.{DefaultHasher, RandomState}
+use io_impl.buffered.{BufReader, BufWriter}
+use io_impl.errors.IoErr;
+use io_impl.reader.{Cursor, Reader, Stdin}
+use io_impl.writer.{Write, Writer}
+use mem_impl.allocator.{AllocErr, Allocator, RawBlock, ReallocErr, SystemAllocator}
+use mem_impl.arena.{ArenaAllocator, FixedBufferAllocator}
+use mem_impl.boxed.Box;
+use mem_impl.layout.Layout;
+use process_impl.process.{CallerLocation, ExitCode, PanicInfo, PanicStrategy}
+use string_impl.string.{String, Utf8Err}
+use time_impl.duration.Duration;
+
+{-
+    Thread-safety marker traits:
+    - `Send`: ownership can be transferred safely across thread boundaries.
+    - `Sync`: shared access via `*T` is safe across threads.
+
+    Note: Compiler auto-derivation of `Send`/`Sync` for user structs/enums
+    is not yet landed in `HEAD`, so core primitives and standard library types
+    provide explicit implementations here. `builtin.Continuation`,
+    `TypedContinuation`, and lock guards intentionally do NOT implement
+    `Send` or `Sync`.
+-}
+pub trait Send {}
+
+pub trait Sync {}
+
+-- ── Primitive Scalars & Builtin Types ────────────────────────────────────────
+
+impl Send for bool {}
+impl Sync for bool {}
+
+impl Send for u8 {}
+impl Sync for u8 {}
+
+impl Send for u16 {}
+impl Sync for u16 {}
+
+impl Send for u32 {}
+impl Sync for u32 {}
+
+impl Send for u64 {}
+impl Sync for u64 {}
+
+impl Send for u128 {}
+impl Sync for u128 {}
+
+impl Send for usize {}
+impl Sync for usize {}
+
+impl Send for i8 {}
+impl Sync for i8 {}
+
+impl Send for i16 {}
+impl Sync for i16 {}
+
+impl Send for i32 {}
+impl Sync for i32 {}
+
+impl Send for i64 {}
+impl Sync for i64 {}
+
+impl Send for i128 {}
+impl Sync for i128 {}
+
+impl Send for isize {}
+impl Sync for isize {}
+
+impl Send for f16 {}
+impl Sync for f16 {}
+
+impl Send for bf16 {}
+impl Sync for bf16 {}
+
+impl Send for f32 {}
+impl Sync for f32 {}
+
+impl Send for f64 {}
+impl Sync for f64 {}
+
+impl Send for char {}
+impl Sync for char {}
+
+impl Send for str {}
+impl Sync for str {}
+
+impl Send for Symbol {}
+impl Sync for Symbol {}
+
+impl Send for void {}
+impl Sync for void {}
+
+impl Send for NoReturn {}
+impl Sync for NoReturn {}
+
+-- ── Generic Builtin Wrappers ─────────────────────────────────────────────────
+
+impl Send for ?T where T :- Send {}
+impl Sync for ?T where T :- Sync {}
+
+impl Send for !E T
+where
+    E :- Send,
+    T :- Send,
+{}
+
+impl Sync for !E T
+where
+    E :- Sync,
+    T :- Sync,
+{}
+
+impl Send for Slice<T> where T :- Sync {}
+impl Sync for Slice<T> where T :- Sync {}
+
+-- ── Standard Library Core Types ──────────────────────────────────────────────
+
+impl Send for SystemAllocator {}
+impl Sync for SystemAllocator {}
+
+impl Send for FixedBufferAllocator {}
+
+impl Send for ArenaAllocator<.Backing = Backing, .backing = backing>
+where
+    Backing: Type,
+    requires Backing :- Allocator + Send,
+    quote backing: lift *Backing,
+{}
+
+impl Send for AllocErr {}
+impl Sync for AllocErr {}
+
+impl Send for ReallocErr {}
+impl Sync for ReallocErr {}
+
+impl Send for RawBlock {}
+
+impl Send for Layout {}
+impl Sync for Layout {}
+
+impl Send for IoErr {}
+impl Sync for IoErr {}
+
+impl Send for Utf8Err {}
+impl Sync for Utf8Err {}
+
+impl Send for Duration {}
+impl Sync for Duration {}
+
+impl Send for ExitCode {}
+impl Sync for ExitCode {}
+
+impl Send for CallerLocation {}
+impl Sync for CallerLocation {}
+
+impl Send for PanicStrategy {}
+impl Sync for PanicStrategy {}
+
+impl Send for PanicInfo {}
+impl Sync for PanicInfo {}
+
+impl Send for File {}
+
+impl Send for Stdin {}
+impl Sync for Stdin {}
+
+impl Send for Writer {}
+impl Sync for Writer {}
+
+impl Send for DefaultHasher {}
+impl Send for RandomState {}
+impl Sync for RandomState {}
+
+impl Send for Box<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for Box<T, .A = A, .allocator = alloc>
+where
+    T :- Sync,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Sync,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Sync,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
+where
+    K :- Send,
+    V :- Send,
+    S: Type,
+    requires S :- BuildHasher + Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for HashMap<K, V, .S = S, .A = A, .allocator = alloc>
+where
+    K :- Sync,
+    V :- Sync,
+    S: Type,
+    requires S :- BuildHasher + Sync,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    S: Type,
+    requires S :- BuildHasher + Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for HashSet<T, .S = S, .A = A, .allocator = alloc>
+where
+    T :- Sync,
+    S: Type,
+    requires S :- BuildHasher + Sync,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for String<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for String<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for Cursor<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Send for BufReader<R, .A = A, .allocator = alloc>
+where
+    R: Type,
+    requires R :- Reader + Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+impl Send for BufWriter<W, .A = A, .allocator = alloc>
+where
+    W: Type,
+    requires W :- Write + Send,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}

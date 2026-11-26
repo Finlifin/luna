@@ -1,0 +1,983 @@
+use builtin.fmt.{ByteWriter, Debug}
+use collections_impl.vec.Vec;
+use io_impl.errors.IoErr;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+use process_impl.process.panic;
+use sync_impl.atomics.{AtomicBool, AtomicOrdering, AtomicU64, AtomicUsize, static_atomic_u64}
+use sync_impl.marker.{Send, Sync}
+use time_impl.duration.Duration;
+
+{-
+    Structured async effect core, task context, cancellation tokens,
+    futures, join handles, task scopes, and structured concurrency combinators.
+
+    HOOK(@llvm-effects / async lowering):
+    - `TaskContext` layout (`cancel_flag: AtomicBool`, `pool_ptr: usize`)
+      matches `compiler/luna/src/host/llvm/task_context.ll`.
+    - `AsyncCore` declares the Tier 1 `async effect` operations. Because HIR
+      lowering for `.await` and `async` handler arms is not yet merged in `HEAD`,
+      `yield_now`, `sleep`, and `JoinHandle.join` currently invoke `AsyncCore`
+      directly and document where `.await` attaches once async lowering lands.
+-}
+pub newtype TaskId = u64;
+
+impl TaskId {
+    pub pure fn new(raw: u64) -> Self {
+        raw.as(TaskId)
+    }
+
+    pub pure fn as_u64(self) -> u64 {
+        self.as(u64)
+    }
+}
+
+impl Clone for TaskId {
+    fn clone(*self) -> Self {
+        self.*.as(u64).as(TaskId)
+    }
+}
+
+impl Copy for TaskId {}
+
+impl Eq for TaskId {
+    fn eq(*self, other: *Self) -> bool {
+        self.*.as(u64) == other.*.as(u64)
+    }
+}
+
+impl Debug for TaskId {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("TaskId(")!;
+        let raw = self.*.as(u64);
+        raw.ref.as(Debug).write_debug(output)!;
+        output.write_byte(41)
+    }
+}
+
+impl Send for TaskId {}
+impl Sync for TaskId {}
+
+pub enum CancelErr {
+    Cancelled,
+    TimedOut,
+    ScopeClosed,
+}
+
+impl Clone for CancelErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .Cancelled => .Cancelled,
+            .TimedOut => .TimedOut,
+            .ScopeClosed => .ScopeClosed,
+        }
+    }
+}
+
+impl Copy for CancelErr {}
+
+impl Eq for CancelErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .Cancelled =>
+                other.* match {
+                    .Cancelled => true,
+                    _ => false,
+                },
+            .TimedOut =>
+                other.* match {
+                    .TimedOut => true,
+                    _ => false,
+                },
+            .ScopeClosed =>
+                other.* match {
+                    .ScopeClosed => true,
+                    _ => false,
+                },
+        }
+    }
+}
+
+impl Debug for CancelErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Cancelled => output.write_str("CancelErr.Cancelled"),
+            .TimedOut => output.write_str("CancelErr.TimedOut"),
+            .ScopeClosed => output.write_str("CancelErr.ScopeClosed"),
+        }
+    }
+}
+
+impl Send for CancelErr {}
+impl Sync for CancelErr {}
+
+pub enum TaskErr {
+    Cancelled,
+    Panicked,
+    RuntimeShutdown,
+    Pool(runtime_impl.stack_pool.StackPoolErr),
+    Alloc(AllocErr),
+}
+
+impl Clone for TaskErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .Cancelled => .Cancelled,
+            .Panicked => .Panicked,
+            .RuntimeShutdown => .RuntimeShutdown,
+            .Pool(err) => .Pool(err),
+            .Alloc(err) => .Alloc(err),
+        }
+    }
+}
+
+impl Copy for TaskErr {}
+
+impl Eq for TaskErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .Cancelled =>
+                other.* match {
+                    .Cancelled => true,
+                    _ => false,
+                },
+            .Panicked =>
+                other.* match {
+                    .Panicked => true,
+                    _ => false,
+                },
+            .RuntimeShutdown =>
+                other.* match {
+                    .RuntimeShutdown => true,
+                    _ => false,
+                },
+            .Pool(e1) =>
+                other.* match {
+                    .Pool(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+            .Alloc(e1) =>
+                other.* match {
+                    .Alloc(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+        }
+    }
+}
+
+impl Debug for TaskErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Cancelled => output.write_str("TaskErr.Cancelled"),
+            .Panicked => output.write_str("TaskErr.Panicked"),
+            .RuntimeShutdown => output.write_str("TaskErr.RuntimeShutdown"),
+            .Pool(err) => {
+                output.write_str("TaskErr.Pool(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+            .Alloc(err) => {
+                output.write_str("TaskErr.Alloc(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+        }
+    }
+}
+
+impl Send for TaskErr {}
+impl Sync for TaskErr {}
+
+pub enum RuntimeErr {
+    ExecutorShutdown,
+    QueueFull,
+    Pool(runtime_impl.stack_pool.StackPoolErr),
+    Alloc(AllocErr),
+    Io(IoErr),
+}
+
+impl Clone for RuntimeErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .ExecutorShutdown => .ExecutorShutdown,
+            .QueueFull => .QueueFull,
+            .Pool(err) => .Pool(err),
+            .Alloc(err) => .Alloc(err),
+            .Io(err) => .Io(err),
+        }
+    }
+}
+
+impl Copy for RuntimeErr {}
+
+impl Eq for RuntimeErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .ExecutorShutdown =>
+                other.* match {
+                    .ExecutorShutdown => true,
+                    _ => false,
+                },
+            .QueueFull =>
+                other.* match {
+                    .QueueFull => true,
+                    _ => false,
+                },
+            .Pool(e1) =>
+                other.* match {
+                    .Pool(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+            .Alloc(e1) =>
+                other.* match {
+                    .Alloc(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+            .Io(e1) =>
+                other.* match {
+                    .Io(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+        }
+    }
+}
+
+impl Debug for RuntimeErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .ExecutorShutdown => output.write_str("RuntimeErr.ExecutorShutdown"),
+            .QueueFull => output.write_str("RuntimeErr.QueueFull"),
+            .Pool(err) => {
+                output.write_str("RuntimeErr.Pool(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+            .Alloc(err) => {
+                output.write_str("RuntimeErr.Alloc(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+            .Io(err) => {
+                output.write_str("RuntimeErr.Io(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+        }
+    }
+}
+
+impl Send for RuntimeErr {}
+impl Sync for RuntimeErr {}
+
+pub enum FutureState {
+    pending,
+    completed,
+    cancelled,
+}
+
+impl Clone for FutureState {
+    fn clone(*self) -> Self {
+        self.* match {
+            .pending => .pending,
+            .completed => .completed,
+            .cancelled => .cancelled,
+        }
+    }
+}
+
+impl Copy for FutureState {}
+
+impl Eq for FutureState {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .pending =>
+                other.* match {
+                    .pending => true,
+                    _ => false,
+                },
+            .completed =>
+                other.* match {
+                    .completed => true,
+                    _ => false,
+                },
+            .cancelled =>
+                other.* match {
+                    .cancelled => true,
+                    _ => false,
+                },
+        }
+    }
+}
+
+impl Debug for FutureState {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .pending => output.write_str("FutureState.pending"),
+            .completed => output.write_str("FutureState.completed"),
+            .cancelled => output.write_str("FutureState.cancelled"),
+        }
+    }
+}
+
+impl Send for FutureState {}
+impl Sync for FutureState {}
+
+-- Matches `compiler/luna/src/host/llvm/task_context.ll` (`%flurry.task = type { i8, ptr }`).
+pub struct TaskContext {
+    cancel_flag: AtomicBool,
+    pool_ptr: usize,
+}
+
+impl TaskContext {
+    pub fn new(pool_ptr: usize) -> Self {
+        TaskContext {
+            cancel_flag: AtomicBool.new(false),
+            pool_ptr: pool_ptr,
+        }
+    }
+
+    pub fn is_cancelled(*self) -> bool {
+        self.cancel_flag.load(AtomicOrdering.acquire)
+    }
+
+    pub fn request_cancel(*self) {
+        self.cancel_flag.store(true, AtomicOrdering.release);
+    }
+
+    pub fn stack_pool_ptr(*self) -> usize {
+        self.pool_ptr.*
+    }
+}
+
+impl Send for TaskContext {}
+impl Sync for TaskContext {}
+
+struct CancelState {
+    cancelled: AtomicBool,
+    refs: AtomicUsize,
+}
+
+pub struct CancelToken
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    state_addr: usize,
+}
+
+impl CancelToken<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new() -> !AllocErr Self {
+        let layout = Layout.of<CancelState>() match {
+            l? => l,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let state = CancelState {
+            cancelled: AtomicBool.new(false),
+            refs: AtomicUsize.new(1),
+        }
+        unsafe {
+            builtin.mem.raw_write<CancelState>(block.address(), state);
+        }
+        CancelToken<.A = A, .allocator = alloc> {
+            state_addr: block.address(),
+        }
+    }
+
+    pub fn is_cancelled(*self) -> bool {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return false;
+        }
+        let state = unsafe { builtin.mem.raw_ptr<CancelState>(addr) }
+        state.cancelled.load(AtomicOrdering.acquire)
+    }
+
+    pub fn cancel(*self) {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return;
+        }
+        let state = unsafe { builtin.mem.raw_ptr<CancelState>(addr) }
+        state.cancelled.store(true, AtomicOrdering.release);
+    }
+
+    pub fn clone_token(*self) -> Self {
+        let addr = self.state_addr.*;
+        if addr != 0 {
+            let state = unsafe { builtin.mem.raw_ptr<CancelState>(addr) }
+            let _ = state.refs.fetch_add(1, AtomicOrdering.relaxed);
+        }
+        CancelToken<.A = A, .allocator = alloc> { state_addr: addr }
+    }
+}
+
+impl Clone for CancelToken<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn clone(*self) -> Self {
+        self.clone_token()
+    }
+}
+
+impl Drop for CancelToken<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.state_addr.* = 0;
+        let state = unsafe { builtin.mem.raw_ptr<CancelState>(addr) }
+        let prev = state.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+        if prev == 1 {
+            let layout = Layout.of<CancelState>() match {
+                l? => l,
+                null => return,
+            }
+            let _ = unsafe { builtin.mem.raw_read<CancelState>(addr) }
+            unsafe {
+                alloc
+                    .as(Allocator)
+                    .deallocate(RawBlock.from_raw_parts(addr, layout));
+            }
+        }
+    }
+}
+
+impl Send for CancelToken<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for CancelToken<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+-- Future state tags: 0 = pending, 1 = completed, 2 = cancelled, 3 = taken.
+struct FutureBox
+where
+    T: Type,
+{
+    state_tag: AtomicUsize,
+    refs: AtomicUsize,
+    result: ?(!TaskErr T),
+}
+
+fn retire_future_result(val: ?(!TaskErr T)) where T: Type {}
+
+pub struct Future
+where
+    T: Type,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    state_addr: usize,
+}
+
+impl Future<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new_pending() -> !AllocErr Self {
+        let layout = Layout.of<FutureBox<T>>() match {
+            l? => l,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let box_val = FutureBox<T> {
+            state_tag: AtomicUsize.new(0),
+            refs: AtomicUsize.new(1),
+            result: null,
+        }
+        unsafe {
+            builtin.mem.raw_write<FutureBox<T>>(block.address(), box_val);
+        }
+        Future<T, .A = A, .allocator = alloc> {
+            state_addr: block.address(),
+        }
+    }
+
+    pub fn from_ready(outcome: !TaskErr T) -> !AllocErr Self {
+        let layout = Layout.of<FutureBox<T>>() match {
+            l? => l,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let box_val = FutureBox<T> {
+            state_tag: AtomicUsize.new(1),
+            refs: AtomicUsize.new(1),
+            result: outcome,
+        }
+        unsafe {
+            builtin.mem.raw_write<FutureBox<T>>(block.address(), box_val);
+        }
+        Future<T, .A = A, .allocator = alloc> {
+            state_addr: block.address(),
+        }
+    }
+
+    pub fn raw_addr(*self) -> usize {
+        self.state_addr.*
+    }
+
+    pub fn state(*self) -> FutureState {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return .cancelled;
+        }
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        let tag = box_ptr.state_tag.load(AtomicOrdering.acquire);
+        if tag == 0 {
+            .pending
+        } else if tag == 1 or tag == 3 {
+            .completed
+        } else {
+            .cancelled
+        }
+    }
+
+    pub fn is_ready(*self) -> bool {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return false;
+        }
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        box_ptr.state_tag.load(AtomicOrdering.acquire) != 0
+    }
+
+    pub fn complete_with(*self, outcome: !TaskErr T) {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return;
+        }
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        let wrapped: ?(!TaskErr T) = outcome;
+        unsafe {
+            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result), wrapped);
+        }
+        box_ptr.state_tag.store(1, AtomicOrdering.release);
+    }
+
+    pub fn cancel(*self) {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return;
+        }
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        let _ = box_ptr.state_tag.compare_exchange(
+            0,
+            2,
+            AtomicOrdering.acq_rel,
+            AtomicOrdering.acquire,
+        );
+    }
+
+    pub fn try_take(self) -> ?(!TaskErr T) {
+        let addr = self.state_addr;
+        if addr == 0 {
+            return null;
+        }
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        let tag = box_ptr.state_tag.load(AtomicOrdering.acquire);
+        if tag == 0 or tag == 3 {
+            return null;
+        }
+        if tag == 2 {
+            box_ptr.state_tag.store(3, AtomicOrdering.release);
+            let err: !TaskErr T = error TaskErr.Cancelled;
+            return err;
+        }
+        box_ptr.state_tag.store(3, AtomicOrdering.release);
+        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result)) }
+        let empty: ?(!TaskErr T) = null;
+        unsafe {
+            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result), empty);
+        }
+        taken
+    }
+
+    pub fn wait(self) -> #AsyncCore !TaskErr T {
+        while not self.ref.is_ready() {
+            AsyncCore.await_future_raw(self.ref.raw_addr())#!;
+        }
+        self.try_take() match {
+            res? => res,
+            null => {
+                let err: !TaskErr T = error TaskErr.Cancelled;
+                err
+            },
+        }
+    }
+}
+
+impl Drop for Future<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.state_addr.* = 0;
+        let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
+        let prev = box_ptr.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+        if prev == 1 {
+            let layout = Layout.of<FutureBox<T>>() match {
+                l? => l,
+                null => return,
+            }
+            let box_val = unsafe { builtin.mem.raw_read<FutureBox<T>>(addr) }
+            retire_future_result(box_val.result);
+            unsafe {
+                alloc
+                    .as(Allocator)
+                    .deallocate(RawBlock.from_raw_parts(addr, layout));
+            }
+        }
+    }
+}
+
+impl Send for Future<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+pub struct JoinHandle
+where
+    T: Type,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    task_id: TaskId,
+    future: Future<T, .A = A, .allocator = allocator>,
+    cancel_tok: CancelToken<.A = A, .allocator = allocator>,
+}
+
+impl JoinHandle<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new(
+        task_id: TaskId,
+        future: Future<T, .A = A, .allocator = alloc>,
+        cancel_tok: CancelToken<.A = A, .allocator = alloc>,
+    ) -> Self
+    {
+        JoinHandle<T, .A = A, .allocator = alloc> {
+            task_id: task_id,
+            future: future,
+            cancel_tok: cancel_tok,
+        }
+    }
+
+    pub fn id(*self) -> TaskId {
+        self.task_id.*
+    }
+
+    pub fn cancel(*self) {
+        self.cancel_tok.cancel();
+        self.future.cancel();
+    }
+
+    pub fn into_future(self) -> Future<T, .A = A, .allocator = alloc> {
+        self.future
+    }
+
+    pub fn join(self) -> #AsyncCore !TaskErr T {
+        self.future.wait()
+    }
+}
+
+impl Send for JoinHandle<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+pub effect enum AsyncCore {
+    async yield_now() -> !TaskErr void,
+    async sleep_for(dur: Duration) -> ![TaskErr, CancelErr] void,
+    async await_future_raw(future_addr: usize) -> !TaskErr void,
+}
+
+static next_task_id_counter: AtomicU64 = static_atomic_u64(1);
+
+fn allocate_task_id() -> TaskId {
+    TaskId.new(next_task_id_counter.fetch_add(1, AtomicOrdering.relaxed))
+}
+
+pub struct TaskScope
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    cancel_tok: CancelToken<.A = A, .allocator = allocator>,
+    pending_tasks: Vec<TaskId, .A = A, .allocator = allocator>,
+}
+
+impl TaskScope<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new() -> !AllocErr Self {
+        let tok = CancelToken<.A = A, .allocator = alloc>.new()!;
+        TaskScope<.A = A, .allocator = alloc> {
+            cancel_tok: tok,
+            pending_tasks: Vec<TaskId, .A = A, .allocator = alloc>.new(),
+        }
+    }
+
+    pub fn spawn(
+        *self,
+        body: %c fn() -> #AsyncCore T,
+    ) -> !TaskErr JoinHandle<T, .A = A, .allocator = alloc>
+    where
+        T: Type,
+        requires T :- Send,
+        c: Type.vars.Closure,
+    {
+        let tid = allocate_task_id();
+        self.pending_tasks.push(tid) match {
+            _! => {},
+            error err => return error TaskErr.Alloc(err),
+        }
+        let fut = Future<T, .A = A, .allocator = alloc>.new_pending() match {
+            f! => f,
+            error err => return error TaskErr.Alloc(err),
+        }
+        let child_tok = self.cancel_tok.clone_token();
+        let _ = body;
+        -- HOOK(runtime scheduler / async lowering): enqueue `body` onto active
+        -- `.use(runtime)` TaskSpawner; synchronous fallback marks empty handle.
+        JoinHandle<T, .A = A, .allocator = alloc>.new(tid, fut, child_tok)
+    }
+
+    pub fn cancel_all(*self) {
+        self.cancel_tok.cancel();
+    }
+
+    pub fn cancel_token(*self) -> CancelToken<.A = A, .allocator = alloc> {
+        self.cancel_tok.clone_token()
+    }
+
+    pub fn pending_count(*self) -> usize {
+        self.pending_tasks.len()
+    }
+}
+
+impl Drop for TaskScope<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        self.cancel_tok.cancel();
+        self.pending_tasks.clear();
+    }
+}
+
+-- ── Structured Concurrency Combinators ───────────────────────────────────────
+
+pub fn scoped(
+    entry: %c fn(*TaskScope<.A = A, .allocator = allocator>) -> #AsyncCore R,
+) -> #AsyncCore !TaskErr R
+where
+    R: Type,
+    c: Type.vars.Closure,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    var scope = TaskScope<.A = A, .allocator = allocator>.new() match {
+        s! => s,
+        error err => return error TaskErr.Alloc(err),
+    }
+    entry(scope.ref)
+}
+
+pub fn yield_now() -> #AsyncCore !TaskErr void {
+    -- HOOK(async lowering): append `.await` once `async effect` returns `Future<Y>`.
+    AsyncCore.yield_now()#
+}
+
+pub fn sleep(duration: Duration) -> #AsyncCore ![CancelErr, TaskErr] void {
+    -- HOOK(async lowering): append `.await` once `async effect` returns `Future<Y>`.
+    AsyncCore.sleep_for(duration)#
+}
+
+pub fn join_pair(
+    left: Future<L, .A = AL, .allocator = alloc_l>,
+    right: Future<R, .A = AR, .allocator = alloc_r>,
+) -> #AsyncCore Tuple<!TaskErr L, !TaskErr R>
+where
+    L: Type,
+    R: Type,
+    AL: Type,
+    requires AL :- Allocator + Sync,
+    quote alloc_l: lift *AL,
+    AR: Type,
+    requires AR :- Allocator + Sync,
+    quote alloc_r: lift *AR,
+{
+    let l_res = left.wait();
+    let r_res = right.wait();
+    (l_res, r_res)
+}
+
+pub enum Select2
+where
+    L: Type,
+    R: Type,
+    .AL: Type = DefaultAllocator,
+    requires AL :- Allocator + Sync,
+    quote .alloc_l: lift *AL = DefaultAllocator.GLOBAL.ref,
+    .AR: Type = DefaultAllocator,
+    requires AR :- Allocator + Sync,
+    quote .alloc_r: lift *AR = DefaultAllocator.GLOBAL.ref,
+{
+    first(!TaskErr L, Future<R, .A = AR, .allocator = alloc_r>),
+    second(Future<L, .A = AL, .allocator = alloc_l>, !TaskErr R),
+}
+
+pub fn select_pair(
+    left: Future<L, .A = AL, .allocator = alloc_l>,
+    right: Future<R, .A = AR, .allocator = alloc_r>,
+) -> #AsyncCore Select2<L, R, .AL = AL, .alloc_l = alloc_l, .AR = AR, .alloc_r = alloc_r>
+where
+    L: Type,
+    R: Type,
+    AL: Type,
+    requires AL :- Allocator + Sync,
+    quote alloc_l: lift *AL,
+    AR: Type,
+    requires AR :- Allocator + Sync,
+    quote alloc_r: lift *AR,
+{
+    while true {
+        if left.ref.is_ready() {
+            let val = left.try_take() match {
+                res? => res,
+                null => {
+                    let err: !TaskErr L = error TaskErr.Cancelled;
+                    err
+                },
+            };
+            return Select2<L, R, .AL = AL, .alloc_l = alloc_l, .AR = AR, .alloc_r = alloc_r>.first(
+                val,
+                right,
+            );
+        }
+        if right.ref.is_ready() {
+            let val = right.try_take() match {
+                res? => res,
+                null => {
+                    let err: !TaskErr R = error TaskErr.Cancelled;
+                    err
+                },
+            };
+            return Select2<L, R, .AL = AL, .alloc_l = alloc_l, .AR = AR, .alloc_r = alloc_r>.second(
+                left,
+                val,
+            );
+        }
+        AsyncCore.yield_now()# match {
+            _! => {},
+            error err => {
+                return Select2<L, R, .AL = AL, .alloc_l = alloc_l, .AR = AR, .alloc_r = alloc_r>.first(
+                    error err,
+                    right,
+                );
+            },
+        }
+    }
+    Select2<L, R, .AL = AL, .alloc_l = alloc_l, .AR = AR, .alloc_r = alloc_r>.first(
+        error TaskErr.Cancelled,
+        right,
+    )
+}
+
+pub fn race_pair(
+    scope: *TaskScope<.A = A, .allocator = alloc>,
+    left: Future<T, .A = A, .allocator = alloc>,
+    right: Future<T, .A = A, .allocator = alloc>,
+) -> #AsyncCore !TaskErr T
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    let _ = scope;
+    select_pair(left, right) match {
+        .first(res, loser) => {
+            loser.ref.cancel();
+            let _ = loser.wait();
+            res
+        },
+        .second(loser, res) => {
+            loser.ref.cancel();
+            let _ = loser.wait();
+            res
+        },
+    }
+}
+
+pub fn timeout(
+    scope: *TaskScope<.A = A, .allocator = alloc>,
+    duration: Duration,
+    body: %c fn() -> #AsyncCore T,
+) -> #AsyncCore ![CancelErr, TaskErr] T
+where
+    T: Type,
+    requires T :- Send,
+    c: Type.vars.Closure,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    let _ = scope;
+    let _ = duration;
+    -- HOOK(async lowering): spawn body and `sleep_for(duration)` concurrently on
+    -- `scope` and race via `select_pair`, cancelling loser cleanly on expiry.
+    body()
+}

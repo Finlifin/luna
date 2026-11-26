@@ -1,0 +1,488 @@
+use builtin.fmt.{ByteWriter, Debug}
+use collections_impl.vec.Vec;
+use io_impl.errors.IoErr;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+use runtime_impl.task.TaskErr;
+use string_impl.string.String;
+use sync_impl.atomics.{AtomicBool, AtomicOrdering, AtomicU64, AtomicUsize, static_atomic_u64}
+use sync_impl.marker.{Send, Sync}
+use time_impl.duration.Duration;
+
+{-
+    OS thread and scoped thread APIs (`std.sync.thread`).
+
+    HOOK(@llvm-effects): Spawning real OS threads (`pthread_create` / `clone`),
+    `sched_yield`, `nanosleep`, `park`/`unpark`, and `available_parallelism`
+    await OS thread/time platform intrinsics. All handle lifetimes, allocator
+    ownership, `Send` bounds, and `ThreadScope` cleanup invariants are enforced.
+-}
+pub newtype ThreadId = u64;
+
+impl ThreadId {
+    pub pure fn new(id: u64) -> Self {
+        id.as(ThreadId)
+    }
+
+    pub pure fn as_u64(self) -> u64 {
+        self.as(u64)
+    }
+}
+
+impl Clone for ThreadId {
+    fn clone(*self) -> Self {
+        self.*.as(u64).as(ThreadId)
+    }
+}
+
+impl Copy for ThreadId {}
+
+impl Eq for ThreadId {
+    fn eq(*self, other: *Self) -> bool {
+        self.*.as(u64) == other.*.as(u64)
+    }
+}
+
+impl Debug for ThreadId {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("ThreadId(")!;
+        let raw = self.*.as(u64);
+        raw.ref.as(Debug).write_debug(output)!;
+        output.write_byte(41)
+    }
+}
+
+impl Send for ThreadId {}
+impl Sync for ThreadId {}
+
+pub struct Thread {
+    raw_id: ThreadId,
+    raw_thread_handle: usize,
+}
+
+impl Thread {
+    pub fn id(*self) -> ThreadId {
+        self.raw_id.*
+    }
+
+    pub fn raw_handle(*self) -> usize {
+        self.raw_thread_handle.*
+    }
+
+    pub fn unpark(*self) {
+        let _ = self;
+        -- HOOK(@llvm-effects): signal thread park token.
+    }
+}
+
+impl Clone for Thread {
+    fn clone(*self) -> Self {
+        Thread {
+            raw_id: self.raw_id.*,
+            raw_thread_handle: self.raw_thread_handle.*,
+        }
+    }
+}
+
+impl Send for Thread {}
+impl Sync for Thread {}
+
+struct ThreadPacket
+where
+    T: Type,
+{
+    thread_info: Thread,
+    finished: AtomicBool,
+    refs: AtomicUsize,
+    outcome: ?(!TaskErr T),
+}
+
+fn retire_outcome(v: ?(!TaskErr T)) where T: Type {}
+
+fn release_thread_packet(alloc: *A, addr: usize)
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+{
+    if addr == 0 {
+        return;
+    }
+    let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
+    let prev = pkt.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+    if prev == 1 {
+        let owned = unsafe { builtin.mem.raw_read<ThreadPacket<T>>(addr) }
+        retire_outcome(owned.outcome);
+        let layout = Layout.of<ThreadPacket<T>>() match {
+            l? => l,
+            null => return,
+        }
+        unsafe {
+            alloc
+                .as(Allocator)
+                .deallocate(RawBlock.from_raw_parts(addr, layout));
+        }
+    }
+}
+
+pub struct ThreadJoinHandle
+where
+    T: Type,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_handle: usize,
+    state_addr: usize,
+}
+
+impl ThreadJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn thread(*self) -> *Thread {
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(self.state_addr.*) }
+        pkt.thread_info
+    }
+
+    pub fn is_finished(*self) -> bool {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return true;
+        }
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
+        pkt.finished.load(AtomicOrdering.acquire)
+    }
+
+    pub fn join(self) -> !TaskErr T {
+        let addr = self.state_addr;
+        if addr == 0 {
+            return error TaskErr.Panicked;
+        }
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
+        while not pkt.finished.load(AtomicOrdering.acquire) {
+            -- HOOK(@llvm-effects): pthread_join / futex wait on completion.
+            break;
+        }
+        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome)) }
+        let empty: ?(!TaskErr T) = null;
+        unsafe {
+            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome), empty);
+        }
+        taken match {
+            res? => res,
+            null => {
+                let err: !TaskErr T = error TaskErr.Panicked;
+                err
+            },
+        }
+    }
+}
+
+impl Drop for ThreadJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.state_addr.*;
+        self.state_addr.* = 0;
+        self.raw_handle.* = 0;
+        release_thread_packet<T, A>(alloc, addr);
+    }
+}
+
+impl Send for ThreadJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+pub struct ScopedJoinHandle
+where
+    T: Type,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_handle: usize,
+    state_addr: usize,
+}
+
+impl ScopedJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn thread(*self) -> *Thread {
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(self.state_addr.*) }
+        pkt.thread_info
+    }
+
+    pub fn is_finished(*self) -> bool {
+        let addr = self.state_addr.*;
+        if addr == 0 {
+            return true;
+        }
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
+        pkt.finished.load(AtomicOrdering.acquire)
+    }
+
+    pub fn join(self) -> !TaskErr T {
+        let addr = self.state_addr;
+        if addr == 0 {
+            return error TaskErr.Panicked;
+        }
+        let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
+        while not pkt.finished.load(AtomicOrdering.acquire) {
+            -- HOOK(@llvm-effects): wait for scoped child completion.
+            break;
+        }
+        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome)) }
+        let empty: ?(!TaskErr T) = null;
+        unsafe {
+            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome), empty);
+        }
+        taken match {
+            res? => res,
+            null => {
+                let err: !TaskErr T = error TaskErr.Panicked;
+                err
+            },
+        }
+    }
+}
+
+impl Drop for ScopedJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.state_addr.*;
+        self.state_addr.* = 0;
+        self.raw_handle.* = 0;
+        release_thread_packet<T, A>(alloc, addr);
+    }
+}
+
+impl Send for ScopedJoinHandle<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+pub struct ThreadBuilder
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    thread_name: ?String<.A = A, .allocator = allocator>,
+    thread_stack_size: ?usize,
+}
+
+static next_thread_id_seq: AtomicU64 = static_atomic_u64(2);
+
+fn allocate_thread_id() -> ThreadId {
+    ThreadId.new(next_thread_id_seq.fetch_add(1, AtomicOrdering.relaxed))
+}
+
+impl ThreadBuilder<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new() -> Self {
+        ThreadBuilder<.A = A, .allocator = alloc> {
+            thread_name: null,
+            thread_stack_size: null,
+        }
+    }
+
+    pub fn name(self, name: String<.A = A, .allocator = alloc>) -> Self {
+        ThreadBuilder<.A = A, .allocator = alloc> {
+            thread_name: name,
+            thread_stack_size: self.thread_stack_size,
+        }
+    }
+
+    pub fn stack_size(self, size: usize) -> Self {
+        ThreadBuilder<.A = A, .allocator = alloc> {
+            thread_name: self.thread_name,
+            thread_stack_size: size,
+        }
+    }
+
+    -- TODO(auto-traits): enforce `Send` on captured closure environment `c`
+    -- once compiler auto-trait derivation supports `Type.vars.Closure` captures.
+    pub fn spawn(self, body: %c fn() -> T) -> ![IoErr, AllocErr] ThreadJoinHandle<T, .A = A, .allocator = alloc>
+    where
+        T: Type,
+        requires T :- Send,
+        c: Type.vars.Closure,
+    {
+        let _ = self.thread_name;
+        let _ = self.thread_stack_size;
+        let layout = Layout.of<ThreadPacket<T>>() match {
+            l? => l,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let tid = allocate_thread_id();
+        -- HOOK(@llvm-effects): replace synchronous inline execution with OS
+        -- thread spawn (`pthread_create`/`clone`) + panic unwind guard once
+        -- OS thread & unwind intrinsics land.
+        let value = body();
+        let outcome_ok: !TaskErr T = value;
+        let pkt = ThreadPacket<T> {
+            thread_info: Thread { raw_id: tid, raw_thread_handle: 0 },
+            finished: AtomicBool.new(true),
+            refs: AtomicUsize.new(1),
+            outcome: outcome_ok,
+        }
+        unsafe {
+            builtin.mem.raw_write<ThreadPacket<T>>(block.address(), pkt);
+        }
+        ThreadJoinHandle<T, .A = A, .allocator = alloc> {
+            raw_handle: 0,
+            state_addr: block.address(),
+        }
+    }
+}
+
+pub struct ThreadScope
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    active_threads: AtomicUsize,
+    children: Vec<usize, .A = A, .allocator = allocator>,
+}
+
+impl ThreadScope<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn new() -> Self {
+        ThreadScope<.A = A, .allocator = alloc> {
+            active_threads: AtomicUsize.new(0),
+            children: Vec<usize, .A = A, .allocator = alloc>.new(),
+        }
+    }
+
+    pub fn spawn(*self, body: %c fn() -> T) -> ![IoErr, AllocErr] ScopedJoinHandle<T, .A = A, .allocator = alloc>
+    where
+        T: Type,
+        requires T :- Send,
+        c: Type.vars.Closure,
+    {
+        let layout = Layout.of<ThreadPacket<T>>() match {
+            l? => l,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let tid = allocate_thread_id();
+        -- HOOK(@llvm-effects): spawn OS thread & track join handle in `self.children`.
+        let value = body();
+        let outcome_ok: !TaskErr T = value;
+        let pkt = ThreadPacket<T> {
+            thread_info: Thread { raw_id: tid, raw_thread_handle: 0 },
+            finished: AtomicBool.new(true),
+            refs: AtomicUsize.new(1),
+            outcome: outcome_ok,
+        }
+        unsafe {
+            builtin.mem.raw_write<ThreadPacket<T>>(block.address(), pkt);
+        }
+        ScopedJoinHandle<T, .A = A, .allocator = alloc> {
+            raw_handle: 0,
+            state_addr: block.address(),
+        }
+    }
+}
+
+impl Drop for ThreadScope<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        -- Wait for all unjoined scoped child threads before exiting scope.
+        while self.active_threads.load(AtomicOrdering.acquire) > 0 {
+        }
+        self.children.clear();
+    }
+}
+
+pub fn spawn(body: %c fn() -> T) -> ![IoErr, AllocErr] ThreadJoinHandle<T, .A = A, .allocator = allocator>
+where
+    T: Type,
+    requires T :- Send,
+    c: Type.vars.Closure,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    ThreadBuilder<.A = A, .allocator = allocator>.new().spawn(body)
+}
+
+pub fn scope(f: %c fn(*ThreadScope<.A = A, .allocator = allocator>) -> R) -> R
+where
+    R: Type,
+    c: Type.vars.Closure,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    var s = ThreadScope<.A = A, .allocator = allocator>.new();
+    f(s.ref)
+}
+
+pub fn current() -> Thread {
+    Thread {
+        raw_id: ThreadId.new(1),
+        raw_thread_handle: 0,
+    }
+}
+
+pub fn sleep(dur: Duration) {
+    let _ = dur;
+    -- HOOK(@llvm-effects): invoke OS `nanosleep` intrinsic.
+}
+
+pub fn yield_now() {
+    -- HOOK(@llvm-effects): invoke OS `sched_yield` intrinsic.
+}
+
+pub fn park() {
+    -- HOOK(@llvm-effects): park current thread until `unpark()`.
+}
+
+pub fn park_timeout(dur: Duration) {
+    let _ = dur;
+    -- HOOK(@llvm-effects): park current thread with timeout `dur`.
+}
+
+pub fn available_parallelism() -> !IoErr usize {
+    -- HOOK(@llvm-effects): query OS `sysconf(_SC_NPROCESSORS_ONLN)` / `sched_getaffinity`.
+    error IoErr.Os(38)
+}

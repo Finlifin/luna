@@ -1,0 +1,1769 @@
+use builtin.fmt.{ByteWriter, Debug}
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+use process_impl.process.panic;
+use runtime_impl.task.AsyncCore;
+use sync_impl.atomics.{AtomicBool, AtomicOrdering, AtomicU64, AtomicUsize}
+use sync_impl.locks.Mutex;
+use sync_impl.marker.{Send, Sync}
+use time_impl.duration.Duration;
+
+{-
+    Allocator-parameterized concurrent channels:
+    - `mpsc`: unbounded & bounded multi-producer single-consumer channels
+    - `mpmc`: bounded multi-producer multi-consumer channels
+    - `oneshot`: single-shot value transfer channels
+    - `broadcast`: bounded multi-receiver broadcast channels
+
+    Every channel allocates its shared control block and ring/node storage
+    via the runtime-dependent allocator clause (`.A`, `quote .allocator`) and
+    drops remaining unconsumed affine `T` payloads cleanly when the final
+    endpoint drops.
+-}
+pub struct SendErr
+where
+    T: Type,
+{
+    value: T,
+}
+
+impl SendErr<T>
+where
+    T: Type,
+{
+    pub fn new(value: T) -> Self {
+        SendErr<T> { value: value }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+}
+
+impl Debug for SendErr<T>
+where
+    T: Type,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("SendErr(..)")
+    }
+}
+
+impl Send for SendErr<T> where T :- Send {}
+impl Sync for SendErr<T> where T :- Sync {}
+
+pub enum TrySendErr
+where
+    T: Type,
+{
+    Full(T),
+    Disconnected(T),
+}
+
+impl TrySendErr<T>
+where
+    T: Type,
+{
+    pub fn into_inner(self) -> T {
+        self match {
+            .Full(v) => v,
+            .Disconnected(v) => v,
+        }
+    }
+}
+
+impl Debug for TrySendErr<T>
+where
+    T: Type,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        let _ = self;
+        output.write_str("TrySendErr { .. }")
+    }
+}
+
+impl Send for TrySendErr<T> where T :- Send {}
+impl Sync for TrySendErr<T> where T :- Sync {}
+
+pub enum RecvErr {
+    Disconnected,
+}
+
+impl Clone for RecvErr {
+    fn clone(*self) -> Self {
+        .Disconnected
+    }
+}
+
+impl Copy for RecvErr {}
+
+impl Eq for RecvErr {
+    fn eq(*self, other: *Self) -> bool {
+        let _ = other;
+        true
+    }
+}
+
+impl Debug for RecvErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("RecvErr.Disconnected")
+    }
+}
+
+impl Send for RecvErr {}
+impl Sync for RecvErr {}
+
+pub enum TryRecvErr {
+    Empty,
+    Disconnected,
+}
+
+impl Clone for TryRecvErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .Empty => .Empty,
+            .Disconnected => .Disconnected,
+        }
+    }
+}
+
+impl Copy for TryRecvErr {}
+
+impl Eq for TryRecvErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .Empty =>
+                other.* match {
+                    .Empty => true,
+                    .Disconnected => false,
+                },
+            .Disconnected =>
+                other.* match {
+                    .Empty => false,
+                    .Disconnected => true,
+                },
+        }
+    }
+}
+
+impl Debug for TryRecvErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Empty => output.write_str("TryRecvErr.Empty"),
+            .Disconnected => output.write_str("TryRecvErr.Disconnected"),
+        }
+    }
+}
+
+impl Send for TryRecvErr {}
+impl Sync for TryRecvErr {}
+
+pub enum RecvTimeoutErr {
+    Timeout,
+    Disconnected,
+}
+
+impl Clone for RecvTimeoutErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .Timeout => .Timeout,
+            .Disconnected => .Disconnected,
+        }
+    }
+}
+
+impl Copy for RecvTimeoutErr {}
+
+impl Eq for RecvTimeoutErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .Timeout =>
+                other.* match {
+                    .Timeout => true,
+                    .Disconnected => false,
+                },
+            .Disconnected =>
+                other.* match {
+                    .Timeout => false,
+                    .Disconnected => true,
+                },
+        }
+    }
+}
+
+impl Debug for RecvTimeoutErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Timeout => output.write_str("RecvTimeoutErr.Timeout"),
+            .Disconnected => output.write_str("RecvTimeoutErr.Disconnected"),
+        }
+    }
+}
+
+impl Send for RecvTimeoutErr {}
+impl Sync for RecvTimeoutErr {}
+
+-- ── Shared Ring Buffer Helpers ───────────────────────────────────────────────
+
+fn slot_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    builtin.mem.align_up_usize(size, Type.align_of(T))
+}
+
+fn slot_addr_at(base: usize, index: usize) -> usize where T {
+    let stride = slot_stride<T>() match {
+        s? => s,
+        null => return Type.align_of(T),
+    }
+    if stride == 0 {
+        return Type.align_of(T);
+    }
+    let off = builtin.mem.checked_mul_usize(index, stride) match {
+        o? => o,
+        null => return 0,
+    }
+    builtin.mem.checked_add_usize(base, off) match {
+        a? => a,
+        null => 0,
+    }
+}
+
+fn ring_layout(cap: usize) -> ?Layout where T {
+    let count_u64 = builtin.compiler.try_usize_to_u64(cap) match {
+        c? => c,
+        null => return null,
+    }
+    Layout.array<T>(count_u64)
+}
+
+fn alloc_ring_buffer(alloc: *A, cap: usize) -> !AllocErr usize
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator,
+{
+    if cap == 0 or Type.size_of(T) == 0 {
+        return 0;
+    }
+    let layout = ring_layout<T>(cap) match {
+        l? => l,
+        null => return error AllocErr.InvalidLayout,
+    }
+    let block = alloc.as(Allocator).allocate(layout)!;
+    block.address()
+}
+
+fn dealloc_ring_buffer(alloc: *A, addr: usize, cap: usize)
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator,
+{
+    if cap == 0 or addr == 0 or Type.size_of(T) == 0 {
+        return;
+    }
+    let layout = ring_layout<T>(cap) match {
+        l? => l,
+        null => return,
+    }
+    unsafe {
+        alloc
+            .as(Allocator)
+            .deallocate(RawBlock.from_raw_parts(addr, layout));
+    }
+}
+
+fn retire_value(v: T) where T: Type {}
+
+-- ── 1. MPSC Channel (Unbounded / Bounded) ────────────────────────────────────
+
+struct MpscQueueState
+where
+    T: Type,
+{
+    buf_addr: usize,
+    head: usize,
+    len: usize,
+    cap: usize,
+    bound: usize, -- 0 means unbounded
+    sender_count: usize,
+    receiver_alive: bool,
+}
+
+struct MpscShared
+where
+    T: Type,
+    requires T :- Send,
+{
+    queue: Mutex<MpscQueueState<T>>,
+    refs: AtomicUsize,
+}
+
+impl Send for MpscQueueState<T> where T :- Send {}
+impl Send for MpscShared<T> where T :- Send {}
+impl Sync for MpscShared<T> where T :- Send {}
+
+pure fn chan_ring_index(head: usize, offset: usize, cap: usize) -> usize {
+    if cap == 0 or head >= cap or offset >= cap {
+        return 0;
+    }
+    let rem = cap - head;
+    if offset < rem {
+        head + offset
+    } else {
+        offset - rem
+    }
+}
+
+pure fn chan_ring_inc(idx: usize, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    let last = cap - 1;
+    if idx < last {
+        idx + 1
+    } else {
+        0
+    }
+}
+
+fn mpsc_drop_shared(alloc: *A, shared_addr: usize)
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+{
+    if shared_addr == 0 {
+        return;
+    }
+    let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(shared_addr) }
+    let prev = shared.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+    if prev == 1 {
+        let owned_shared = unsafe { builtin.mem.raw_read<MpscShared<T>>(shared_addr) }
+        let st = owned_shared.queue.into_inner() match {
+            q! => q,
+            error poisoned => poisoned.into_inner(),
+        }
+        var i: usize = 0;
+        while i < st.len {
+            let idx = chan_ring_index(st.head, i, st.cap);
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_addr_at<T>(st.buf_addr, idx)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_ring_buffer<T, A>(alloc, st.buf_addr, st.cap);
+        let layout = Layout.of<MpscShared<T>>() match {
+            l? => l,
+            null => return,
+        }
+        unsafe {
+            alloc
+                .as(Allocator)
+                .deallocate(RawBlock.from_raw_parts(shared_addr, layout));
+        }
+    }
+}
+
+pub struct MpscSender
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub struct MpscReceiver
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+fn mpsc_create(
+    bound: usize,
+) -> !AllocErr Tuple<MpscSender<T, .A = A, .allocator = allocator>, MpscReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote allocator: lift *A,
+{
+    let init_cap: usize = if bound == 0 { 8 } else { bound }
+    let buf = alloc_ring_buffer<T, A>(allocator, init_cap)!;
+    let layout = Layout.of<MpscShared<T>>() match {
+        l? => l,
+        null => {
+            dealloc_ring_buffer<T, A>(allocator, buf, init_cap);
+            return error AllocErr.InvalidLayout;
+        },
+    }
+    let block = alloc_shared_block(allocator, layout) match {
+        b! => b,
+        error err => {
+            dealloc_ring_buffer<T, A>(allocator, buf, init_cap);
+            return error err;
+        },
+    }
+    let shared = MpscShared<T> {
+        queue: Mutex<MpscQueueState<T>>.new(MpscQueueState<T> {
+            buf_addr: buf,
+            head: 0,
+            len: 0,
+            cap: init_cap,
+            bound: bound,
+            sender_count: 1,
+            receiver_alive: true,
+        }),
+        refs: AtomicUsize.new(2),
+    }
+    unsafe {
+        builtin.mem.raw_write<MpscShared<T>>(block.address(), shared);
+    }
+    let tx = MpscSender<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    let rx = MpscReceiver<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    (tx, rx)
+}
+
+fn alloc_shared_block(alloc: *A, layout: Layout) -> !AllocErr RawBlock
+where
+    A: Type,
+    requires A :- Allocator,
+{
+    alloc.as(Allocator).allocate(layout)
+}
+
+pub fn mpsc_channel() -> !AllocErr Tuple<MpscSender<T, .A = A, .allocator = allocator>, MpscReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    mpsc_create<T, A, allocator>(0)
+}
+
+pub fn mpsc_sync_channel(
+    bound: usize,
+) -> !AllocErr Tuple<MpscSender<T, .A = A, .allocator = allocator>, MpscReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    let eff_bound: usize = if bound == 0 { 1 } else { bound }
+    mpsc_create<T, A, allocator>(eff_bound)
+}
+
+fn mpsc_grow_ring(alloc: *A, st: *MpscQueueState<T>) -> !AllocErr void
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator,
+{
+    let old_cap = st.cap.*;
+    let new_cap = builtin.mem.checked_mul_usize(old_cap, 2) match {
+        c? => c,
+        null => return error AllocErr.InvalidLayout,
+    }
+    let new_buf = alloc_ring_buffer<T, A>(alloc, new_cap)!;
+    let len = st.len.*;
+    let head = st.head.*;
+    let old_buf = st.buf_addr.*;
+    if Type.size_of(T) != 0 {
+        var i: usize = 0;
+        while i < len {
+            let src_idx = chan_ring_index(head, i, old_cap);
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_addr_at<T>(old_buf, src_idx)) }
+            unsafe {
+                builtin.mem.raw_write<T>(slot_addr_at<T>(new_buf, i), elem);
+            }
+            i = i + 1;
+        }
+    }
+    dealloc_ring_buffer<T, A>(alloc, old_buf, old_cap);
+    st.buf_addr.* = new_buf;
+    st.head.* = 0;
+    st.cap.* = new_cap;
+}
+
+impl MpscSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_send(*self, value: T) -> ![TrySendErr<T>, AllocErr] void {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(addr) }
+        let guard = shared.queue.lock() match {
+            g! => g,
+            error poisoned => poisoned.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        if not st.receiver_alive.* {
+            return error TrySendErr<T>.Disconnected(value);
+        }
+        let len = st.len.*;
+        let cap = st.cap.*;
+        let bound = st.bound.*;
+        if len == cap {
+            if bound != 0 {
+                return error TrySendErr<T>.Full(value);
+            }
+            mpsc_grow_ring<T, A>(alloc, st) match {
+                _! => {},
+                error err => return error err,
+            }
+        }
+        let tail = chan_ring_index(st.head.*, st.len.*, st.cap.*);
+        if Type.size_of(T) != 0 {
+            unsafe {
+                builtin.mem.raw_write<T>(slot_addr_at<T>(st.buf_addr.*, tail), value);
+            }
+        } else {
+            retire_value(value);
+        }
+        let cur_len = st.len.*;
+        st.len.* = builtin.mem.checked_add_usize(cur_len, 1) match {
+            v? => v,
+            null => cur_len,
+        };
+    }
+
+    pub fn send(*self, value: T) -> ![SendErr<T>, AllocErr] void {
+        var cur = value;
+        while true {
+            self.try_send(cur) match {
+                _! => return,
+                error TrySendErr<T>.Full(v) => {
+                    cur = v;
+                    -- HOOK(@llvm-effects): yield/wait until consumer frees a slot.
+                },
+                error TrySendErr<T>.Disconnected(v) => {
+                    return error SendErr<T>.new(v);
+                },
+                error AllocErr.OutOfMemory => return error AllocErr.OutOfMemory,
+                error AllocErr.InvalidLayout => return error AllocErr.InvalidLayout,
+            }
+        }
+    }
+
+    pub fn clone_sender(*self) -> Self {
+        let addr = self.shared_addr.*;
+        if addr != 0 {
+            let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(addr) }
+            let _ = shared.refs.fetch_add(1, AtomicOrdering.relaxed);
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            }
+            let st = guard.ref.as_ptr();
+            st.sender_count.* = builtin.mem.checked_add_usize(st.sender_count.*, 1) match {
+                v? => v,
+                null => st.sender_count.*,
+            };
+        }
+        MpscSender<T, .A = A, .allocator = alloc> { shared_addr: addr }
+    }
+}
+
+impl MpscReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_recv(*self) -> !TryRecvErr T {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(addr) }
+        let guard = shared.queue.lock() match {
+            g! => g,
+            error p => p.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        if st.len.* == 0 {
+            if st.sender_count.* == 0 {
+                return error TryRecvErr.Disconnected;
+            }
+            return error TryRecvErr.Empty;
+        }
+        let head = st.head.*;
+        let item = unsafe { builtin.mem.raw_read<T>(slot_addr_at<T>(st.buf_addr.*, head)) }
+        st.head.* = chan_ring_inc(head, st.cap.*);
+        let cur_len = st.len.*;
+        if cur_len > 0 {
+            st.len.* = cur_len - 1;
+        }
+        item
+    }
+
+    pub fn recv(*self) -> !RecvErr T {
+        while true {
+            self.try_recv() match {
+                item! => return item,
+                error TryRecvErr.Empty => {
+                    -- HOOK(@llvm-effects): futex_wait on non-empty signal.
+                },
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+
+    pub fn recv_timeout(*self, timeout: Duration) -> !RecvTimeoutErr T {
+        let _ = timeout;
+        self.try_recv() match {
+            item! => item,
+            error TryRecvErr.Empty => error RecvTimeoutErr.Timeout,
+            error TryRecvErr.Disconnected => error RecvTimeoutErr.Disconnected,
+        }
+    }
+
+    pub fn recv_async(*self) -> #AsyncCore !RecvErr T {
+        while true {
+            self.try_recv() match {
+                item! => return item,
+                error TryRecvErr.Empty => {
+                    AsyncCore.yield_now()# match {
+                        _! => {},
+                        error _ => return error RecvErr.Disconnected,
+                    }
+                },
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+}
+
+impl Drop for MpscSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(addr) };
+        do {
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            let st = guard.ref.as_ptr();
+            let cur_sc = st.sender_count.*;
+            if cur_sc > 0 {
+                st.sender_count.* = cur_sc - 1;
+            }
+        }
+        mpsc_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Drop for MpscReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<MpscShared<T>>(addr) };
+        do {
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            guard.ref.as_ptr().receiver_alive.* = false;
+        }
+        mpsc_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Send for MpscSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for MpscSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for MpscReceiver<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+-- ── 2. MPMC Channel ──────────────────────────────────────────────────────────
+
+struct MpmcQueueState
+where
+    T: Type,
+{
+    buf_addr: usize,
+    head: usize,
+    len: usize,
+    cap: usize,
+    sender_count: usize,
+    receiver_count: usize,
+}
+
+struct MpmcShared
+where
+    T: Type,
+    requires T :- Send,
+{
+    queue: Mutex<MpmcQueueState<T>>,
+    refs: AtomicUsize,
+}
+
+impl Send for MpmcQueueState<T> where T :- Send {}
+impl Send for MpmcShared<T> where T :- Send {}
+impl Sync for MpmcShared<T> where T :- Send {}
+
+fn mpmc_drop_shared(alloc: *A, shared_addr: usize)
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+{
+    if shared_addr == 0 {
+        return;
+    }
+    let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(shared_addr) }
+    let prev = shared.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+    if prev == 1 {
+        let owned_shared = unsafe { builtin.mem.raw_read<MpmcShared<T>>(shared_addr) }
+        let st = owned_shared.queue.into_inner() match {
+            q! => q,
+            error p => p.into_inner(),
+        }
+        var i: usize = 0;
+        while i < st.len {
+            let idx = chan_ring_index(st.head, i, st.cap);
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_addr_at<T>(st.buf_addr, idx)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_ring_buffer<T, A>(alloc, st.buf_addr, st.cap);
+        let layout = Layout.of<MpmcShared<T>>() match {
+            l? => l,
+            null => return,
+        }
+        unsafe {
+            alloc
+                .as(Allocator)
+                .deallocate(RawBlock.from_raw_parts(shared_addr, layout));
+        }
+    }
+}
+
+pub struct MpmcSender
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub struct MpmcReceiver
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub fn mpmc_channel(
+    capacity: usize,
+) -> !AllocErr Tuple<MpmcSender<T, .A = A, .allocator = allocator>, MpmcReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    let cap: usize = if capacity == 0 { 1 } else { capacity }
+    let buf = alloc_ring_buffer<T, A>(allocator, cap)!;
+    let layout = Layout.of<MpmcShared<T>>() match {
+        l? => l,
+        null => {
+            dealloc_ring_buffer<T, A>(allocator, buf, cap);
+            return error AllocErr.InvalidLayout;
+        },
+    }
+    let block = alloc_shared_block(allocator, layout) match {
+        b! => b,
+        error err => {
+            dealloc_ring_buffer<T, A>(allocator, buf, cap);
+            return error err;
+        },
+    }
+    let shared = MpmcShared<T> {
+        queue: Mutex<MpmcQueueState<T>>.new(MpmcQueueState<T> {
+            buf_addr: buf,
+            head: 0,
+            len: 0,
+            cap: cap,
+            sender_count: 1,
+            receiver_count: 1,
+        }),
+        refs: AtomicUsize.new(2),
+    }
+    unsafe {
+        builtin.mem.raw_write<MpmcShared<T>>(block.address(), shared);
+    }
+    let tx = MpmcSender<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    let rx = MpmcReceiver<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    (tx, rx)
+}
+
+impl MpmcSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_send(*self, value: T) -> !TrySendErr<T> void {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) }
+        let guard = shared.queue.lock() match {
+            g! => g,
+            error p => p.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        if st.receiver_count.* == 0 {
+            return error TrySendErr<T>.Disconnected(value);
+        }
+        if st.len.* >= st.cap.* {
+            return error TrySendErr<T>.Full(value);
+        }
+        let tail = chan_ring_index(st.head.*, st.len.*, st.cap.*);
+        if Type.size_of(T) != 0 {
+            unsafe {
+                builtin.mem.raw_write<T>(slot_addr_at<T>(st.buf_addr.*, tail), value);
+            }
+        } else {
+            retire_value(value);
+        }
+        let cur_len = st.len.*;
+        st.len.* = builtin.mem.checked_add_usize(cur_len, 1) match {
+            v? => v,
+            null => cur_len,
+        };
+    }
+
+    pub fn send(*self, value: T) -> !SendErr<T> void {
+        var cur = value;
+        while true {
+            self.try_send(cur) match {
+                _! => return,
+                error TrySendErr<T>.Full(v) => {
+                    cur = v;
+                },
+                error TrySendErr<T>.Disconnected(v) => return error SendErr<T>.new(v),
+            }
+        }
+    }
+
+    pub fn clone_sender(*self) -> Self {
+        let addr = self.shared_addr.*;
+        if addr != 0 {
+            let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) }
+            let _ = shared.refs.fetch_add(1, AtomicOrdering.relaxed);
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            }
+            let st = guard.ref.as_ptr();
+            st.sender_count.* = builtin.mem.checked_add_usize(st.sender_count.*, 1) match {
+                v? => v,
+                null => st.sender_count.*,
+            };
+        }
+        MpmcSender<T, .A = A, .allocator = alloc> { shared_addr: addr }
+    }
+}
+
+impl MpmcReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_recv(*self) -> !TryRecvErr T {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) }
+        let guard = shared.queue.lock() match {
+            g! => g,
+            error p => p.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        if st.len.* == 0 {
+            if st.sender_count.* == 0 {
+                return error TryRecvErr.Disconnected;
+            }
+            return error TryRecvErr.Empty;
+        }
+        let head = st.head.*;
+        let item = unsafe { builtin.mem.raw_read<T>(slot_addr_at<T>(st.buf_addr.*, head)) }
+        st.head.* = chan_ring_inc(head, st.cap.*);
+        let cur_len = st.len.*;
+        if cur_len > 0 {
+            st.len.* = cur_len - 1;
+        }
+        item
+    }
+
+    pub fn recv(*self) -> !RecvErr T {
+        while true {
+            self.try_recv() match {
+                item! => return item,
+                error TryRecvErr.Empty => {},
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+
+    pub fn clone_receiver(*self) -> Self {
+        let addr = self.shared_addr.*;
+        if addr != 0 {
+            let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) }
+            let _ = shared.refs.fetch_add(1, AtomicOrdering.relaxed);
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            }
+            let st = guard.ref.as_ptr();
+            st.receiver_count.* = builtin.mem.checked_add_usize(st.receiver_count.*, 1) match {
+                v? => v,
+                null => st.receiver_count.*,
+            };
+        }
+        MpmcReceiver<T, .A = A, .allocator = alloc> { shared_addr: addr }
+    }
+
+    pub fn recv_async(*self) -> #AsyncCore !RecvErr T {
+        while true {
+            self.try_recv() match {
+                item! => return item,
+                error TryRecvErr.Empty => {
+                    AsyncCore.yield_now()# match {
+                        _! => {},
+                        error _ => return error RecvErr.Disconnected,
+                    }
+                },
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+}
+
+impl Drop for MpmcSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) };
+        do {
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            let st = guard.ref.as_ptr();
+            let cur_sc = st.sender_count.*;
+            if cur_sc > 0 {
+                st.sender_count.* = cur_sc - 1;
+            }
+        }
+        mpmc_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Drop for MpmcReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<MpmcShared<T>>(addr) };
+        do {
+            let guard = shared.queue.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            let st = guard.ref.as_ptr();
+            let cur_rc = st.receiver_count.*;
+            if cur_rc > 0 {
+                st.receiver_count.* = cur_rc - 1;
+            }
+        }
+        mpmc_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Send for MpmcSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for MpmcSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for MpmcReceiver<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for MpmcReceiver<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+-- ── 3. Oneshot Channel ───────────────────────────────────────────────────────
+
+-- state_tag: 0 = empty, 1 = sent, 2 = sender_closed, 3 = receiver_closed, 4 = taken
+struct OneshotShared
+where
+    T: Type,
+{
+    state_tag: AtomicUsize,
+    refs: AtomicUsize,
+    value: ?T,
+}
+
+fn retire_opt(v: ?T) where T: Type {}
+
+fn oneshot_drop_shared(alloc: *A, shared_addr: usize)
+where
+    T: Type,
+    A: Type,
+    requires A :- Allocator + Sync,
+{
+    if shared_addr == 0 {
+        return;
+    }
+    let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(shared_addr) }
+    let prev = shared.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+    if prev == 1 {
+        let owned = unsafe { builtin.mem.raw_read<OneshotShared<T>>(shared_addr) }
+        retire_opt(owned.value);
+        let layout = Layout.of<OneshotShared<T>>() match {
+            l? => l,
+            null => return,
+        }
+        unsafe {
+            alloc
+                .as(Allocator)
+                .deallocate(RawBlock.from_raw_parts(shared_addr, layout));
+        }
+    }
+}
+
+pub struct OneshotSender
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub struct OneshotReceiver
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub fn oneshot_channel() -> !AllocErr Tuple<OneshotSender<T, .A = A, .allocator = allocator>, OneshotReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    let layout = Layout.of<OneshotShared<T>>() match {
+        l? => l,
+        null => return error AllocErr.InvalidLayout,
+    }
+    let block = alloc_shared_block(allocator, layout)!;
+    let shared = OneshotShared<T> {
+        state_tag: AtomicUsize.new(0),
+        refs: AtomicUsize.new(2),
+        value: null,
+    }
+    unsafe {
+        builtin.mem.raw_write<OneshotShared<T>>(block.address(), shared);
+    }
+    let tx = OneshotSender<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    let rx = OneshotReceiver<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    (tx, rx)
+}
+
+impl OneshotSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn is_closed(*self) -> bool {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return true;
+        }
+        let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(addr) }
+        shared.state_tag.load(AtomicOrdering.acquire) == 3
+    }
+
+    pub fn send(self, value: T) -> !SendErr<T> void {
+        let addr = self.shared_addr;
+        if addr == 0 {
+            return error SendErr<T>.new(value);
+        }
+        let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(addr) }
+        if shared.state_tag.load(AtomicOrdering.acquire) == 3 {
+            return error SendErr<T>.new(value);
+        }
+        let wrapped: ?T = value;
+        unsafe {
+            builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(shared.value), wrapped);
+        }
+        shared.state_tag.store(1, AtomicOrdering.release);
+    }
+}
+
+impl OneshotReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_recv(*self) -> !TryRecvErr T {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return error TryRecvErr.Disconnected;
+        }
+        let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(addr) }
+        let tag = shared.state_tag.load(AtomicOrdering.acquire);
+        if tag == 0 {
+            return error TryRecvErr.Empty;
+        }
+        if tag != 1 {
+            return error TryRecvErr.Disconnected;
+        }
+        shared.state_tag.store(4, AtomicOrdering.release);
+        let taken = unsafe { builtin.mem.raw_read<?T>(builtin.mem.ptr_addr(shared.value)) }
+        let empty: ?T = null;
+        unsafe {
+            builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(shared.value), empty);
+        }
+        taken match {
+            v? => v,
+            null => error TryRecvErr.Disconnected,
+        }
+    }
+
+    pub fn recv(self) -> !RecvErr T {
+        while true {
+            self.ref.try_recv() match {
+                v! => return v,
+                error TryRecvErr.Empty => {},
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+
+    pub fn recv_async(self) -> #AsyncCore !RecvErr T {
+        while true {
+            self.ref.try_recv() match {
+                v! => return v,
+                error TryRecvErr.Empty => {
+                    AsyncCore.yield_now()# match {
+                        _! => {},
+                        error _ => return error RecvErr.Disconnected,
+                    }
+                },
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+}
+
+impl Drop for OneshotSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(addr) }
+        let _ = shared.state_tag.compare_exchange(
+            0,
+            2,
+            AtomicOrdering.acq_rel,
+            AtomicOrdering.acquire,
+        );
+        oneshot_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Drop for OneshotReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<OneshotShared<T>>(addr) }
+        let _ = shared.state_tag.compare_exchange(
+            0,
+            3,
+            AtomicOrdering.acq_rel,
+            AtomicOrdering.acquire,
+        );
+        oneshot_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Send for OneshotSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Send for OneshotReceiver<T, .A = A, .allocator = alloc>
+where
+    T :- Send,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+-- ── 4. Broadcast Channel ─────────────────────────────────────────────────────
+
+struct BroadcastSlot
+where
+    T: Type,
+{
+    seq: u64,
+    value: ?T,
+}
+
+struct BroadcastState
+where
+    T: Type,
+{
+    buf_addr: usize,
+    cap: usize,
+    tail_seq: u64,
+    sender_count: usize,
+    receiver_count: usize,
+}
+
+struct BroadcastShared
+where
+    T: Type,
+    requires T :- Send,
+{
+    state: Mutex<BroadcastState<T>>,
+    refs: AtomicUsize,
+}
+
+impl Send for BroadcastSlot<T> where T :- Send {}
+impl Send for BroadcastState<T> where T :- Send {}
+impl Send for BroadcastShared<T> where T :- Send {}
+impl Sync for BroadcastShared<T> where T :- Send {}
+
+fn broadcast_drop_shared(alloc: *A, shared_addr: usize)
+where
+    T: Type,
+    requires T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+{
+    if shared_addr == 0 {
+        return;
+    }
+    let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(shared_addr) }
+    let prev = shared.refs.fetch_sub(1, AtomicOrdering.acq_rel);
+    if prev == 1 {
+        let owned = unsafe { builtin.mem.raw_read<BroadcastShared<T>>(shared_addr) }
+        let st = owned.state.into_inner() match {
+            q! => q,
+            error p => p.into_inner(),
+        }
+        var i: usize = 0;
+        while i < st.cap {
+            let slot = unsafe {
+                builtin.mem.raw_read<BroadcastSlot<T>>(slot_addr_at<BroadcastSlot<T>>(st.buf_addr, i))
+            }
+            retire_opt(slot.value);
+            i = i + 1;
+        }
+        dealloc_ring_buffer<BroadcastSlot<T>, A>(alloc, st.buf_addr, st.cap);
+        let layout = Layout.of<BroadcastShared<T>>() match {
+            l? => l,
+            null => return,
+        }
+        unsafe {
+            alloc
+                .as(Allocator)
+                .deallocate(RawBlock.from_raw_parts(shared_addr, layout));
+        }
+    }
+}
+
+pub struct BroadcastSender
+where
+    T: Type,
+    requires T :- Send + Clone,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+}
+
+pub struct BroadcastReceiver
+where
+    T: Type,
+    requires T :- Send + Clone,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    shared_addr: usize,
+    cursor: u64,
+}
+
+pub fn broadcast_channel(
+    capacity: usize,
+) -> !AllocErr Tuple<BroadcastSender<T, .A = A, .allocator = allocator>, BroadcastReceiver<T, .A = A, .allocator = allocator>>
+where
+    T: Type,
+    requires T :- Send + Clone,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator + Sync,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    let cap: usize = if capacity == 0 { 1 } else { capacity }
+    let buf = alloc_ring_buffer<BroadcastSlot<T>, A>(allocator, cap)!;
+    var i: usize = 0;
+    while i < cap {
+        let empty = BroadcastSlot<T> { seq: 0, value: null }
+        unsafe {
+            builtin.mem.raw_write<BroadcastSlot<T>>(
+                slot_addr_at<BroadcastSlot<T>>(buf, i),
+                empty,
+            );
+        }
+        i = i + 1;
+    }
+    let layout = Layout.of<BroadcastShared<T>>() match {
+        l? => l,
+        null => {
+            dealloc_ring_buffer<BroadcastSlot<T>, A>(allocator, buf, cap);
+            return error AllocErr.InvalidLayout;
+        },
+    }
+    let block = alloc_shared_block(allocator, layout) match {
+        b! => b,
+        error err => {
+            dealloc_ring_buffer<BroadcastSlot<T>, A>(allocator, buf, cap);
+            return error err;
+        },
+    }
+    let shared = BroadcastShared<T> {
+        state: Mutex<BroadcastState<T>>.new(BroadcastState<T> {
+            buf_addr: buf,
+            cap: cap,
+            tail_seq: 0,
+            sender_count: 1,
+            receiver_count: 1,
+        }),
+        refs: AtomicUsize.new(2),
+    }
+    unsafe {
+        builtin.mem.raw_write<BroadcastShared<T>>(block.address(), shared);
+    }
+    let tx = BroadcastSender<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+    };
+    let rx = BroadcastReceiver<T, .A = A, .allocator = allocator> {
+        shared_addr: block.address(),
+        cursor: 0,
+    };
+    (tx, rx)
+}
+
+impl BroadcastSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn send(*self, value: T) -> !SendErr<T> usize {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(addr) }
+        let guard = shared.state.lock() match {
+            g! => g,
+            error p => p.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        let receivers = st.receiver_count.*;
+        if receivers == 0 {
+            return error SendErr<T>.new(value);
+        }
+        let seq = st.tail_seq.*;
+        let cap_u64 = builtin.compiler.try_usize_to_u64(st.cap.*) match {
+            c? => c,
+            null => 1,
+        }
+        let slot_u64: u64 = if cap_u64 == 0 { 0 } else { seq % cap_u64 };
+        let idx = builtin.compiler.try_u64_to_usize(slot_u64) match {
+            i? => i,
+            null => 0,
+        }
+        let slot_addr = slot_addr_at<BroadcastSlot<T>>(st.buf_addr.*, idx);
+        let old = unsafe { builtin.mem.raw_read<BroadcastSlot<T>>(slot_addr) }
+        retire_opt(old.value);
+        let next_slot = BroadcastSlot<T> {
+            seq: if seq < 18446744073709551615 { seq + 1 } else { 0 },
+            value: value,
+        }
+        unsafe {
+            builtin.mem.raw_write<BroadcastSlot<T>>(slot_addr, next_slot);
+        }
+        st.tail_seq.* = if seq < 18446744073709551615 { seq + 1 } else { 0 };
+        receivers
+    }
+
+    pub fn subscribe(*self) -> BroadcastReceiver<T, .A = A, .allocator = alloc> {
+        let addr = self.shared_addr.*;
+        var start_cursor: u64 = 0;
+        if addr != 0 {
+            let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(addr) }
+            let _ = shared.refs.fetch_add(1, AtomicOrdering.relaxed);
+            let guard = shared.state.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            }
+            let st = guard.ref.as_ptr();
+            st.receiver_count.* = builtin.mem.checked_add_usize(st.receiver_count.*, 1) match {
+                v? => v,
+                null => st.receiver_count.*,
+            };
+            start_cursor = st.tail_seq.*;
+        }
+        BroadcastReceiver<T, .A = A, .allocator = alloc> {
+            shared_addr: addr,
+            cursor: start_cursor,
+        }
+    }
+}
+
+impl BroadcastReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    pub fn try_recv(*self) -> !TryRecvErr T {
+        let addr = self.shared_addr.*;
+        let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(addr) }
+        let guard = shared.state.lock() match {
+            g! => g,
+            error p => p.into_inner(),
+        }
+        let st = guard.ref.as_ptr();
+        let tail = st.tail_seq.*;
+        let cap_u64 = builtin.compiler.try_usize_to_u64(st.cap.*) match {
+            c? => c,
+            null => 1,
+        }
+        if tail > cap_u64 and self.cursor.* < tail - cap_u64 {
+            self.cursor.* = tail - cap_u64;
+        }
+        if self.cursor.* >= tail {
+            if st.sender_count.* == 0 {
+                return error TryRecvErr.Disconnected;
+            }
+            return error TryRecvErr.Empty;
+        }
+        let slot_u64: u64 = if cap_u64 == 0 { 0 } else { self.cursor.* % cap_u64 };
+        let idx = builtin.compiler.try_u64_to_usize(slot_u64) match {
+            i? => i,
+            null => 0,
+        }
+        let slot_addr = slot_addr_at<BroadcastSlot<T>>(st.buf_addr.*, idx);
+        let slot = unsafe { builtin.mem.raw_read<BroadcastSlot<T>>(slot_addr) }
+        let cloned_opt = slot.value match {
+            v? => {
+                let slot_val = v;
+                let copy = T.as(Clone).clone(slot_val.ref);
+                let restored = BroadcastSlot<T> { seq: slot.seq, value: slot_val };
+                unsafe {
+                    builtin.mem.raw_write<BroadcastSlot<T>>(slot_addr, restored);
+                }
+                copy
+            },
+            null => {
+                let restored = BroadcastSlot<T> { seq: slot.seq, value: null }
+                unsafe {
+                    builtin.mem.raw_write<BroadcastSlot<T>>(slot_addr, restored);
+                }
+                return error TryRecvErr.Empty;
+            },
+        }
+        if self.cursor.* < 18446744073709551615 {
+        let cur_cursor = self.cursor.*;
+        if cur_cursor < 18446744073709551615 {
+            self.cursor.* = cur_cursor + 1;
+        }
+        }
+        cloned_opt
+    }
+
+    pub fn recv(*self) -> !RecvErr T {
+        while true {
+            self.try_recv() match {
+                v! => return v,
+                error TryRecvErr.Empty => {},
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+
+    pub fn recv_async(*self) -> #AsyncCore !RecvErr T {
+        while true {
+            self.try_recv() match {
+                v! => return v,
+                error TryRecvErr.Empty => {
+                    AsyncCore.yield_now()# match {
+                        _! => {},
+                        error _ => return error RecvErr.Disconnected,
+                    }
+                },
+                error TryRecvErr.Disconnected => return error RecvErr.Disconnected,
+            }
+        }
+        error RecvErr.Disconnected
+    }
+}
+
+impl Drop for BroadcastSender<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(addr) };
+        do {
+            let guard = shared.state.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            let st = guard.ref.as_ptr();
+            let cur_sc = st.sender_count.*;
+            if cur_sc > 0 {
+                st.sender_count.* = cur_sc - 1;
+            }
+        }
+        broadcast_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Drop for BroadcastReceiver<T, .A = A, .allocator = alloc>
+where
+    T: Type,
+    requires T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.shared_addr.*;
+        if addr == 0 {
+            return;
+        }
+        self.shared_addr.* = 0;
+        let shared = unsafe { builtin.mem.raw_ptr<BroadcastShared<T>>(addr) };
+        do {
+            let guard = shared.state.lock() match {
+                g! => g,
+                error p => p.into_inner(),
+            };
+            let st = guard.ref.as_ptr();
+            let cur_rc = st.receiver_count.*;
+            if cur_rc > 0 {
+                st.receiver_count.* = cur_rc - 1;
+            }
+        }
+        broadcast_drop_shared<T, A>(alloc, addr);
+    }
+}
+
+impl Send for BroadcastSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
+
+impl Sync for BroadcastSender<T, .A = A, .allocator = alloc>
+where
+    T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync,
+    quote alloc: lift *A,
+{}
+
+impl Send for BroadcastReceiver<T, .A = A, .allocator = alloc>
+where
+    T :- Send + Clone,
+    A: Type,
+    requires A :- Allocator + Sync + Send,
+    quote alloc: lift *A,
+{}
