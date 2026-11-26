@@ -1,9 +1,11 @@
 //! The `luna fmt` driver, shared with stream-based library tests.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -12,7 +14,9 @@ use crate::diff::render_check_diff;
 use crate::formatter::format_source;
 
 pub const EXIT_OK: u8 = 0;
+
 pub const EXIT_DIFF_OR_FORMAT_ERR: u8 = 1;
+
 pub const EXIT_CLI_OR_CONFIG_ERR: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +74,7 @@ struct CliOptions {
     quiet: bool,
     help: bool,
     version: bool,
-    inputs: Vec<String>,
+    inputs: Vec<OsString>,
 }
 
 impl Default for CliOptions {
@@ -131,10 +135,7 @@ where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
-    let raw_args: Vec<String> = args
-        .into_iter()
-        .map(|a| a.into().to_string_lossy().into_owned())
-        .collect();
+    let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
 
     let opts = match parse_cli_options(&raw_args) {
         Ok(o) => o,
@@ -366,7 +367,7 @@ where
                     any_diff_in_check = true;
                     if opts.files_with_diff {
                         if !opts.quiet {
-                            let _ = writeln!(stdout, "{display_name}");
+                            let _ = write_path_line(stdout, path);
                         }
                     } else if !opts.quiet {
                         let diff_text =
@@ -378,7 +379,7 @@ where
             EmitMode::Stdout => {
                 if opts.files_with_diff {
                     if changed && !opts.quiet {
-                        let _ = writeln!(stdout, "{display_name}");
+                        let _ = write_path_line(stdout, path);
                     }
                 } else {
                     if multi_stdout_headers {
@@ -412,7 +413,7 @@ where
                         continue;
                     }
                     if opts.files_with_diff && !opts.quiet {
-                        let _ = writeln!(stdout, "{display_name}");
+                        let _ = write_path_line(stdout, path);
                     }
                 }
             }
@@ -661,7 +662,7 @@ fn parent_or_cwd(path: &Path) -> PathBuf {
     }
 }
 
-fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
+fn parse_cli_options(args: &[OsString]) -> Result<CliOptions, String> {
     let mut opts = CliOptions::default();
     let mut i = 0usize;
     let mut after_double_dash = false;
@@ -674,55 +675,57 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             continue;
         }
 
-        if arg == "--" {
+        let arg_str = arg.to_str();
+
+        if arg_str == Some("--") {
             after_double_dash = true;
             i += 1;
             continue;
         }
 
-        if arg == "-" {
-            opts.inputs.push("-".to_string());
+        if arg_str == Some("-") {
+            opts.inputs.push(OsString::from("-"));
             i += 1;
             continue;
         }
 
-        if arg == "-h" || arg == "--help" {
+        if matches!(arg_str, Some("-h" | "--help")) {
             opts.help = true;
             i += 1;
             continue;
         }
-        if arg == "-V" || arg == "--version" {
+        if matches!(arg_str, Some("-V" | "--version")) {
             opts.version = true;
             i += 1;
             continue;
         }
-        if arg == "--check" {
+        if arg_str == Some("--check") {
             opts.check_flag = true;
             i += 1;
             continue;
         }
-        if arg == "--backup" {
+        if arg_str == Some("--backup") {
             opts.backup = true;
             i += 1;
             continue;
         }
-        if arg == "-l" || arg == "--files-with-diff" {
+        if matches!(arg_str, Some("-l" | "--files-with-diff")) {
             opts.files_with_diff = true;
             i += 1;
             continue;
         }
-        if arg == "-v" || arg == "--verbose" {
+        if matches!(arg_str, Some("-v" | "--verbose")) {
             opts.verbose = true;
             i += 1;
             continue;
         }
-        if arg == "-q" || arg == "--quiet" {
+        if matches!(arg_str, Some("-q" | "--quiet")) {
             opts.quiet = true;
             i += 1;
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--emit")? {
+        if let Some(val) = take_opt_str_value(args, &mut i, "--emit")? {
             let mode = match val.as_str() {
                 "files" => EmitMode::Files,
                 "stdout" => EmitMode::Stdout,
@@ -737,22 +740,22 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--stdin-filepath")? {
+        if let Some(val) = take_opt_os_value(args, &mut i, "--stdin-filepath")? {
             opts.stdin_filepath = Some(PathBuf::from(val));
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--config-path")? {
+        if let Some(val) = take_opt_os_value(args, &mut i, "--config-path")? {
             opts.config_path = Some(PathBuf::from(val));
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--config")? {
+        if let Some(val) = take_opt_str_value(args, &mut i, "--config")? {
             opts.config_overrides.push(val);
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--print-config")? {
+        if let Some(val) = take_opt_str_value(args, &mut i, "--print-config")? {
             let mode = match val.as_str() {
                 "default" => PrintConfigMode::Default,
                 "minimal" => PrintConfigMode::Minimal,
@@ -767,7 +770,7 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             continue;
         }
 
-        if let Some(val) = take_opt_value(args, &mut i, "--color")? {
+        if let Some(val) = take_opt_str_value(args, &mut i, "--color")? {
             let choice = ColorChoice::parse(&val).ok_or_else(|| {
                 format!("invalid `--color` value `{val}` (expected `auto`, `always`, or `never`)")
             })?;
@@ -776,8 +779,12 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         }
 
         // Combined short flags like `-lv` or `-ql`.
-        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
-            for ch in arg[1..].chars() {
+        if let Some(s) = arg_str
+            && s.starts_with('-')
+            && !s.starts_with("--")
+            && s.len() > 2
+        {
+            for ch in s[1..].chars() {
                 match ch {
                     'l' => opts.files_with_diff = true,
                     'v' => opts.verbose = true,
@@ -791,8 +798,8 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             continue;
         }
 
-        if arg.starts_with('-') {
-            return Err(format!("unknown option `{arg}`"));
+        if os_starts_with_dash(arg) {
+            return Err(format!("unknown option `{}`", arg.to_string_lossy()));
         }
 
         opts.inputs.push(arg.clone());
@@ -802,22 +809,80 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     Ok(opts)
 }
 
-fn take_opt_value(args: &[String], idx: &mut usize, flag: &str) -> Result<Option<String>, String> {
+fn write_path_line(out: &mut dyn Write, path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        out.write_all(path.as_os_str().as_bytes())?;
+        out.write_all(b"\n")
+    }
+    #[cfg(not(unix))]
+    {
+        writeln!(out, "{}", path.display())
+    }
+}
+
+fn os_starts_with_dash(s: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        s.as_bytes().starts_with(b"-")
+    }
+    #[cfg(not(unix))]
+    {
+        s.to_str().is_some_and(|u| u.starts_with('-'))
+    }
+}
+
+fn strip_ascii_prefix<'a>(s: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    #[cfg(unix)]
+    {
+        s.as_bytes()
+            .strip_prefix(prefix.as_bytes())
+            .map(OsStr::from_bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        s.to_str()
+            .and_then(|u| u.strip_prefix(prefix))
+            .map(OsStr::new)
+    }
+}
+
+fn take_opt_os_value(
+    args: &[OsString],
+    idx: &mut usize,
+    flag: &str,
+) -> Result<Option<OsString>, String> {
     let cur = &args[*idx];
-    if cur == flag {
+    if cur == OsStr::new(flag) {
         let next = args
             .get(*idx + 1)
             .ok_or_else(|| format!("option `{flag}` requires a value"))?;
         *idx += 2;
         return Ok(Some(next.clone()));
     }
-    if let Some(rest) = cur.strip_prefix(flag) {
-        if let Some(val) = rest.strip_prefix('=') {
-            *idx += 1;
-            return Ok(Some(val.to_string()));
-        }
+    if let Some(rest) = strip_ascii_prefix(cur, flag)
+        && let Some(val) = strip_ascii_prefix(rest, "=")
+    {
+        *idx += 1;
+        return Ok(Some(val.to_os_string()));
     }
     Ok(None)
+}
+
+fn take_opt_str_value(
+    args: &[OsString],
+    idx: &mut usize,
+    flag: &str,
+) -> Result<Option<String>, String> {
+    let Some(val) = take_opt_os_value(args, idx, flag)? else {
+        return Ok(None);
+    };
+    val.into_string().map(Some).map_err(|bad| {
+        format!(
+            "option `{flag}` value `{}` is not valid UTF-8",
+            bad.to_string_lossy()
+        )
+    })
 }
 
 pub fn render_help() -> String {

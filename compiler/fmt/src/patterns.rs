@@ -330,25 +330,7 @@ impl<'a> Formatter<'a> {
             close_idx,
             DelimStyle::Brackets,
             None,
-            |fmt, sub_node, sub_slot| {
-                let ch = fmt.parsed.ast.get_children(sub_node);
-                let lhs = ch[0];
-                let rhs = ch[1];
-                let lhs_slot = sub_slot.child_slot_from(fmt.parsed, sub_slot.first, lhs);
-                let eq_tok = fmt
-                    .parsed
-                    .find_depth_zero_token(
-                        lhs_slot.last + 1,
-                        sub_slot.last,
-                        |k| k == TokenKind::Eq,
-                        false,
-                    )
-                    .unwrap_or(lhs_slot.last + 1);
-                let rhs_slot = sub_slot.child_slot_from(fmt.parsed, eq_tok + 1, rhs);
-                let lhs_doc = fmt.format_expr(lhs, lhs_slot);
-                let rhs_doc = fmt.format_expr(rhs, rhs_slot);
-                Doc::concat([lhs_doc, Doc::str(" = "), rhs_doc])
-            },
+            |fmt, sub_node, sub_slot| fmt.format_code_substitution(sub_node, sub_slot),
         );
         (doc, close_idx + 1)
     }
@@ -855,7 +837,8 @@ impl<'a> Formatter<'a> {
         let prefix = match kind {
             NodeKind::BitVecBinPattern => "0b",
             NodeKind::BitVecOctPattern => "0o",
-            _ => "0x",
+            NodeKind::BitVecHexPattern => "0x",
+            _ => unreachable!("unexpected bitvec pattern kind: {kind:?}"),
         };
         if segs.is_empty() {
             return Doc::text(self.literal_slice(node, slot.first));

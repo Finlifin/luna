@@ -159,3 +159,31 @@ fn luna_fmt_dash_streams_stdin_and_preserves_exit_codes() {
         assert!(stdout.contains("fmt"), "{help_args:?} stdout:\n{stdout}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn luna_fmt_preserves_non_utf8_file_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new("non_utf8_path");
+    let raw_name = OsString::from_vec(b"non_utf8_\xff_mod.fl".to_vec());
+    let file_path = tmp.path.join(&raw_name);
+    fs::write(&file_path, "fn   keep(x:i32)->i32{x + 1}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg("fmt")
+        .arg(&file_path)
+        .output()
+        .expect("spawn luna fmt");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn keep(x: i32) -> i32 {\n    x + 1\n}\n"
+    );
+}

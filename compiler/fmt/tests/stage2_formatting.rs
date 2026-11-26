@@ -783,3 +783,52 @@ fn inspect(p: Point, r: Rec, m: Msg) -> bool {
     assert!(got.contains("let { a, ... } = r;"), "{got}");
     assert!(got.contains(".data { flag, ... } => flag,"), "{got}");
 }
+
+#[test]
+fn pipe_prepend_precedence_and_implies_associativity_regressions() {
+    let src = "\
+fn pipes_and_implies(x0: i32, y0: i32, c: bool, d: bool, e: bool) -> bool {
+    let x = x0 + 1 |> f |> g;
+    let y = x0 |> (y0 |> wrap);
+    let z = (c and d) |> check;
+    let r1 = c ==> d ==> e;
+    let r2 = (c ==> d) ==> e;
+    let r3 = c ==> (d ==> e);
+    r1 and r2 and r3
+}
+";
+    let got = fmt_ok(src);
+    assert_eq!(got, src);
+
+    let mut narrow = FormatConfig::default();
+    narrow.max_width = 36;
+    let long_src = "\
+fn f(a: i32, b: bool, c: bool, d: bool) -> bool {
+    let x = a + 1 |> transform |> finalize;
+    let r1 = b ==> c ==> d;
+    let r2 = (b ==> c) ==> d;
+    r1 and r2
+}
+";
+    let wrapped = fmt_with_cfg(long_src, &narrow);
+    assert!(
+        wrapped.contains("\n        a + 1\n            |> transform\n            |> finalize;"),
+        "{wrapped}"
+    );
+    assert!(wrapped.contains("b ==> c ==> d;"), "{wrapped}");
+    assert!(wrapped.contains("(b ==> c) ==> d;"), "{wrapped}");
+}
+
+#[test]
+fn token_buffer_interpolations_and_dollar_escape_roundtrip() {
+    let src = "\
+fn buffers(x: i32, y: i32, z: i32) {
+    let b = {{ 1 + $x + ${y + 2} + $(z) + $$ }};
+}
+";
+    let got = fmt_ok(src);
+    assert!(
+        got.contains("let b = {{ 1 + $x + ${y + 2} + $(z) + $$ }}"),
+        "{got}"
+    );
+}

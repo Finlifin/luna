@@ -649,47 +649,73 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 fn glob_match_inner(pat: &[u8], text: &[u8]) -> bool {
-    if pat.is_empty() {
-        return text.is_empty();
-    }
-    if pat.starts_with(b"**/") {
-        // Zero or more leading path segments.
-        if glob_match_inner(&pat[3..], text) {
-            return true;
-        }
-        for i in 0..text.len() {
-            if text[i] == b'/' && glob_match_inner(&pat[3..], &text[i + 1..]) {
+    let p_len = pat.len();
+    let mut active = vec![false; p_len + 1];
+    let mut slash_wait = vec![false; p_len + 1];
+    active[0] = true;
+
+    let expand_epsilons = |pat: &[u8], active: &mut [bool], slash_wait: &mut [bool]| -> bool {
+        for pi in 0..p_len {
+            if !active[pi] {
+                continue;
+            }
+            if pat[pi..].starts_with(b"**/") {
+                active[pi + 3] = true;
+                slash_wait[pi] = true;
+            } else if &pat[pi..] == b"**" {
                 return true;
+            } else if pat[pi..].starts_with(b"**") {
+                active[pi + 2] = true;
+            } else if pat[pi] == b'*' {
+                active[pi + 1] = true;
             }
         }
-        return false;
-    }
-    if pat == b"**" {
-        return true;
-    }
-    if pat.starts_with(b"**") {
-        return glob_match_inner(&pat[2..], text)
-            || (!text.is_empty() && glob_match_inner(pat, &text[1..]));
-    }
-    if pat[0] == b'*' {
-        if glob_match_inner(&pat[1..], text) {
+        false
+    };
+
+    for &b in text {
+        if expand_epsilons(pat, &mut active, &mut slash_wait) {
             return true;
         }
-        if !text.is_empty() && text[0] != b'/' {
-            return glob_match_inner(pat, &text[1..]);
+        let mut next_active = vec![false; p_len + 1];
+        let mut next_slash_wait = vec![false; p_len + 1];
+        for pi in 0..p_len {
+            if slash_wait[pi] {
+                next_slash_wait[pi] = true;
+                if b == b'/' {
+                    next_active[pi + 3] = true;
+                }
+            }
+            if !active[pi] {
+                continue;
+            }
+            if pat[pi..].starts_with(b"**/") {
+                // Already handled via `slash_wait[pi]`.
+            } else if pat[pi..].starts_with(b"**") {
+                next_active[pi] = true;
+            } else if pat[pi] == b'*' {
+                if b != b'/' {
+                    next_active[pi] = true;
+                }
+            } else if pat[pi] == b'?' {
+                if b != b'/' {
+                    next_active[pi + 1] = true;
+                }
+            } else if b == pat[pi] {
+                next_active[pi + 1] = true;
+            }
         }
-        return false;
-    }
-    if pat[0] == b'?' {
-        if !text.is_empty() && text[0] != b'/' {
-            return glob_match_inner(&pat[1..], &text[1..]);
+        active = next_active;
+        slash_wait = next_slash_wait;
+        if !active.iter().any(|&x| x) && !slash_wait.iter().any(|&x| x) {
+            return false;
         }
-        return false;
     }
-    if !text.is_empty() && pat[0] == text[0] {
-        return glob_match_inner(&pat[1..], &text[1..]);
+
+    if expand_epsilons(pat, &mut active, &mut slash_wait) {
+        return true;
     }
-    false
+    active[p_len]
 }
 
 fn extract_id_text(ast: &Ast, node: NodeIndex, src: &str, base_pos: u32) -> Option<String> {

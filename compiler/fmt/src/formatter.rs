@@ -71,7 +71,8 @@ pub fn format_source(
     let doc = fmt.format_file_scope();
     let rendered = print_doc(&doc, config.max_width, newline);
 
-    verify_formatted_output(&parsed, &rendered, display_name).map_err(FormatError::Verification)?;
+    verify_formatted_output(&parsed, &rendered, display_name, config)
+        .map_err(FormatError::Verification)?;
 
     Ok(FormatResult {
         formatted: rendered,

@@ -895,7 +895,8 @@ impl<'a> Formatter<'a> {
         let kw = match kind {
             NodeKind::StructDef => "struct",
             NodeKind::EnumDef => "enum",
-            _ => "union",
+            NodeKind::UnionDef => "union",
+            _ => unreachable!("unexpected ADT kind: {kind:?}"),
         };
         let ch = self.parsed.ast.get_children(node);
         let id = ch[0];

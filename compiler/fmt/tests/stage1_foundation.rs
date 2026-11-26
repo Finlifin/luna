@@ -304,3 +304,137 @@ fn off_and_skip_protect_unparseable_code_while_real_syntax_errors_fail() {
     let bad_src = "fn broken( {\n    let x = 1;\n}\n";
     assert!(parse_and_bridge(bad_src, "broken.fl", false).is_err());
 }
+
+#[test]
+fn glob_match_handles_repeated_wildcards_without_backtracking_blowup() {
+    use fmt::config::glob_match;
+
+    let pat = "**/**/**/**/**/**/**/**/**/**/x";
+    let long_miss = "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/y";
+    let start = std::time::Instant::now();
+    assert!(!glob_match(pat, long_miss));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "glob_match took too long: {:?}",
+        start.elapsed()
+    );
+
+    assert!(glob_match(pat, "x"));
+    assert!(glob_match(pat, "a/b/c/x"));
+    assert!(!glob_match("**/x", "ax"));
+    assert!(glob_match("a/**/b", "a/b"));
+    assert!(glob_match("a/**/b", "a/x/y/b"));
+    assert!(glob_match("a/**b", "a/x/yb"));
+    assert!(!glob_match("a*b", "a/b"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_preserves_non_utf8_posix_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let unique = format!(
+        "flurryfmt_nonutf8_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    fs::create_dir_all(&root).unwrap();
+
+    let non_utf8_name = OsString::from_vec(b"bad_\xff_file.fl".to_vec());
+    let file_path = root.join(&non_utf8_name);
+    fs::write(&file_path, "fn   demo(x:i32)->i32{x + 1}\n").unwrap();
+
+    let mut stdin = std::io::empty();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let check_code = fmt::cli::run_cli_with_io(
+        vec![
+            OsString::from("--check"),
+            OsString::from("-l"),
+            file_path.clone().into_os_string(),
+        ],
+        &mut stdin,
+        &mut stdout,
+        &mut stderr,
+        false,
+        false,
+    );
+    assert_eq!(
+        check_code,
+        1,
+        "stderr: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let mut expected_line = file_path.clone().into_os_string().into_vec();
+    expected_line.push(b'\n');
+    assert_eq!(stdout, expected_line);
+
+    stdout.clear();
+    stderr.clear();
+    let fmt_code = fmt::cli::run_cli_with_io(
+        vec![file_path.clone().into_os_string()],
+        &mut stdin,
+        &mut stdout,
+        &mut stderr,
+        false,
+        false,
+    );
+    assert_eq!(fmt_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "fn demo(x: i32) -> i32 {\n    x + 1\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn verify_rejects_reordered_attrs_unrequested_import_reorder_and_mutated_bridges() {
+    use fmt::verify::verify_formatted_output;
+
+    let src_attrs = "^a\n^b\nfn foo() {}\n";
+    let parsed_attrs = parse_and_bridge(src_attrs, "attrs.fl", false).unwrap();
+    let cfg = FormatConfig::default();
+    assert!(verify_formatted_output(&parsed_attrs, src_attrs, "attrs.fl", &cfg).is_ok());
+    assert!(
+        verify_formatted_output(&parsed_attrs, "^b\n^a\nfn foo() {}\n", "attrs.fl", &cfg).is_err()
+    );
+
+    let src_uses = "use z.b;\nuse a.c;\n";
+    let parsed_uses = parse_and_bridge(src_uses, "uses.fl", false).unwrap();
+    let mut no_reorder = FormatConfig::default();
+    no_reorder.reorder_imports = false;
+    assert!(
+        verify_formatted_output(&parsed_uses, "use a.c;\nuse z.b;\n", "uses.fl", &no_reorder)
+            .is_err()
+    );
+
+    let src_macro = "\
+fn demo() {
+    let a = @vec(1, 2, 3);
+    let raw = @builtin.str.raw { keep_me };
+    let buf = {{ 1 + 2 }};
+    --% .skip
+    let   s = 1;
+}
+";
+    let parsed_macro = parse_and_bridge(src_macro, "macro.fl", false).unwrap();
+    assert!(verify_formatted_output(&parsed_macro, src_macro, "macro.fl", &cfg).is_ok());
+
+    let bad_paren = src_macro.replace("@vec(1, 2, 3)", "@vec(1, 2)");
+    assert!(verify_formatted_output(&parsed_macro, &bad_paren, "macro.fl", &cfg).is_err());
+
+    let bad_raw = src_macro.replace("keep_me", "changed");
+    assert!(verify_formatted_output(&parsed_macro, &bad_raw, "macro.fl", &cfg).is_err());
+
+    let bad_buf = src_macro.replace("{{ 1 + 2 }}", "{{ 1 + 3 }}");
+    assert!(verify_formatted_output(&parsed_macro, &bad_buf, "macro.fl", &cfg).is_err());
+
+    let bad_skip = src_macro.replace("let   s = 1;", "let   s = 2;");
+    assert!(verify_formatted_output(&parsed_macro, &bad_skip, "macro.fl", &cfg).is_err());
+}

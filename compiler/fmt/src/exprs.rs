@@ -358,7 +358,23 @@ impl<'a> Formatter<'a> {
                 );
                 (doc, true)
             }
-            NodeKind::TokenBuffer => (Doc::text(self.literal_slice(node, slot.first)), true),
+            NodeKind::TokenBuffer => (self.format_token_buffer(node, slot), true),
+            NodeKind::TokenBufferToken => (Doc::text(self.literal_slice(node, slot.first)), false),
+            NodeKind::TokenBufferDollar => (Doc::str("$$"), false),
+            NodeKind::TokenBufferInterp => (self.format_token_buffer_interp(node, slot), false),
+            NodeKind::ClosureEnvironmentBinding => {
+                (self.format_closure_env_binding(node, slot), false)
+            }
+            NodeKind::CodeContextBinding => (self.format_code_context_binding(node, slot), false),
+            NodeKind::CodeSubstitution => (self.format_code_substitution(node, slot), false),
+            NodeKind::DeclarationBound | NodeKind::FieldMethodBound => {
+                let inner = ch.first().copied().unwrap_or(0);
+                if inner != 0 {
+                    self.format_expr_with_rbrace(inner, slot)
+                } else {
+                    (Doc::text(self.literal_slice(node, slot.first)), false)
+                }
+            }
 
             // Postfix expressions & method/field chains
             NodeKind::Projection
@@ -533,7 +549,8 @@ impl<'a> Formatter<'a> {
                 let sigil = match kind {
                     NodeKind::EffectQualifiedType => "#",
                     NodeKind::ErrorQualifiedType => "!",
-                    _ => "&",
+                    NodeKind::ReachabilityQualifiedType => "&",
+                    _ => unreachable!("unexpected qualified type kind: {kind:?}"),
                 };
                 let qual_slot = slot.child_slot_from(self.parsed, slot.first + 1, ch[0]);
                 let body_slot = slot.child_slot_from(self.parsed, qual_slot.last + 1, ch[1]);
@@ -732,7 +749,8 @@ impl<'a> Formatter<'a> {
                     NodeKind::DoBlock => "do ",
                     NodeKind::AsyncBlock => "async ",
                     NodeKind::UnsafeBlock => "unsafe ",
-                    _ => "comptime ",
+                    NodeKind::ComptimeBlock => "comptime ",
+                    _ => unreachable!("unexpected keyword block kind: {kind:?}"),
                 };
                 let block_slot = TokenSlot::new(slot.first + 1, slot.last);
                 let budget = Some(self.cfg().width_heuristics().fn_call_width);
@@ -800,7 +818,8 @@ impl<'a> Formatter<'a> {
                     NodeKind::SubAssign => "-=",
                     NodeKind::MulAssign => "*=",
                     NodeKind::DivAssign => "/=",
-                    _ => "%=",
+                    NodeKind::RemAssign => "%=",
+                    _ => unreachable!("unexpected assignment kind: {kind:?}"),
                 };
                 let lhs_slot = slot.child_slot_from(self.parsed, slot.first, ch[0]);
                 let op_tok = lhs_slot.last + 1;
@@ -1097,7 +1116,8 @@ impl<'a> Formatter<'a> {
                     let prefix = match k {
                         NodeKind::TypeCast => ".as(",
                         NodeKind::DynCast => ".dyn(",
-                        _ => ".use(",
+                        NodeKind::HandlerApplication => ".use(",
+                        _ => unreachable!("unexpected dot-paren postfix kind: {k:?}"),
                     };
                     let recv_slot = inner.child_slot_from(self.parsed, inner.first, c[0]);
                     let open_paren = recv_slot.last + 3; // `.` + `as`/`dyn`/`use` + `(`
@@ -1417,7 +1437,9 @@ impl<'a> Formatter<'a> {
             NodeKind::BoolLt => "<",
             NodeKind::BoolLtEq => "<=",
             NodeKind::BoolImplies => "==>",
+            NodeKind::BoolMatches => "matches",
             NodeKind::Arrow => "->",
+            NodeKind::TypedWith => ":",
             NodeKind::Subtype => "<:",
             NodeKind::TraitBound => {
                 if self.parsed.bridge.subtype_offsets.contains(&op_byte) {
@@ -1428,7 +1450,91 @@ impl<'a> Formatter<'a> {
             }
             NodeKind::Pipe => "|",
             NodeKind::PipePrepend => "|>",
-            _ => "+",
+            _ => unreachable!("unexpected binary operator kind: {kind:?}"),
+        }
+    }
+
+    pub(crate) fn format_code_substitution(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
+        let ch = self.parsed.ast.get_children(node);
+        let lhs = ch[0];
+        let rhs = ch[1];
+        let lhs_slot = slot.child_slot_from(self.parsed, slot.first, lhs);
+        let eq_tok = self
+            .parsed
+            .find_depth_zero_token(lhs_slot.last + 1, slot.last, |k| k == TokenKind::Eq, false)
+            .unwrap_or(lhs_slot.last + 1);
+        let rhs_slot = slot.child_slot_from(self.parsed, eq_tok + 1, rhs);
+        let lhs_doc = self.format_expr(lhs, lhs_slot);
+        let rhs_doc = self.format_expr(rhs, rhs_slot);
+        Doc::concat([lhs_doc, Doc::str(" = "), rhs_doc])
+    }
+
+    fn format_token_buffer(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
+        let ch = self.parsed.ast.get_children(node);
+        let parts = ch
+            .first()
+            .and_then(|&h| self.parsed.ast.get_multi_child_slice(h))
+            .unwrap_or(&[]);
+        if parts.is_empty() {
+            return Doc::text(self.literal_slice(node, slot.first));
+        }
+        let mut docs = vec![Doc::str("{{")];
+        let mut cursor = slot.first + 2;
+        let mut prev_hi = self
+            .parsed
+            .sig_tokens
+            .get(slot.first + 1)
+            .map_or(0, |t| t.to);
+        for &part in parts {
+            let p_slot = slot.child_slot_from(self.parsed, cursor, part);
+            if let Some(tok) = self.parsed.sig_tokens.get(p_slot.first)
+                && tok.from > prev_hi
+            {
+                docs.push(Doc::space());
+            }
+            docs.push(self.format_expr(part, p_slot));
+            prev_hi = self
+                .parsed
+                .sig_tokens
+                .get(p_slot.last)
+                .map_or(prev_hi, |t| t.to);
+            cursor = p_slot.last + 1;
+        }
+        if let Some(close_tok) = self.parsed.sig_tokens.get(slot.last.saturating_sub(1))
+            && close_tok.from > prev_hi
+        {
+            docs.push(Doc::space());
+        }
+        docs.push(Doc::str("}}"));
+        Doc::concat(docs)
+    }
+
+    fn format_token_buffer_interp(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
+        let ch = self.parsed.ast.get_children(node);
+        let inner = ch[0];
+        let next_kind = self.parsed.sig_tokens.get(slot.first + 1).map(|t| t.kind);
+        match next_kind {
+            Some(TokenKind::LBrace) => {
+                let inner_slot = TokenSlot::new(
+                    slot.first + 2,
+                    slot.last.saturating_sub(1).max(slot.first + 2),
+                );
+                let inner_doc = self.format_expr(inner, inner_slot);
+                Doc::concat([Doc::str("${"), inner_doc, Doc::str("}")])
+            }
+            Some(TokenKind::LParen) => {
+                let inner_slot = TokenSlot::new(
+                    slot.first + 2,
+                    slot.last.saturating_sub(1).max(slot.first + 2),
+                );
+                let inner_doc = self.format_expr(inner, inner_slot);
+                Doc::concat([Doc::str("$("), inner_doc, Doc::str(")")])
+            }
+            _ => {
+                let inner_slot = slot.child_slot_from(self.parsed, slot.first + 1, inner);
+                let inner_doc = self.format_expr(inner, inner_slot);
+                Doc::concat([Doc::str("$"), inner_doc])
+            }
         }
     }
 
@@ -2080,7 +2186,8 @@ impl<'a> Formatter<'a> {
         let kw = match kind {
             NodeKind::LetDecl => "let ",
             NodeKind::VarDecl => "var ",
-            _ => "const ",
+            NodeKind::ConstDecl => "const ",
+            _ => unreachable!("unexpected local decl kind: {kind:?}"),
         };
         let ch = self.parsed.ast.get_children(node);
         let pat = ch[0];
@@ -2256,7 +2363,7 @@ impl<'a> Formatter<'a> {
                 NodeKind::Decreases => "decreases",
                 NodeKind::Requires => "requires",
                 NodeKind::Ensures => "ensures",
-                _ => "requires",
+                _ => unreachable!("unexpected verification stmt/clause kind: {kind:?}"),
             }
         };
         let ch = self.parsed.ast.get_children(node);
@@ -2493,7 +2600,7 @@ impl<'a> Formatter<'a> {
                 let p_doc = self.format_pattern(pat, p_slot);
                 (Doc::concat([Doc::str("catch "), p_doc]), body, b_slot)
             }
-            _ => {
+            NodeKind::CaseArm => {
                 // `CaseArm`: `[pat, body]`
                 let pat = ch[0];
                 let body = ch[1];
@@ -2511,6 +2618,7 @@ impl<'a> Formatter<'a> {
                 let p_doc = self.format_pattern_with_mode(pat, p_slot, pat_mode);
                 (p_doc, body, b_slot)
             }
+            _ => unreachable!("unexpected arm kind: {kind:?}"),
         };
 
         // Never add or remove `{}` around arm bodies!
