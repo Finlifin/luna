@@ -371,6 +371,52 @@ impl Checker<'_, '_> {
                         // Keep the abstract iteration for definition-side P4
                         // checking, including bodies with no concrete iteration.
                         iterations.push(checked);
+                    } else {
+                        // Retain closed unselected loop bodies under an unreachable
+                        // false guard so NIR phase and safety passes still inspect them.
+                        let mut dead_statements: Vec<n::Expr> = self
+                            .locals
+                            .iter()
+                            .filter(|(id, _)| !saved_locals.contains_key(id))
+                            .map(|(id, ty)| n::Expr {
+                                source: source(pat.span),
+                                ty: p(P::Void),
+                                kind: K::Let {
+                                    binding: *id,
+                                    value: Box::new(n::Expr {
+                                        source: source(pat.span),
+                                        ty: ty.clone(),
+                                        kind: K::Literal(n::Literal::Integer("0".into())),
+                                    }),
+                                },
+                            })
+                            .collect();
+                        let dead_ty = checked.ty.clone();
+                        dead_statements.push(checked);
+                        iterations.push(n::Expr {
+                            source: source(expr.span),
+                            ty: p(P::Void),
+                            kind: K::If {
+                                condition: Box::new(n::Expr {
+                                    source: source(iter.span),
+                                    ty: p(P::Bool),
+                                    kind: K::Literal(n::Literal::Bool(false)),
+                                }),
+                                then_branch: Box::new(n::Expr {
+                                    source: source(body.span),
+                                    ty: dead_ty,
+                                    kind: K::Block {
+                                        statements: dead_statements,
+                                        result: None,
+                                    },
+                                }),
+                                else_branch: Some(Box::new(n::Expr {
+                                    source: source(expr.span),
+                                    ty: p(P::Void),
+                                    kind: K::Unit,
+                                })),
+                            },
+                        });
                     }
                     break;
                 }
