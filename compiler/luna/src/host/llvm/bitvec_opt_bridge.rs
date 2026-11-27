@@ -340,7 +340,7 @@ fn is_copy_bit_carrier(emitter: &Emitter<'_>, ty: &Term) -> bool {
     is_copy_bit_primitive(ty) || emitter.is_bit_packed_type(ty)
 }
 
-fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey> {
+fn pure_local_read_id(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LocalId> {
     if emitter.has_cleanup_hook(expr.source) || emitter.is_volatile_type(&expr.ty) {
         return None;
     }
@@ -349,23 +349,39 @@ fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey>
             if is_copy_bit_carrier(emitter, &expr.ty)
                 && emitter.locals.get(id).is_some_and(|slot| !slot.volatile) =>
         {
-            Some(LeafKey::Local(*id))
+            Some(*id)
         }
-        K::TakeBits(inner) => {
-            let K::Local(id) = &inner.kind else {
+        K::ReadPointer(pointer)
+            if !emitter.has_cleanup_hook(pointer.source)
+                && !emitter.is_volatile_type(&pointer.ty) =>
+        {
+            let K::AddressOf(target) = &pointer.kind else {
                 return None;
             };
-            if emitter.has_cleanup_hook(inner.source) || emitter.is_volatile_type(&inner.ty) {
+            if emitter.has_cleanup_hook(target.source) || emitter.is_volatile_type(&target.ty) {
                 return None;
             }
-            if is_copy_bit_carrier(emitter, &inner.ty)
-                && emitter.locals.get(id).is_some_and(|slot| !slot.volatile)
-            {
-                Some(LeafKey::TakeBitsLocal(*id))
-            } else {
-                None
-            }
+            let K::Local(id) = &target.kind else {
+                return None;
+            };
+            (target.ty == expr.ty
+                && is_copy_bit_carrier(emitter, &target.ty)
+                && emitter.locals.get(id).is_some_and(|slot| !slot.volatile))
+            .then_some(*id)
         }
+        _ => None,
+    }
+}
+
+fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey> {
+    if emitter.has_cleanup_hook(expr.source) || emitter.is_volatile_type(&expr.ty) {
+        return None;
+    }
+    if let Some(id) = pure_local_read_id(emitter, expr) {
+        return Some(LeafKey::Local(id));
+    }
+    match &expr.kind {
+        K::TakeBits(inner) => pure_local_read_id(emitter, inner).map(LeafKey::TakeBitsLocal),
         _ => None,
     }
 }
