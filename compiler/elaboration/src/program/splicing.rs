@@ -337,6 +337,20 @@ impl Checker<'_, '_> {
                         )
                     })
                 };
+            if let Some((element_ty, _)) = self.array_element_and_len(&shape) {
+                let target = require_child(self, &element_ty, visiting, fuel)?;
+                if self.structural_type(&target, span)?
+                    != self.structural_type(&element_ty, span)?
+                {
+                    return Err(error(
+                        span,
+                        format!(
+                            "auto-Splice on array element `{element_ty}` cannot change layout to `{target}`"
+                        ),
+                    ));
+                }
+                return Ok(Some(ty.clone()));
+            }
             match &shape {
                 Term::Tuple(elements) => {
                     let mut targets = Vec::with_capacity(elements.len());

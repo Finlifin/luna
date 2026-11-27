@@ -889,7 +889,14 @@ impl<'a> Analysis<'a> {
         for trait_callee in trait_callees {
             let method = self
                 .method_callees
-                .select_behavior(self.package, trait_callee, &mut self.fuel)
+                .select_behavior_in_source(
+                    self.package,
+                    Some(::materialization::DeclarationSource::Prepared(
+                        &self.declaration_catalog,
+                    )),
+                    trait_callee,
+                    &mut self.fuel,
+                )
                 .map_err(|_| "trait method call lacks P5 termination/no-trap proof".to_string())?;
             let K::FunctionInstance {
                 declaration,
@@ -1109,13 +1116,17 @@ impl<'a> Analysis<'a> {
             self.verify_tier_expr(body, tier, visited, depth + 1)?;
         }
         for trait_callee in trait_callees {
-            if let Ok(method) =
-                self.method_callees
-                    .select_behavior(self.package, trait_callee, &mut self.fuel)
-                && let K::FunctionInstance {
-                    declaration,
-                    arguments,
-                } = method.kind
+            if let Ok(method) = self.method_callees.select_behavior_in_source(
+                self.package,
+                Some(::materialization::DeclarationSource::Prepared(
+                    &self.declaration_catalog,
+                )),
+                trait_callee,
+                &mut self.fuel,
+            ) && let K::FunctionInstance {
+                declaration,
+                arguments,
+            } = method.kind
             {
                 if let Some((callee_fn, _)) = self.package.runtime_body(declaration, &arguments) {
                     self.verify_tier_function(callee_fn, tier, visited, depth + 1)?;
@@ -1430,6 +1441,15 @@ pub fn validate_runtime_promises_incremental(
         // before assigning an independent budget to each runtime pure function.
         let _ = analysis.resource_world_parts();
     }
+    let mut catalog_budget = crate::ptc::Budget {
+        steps: prep_fuel,
+        ..Default::default()
+    };
+    let _ = analysis.declaration_catalog.prepare(&mut catalog_budget);
+    let mut theory_steps = catalog_budget.steps;
+    let _ = analysis
+        .declaration_catalog
+        .package_context(&mut theory_steps);
     for (static_item, init, source) in static_targets {
         verify_pure_closures_in_expr(
             &mut analysis,
@@ -1534,6 +1554,7 @@ struct Analysis<'a> {
     protocols: Protocols,
     // Only immutable declarations are shared; each query supplies its own assumptions.
     resource_world: Option<ResourceWorld>,
+    declaration_catalog: ::type_resolution::dispatch::BorrowedCatalog<'a>,
     functions: BTreeMap<DeclarationId, &'a n::Function>,
     tuple_heads: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
@@ -1554,6 +1575,7 @@ struct Analysis<'a> {
     // Lookup/memo tables containing `Term` (`Term: Eq + Hash`, not `Ord`).
     active: HashSet<Key>,
     proven: HashMap<Key, bool>,
+    assumption_free_copy_types: HashSet<Term>,
     fuel: usize,
 }
 
@@ -1590,6 +1612,7 @@ impl<'a> Analysis<'a> {
             method_callees: Default::default(),
             protocols: Protocols::default(),
             resource_world: None,
+            declaration_catalog: ::type_resolution::dispatch::BorrowedCatalog::new(package),
             functions: package
                 .functions
                 .iter()
@@ -1611,6 +1634,7 @@ impl<'a> Analysis<'a> {
             result_fields: BTreeMap::new(),
             active: HashSet::new(),
             proven: HashMap::new(),
+            assumption_free_copy_types: HashSet::new(),
             fuel,
         }
     }
@@ -3715,7 +3739,12 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
-        let mut copy_types = HashSet::new();
+        let empty_assumptions = function.capabilities.is_empty();
+        let mut copy_types = if empty_assumptions {
+            self.assumption_free_copy_types.clone()
+        } else {
+            HashSet::new()
+        };
         if self.protocols.drop.is_none() {
             let report = moves::analyze_with_declarations(
                 self.declarations.clone(),
@@ -3797,6 +3826,18 @@ impl<'a> Analysis<'a> {
         let Ok(report) = report else {
             return false;
         };
+        if empty_assumptions {
+            for ty in &copy_types {
+                if !self.assumption_free_copy_types.contains(ty) {
+                    let mut closed_fuel = self.fuel.max(1024);
+                    if nir::type_computations::has_rigid_parameters_bounded(ty, &mut closed_fuel)
+                        == Ok(false)
+                    {
+                        self.assumption_free_copy_types.insert(ty.clone());
+                    }
+                }
+            }
+        }
         self.fuel = self.fuel.saturating_sub(report.entry_steps_used);
         self.cleanup_report_is_pure(&report, &copy_types, Some(&world), 0)
     }
@@ -4837,10 +4878,14 @@ impl<'a> Analysis<'a> {
                 if promised && !self.finite {
                     return true;
                 }
-                let Ok(method) =
-                    self.method_callees
-                        .select_behavior(self.package, callee, &mut self.fuel)
-                else {
+                let Ok(method) = self.method_callees.select_behavior_in_source(
+                    self.package,
+                    Some(::materialization::DeclarationSource::Prepared(
+                        &self.declaration_catalog,
+                    )),
+                    callee,
+                    &mut self.fuel,
+                ) else {
                     return false;
                 };
                 let K::FunctionInstance {

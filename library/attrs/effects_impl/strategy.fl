@@ -1,1 +1,12 @@
+use bindings.{Object, Symbol};
+
 pub const direct_passing = { __flurry_direct_passing: true }
+
+{-
+    Select the stack allocation strategy for an effectful function or handler
+    (`.bounded_pool`, `.guarded_pool`, or `.inline_frame`).
+-}
+pub pure comptime fn stack_strategy(mode: Symbol) -> Object {
+    let metadata = { __flurry_effect_strategy: mode }
+    metadata
+}

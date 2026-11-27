@@ -1,0 +1,838 @@
+use collections_impl.slice.Slice;
+use collections_impl.vec.Vec;
+use io_impl.errors.IoErr;
+use io_impl.reader.Reader;
+use io_impl.writer.Write;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
+use net_impl.addr.{IpAddr, Ipv4Addr, NetErr, Shutdown, SocketAddr, ToSocketAddrs}
+use std.os.unix;
+use string_impl.string.String;
+use sync_impl.marker.{Send, Sync}
+use time_impl.duration.Duration;
+
+{-
+    OS L3/L4 socket types (`TcpStream`, `TcpListener`, `UdpSocket`, `UnixStream`,
+    `UnixListener`, `Incoming`), `std.io.{Reader, Write}` implementations, and
+    the `NetIoWait` async I/O wait bridge effect.
+
+    Redlines enforced:
+    - OQ-08-07: NO `MutSlice`; all mutable byte buffer slices use `Slice<u8>`.
+    - Tier 1 boundary: NO HTTP, TLS, WebSocket, QUIC, URL, or reactor loop.
+    - Affine `Once` + `Drop` closes valid OS socket file descriptors (`>= 0`).
+
+    HOOK(@llvm-effects): Socket syscalls (`socket`, `bind`, `listen`, `accept`,
+    `connect`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
+    `getsockopt`, `getsockname`, `getpeername`, `dup`, `fcntl`) await OS network
+    intrinsics in `platform/linux.fl` + LLVM `platform.ll`; `read_raw`/`write_raw`
+    and `Drop` already wire through `std.os.unix.{read_raw, write_raw, close}`.
+-}
+
+fn net_enosys() -> NetErr {
+    NetErr.Io(IoErr.Os(38))
+}
+
+fn close_raw_fd(fd: i64) {
+    if fd >= 0 and fd <= 2147483647 {
+        let _ = unix.close(fd'bitvec[0..32].as(i32)) match {
+            _! => {},
+            error _ => {},
+        }
+    }
+}
+
+fn raw_fd_to_i32(fd: i64) -> !IoErr i32 {
+    if fd < 0 or fd > 2147483647 {
+        return error IoErr.Os(9);
+    }
+    fd'bitvec[0..32].as(i32)
+}
+
+pub struct TcpStream {
+    raw_handle: i64,
+}
+
+pub struct TcpListener {
+    raw_handle: i64,
+}
+
+pub struct UdpSocket {
+    raw_handle: i64,
+}
+
+pub struct UnixStream {
+    raw_handle: i64,
+}
+
+pub struct UnixListener {
+    raw_handle: i64,
+}
+
+pub struct Incoming {
+    listener: *TcpListener,
+}
+
+impl Drop for TcpStream {
+    fn drop(*self) {
+        let fd = self.raw_handle.*;
+        self.raw_handle.* = -1;
+        close_raw_fd(fd);
+    }
+}
+
+impl Drop for TcpListener {
+    fn drop(*self) {
+        let fd = self.raw_handle.*;
+        self.raw_handle.* = -1;
+        close_raw_fd(fd);
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(*self) {
+        let fd = self.raw_handle.*;
+        self.raw_handle.* = -1;
+        close_raw_fd(fd);
+    }
+}
+
+impl Drop for UnixStream {
+    fn drop(*self) {
+        let fd = self.raw_handle.*;
+        self.raw_handle.* = -1;
+        close_raw_fd(fd);
+    }
+}
+
+impl Drop for UnixListener {
+    fn drop(*self) {
+        let fd = self.raw_handle.*;
+        self.raw_handle.* = -1;
+        close_raw_fd(fd);
+    }
+}
+
+impl Send for TcpStream {}
+impl Sync for TcpStream {}
+impl Send for TcpListener {}
+impl Sync for TcpListener {}
+impl Send for UdpSocket {}
+impl Sync for UdpSocket {}
+impl Send for UnixStream {}
+impl Sync for UnixStream {}
+impl Send for UnixListener {}
+impl Sync for UnixListener {}
+
+impl TcpListener {
+    pub unsafe fn from_raw_fd(fd: i64) -> Self {
+        TcpListener { raw_handle: fd }
+    }
+
+    pub fn as_raw_fd(*self) -> i64 {
+        self.raw_handle.*
+    }
+
+    pub fn bind(addr: SocketAddr) -> !NetErr Self {
+        let _ = addr;
+        -- HOOK(@llvm-effects): OS `socket` + `SO_REUSEADDR` + `bind` + `listen`.
+        error net_enosys()
+    }
+
+    pub fn bind_addrs(addr: *T) -> ![NetErr, AllocErr] Self
+    where
+        T: Type,
+        requires T :- ToSocketAddrs,
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let addrs = addr.as(ToSocketAddrs).to_socket_addrs<.A = A, .allocator = allocator>()!;
+        if addrs.ref.is_empty() {
+            return error NetErr.InvalidInput;
+        }
+        let first = addrs.ref.get(0) match {
+            a? => a,
+            null => return error NetErr.InvalidInput,
+        }
+        TcpListener.bind(first) match {
+            listener! => listener,
+            error err => error err,
+        }
+    }
+
+    pub fn accept(*self) -> !NetErr Tuple<TcpStream, SocketAddr> {
+        let _ = self;
+        -- HOOK(@llvm-effects): OS `accept`.
+        error net_enosys()
+    }
+
+    pub fn incoming(*self) -> Incoming {
+        Incoming { listener: self }
+    }
+
+    pub fn local_addr(*self) -> !NetErr SocketAddr {
+        let _ = self;
+        -- HOOK(@llvm-effects): OS `getsockname`.
+        error net_enosys()
+    }
+
+    pub fn try_clone(*self) -> !NetErr Self {
+        let _ = self;
+        -- HOOK(@llvm-effects): OS `dup` / `F_DUPFD_CLOEXEC`.
+        error net_enosys()
+    }
+
+    pub fn set_ttl(*self, ttl: u32) -> !NetErr void {
+        let _ = self;
+        let _ = ttl;
+        -- HOOK(@llvm-effects): OS `setsockopt(IP_TTL)`.
+        error net_enosys()
+    }
+
+    pub fn set_nonblocking(*self, nonblocking: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nonblocking;
+        -- HOOK(@llvm-effects): OS `fcntl(F_SETFL, O_NONBLOCK)`.
+        error net_enosys()
+    }
+
+    pub fn take_error(*self) -> !NetErr ?NetErr {
+        let _ = self;
+        -- HOOK(@llvm-effects): OS `getsockopt(SO_ERROR)`.
+        error net_enosys()
+    }
+}
+
+impl Incoming {
+    pub fn next(*self) -> ?(!NetErr TcpStream) {
+        self.listener.*.accept() match {
+            pair! => {
+                let (stream, _) = pair;
+                let res: !NetErr TcpStream = stream;
+                res
+            },
+            error err => {
+                let res: !NetErr TcpStream = error err;
+                res
+            },
+        }
+    }
+}
+
+impl TcpStream {
+    pub unsafe fn from_raw_fd(fd: i64) -> Self {
+        TcpStream { raw_handle: fd }
+    }
+
+    pub fn as_raw_fd(*self) -> i64 {
+        self.raw_handle.*
+    }
+
+    pub fn connect(addr: SocketAddr) -> !NetErr Self {
+        let _ = addr;
+        -- HOOK(@llvm-effects): OS `socket` + `connect`.
+        error net_enosys()
+    }
+
+    pub fn connect_addrs(addr: *T) -> ![NetErr, AllocErr] Self
+    where
+        T: Type,
+        requires T :- ToSocketAddrs,
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let addrs = addr.as(ToSocketAddrs).to_socket_addrs<.A = A, .allocator = allocator>()!;
+        if addrs.ref.is_empty() {
+            return error NetErr.InvalidInput;
+        }
+        let first = addrs.ref.get(0) match {
+            a? => a,
+            null => return error NetErr.InvalidInput,
+        }
+        TcpStream.connect(first) match {
+            stream! => stream,
+            error err => error err,
+        }
+    }
+
+    pub fn connect_timeout(addr: SocketAddr, timeout: Duration) -> !NetErr Self {
+        let _ = addr;
+        let _ = timeout;
+        -- HOOK(@llvm-effects): non-blocking `connect` + `poll` timeout.
+        error net_enosys()
+    }
+
+    pub fn peer_addr(*self) -> !NetErr SocketAddr {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn local_addr(*self) -> !NetErr SocketAddr {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn shutdown(*self, how: Shutdown) -> !NetErr void {
+        let _ = self;
+        let _ = how;
+        error net_enosys()
+    }
+
+    pub fn try_clone(*self) -> !NetErr Self {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn set_read_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn set_write_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn read_timeout(*self) -> !NetErr ?Duration {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn write_timeout(*self) -> !NetErr ?Duration {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn peek(*self, buf: Slice<u8>) -> !NetErr usize {
+        let _ = self;
+        let _ = buf;
+        -- HOOK(@llvm-effects): OS `recv(..., MSG_PEEK)`.
+        error net_enosys()
+    }
+
+    pub fn read(*self, buf: Slice<u8>) -> !IoErr usize {
+        let len = buf.len();
+        if len == 0 {
+            return 0;
+        }
+        unsafe { self.as(Reader).read_raw(buf.as_addr(), len) }
+    }
+
+    pub fn write(*self, buf: Slice<u8>) -> !IoErr usize {
+        let len = buf.len();
+        if len == 0 {
+            return 0;
+        }
+        unsafe { self.as(Write).write_raw(buf.as_addr(), len) }
+    }
+
+    pub fn write_all_slice(*self, buf: Slice<u8>) -> !IoErr void {
+        let len = buf.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { self.as(Write).write_all_raw(buf.as_addr(), len) }
+    }
+
+    pub fn set_nodelay(*self, nodelay: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nodelay;
+        error net_enosys()
+    }
+
+    pub fn nodelay(*self) -> !NetErr bool {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn set_nonblocking(*self, nonblocking: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nonblocking;
+        error net_enosys()
+    }
+
+    pub fn take_error(*self) -> !NetErr ?NetErr {
+        let _ = self;
+        error net_enosys()
+    }
+}
+
+impl Reader for TcpStream {
+    assoc Err: Type = IoErr;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.read_raw(fd, dst, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    fn read_byte(*self) -> !IoErr ?u8 {
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        unix.read_byte(fd)
+    }
+}
+
+impl Write for TcpStream {
+    assoc Err: Type = IoErr;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.write_raw(fd, src, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !IoErr void {
+        if len == 0 {
+            return;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        io_impl.writer.write_all_raw(fd, src, len)
+    }
+}
+
+impl UdpSocket {
+    pub unsafe fn from_raw_fd(fd: i64) -> Self {
+        UdpSocket { raw_handle: fd }
+    }
+
+    pub fn as_raw_fd(*self) -> i64 {
+        self.raw_handle.*
+    }
+
+    pub fn bind(addr: SocketAddr) -> !NetErr Self {
+        let _ = addr;
+        error net_enosys()
+    }
+
+    pub fn bind_addrs(addr: *T) -> ![NetErr, AllocErr] Self
+    where
+        T: Type,
+        requires T :- ToSocketAddrs,
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let addrs = addr.as(ToSocketAddrs).to_socket_addrs<.A = A, .allocator = allocator>()!;
+        if addrs.ref.is_empty() {
+            return error NetErr.InvalidInput;
+        }
+        let first = addrs.ref.get(0) match {
+            a? => a,
+            null => return error NetErr.InvalidInput,
+        }
+        UdpSocket.bind(first) match {
+            sock! => sock,
+            error err => error err,
+        }
+    }
+
+    pub fn connect(*self, addr: SocketAddr) -> !NetErr void {
+        let _ = self;
+        let _ = addr;
+        error net_enosys()
+    }
+
+    pub fn send(*self, buf: Slice<u8>) -> !NetErr usize {
+        let _ = self;
+        let _ = buf;
+        error net_enosys()
+    }
+
+    pub fn recv(*self, buf: Slice<u8>) -> !NetErr usize {
+        let _ = self;
+        let _ = buf;
+        error net_enosys()
+    }
+
+    pub fn send_to(*self, buf: Slice<u8>, addr: SocketAddr) -> !NetErr usize {
+        let _ = self;
+        let _ = buf;
+        let _ = addr;
+        error net_enosys()
+    }
+
+    pub fn send_to_addrs(*self, buf: Slice<u8>, addr: *T) -> ![NetErr, AllocErr] usize
+    where
+        T: Type,
+        requires T :- ToSocketAddrs,
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let addrs = addr.as(ToSocketAddrs).to_socket_addrs<.A = A, .allocator = allocator>()!;
+        if addrs.ref.is_empty() {
+            return error NetErr.InvalidInput;
+        }
+        let first = addrs.ref.get(0) match {
+            a? => a,
+            null => return error NetErr.InvalidInput,
+        }
+        self.send_to(buf, first) match {
+            n! => n,
+            error err => error err,
+        }
+    }
+
+    pub fn recv_from(*self, buf: Slice<u8>) -> !NetErr Tuple<usize, SocketAddr> {
+        let _ = self;
+        let _ = buf;
+        error net_enosys()
+    }
+
+    pub fn peek_from(*self, buf: Slice<u8>) -> !NetErr Tuple<usize, SocketAddr> {
+        let _ = self;
+        let _ = buf;
+        error net_enosys()
+    }
+
+    pub fn local_addr(*self) -> !NetErr SocketAddr {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn peer_addr(*self) -> !NetErr SocketAddr {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn set_broadcast(*self, broadcast: bool) -> !NetErr void {
+        let _ = self;
+        let _ = broadcast;
+        error net_enosys()
+    }
+
+    pub fn set_multicast_loop_v4(*self, on: bool) -> !NetErr void {
+        let _ = self;
+        let _ = on;
+        error net_enosys()
+    }
+
+    pub fn join_multicast_v4(*self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> !NetErr void {
+        let _ = self;
+        let _ = multiaddr;
+        let _ = interface;
+        error net_enosys()
+    }
+
+    pub fn leave_multicast_v4(*self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> !NetErr void {
+        let _ = self;
+        let _ = multiaddr;
+        let _ = interface;
+        error net_enosys()
+    }
+
+    pub fn set_read_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn set_write_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn set_nonblocking(*self, nonblocking: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nonblocking;
+        error net_enosys()
+    }
+}
+
+-- Note: `std.path.{Path, PathBuf}` is not yet present in `std` at `HEAD`, so
+-- `UnixListener` / `UnixStream` accept `str` and return `String` with
+-- allocator parameterization until `std.path` lands.
+impl UnixListener {
+    pub unsafe fn from_raw_fd(fd: i64) -> Self {
+        UnixListener { raw_handle: fd }
+    }
+
+    pub fn as_raw_fd(*self) -> i64 {
+        self.raw_handle.*
+    }
+
+    pub fn bind(path: str) -> !NetErr Self {
+        let _ = path;
+        error net_enosys()
+    }
+
+    pub fn accept(
+        *self,
+    ) -> ![NetErr, AllocErr] Tuple<UnixStream, String<.A = A, .allocator = allocator>>
+    where
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn set_nonblocking(*self, nonblocking: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nonblocking;
+        error net_enosys()
+    }
+}
+
+impl UnixStream {
+    pub unsafe fn from_raw_fd(fd: i64) -> Self {
+        UnixStream { raw_handle: fd }
+    }
+
+    pub fn as_raw_fd(*self) -> i64 {
+        self.raw_handle.*
+    }
+
+    pub fn connect(path: str) -> !NetErr Self {
+        let _ = path;
+        error net_enosys()
+    }
+
+    pub fn pair() -> !NetErr Tuple<UnixStream, UnixStream> {
+        error net_enosys()
+    }
+
+    pub fn shutdown(*self, how: Shutdown) -> !NetErr void {
+        let _ = self;
+        let _ = how;
+        error net_enosys()
+    }
+
+    pub fn set_read_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn set_write_timeout(*self, dur: ?Duration) -> !NetErr void {
+        let _ = self;
+        let _ = dur;
+        error net_enosys()
+    }
+
+    pub fn read_timeout(*self) -> !NetErr ?Duration {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn write_timeout(*self) -> !NetErr ?Duration {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn set_nonblocking(*self, nonblocking: bool) -> !NetErr void {
+        let _ = self;
+        let _ = nonblocking;
+        error net_enosys()
+    }
+
+    pub fn take_error(*self) -> !NetErr ?NetErr {
+        let _ = self;
+        error net_enosys()
+    }
+
+    pub fn read(*self, buf: Slice<u8>) -> !IoErr usize {
+        let len = buf.len();
+        if len == 0 {
+            return 0;
+        }
+        unsafe { self.as(Reader).read_raw(buf.as_addr(), len) }
+    }
+
+    pub fn write(*self, buf: Slice<u8>) -> !IoErr usize {
+        let len = buf.len();
+        if len == 0 {
+            return 0;
+        }
+        unsafe { self.as(Write).write_raw(buf.as_addr(), len) }
+    }
+
+    pub fn write_all_slice(*self, buf: Slice<u8>) -> !IoErr void {
+        let len = buf.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { self.as(Write).write_all_raw(buf.as_addr(), len) }
+    }
+}
+
+impl Reader for UnixStream {
+    assoc Err: Type = IoErr;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.read_raw(fd, dst, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    fn read_byte(*self) -> !IoErr ?u8 {
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        unix.read_byte(fd)
+    }
+}
+
+impl Write for UnixStream {
+    assoc Err: Type = IoErr;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.write_raw(fd, src, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !IoErr void {
+        if len == 0 {
+            return;
+        }
+        let fd = raw_fd_to_i32(self.raw_handle.*)!;
+        io_impl.writer.write_all_raw(fd, src, len)
+    }
+}
+
+-- ── Non-Blocking Async I/O Wait Effect Bridge ────────────────────────────────
+
+pub effect enum NetIoWait {
+    async wait_readable(fd: i64) -> !NetErr void,
+    async wait_writable(fd: i64) -> !NetErr void,
+}
+
+fn map_io_err_to_net(err: IoErr) -> NetErr {
+    NetErr.Io(err)
+}
+
+impl TcpStream {
+    pub fn read_async(*self, buf: Slice<u8>) -> #NetIoWait !NetErr usize {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_readable(fd)#!;
+        self.read(buf) match {
+            n! => n,
+            error err => error map_io_err_to_net(err),
+        }
+    }
+
+    pub fn write_async(*self, buf: Slice<u8>) -> #NetIoWait !NetErr usize {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_writable(fd)#!;
+        self.write(buf) match {
+            n! => n,
+            error err => error map_io_err_to_net(err),
+        }
+    }
+}
+
+impl TcpListener {
+    pub fn accept_async(*self) -> #NetIoWait !NetErr Tuple<TcpStream, SocketAddr> {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_readable(fd)#!;
+        self.accept()
+    }
+}
+
+impl UdpSocket {
+    pub fn recv_from_async(*self, buf: Slice<u8>) -> #NetIoWait !NetErr Tuple<usize, SocketAddr> {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_readable(fd)#!;
+        self.recv_from(buf)
+    }
+
+    pub fn send_to_async(*self, buf: Slice<u8>, addr: SocketAddr) -> #NetIoWait !NetErr usize {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_writable(fd)#!;
+        self.send_to(buf, addr)
+    }
+}
+
+impl UnixStream {
+    pub fn read_async(*self, buf: Slice<u8>) -> #NetIoWait !NetErr usize {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_readable(fd)#!;
+        self.read(buf) match {
+            n! => n,
+            error err => error map_io_err_to_net(err),
+        }
+    }
+
+    pub fn write_async(*self, buf: Slice<u8>) -> #NetIoWait !NetErr usize {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_writable(fd)#!;
+        self.write(buf) match {
+            n! => n,
+            error err => error map_io_err_to_net(err),
+        }
+    }
+}
+
+impl UnixListener {
+    pub fn accept_async(
+        *self,
+    ) -> #NetIoWait ![NetErr, AllocErr] Tuple<UnixStream, String<.A = A, .allocator = allocator>>
+    where
+        .A: Type = DefaultAllocator,
+        requires A :- Allocator,
+        quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+    {
+        let fd = self.raw_handle.*;
+        NetIoWait.wait_readable(fd)#!;
+        self.accept<.A = A, .allocator = allocator>()
+    }
+}

@@ -3185,7 +3185,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             }
             K::Local { .. } => self.transfer_local(expr, locals, returned, next),
             K::AddressOf { .. } => self.transfer_address_of(expr, locals, returned, next),
-            K::ConstAddress { .. } => Ok(empty),
+            K::ConstAddress { .. } | K::StaticAddress(_) => Ok(empty),
             K::PointerField { .. } | K::PointerAnonymousField { .. } => {
                 self.transfer_pointer_field(expr, locals, returned, next)
             }
@@ -3199,7 +3199,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             K::SymbolName { .. } | K::EnumName { .. } => {
                 self.transfer_symbol_name(expr, locals, returned, next)
             }
-            K::Tuple { .. } | K::Record { .. } | K::AnonymousRecord { .. } => {
+            K::Tuple { .. } | K::Array { .. } | K::Record { .. } | K::AnonymousRecord { .. } => {
                 self.transfer_tuple(expr, locals, returned, next)
             }
             K::TupleAppend { .. } => self.transfer_tuple_append(expr, locals, returned, next),
@@ -4379,5 +4379,61 @@ mod tests {
             )
             .expect_err("empty text storage descriptor must fail closed");
         assert!(err.contains("backing-region provenance"), "{err}");
+    }
+
+    #[test]
+    fn static_address_allows_non_text_reads_and_rejects_text_bearing_dereference() {
+        let u64_ty = Term::Primitive(Primitive::U64);
+        let str_ty = Term::Primitive(Primitive::Str);
+        let ptr_u64_ty = Term::Pointer(Box::new(u64_ty.clone()));
+        let ptr_str_ty = Term::Pointer(Box::new(str_ty.clone()));
+
+        let read_u64_fn = decl(1);
+        let u64_pkg = Package {
+            functions: vec![Function {
+                interface: fn_decl(
+                    read_u64_fn,
+                    "read_static_u64",
+                    vec![],
+                    vec![],
+                    u64_ty.clone(),
+                ),
+                body: expr(
+                    u64_ty,
+                    K::ReadPointer(Box::new(expr(ptr_u64_ty, K::StaticAddress(decl(10))))),
+                ),
+                runtime_deliveries: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let metadata = crate::declarations::Metadata::new(Some(&u64_pkg));
+        let mut fuel = 10_000;
+        infer_text_regions_with_metadata(&u64_pkg, &metadata, read_u64_fn, &[], &mut fuel)
+            .expect("non-text static address read must pass");
+
+        let read_str_fn = decl(2);
+        let str_pkg = Package {
+            functions: vec![Function {
+                interface: fn_decl(
+                    read_str_fn,
+                    "read_static_str",
+                    vec![],
+                    vec![],
+                    str_ty.clone(),
+                ),
+                body: expr(
+                    str_ty,
+                    K::ReadPointer(Box::new(expr(ptr_str_ty, K::StaticAddress(decl(11))))),
+                ),
+                runtime_deliveries: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let metadata = crate::declarations::Metadata::new(Some(&str_pkg));
+        let mut fuel = 10_000;
+        let err =
+            infer_text_regions_with_metadata(&str_pkg, &metadata, read_str_fn, &[], &mut fuel)
+                .expect_err("text-bearing static address dereference must fail closed");
+        assert!(err.contains("pointer target is unknown"), "{err}");
     }
 }

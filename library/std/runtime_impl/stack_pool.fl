@@ -1,0 +1,679 @@
+use builtin.fmt.{ByteWriter, Debug, Display}
+use collections_impl.vec.Vec;
+use io_impl.errors.IoErr;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+use meta.{compilation, runtime};
+use process_impl.process.panic;
+use sync_impl.atomics.{AtomicOrdering, AtomicU64, static_atomic_u64}
+use sync_impl.marker.{Send, Sync}
+
+{-
+    Address-stable stack pool protocols and pooled-stack allocators:
+    - `StackPoolErr`: allocation, capacity, alignment, or guard-page error.
+    - `StackSlot`: affine (`Once`) descriptor bound to its origin `StackPool`.
+    - `StackPool`: protocol used by `.use(pool)` and async runtimes.
+    - `BoundedStackPool<slot_bytes, .A, .allocator>`: fixed-slot slab pool
+      (Silver P0-3). OQ-08-03: compile-time `meta.runtime.bounded_stack_bytes`
+      verification wired via `bounded_stack_bytes_for`, `verify_bounded_stack_bytes`,
+      and `require_bounded_stack_bytes`.
+    - `GuardedStackPool<.A, .allocator>`: general-purpose pool for unbounded
+      recursion / dynamic closures (Silver P1-1).
+-}
+pub enum StackPoolErr {
+    OutOfMemory,
+    StackSizeOverflow(usize, usize),
+    InvalidSlotAlignment,
+    GuardPageSetupFailed(IoErr),
+    PoolExhausted,
+}
+
+impl Clone for StackPoolErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .OutOfMemory => .OutOfMemory,
+            .StackSizeOverflow(req, cap) => .StackSizeOverflow(req, cap),
+            .InvalidSlotAlignment => .InvalidSlotAlignment,
+            .GuardPageSetupFailed(err) => .GuardPageSetupFailed(err),
+            .PoolExhausted => .PoolExhausted,
+        }
+    }
+}
+
+impl Copy for StackPoolErr {}
+
+impl Eq for StackPoolErr {
+    fn eq(*self, other: *Self) -> bool {
+        self.* match {
+            .OutOfMemory =>
+                other.* match {
+                    .OutOfMemory => true,
+                    _ => false,
+                },
+            .StackSizeOverflow(r1, c1) =>
+                other.* match {
+                    .StackSizeOverflow(r2, c2) => r1 == r2 and c1 == c2,
+                    _ => false,
+                },
+            .InvalidSlotAlignment =>
+                other.* match {
+                    .InvalidSlotAlignment => true,
+                    _ => false,
+                },
+            .GuardPageSetupFailed(e1) =>
+                other.* match {
+                    .GuardPageSetupFailed(e2) => e1.ref.as(Eq).eq(e2.ref),
+                    _ => false,
+                },
+            .PoolExhausted =>
+                other.* match {
+                    .PoolExhausted => true,
+                    _ => false,
+                },
+        }
+    }
+}
+
+impl Debug for StackPoolErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .OutOfMemory => output.write_str("StackPoolErr.OutOfMemory"),
+            .StackSizeOverflow(req, cap) => {
+                output.write_str("StackPoolErr.StackSizeOverflow(")!;
+                req.as(Display).fmt(output)!;
+                output.write_str(", ")!;
+                cap.as(Display).fmt(output)!;
+                output.write_byte(41)
+            },
+            .InvalidSlotAlignment => output.write_str("StackPoolErr.InvalidSlotAlignment"),
+            .GuardPageSetupFailed(err) => {
+                output.write_str("StackPoolErr.GuardPageSetupFailed(")!;
+                err.ref.as(Debug).write_debug(output)!;
+                output.write_byte(41)
+            },
+            .PoolExhausted => output.write_str("StackPoolErr.PoolExhausted"),
+        }
+    }
+}
+
+impl Send for StackPoolErr {}
+impl Sync for StackPoolErr {}
+
+pub struct StackSlot {
+    stack_base: usize,
+    stack_top: usize,
+    slot_bytes: usize,
+    pool_id: u64,
+    token: usize,
+}
+
+impl StackSlot {
+    pub unsafe fn from_raw_parts(
+        stack_base: usize,
+        stack_top: usize,
+        slot_bytes: usize,
+        pool_id: u64,
+        token: usize,
+    ) -> Self
+    {
+        StackSlot {
+            stack_base: stack_base,
+            stack_top: stack_top,
+            slot_bytes: slot_bytes,
+            pool_id: pool_id,
+            token: token,
+        }
+    }
+
+    pub fn base_addr(*self) -> usize {
+        self.stack_base.*
+    }
+
+    pub fn top_addr(*self) -> usize {
+        self.stack_top.*
+    }
+
+    pub fn size_bytes(*self) -> usize {
+        self.slot_bytes.*
+    }
+
+    pub fn owner_pool_id(*self) -> u64 {
+        self.pool_id.*
+    }
+
+    pub fn raw_token(*self) -> usize {
+        self.token.*
+    }
+}
+
+impl Send for StackSlot {}
+
+pub trait StackPool {
+    fn acquire_stack(*self, min_bytes: usize) -> !StackPoolErr StackSlot;
+    unsafe fn release_stack(*self, slot: StackSlot);
+    fn pool_id(*self) -> u64;
+    fn slot_capacity_bytes(*self) -> ?usize;
+}
+
+static next_pool_uid: AtomicU64 = static_atomic_u64(1);
+
+fn allocate_pool_uid() -> u64 {
+    next_pool_uid.fetch_add(1, AtomicOrdering.relaxed)
+}
+
+fn map_alloc_err(err: AllocErr) -> StackPoolErr {
+    err match {
+        .OutOfMemory => StackPoolErr.OutOfMemory,
+        .InvalidLayout => StackPoolErr.InvalidSlotAlignment,
+    }
+}
+
+struct SlabHeader {
+    prev_slab: usize,
+    total_bytes: u64,
+    slot_count: usize,
+}
+
+fn slab_layout(slot_bytes: usize, slots_per_slab: usize) -> ?Tuple<Layout, usize> {
+    let hdr_layout = Layout.of<SlabHeader>() match {
+        l? => l,
+        null => return null,
+    }
+    let hdr_size = hdr_layout.byte_size_usize() match {
+        s? => s,
+        null => return null,
+    }
+    let data_offset = builtin.mem.align_up_usize(hdr_size, 16) match {
+        o? => o,
+        null => return null,
+    }
+    let payload_bytes = builtin.mem.checked_mul_usize(slot_bytes, slots_per_slab) match {
+        b? => b,
+        null => return null,
+    }
+    let total_usize = builtin.mem.checked_add_usize(data_offset, payload_bytes) match {
+        t? => t,
+        null => return null,
+    }
+    let total_u64 = builtin.compiler.try_usize_to_u64(total_usize) match {
+        t? => t,
+        null => return null,
+    }
+    let layout = Layout.new(total_u64, 16) match {
+        l? => l,
+        null => return null,
+    };
+    (layout, data_offset)
+}
+
+{-
+    Compile-time OQ-08-03 stack-bound query against `meta.runtime.bounded_stack_bytes`.
+    Returns `null` if `entry_fn` contains recursion or dynamic/indirect calls.
+-}
+pub pure comptime fn bounded_stack_bytes_for(entry_fn: F) -> ?usize
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn)
+}
+
+{-
+    Compile-time OQ-08-03 stack-bound predicate for `BoundedStackPool<slot_bytes>`.
+    Returns `true` iff `entry_fn` has a statically bounded frame size `<= slot_bytes`.
+-}
+pub pure comptime fn verify_bounded_stack_bytes(
+    entry_fn: F,
+    slot_bytes: usize,
+) -> bool
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn) match {
+        bytes? => bytes <= slot_bytes,
+        null => false,
+    }
+}
+
+{-
+    Enforce at compile time that `entry_fn` has a statically bounded stack frame
+    of at most `slot_bytes`, emitting a compiler error diagnostic otherwise.
+-}
+pub comptime fn require_bounded_stack_bytes(
+    entry_fn: F,
+    slot_bytes: usize,
+) -> usize
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn) match {
+        bytes? => {
+            if bytes > slot_bytes {
+                compilation.err(
+                    "BoundedStackPool slot_bytes is smaller than statically bounded entry_fn stack usage",
+                );
+            }
+            bytes
+        },
+        null => compilation.err(
+            "BoundedStackPool entry_fn stack usage is unbounded (recursive or dynamic call)",
+        ),
+    }
+}
+
+{-
+    Fixed-size pooled stack allocator (`OQ-08-03`): address-stable fixed-slot
+    stack pool for call graphs whose static stack usage fits within `slot_bytes`
+    (verified at compile time via `require_bounded_stack_bytes` / `verify_bounded_stack_bytes`).
+-}
+pub struct BoundedStackPool
+where
+    slot_bytes: usize,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    pool_uid: u64,
+    free_list_head: usize,
+    slab_head: usize,
+    slab_slots: usize,
+    active_count: usize,
+    total_count: usize,
+}
+
+impl BoundedStackPool<slot_bytes, .A = A, .allocator = alloc>
+where
+    slot_bytes: usize,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn new(slots_per_slab: usize) -> !StackPoolErr Self {
+        if slots_per_slab == 0 or slot_bytes < 128 or (slot_bytes % 16) != 0 {
+            return error StackPoolErr.InvalidSlotAlignment;
+        }
+        var pool = BoundedStackPool<slot_bytes, .A = A, .allocator = alloc> {
+            pool_uid: allocate_pool_uid(),
+            free_list_head: 0,
+            slab_head: 0,
+            slab_slots: slots_per_slab,
+            active_count: 0,
+            total_count: 0,
+        }
+        pool.ref.grow_one_slab()!;
+        pool
+    }
+
+    fn grow_one_slab(*self) -> !StackPoolErr void {
+        let slots = self.slab_slots.*;
+        let (layout, data_offset) = slab_layout(slot_bytes, slots) match {
+            pair? => pair,
+            null => return error StackPoolErr.InvalidSlotAlignment,
+        }
+        let block = alloc.as(Allocator).allocate(layout) match {
+            b! => b,
+            error err => return error map_alloc_err(err),
+        }
+        let slab_addr = block.address();
+        let hdr = SlabHeader {
+            prev_slab: self.slab_head.*,
+            total_bytes: layout.byte_size(),
+            slot_count: slots,
+        }
+        unsafe {
+            builtin.mem.raw_write<SlabHeader>(slab_addr, hdr);
+        }
+        self.slab_head.* = slab_addr;
+
+        var idx = slots;
+        while idx > 0 {
+            idx = idx - 1;
+            let rel = builtin.mem.checked_mul_usize(idx, slot_bytes) match {
+                r? => r,
+                null => return error StackPoolErr.InvalidSlotAlignment,
+            }
+            let slot_offset = builtin.mem.checked_add_usize(data_offset, rel) match {
+                o? => o,
+                null => return error StackPoolErr.InvalidSlotAlignment,
+            }
+            let slot_addr = builtin.mem.checked_add_usize(slab_addr, slot_offset) match {
+                a? => a,
+                null => return error StackPoolErr.InvalidSlotAlignment,
+            }
+            unsafe {
+                builtin.mem.raw_write<usize>(slot_addr, self.free_list_head.*);
+            }
+            self.free_list_head.* = slot_addr;
+        }
+        self.total_count.* = builtin.mem.checked_add_usize(self.total_count.*, slots) match {
+            v? => v,
+            null => return error StackPoolErr.PoolExhausted,
+        };
+    }
+
+    pub fn preallocate_slabs(*self, slab_count: usize) -> !StackPoolErr void {
+        var i: usize = 0;
+        while i < slab_count {
+            self.grow_one_slab()!;
+            i = i + 1;
+        }
+    }
+
+    pub fn active_slots(*self) -> usize {
+        self.active_count.*
+    }
+
+    pub fn total_slots(*self) -> usize {
+        self.total_count.*
+    }
+}
+
+impl StackPool for BoundedStackPool<slot_bytes, .A = A, .allocator = alloc>
+where
+    slot_bytes: usize,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn acquire_stack(*self, min_bytes: usize) -> !StackPoolErr StackSlot {
+        if min_bytes > slot_bytes {
+            return error StackPoolErr.StackSizeOverflow(min_bytes, slot_bytes);
+        }
+        if self.free_list_head.* == 0 {
+            self.grow_one_slab()!;
+        }
+        let slot_addr = self.free_list_head.*;
+        if slot_addr == 0 {
+            return error StackPoolErr.PoolExhausted;
+        }
+        let next = unsafe { builtin.mem.raw_read<usize>(slot_addr) }
+        self.free_list_head.* = next;
+        self.active_count.* = builtin.mem.checked_add_usize(self.active_count.*, 1) match {
+            v? => v,
+            null => self.active_count.*,
+        };
+        let top = builtin.mem.checked_add_usize(slot_addr, slot_bytes) match {
+            t? => t,
+            null => return error StackPoolErr.InvalidSlotAlignment,
+        }
+        StackSlot {
+            stack_base: slot_addr,
+            stack_top: top,
+            slot_bytes: slot_bytes,
+            pool_id: self.pool_uid.*,
+            token: slot_addr,
+        }
+    }
+
+    unsafe fn release_stack(*self, slot: StackSlot) {
+        if slot.pool_id != self.pool_uid.* {
+            panic("StackSlot released to wrong BoundedStackPool");
+        }
+        let slot_addr = slot.token;
+        builtin.mem.raw_write<usize>(slot_addr, self.free_list_head.*);
+        self.free_list_head.* = slot_addr;
+        let active = self.active_count.*;
+        if active > 0 {
+            self.active_count.* = active - 1;
+        }
+    }
+
+    fn pool_id(*self) -> u64 {
+        self.pool_uid.*
+    }
+
+    fn slot_capacity_bytes(*self) -> ?usize {
+        slot_bytes
+    }
+}
+
+impl Drop for BoundedStackPool<slot_bytes, .A = A, .allocator = alloc>
+where
+    slot_bytes: usize,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        if self.active_count.* != 0 {
+            panic("BoundedStackPool dropped with active unreturned StackSlots");
+        }
+        var cur = self.slab_head.*;
+        self.slab_head.* = 0;
+        self.free_list_head.* = 0;
+        self.total_count.* = 0;
+        while cur != 0 {
+            let hdr = unsafe { builtin.mem.raw_read<SlabHeader>(cur) }
+            let next = hdr.prev_slab;
+            let layout = Layout.new(hdr.total_bytes, 16) match {
+                l? => l,
+                null => {
+                    cur = next;
+                    continue;
+                },
+            }
+            unsafe {
+                alloc
+                    .as(Allocator)
+                    .deallocate(RawBlock.from_raw_parts(cur, layout));
+            }
+            cur = next;
+        }
+    }
+}
+
+impl Send for BoundedStackPool<slot_bytes, .A = A, .allocator = alloc>
+where
+    slot_bytes: usize,
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
+
+const DEFAULT_GUARD_BYTES: usize = 4096;
+
+{-
+    General-purpose pooled stack allocator supporting arbitrary recursion and
+    dynamic closures.
+
+    HOOK(@llvm-effects): When OS virtual memory reservation + guard page
+    (`mmap`/`mprotect`) platform intrinsics land, replace allocator-backed stack
+    buffers with reserved-and-guarded virtual memory regions while preserving the
+    identical `StackPool` and allocator contract.
+-}
+pub struct GuardedStackPool
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    pool_uid: u64,
+    default_stack_bytes: usize,
+    guard_bytes: usize,
+    free_slots: Vec<StackSlot, .A = A, .allocator = allocator>,
+    active_count: usize,
+}
+
+fn slot_block_layout(bytes: usize) -> ?Layout {
+    let aligned = builtin.mem.align_up_usize(bytes, 16) match {
+        b? => b,
+        null => return null,
+    }
+    let size_u64 = builtin.compiler.try_usize_to_u64(aligned) match {
+        s? => s,
+        null => return null,
+    }
+    Layout.new(size_u64, 16)
+}
+
+impl GuardedStackPool<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn new(default_stack_bytes: usize) -> !StackPoolErr Self {
+        let aligned = builtin.mem.align_up_usize(default_stack_bytes, 16) match {
+            b? => b,
+            null => return error StackPoolErr.InvalidSlotAlignment,
+        }
+        if aligned < 128 {
+            return error StackPoolErr.InvalidSlotAlignment;
+        }
+        GuardedStackPool<.A = A, .allocator = alloc> {
+            pool_uid: allocate_pool_uid(),
+            default_stack_bytes: aligned,
+            guard_bytes: DEFAULT_GUARD_BYTES,
+            free_slots: Vec<StackSlot, .A = A, .allocator = alloc>.new(),
+            active_count: 0,
+        }
+    }
+
+    pub fn active_slots(*self) -> usize {
+        self.active_count.*
+    }
+
+    pub fn guard_size_bytes(*self) -> usize {
+        self.guard_bytes.*
+    }
+}
+
+impl StackPool for GuardedStackPool<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn acquire_stack(*self, min_bytes: usize) -> !StackPoolErr StackSlot {
+        let needed = if min_bytes > self.default_stack_bytes.* {
+            min_bytes
+        } else {
+            self.default_stack_bytes.*
+        }
+        let aligned = builtin.mem.align_up_usize(needed, 16) match {
+            b? => b,
+            null => return error StackPoolErr.InvalidSlotAlignment,
+        }
+        let cached = self.free_slots.pop();
+        cached match {
+            slot? => {
+                if slot.slot_bytes >= aligned {
+                    self.active_count.* = builtin.mem.checked_add_usize(self.active_count.*, 1) match {
+            v? => v,
+            null => self.active_count.*,
+        };
+                    return slot;
+                }
+                let old_layout = slot_block_layout(slot.slot_bytes) match {
+                    l? => l,
+                    null => return error StackPoolErr.InvalidSlotAlignment,
+                }
+                unsafe {
+                    alloc
+                        .as(Allocator)
+                        .deallocate(RawBlock.from_raw_parts(slot.stack_base, old_layout));
+                }
+            },
+            null => {},
+        }
+        let layout = slot_block_layout(aligned) match {
+            l? => l,
+            null => return error StackPoolErr.InvalidSlotAlignment,
+        }
+        let block = alloc.as(Allocator).allocate(layout) match {
+            b! => b,
+            error err => return error map_alloc_err(err),
+        }
+        let base = block.address();
+        let top = builtin.mem.checked_add_usize(base, aligned) match {
+            t? => t,
+            null => {
+                unsafe {
+                    alloc.as(Allocator).deallocate(block);
+                }
+                return error StackPoolErr.InvalidSlotAlignment;
+            },
+        }
+        self.active_count.* = builtin.mem.checked_add_usize(self.active_count.*, 1) match {
+            v? => v,
+            null => self.active_count.*,
+        };
+        StackSlot {
+            stack_base: base,
+            stack_top: top,
+            slot_bytes: aligned,
+            pool_id: self.pool_uid.*,
+            token: base,
+        }
+    }
+
+    unsafe fn release_stack(*self, slot: StackSlot) {
+        if slot.pool_id != self.pool_uid.* {
+            panic("StackSlot released to wrong GuardedStackPool");
+        }
+        let active = self.active_count.*;
+        if active > 0 {
+            self.active_count.* = active - 1;
+        }
+        let layout = slot_block_layout(slot.slot_bytes);
+        let addr = slot.stack_base;
+        self.free_slots.push(slot) match {
+            _! => {},
+            error _ => {
+                layout match {
+                    l? => {
+                        alloc
+                            .as(Allocator)
+                            .deallocate(RawBlock.from_raw_parts(addr, l));
+                    },
+                    null => {},
+                }
+            },
+        }
+    }
+
+    fn pool_id(*self) -> u64 {
+        self.pool_uid.*
+    }
+
+    fn slot_capacity_bytes(*self) -> ?usize {
+        null
+    }
+}
+
+impl Drop for GuardedStackPool<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        if self.active_count.* != 0 {
+            panic("GuardedStackPool dropped with active unreturned StackSlots");
+        }
+        while true {
+            self.free_slots.pop() match {
+                slot? => {
+                    let layout = slot_block_layout(slot.slot_bytes);
+                    layout match {
+                        l? => {
+                            unsafe {
+                                alloc
+                                    .as(Allocator)
+                                    .deallocate(RawBlock.from_raw_parts(slot.stack_base, l));
+                            }
+                        },
+                        null => {},
+                    }
+                },
+                null => break,
+            }
+        }
+    }
+}
+
+impl Send for GuardedStackPool<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator + Send,
+    quote alloc: lift *A,
+{}
