@@ -1,0 +1,57 @@
+use mem_impl.raw as raw;
+use primitives.{Continuation, bool, u64, usize};
+use protocols.resources.Drop;
+
+{-
+    Pooled-stack delimited continuation intrinsics, inherent `Continuation`
+    methods, and affine `Drop` cleanup along the hidden abort channel.
+-}
+pub mod target {
+    ^attrs.compilation.intrinsic_enum
+    pub enum Continuation {
+        resume_raw,
+        abort_raw,
+        crosses_c_frame,
+        origin_thread_id,
+    }
+}
+
+impl Continuation {
+    pub unsafe fn resume_raw(self, arg_addr: usize, out_addr: usize) -> usize {
+        target
+            .Continuation
+            .resume_raw'intrinsic(self, arg_addr, out_addr)
+            .as(usize)
+    }
+
+    pub unsafe fn abort_raw(self) {
+        target.Continuation.abort_raw'intrinsic(self);
+    }
+
+    pub fn crosses_c_frame(*self) -> bool {
+        unsafe {
+            target
+                .Continuation
+                .crosses_c_frame'intrinsic(self)
+                .as(bool)
+        }
+    }
+
+    pub fn origin_thread_id(*self) -> u64 {
+        unsafe {
+            target
+                .Continuation
+                .origin_thread_id'intrinsic(self)
+                .as(u64)
+        }
+    }
+}
+
+impl Drop for Continuation {
+    fn drop(*self) {
+        unsafe {
+            let k = raw.read<Continuation>(self);
+            k.abort_raw();
+        }
+    }
+}

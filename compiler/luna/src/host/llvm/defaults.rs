@@ -187,6 +187,7 @@ mod tests {
                 loop_destinations: Default::default(),
                 outlined_return: None,
                 outlined_loops: BTreeMap::new(),
+                outlined_outer_locals: BTreeSet::new(),
                 lambdas: &lambdas,
                 template_identities: &template_identities,
                 locals: BTreeMap::new(),

@@ -121,6 +121,12 @@ impl Emitter<'_> {
         let triple = self.resolved_target_triple().map(str::to_owned);
         let asm = target_context_switch_ir(triple.as_deref())?;
         self.declarations.insert(asm.into());
+        self.declarations.insert("declare ptr @malloc(i64)".into());
+        self.declarations.insert("declare void @free(ptr)".into());
+        self.declarations
+            .insert("declare i32 @posix_memalign(ptr, i64, i64)".into());
+        self.declarations
+            .insert("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)".into());
         self.declarations
             .insert(include_str!("continuations.ll").into());
         Ok(())
@@ -243,6 +249,10 @@ mod tests {
             };
             format!(
                 r#"declare void @llvm.trap()
+declare ptr @malloc(i64)
+declare void @free(ptr)
+declare i32 @posix_memalign(ptr, i64, i64)
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 {task_ll}
 {asm}
 {cont_ll}

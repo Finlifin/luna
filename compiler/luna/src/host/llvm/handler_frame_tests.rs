@@ -271,6 +271,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             loop_destinations: Default::default(),
             outlined_return: None,
             outlined_loops: BTreeMap::new(),
+            outlined_outer_locals: BTreeSet::new(),
             lambdas: &lambdas,
             template_identities: &template_identities,
             locals: BTreeMap::new(),

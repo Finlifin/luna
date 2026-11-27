@@ -26,45 +26,6 @@ impl NativeCase {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library")
     }
 
-    fn intrinsic_flags() -> Vec<&'static str> {
-        vec![
-            "--host-intrinsic",
-            "atomic_load=input.AtomicOps.load",
-            "--host-intrinsic",
-            "atomic_store=input.AtomicOps.store",
-            "--host-intrinsic",
-            "atomic_swap=input.AtomicOps.swap",
-            "--host-intrinsic",
-            "atomic_cmpxchg=input.AtomicOps.cmpxchg",
-            "--host-intrinsic",
-            "atomic_cmpxchg_weak=input.AtomicOps.cmpxchg_weak",
-            "--host-intrinsic",
-            "atomic_fetch_add=input.AtomicOps.fetch_add",
-            "--host-intrinsic",
-            "atomic_fetch_sub=input.AtomicOps.fetch_sub",
-            "--host-intrinsic",
-            "atomic_fetch_and=input.AtomicOps.fetch_and",
-            "--host-intrinsic",
-            "atomic_fetch_or=input.AtomicOps.fetch_or",
-            "--host-intrinsic",
-            "atomic_fetch_xor=input.AtomicOps.fetch_xor",
-            "--host-intrinsic",
-            "atomic_fetch_max=input.AtomicOps.fetch_max",
-            "--host-intrinsic",
-            "atomic_fetch_min=input.AtomicOps.fetch_min",
-            "--host-intrinsic",
-            "atomic_fence=input.AtomicOps.fence",
-            "--host-intrinsic",
-            "atomic_compiler_fence=input.AtomicOps.compiler_fence",
-            "--host-intrinsic",
-            "runtime_panic=input.ControlOps.panic",
-            "--host-intrinsic",
-            "runtime_abort=input.ControlOps.abort",
-            "--host-intrinsic",
-            "mem_ptr_addr=input.MemOps.ptr_addr",
-        ]
-    }
-
     fn emit_llvm(&self, entry: &str) -> Result<String, String> {
         let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"));
         cmd.current_dir(&self.0)
@@ -81,8 +42,7 @@ impl NativeCase {
                 "10000000",
                 "--sysroot",
             ])
-            .arg(Self::sysroot())
-            .args(Self::intrinsic_flags());
+            .arg(Self::sysroot());
         let output = cmd.output().unwrap();
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -107,8 +67,7 @@ impl NativeCase {
                 "10000000",
                 "--sysroot",
             ])
-            .arg(Self::sysroot())
-            .args(Self::intrinsic_flags());
+            .arg(Self::sysroot());
         cmd.output().unwrap()
     }
 
@@ -139,45 +98,16 @@ const INTRINSIC_PREAMBLE: &str = r#"
 use std.prelude.*;
 use std.os.linux;
 
-^attrs.compilation.intrinsic_enum
-enum AtomicOps {
-    load,
-    store,
-    swap,
-    cmpxchg,
-    cmpxchg_weak,
-    fetch_add,
-    fetch_sub,
-    fetch_and,
-    fetch_or,
-    fetch_xor,
-    fetch_max,
-    fetch_min,
-    fence,
-    compiler_fence,
-}
-
-^attrs.compilation.intrinsic_enum
-enum ControlOps {
-    panic,
-    abort,
-}
-
-^attrs.compilation.intrinsic_enum
-enum MemOps {
-    ptr_addr,
-}
-
 fn addr_of(p: *T) -> usize where T {
-    unsafe { MemOps.ptr_addr'intrinsic(p).as(usize) }
+    unsafe { builtin.mem.ptr_addr(p) }
 }
 
 fn trigger_panic(msg: str) -> NoReturn {
-    unsafe { ControlOps.panic'intrinsic(msg).as(NoReturn) }
+    builtin.control.runtime_panic(msg)
 }
 
 fn trigger_abort() -> NoReturn {
-    unsafe { ControlOps.abort'intrinsic().as(NoReturn) }
+    builtin.control.runtime_abort()
 }
 "#;
 
@@ -189,7 +119,7 @@ fn atomic_operations_and_fences_execute_natively_at_o0_and_o3() {
 
         fn touch_atomic(p: *u64, v: u64) {{
             let seq: u8 = 4;
-            unsafe {{ AtomicOps.store'intrinsic(p, v, seq); }}
+            unsafe {{ builtin.atomics.atomic_store(p, v, seq); }}
         }}
 
         fn run() -> bool {{
@@ -228,43 +158,43 @@ fn atomic_operations_and_fences_execute_natively_at_o0_and_o3() {
 
             unsafe {{
                 touch_atomic(cell.ref, v10);
-                let l1 = AtomicOps.load'intrinsic(cell.ref, acquire).as(u64);
-                let sw = AtomicOps.swap'intrinsic(cell.ref, v20, dyn_seq).as(u64);
-                let fa = AtomicOps.fetch_add'intrinsic(cell.ref, v5, seq_cst).as(u64);
-                let fs = AtomicOps.fetch_sub'intrinsic(cell.ref, v3, release).as(u64);
-                let fo = AtomicOps.fetch_or'intrinsic(cell.ref, v100, seq_cst).as(u64);
-                let fx = AtomicOps.fetch_xor'intrinsic(cell.ref, v101, seq_cst).as(u64);
-                let fn_and = AtomicOps.fetch_and'intrinsic(cell.ref, v0f, seq_cst).as(u64);
-                let cur = AtomicOps.load'intrinsic(cell.ref, dyn_seq).as(u64);
+                let l1 = builtin.atomics.atomic_load(cell.ref, acquire);
+                let sw = builtin.atomics.atomic_swap(cell.ref, v20, dyn_seq);
+                let fa = builtin.atomics.atomic_fetch_add(cell.ref, v5, seq_cst);
+                let fs = builtin.atomics.atomic_fetch_sub(cell.ref, v3, release);
+                let fo = builtin.atomics.atomic_fetch_or(cell.ref, v100, seq_cst);
+                let fx = builtin.atomics.atomic_fetch_xor(cell.ref, v101, seq_cst);
+                let fn_and = builtin.atomics.atomic_fetch_and(cell.ref, v0f, seq_cst);
+                let cur = builtin.atomics.atomic_load(cell.ref, dyn_seq);
 
                 exp = 999;
-                let cas_miss = AtomicOps.cmpxchg'intrinsic(cell.ref, exp.ref, v77, seq_cst, acquire).as(bool);
+                let cas_miss = builtin.atomics.atomic_cmpxchg(cell.ref, exp.ref, v77, seq_cst, acquire);
                 let miss_exp = exp;
-                let cas_hit = AtomicOps.cmpxchg_weak'intrinsic(cell.ref, exp.ref, v55, dyn_seq, relaxed).as(bool);
-                let after_cas = AtomicOps.load'intrinsic(cell.ref, acquire).as(u64);
+                let cas_hit = builtin.atomics.atomic_cmpxchg_weak(cell.ref, exp.ref, v55, dyn_seq, relaxed);
+                let after_cas = builtin.atomics.atomic_load(cell.ref, acquire);
 
-                AtomicOps.store'intrinsic(signed_cell.ref, s_neg10, release);
-                let smax_prev = AtomicOps.fetch_max'intrinsic(signed_cell.ref, s_3, seq_cst).as(i32);
-                let smax_cur = AtomicOps.load'intrinsic(signed_cell.ref, acquire).as(i32);
-                let smin_prev = AtomicOps.fetch_min'intrinsic(signed_cell.ref, s_neg20, seq_cst).as(i32);
-                let smin_cur = AtomicOps.load'intrinsic(signed_cell.ref, acquire).as(i32);
+                builtin.atomics.atomic_store(signed_cell.ref, s_neg10, release);
+                let smax_prev = builtin.atomics.atomic_fetch_max(signed_cell.ref, s_3, seq_cst);
+                let smax_cur = builtin.atomics.atomic_load(signed_cell.ref, acquire);
+                let smin_prev = builtin.atomics.atomic_fetch_min(signed_cell.ref, s_neg20, seq_cst);
+                let smin_cur = builtin.atomics.atomic_load(signed_cell.ref, acquire);
 
-                AtomicOps.store'intrinsic(unsigned_cell.ref, u_big, release);
-                let umax_prev = AtomicOps.fetch_max'intrinsic(unsigned_cell.ref, u_5, seq_cst).as(u32);
-                let umax_cur = AtomicOps.load'intrinsic(unsigned_cell.ref, acquire).as(u32);
-                let umin_prev = AtomicOps.fetch_min'intrinsic(unsigned_cell.ref, u_7, seq_cst).as(u32);
-                let umin_cur = AtomicOps.load'intrinsic(unsigned_cell.ref, acquire).as(u32);
+                builtin.atomics.atomic_store(unsigned_cell.ref, u_big, release);
+                let umax_prev = builtin.atomics.atomic_fetch_max(unsigned_cell.ref, u_5, seq_cst);
+                let umax_cur = builtin.atomics.atomic_load(unsigned_cell.ref, acquire);
+                let umin_prev = builtin.atomics.atomic_fetch_min(unsigned_cell.ref, u_7, seq_cst);
+                let umin_cur = builtin.atomics.atomic_load(unsigned_cell.ref, acquire);
 
-                AtomicOps.store'intrinsic(flag.ref, true, release);
+                builtin.atomics.atomic_store(flag.ref, true, release);
                 flag_exp = true;
-                let bcas = AtomicOps.cmpxchg'intrinsic(flag.ref, flag_exp.ref, false, seq_cst, acquire).as(bool);
-                let bload = AtomicOps.load'intrinsic(flag.ref, acquire).as(bool);
+                let bcas = builtin.atomics.atomic_cmpxchg(flag.ref, flag_exp.ref, false, seq_cst, acquire);
+                let bload = builtin.atomics.atomic_load(flag.ref, acquire);
 
-                let pcas = AtomicOps.cmpxchg'intrinsic(ptr_cell.ref, ptr_exp.ref, target_b.ref, seq_cst, acquire).as(bool);
-                let pload = AtomicOps.load'intrinsic(ptr_cell.ref, acquire).as(*u64);
+                let pcas = builtin.atomics.atomic_cmpxchg(ptr_cell.ref, ptr_exp.ref, target_b.ref, seq_cst, acquire);
+                let pload = builtin.atomics.atomic_load(ptr_cell.ref, acquire);
 
-                AtomicOps.fence'intrinsic(dyn_seq);
-                AtomicOps.compiler_fence'intrinsic(acquire);
+                builtin.atomics.atomic_fence(dyn_seq);
+                builtin.atomics.atomic_compiler_fence(acquire);
 
                 l1 == 10
                     and sw == 10
@@ -345,16 +275,16 @@ fn invalid_atomic_ordering_traps_at_runtime() {
     for (label, call) in [
         (
             "release_load",
-            "let _ = AtomicOps.load'intrinsic(cell.ref, bad_rel).as(u64);",
+            "let _ = builtin.atomics.atomic_load(cell.ref, bad_rel);",
         ),
         (
             "acquire_store",
-            "AtomicOps.store'intrinsic(cell.ref, one, bad_acq);",
+            "builtin.atomics.atomic_store(cell.ref, one, bad_acq);",
         ),
-        ("relaxed_fence", "AtomicOps.fence'intrinsic(zero);"),
+        ("relaxed_fence", "builtin.atomics.atomic_fence(zero);"),
         (
             "release_failure_cmpxchg",
-            "let _ = AtomicOps.cmpxchg'intrinsic(cell.ref, exp.ref, one, seq, bad_rel).as(bool);",
+            "let _ = builtin.atomics.atomic_cmpxchg(cell.ref, exp.ref, one, seq, bad_rel);",
         ),
     ] {
         let source = format!(

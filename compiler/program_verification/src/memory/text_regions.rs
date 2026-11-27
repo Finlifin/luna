@@ -206,7 +206,12 @@ pub(super) fn type_may_hold_text_or_callable(
                 Err(error) if error.contains("exhausted") => return Err(error),
                 Err(_) => return Ok((true, false)),
             }
-            if intrinsic_pointer_value(ty) {
+            if intrinsic_pointer_value(ty)
+                || matches!(
+                    ty,
+                    Term::Primitive(Primitive::Continuation | Primitive::Never | Primitive::Unit)
+                )
+            {
                 return Ok((false, false));
             }
             let is_enum = matches!(ty, Term::ErrorResult { .. } | Term::Optional(_))
@@ -1168,7 +1173,11 @@ pub(crate) fn verify_handler_arm_text_regions(
     if query.type_may_hold_text_or_callable(result)? {
         return Err("text effect handler cannot return text or callables".into());
     }
-    let subject_ty = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
+    let mut input_fields: Vec<Term> = parameters.iter().map(|p| p.ty.clone()).collect();
+    if handler.abi == nir::effects::Abi::Capturing {
+        input_fields.push(Term::Primitive(Primitive::Continuation));
+    }
+    let subject_ty = Term::Tuple(input_fields);
     let mut scope = Locals::new();
     let mut pattern = &arm.pattern;
     let mut guards = Vec::new();

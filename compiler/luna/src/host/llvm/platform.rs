@@ -22,6 +22,9 @@ impl Emitter<'_> {
         self.emitted_effects.has_external_or_indirect_call = true;
         self.declarations
             .insert("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)".into());
+        self.declarations
+            .insert("declare i32 @posix_memalign(ptr, i64, i64)".into());
+        self.declarations.insert("declare void @free(ptr)".into());
         self.declarations.insert(include_str!("platform.ll").into());
         let arguments = values
             .iter()

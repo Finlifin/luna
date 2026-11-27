@@ -319,7 +319,11 @@ pub fn borrowed_input_layout(
                     | Term::AnyType
                     | Term::ClosureContextValue(_)
                     | Term::Primitive(
-                        Primitive::Void | Primitive::Never | Primitive::Type | Primitive::Unit,
+                        Primitive::Void
+                            | Primitive::Never
+                            | Primitive::Type
+                            | Primitive::Unit
+                            | Primitive::Continuation,
                     )
             )
         {

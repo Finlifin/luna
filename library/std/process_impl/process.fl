@@ -232,9 +232,9 @@ impl Debug for PanicInfo {
 
 {-
     Panic hook slot.
-    HOOK(@llvm-effects #17): wire `host-intrinsic.runtime_panic(message: str) -> Never`
-    (`{ T, ptr = 1 }` unwind) and `host-intrinsic.runtime_abort() -> Never` (`@llvm.trap()`)
-    once Commit 2 intrinsics merge from `@llvm-effects`.
+    `panic` runs any registered panic hook and then unwinds via
+    `builtin.control.runtime_panic` (`{ T, ptr = 1 }` reverse `Drop`), while
+    `abort` invokes `builtin.control.runtime_abort` (`@llvm.trap()`).
 -}
 static panic_hook_slot: ?fn(*PanicInfo) = null;
 
@@ -246,14 +246,7 @@ pub fn set_panic_hook(hook: fn(*PanicInfo)) -> void {
 }
 
 pub fn abort() -> NoReturn {
-    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.runtime_abort() -> Never` (`@llvm.trap()`).
-    -- Keeps empty effect row; diverges unconditionally without running Drop.
-    let _ = unix.write_str(unix.stderr, "flurry: process aborted\n", 0) match {
-        _! => 0,
-        error _ => 0,
-    }
-    while true {
-    }
+    builtin.control.runtime_abort()
 }
 
 pub fn panic(
@@ -262,9 +255,9 @@ pub fn panic(
     implicit __line__: u32,
     .location: ?CallerLocation = null,
 ) -> NoReturn {
-    -- OQ-08-02: Unwind strategy via `{ T, ptr = 1 }` control word once
-    -- `@llvm-effects` lands the panic unwind intrinsic; call-site location is
-    -- captured automatically via `ImplicitPassing` (`__file__`, `__line__`).
+    -- OQ-08-02: Unwind strategy via `{ T, ptr = 1 }` control word via
+    -- `builtin.control.runtime_panic`; call-site location is captured
+    -- automatically via `ImplicitPassing` (`__file__`, `__line__`).
     let resolved_location: ?CallerLocation = location match {
         loc? => loc,
         null => CallerLocation.new(__file__, __line__, 0),
@@ -288,22 +281,7 @@ pub fn panic(
     }
     current match {
         hook? => hook(info.ref),
-        null => {
-            let _ = unix.write_str(unix.stderr, "panic: ", 0) match {
-                _! => 0,
-                error _ => 0,
-            }
-            let _ = unix.write_str(unix.stderr, message, 0) match {
-                _! => 0,
-                error _ => 0,
-            }
-            let _ = unix.write_str(unix.stderr, "\n", 0) match {
-                _! => 0,
-                error _ => 0,
-            }
-        },
+        null => {},
     }
-    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.runtime_panic(message) -> Never`
-    -- (`{ T, ptr = 1 }` unwind control signal).
-    abort()
+    builtin.control.runtime_panic(message)
 }

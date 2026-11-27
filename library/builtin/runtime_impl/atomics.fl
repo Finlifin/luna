@@ -1,0 +1,106 @@
+use primitives.{Type, bool, u8};
+
+{-
+    Low-level host atomic memory operations and memory fences.
+    Order tags follow LLVM atomic ordering conventions:
+    0 = monotonic/relaxed, 1 = acquire, 2 = release, 3 = acq_rel, 4 = seq_cst.
+-}
+pub mod target {
+    ^attrs.compilation.intrinsic_enum
+    pub enum Atomic {
+        load,
+        store,
+        swap,
+        cmpxchg,
+        cmpxchg_weak,
+        fetch_add,
+        fetch_sub,
+        fetch_and,
+        fetch_or,
+        fetch_xor,
+        fetch_max,
+        fetch_min,
+        fence,
+        compiler_fence,
+    }
+}
+
+pub unsafe fn atomic_load(ptr: *T, order: u8) -> T where T {
+    target.Atomic.load'intrinsic(ptr, order).as(T)
+}
+
+pub unsafe fn atomic_store(ptr: *T, val: T, order: u8) where T {
+    target.Atomic.store'intrinsic(ptr, val, order);
+}
+
+pub unsafe fn atomic_swap(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.swap'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_cmpxchg(
+    ptr: *T,
+    expected: *T,
+    desired: T,
+    success_order: u8,
+    failure_order: u8,
+) -> bool
+where
+    T,
+{
+    target
+        .Atomic
+        .cmpxchg'intrinsic(ptr, expected, desired, success_order, failure_order)
+        .as(bool)
+}
+
+pub unsafe fn atomic_cmpxchg_weak(
+    ptr: *T,
+    expected: *T,
+    desired: T,
+    success_order: u8,
+    failure_order: u8,
+) -> bool
+where
+    T,
+{
+    target
+        .Atomic
+        .cmpxchg_weak'intrinsic(ptr, expected, desired, success_order, failure_order)
+        .as(bool)
+}
+
+pub unsafe fn atomic_fetch_add(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_add'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_sub(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_sub'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_and(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_and'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_or(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_or'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_xor(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_xor'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_max(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_max'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fetch_min(ptr: *T, val: T, order: u8) -> T where T {
+    target.Atomic.fetch_min'intrinsic(ptr, val, order).as(T)
+}
+
+pub unsafe fn atomic_fence(order: u8) {
+    target.Atomic.fence'intrinsic(order);
+}
+
+pub unsafe fn atomic_compiler_fence(order: u8) {
+    target.Atomic.compiler_fence'intrinsic(order);
+}

@@ -9,6 +9,7 @@ use protocols.capabilities.{effects as capability_effects, errors as capability_
 use protocols.formatting.{debug, display, float, options as formatting_options, radix, writer}
 use protocols.{conversion, deriving as deriving_impl, hash as hash_protocol, implicit_passing, iterator, native_resources, ops, patterns, resources, traits}
 use range;
+use runtime_impl.{atomics as runtime_atomics, continuation as runtime_continuation, control as runtime_control};
 use types.{equality, hashing, option, ordering, result, tuple}
 
 pub use capability_effects.{HandleCapturingEffect, HandleEffect};
@@ -150,6 +151,29 @@ pub mod staging {
 pub mod capabilities {
     pub use capability_effects.{HandleCapturingEffect, HandleEffect};
     pub use capability_errors.HandleError;
+}
+
+pub mod atomics {
+    pub use runtime_atomics.{
+        atomic_cmpxchg,
+        atomic_cmpxchg_weak,
+        atomic_compiler_fence,
+        atomic_fence,
+        atomic_fetch_add,
+        atomic_fetch_and,
+        atomic_fetch_max,
+        atomic_fetch_min,
+        atomic_fetch_or,
+        atomic_fetch_sub,
+        atomic_fetch_xor,
+        atomic_load,
+        atomic_store,
+        atomic_swap,
+    };
+}
+
+pub mod control {
+    pub use runtime_control.{runtime_abort, runtime_panic};
 }
 
 pub mod prelude {

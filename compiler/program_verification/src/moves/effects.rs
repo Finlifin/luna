@@ -5,6 +5,15 @@
 //! of those origins still require request-time ownership/provenance evidence.
 use super::*;
 
+pub(super) struct CapturingArmCompletion {
+    pub(super) origins: ValueOrigins,
+    pub(super) value_variants: EnumDomains,
+    pub(super) value_callable: Option<Callable>,
+    pub(super) value_callables: BTreeMap<Vec<usize>, Callable>,
+    pub(super) value_captured_envs: BTreeMap<Vec<usize>, Vec<CapturedEnv>>,
+    pub(super) value_pointer_guards: ValuePointerGuards,
+}
+
 fn mutated_pointer_slot(node: &Expr, fuel: &mut usize) -> Result<Option<Place>, String> {
     Ok(match &node.kind {
         K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
@@ -999,10 +1008,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Vec<std::sync::Arc<HandlerReturnValue>>,
             BTreeSet<(LocalId, bool)>,
             Vec<EffectResultInput>,
+            Vec<CapturingArmCompletion>,
         ),
         Error,
     > {
         let mut result_inputs = vec![];
+        let mut capturing_completions = vec![];
         let mut installation_may_reject = false;
         let mut installation_returns = Vec::new();
         let mut installation_loop_targets = BTreeSet::new();
@@ -1998,18 +2009,28 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             this.observe_guard(guard, frame, depth + 1)?;
                             if constant_bool(guard, 0) == Some(false) {
                                 frame.live = false;
-                                return Ok(());
+                                return Ok(None);
                             }
                         }
                         let origins = this.evaluate_value_origins(&arm.body, frame, depth + 1)?;
+                        let mut capturing_completion = None;
                         if frame.live {
                             this.check_return_origins(frame, &origins, arm.body.source)?;
-                            if handler.abi != nir::effects::Abi::Capturing {
+                            if handler.abi == nir::effects::Abi::Capturing {
+                                capturing_completion = Some(CapturingArmCompletion {
+                                    origins,
+                                    value_variants: frame.value_variants.clone(),
+                                    value_callable: frame.value_callable.clone(),
+                                    value_callables: frame.value_callables.clone(),
+                                    value_captured_envs: frame.value_captured_envs.clone(),
+                                    value_pointer_guards: frame.value_pointer_guards.clone(),
+                                });
+                            } else {
                                 this.capture_handler_completion(frame, &origins, arm.body.source)?;
                             }
                             this.exit(frame, arm.body.source, CleanupReason::HandlerEnd)?;
                         }
-                        Ok(())
+                        Ok(capturing_completion)
                     },
                 );
                 let invocation = std::mem::replace(&mut self.report, outer_report);
@@ -2026,7 +2047,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &mut self.handler_completions,
                     outer_completions,
                 ));
-                checked?;
+                if let Some(completion) = checked? {
+                    capturing_completions.push(completion);
+                }
                 for state in invocation
                     .exits
                     .iter()
@@ -2192,6 +2215,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             installation_returns,
             installation_loop_targets,
             result_inputs,
+            capturing_completions,
         ))
     }
 }

@@ -103,6 +103,7 @@ fn make_emitter<'a>(
         loop_destinations: Default::default(),
         outlined_return: None,
         outlined_loops: BTreeMap::new(),
+        outlined_outer_locals: BTreeSet::new(),
         lambdas,
         template_identities,
         locals: BTreeMap::new(),
@@ -150,6 +151,8 @@ pub(super) fn emit_dyn_vtables(
     let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
     let ptr_bytes = u64::from(pointer_bits / 8).max(8);
     if dyn_allocator_helpers_needed(graph) {
+        declarations.insert("declare i32 @posix_memalign(ptr, i64, i64)".into());
+        declarations.insert("declare void @free(ptr)".into());
         declarations.insert(include_str!("platform.ll").into());
     }
 

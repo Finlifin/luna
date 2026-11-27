@@ -1,0 +1,21 @@
+use primitives.{NoReturn, str};
+
+{-
+    Low-level runtime panic unwind (`{ T, ptr = 1 }`) and unconditional abort
+    (`@llvm.trap()`) intrinsics.
+-}
+pub mod target {
+    ^attrs.compilation.intrinsic_enum
+    pub enum Control {
+        panic,
+        abort,
+    }
+}
+
+pub fn runtime_panic(message: str) -> NoReturn {
+    unsafe { target.Control.panic'intrinsic(message).as(NoReturn) }
+}
+
+pub fn runtime_abort() -> NoReturn {
+    unsafe { target.Control.abort'intrinsic().as(NoReturn) }
+}

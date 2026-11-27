@@ -1461,9 +1461,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             if self.type_may_hold_text_or_callable(result)? {
                 return Err("text effect handler cannot return text or callables".into());
             }
-            handler_subjects.push(Term::Tuple(
-                parameters.iter().map(|p| p.ty.clone()).collect(),
-            ));
+            let mut input_fields: Vec<Term> = parameters.iter().map(|p| p.ty.clone()).collect();
+            if handler.abi == nir::effects::Abi::Capturing {
+                input_fields.push(Term::Primitive(Primitive::Continuation));
+            }
+            handler_subjects.push(Term::Tuple(input_fields));
         }
 
         let initial_frame = self.next_storage_frame;

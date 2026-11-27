@@ -573,7 +573,8 @@ impl<'a> Formatter<'a> {
                     !matches!(
                         inner_kind,
                         Some(
-                            NodeKind::AsyncBlock
+                            NodeKind::ExprStatement
+                                | NodeKind::AsyncBlock
                                 | NodeKind::UnsafeBlock
                                 | NodeKind::ComptimeBlock
                                 | NodeKind::AtomicBlock

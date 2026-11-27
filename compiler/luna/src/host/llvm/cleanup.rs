@@ -944,7 +944,7 @@ impl Emitter<'_> {
                             condition.text
                         ));
                         self.label(&yes);
-                        self.cleanup_action(&site.actions[ranked[offset].1])?;
+                        self.cleanup_action(&site.actions[ranked[offset].1], boundary)?;
                         self.branch(&done);
                         self.label(&next);
                     }
@@ -952,14 +952,18 @@ impl Emitter<'_> {
                     self.line("unreachable");
                     self.label(&done);
                 } else {
-                    self.cleanup_action(action)?;
+                    self.cleanup_action(action, boundary)?;
                 }
             }
         }
         Ok(())
     }
 
-    fn cleanup_action(&mut self, action: &iir::cleanup::Action) -> Result<(), String> {
+    fn cleanup_action(
+        &mut self,
+        action: &iir::cleanup::Action,
+        boundary: Boundary,
+    ) -> Result<(), String> {
         *self.fuel = self
             .fuel
             .checked_sub(1)
@@ -1037,6 +1041,14 @@ impl Emitter<'_> {
         let Target::Local { binding, fields } = &action.target else {
             return Err("host direct cleanup target missing".into());
         };
+        if matches!(
+            boundary,
+            Boundary::PredicateFailure | Boundary::EffectEscape
+        ) && !self.locals.contains_key(binding)
+            && self.outlined_outer_locals.contains(binding)
+        {
+            return Ok(());
+        }
         let slot = self
             .locals
             .get(binding)
@@ -2856,6 +2868,7 @@ mod tests {
                 loop_destinations: Default::default(),
                 outlined_return: None,
                 outlined_loops: BTreeMap::new(),
+                outlined_outer_locals: BTreeSet::new(),
                 lambdas: &lambdas,
                 template_identities: &template_identities,
                 locals: BTreeMap::new(),

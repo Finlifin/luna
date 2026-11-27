@@ -4,6 +4,7 @@ macro_rules! effect_fixture {
     ($source:literal) => {
         concat!(
             $source,
+            "\nmod bindings { pub typealias Object = .Object'builtin; pub typealias Symbol = .Symbol'builtin; }",
             "\nmod attrs { pub mod effects {\n",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),

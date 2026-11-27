@@ -15830,7 +15830,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             nir::intrinsics::checked(expr).map(|checked| checked.operation()),
             Ok(nir::intrinsics::Operation::MemRawPtr
                 | nir::intrinsics::Operation::MemRawRead
-                | nir::intrinsics::Operation::MemManuallyDropUnwrap)
+                | nir::intrinsics::Operation::MemManuallyDropUnwrap
+                | nir::intrinsics::Operation::AtomicLoad
+                | nir::intrinsics::Operation::AtomicSwap)
         ) {
             self.expr(expr, flow, depth + 1)?;
             if !flow.live {

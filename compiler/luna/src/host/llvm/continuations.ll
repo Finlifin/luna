@@ -2,10 +2,6 @@
 ; Status values: 0 = RUNNING, 1 = SUSPENDED, 2 = COMPLETED, 3 = UNWIND_PANIC, 4 = ABORTING
 %flurry.cont = type { ptr, ptr, i64, ptr, ptr, i32, ptr, ptr, ptr, ptr, i64, ptr, i64, ptr, ptr, ptr, i8, i64, i64, %flurry.task, ptr, ptr, i64, ptr }
 
-declare ptr @malloc(i64)
-declare void @free(ptr)
-declare i32 @posix_memalign(ptr, i64, i64)
-declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare ptr @flurry_ctx_switch(ptr, ptr, ptr)
 declare void @flurry_ctx_trampoline()
 

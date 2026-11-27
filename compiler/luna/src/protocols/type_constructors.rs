@@ -1857,13 +1857,6 @@ mod repository_bindings_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
         let bindings = SysrootBindings::load(&root).unwrap();
         for &operation in nir::intrinsics::Operation::ALL {
-            if operation.is_atomic()
-                || operation.is_control_runtime()
-                || operation.is_continuation()
-            {
-                // Phase 2B wires atomic/panic/continuation selectors into `library/language-items.conf`.
-                continue;
-            }
             let path = if operation.is_platform() {
                 format!(
                     "std.platform.linux.target.System.{}",
@@ -1873,6 +1866,21 @@ mod repository_bindings_tests {
                 format!(
                     "builtin.mem_impl.raw.target.Memory.{}",
                     operation.name().strip_prefix("mem_").unwrap()
+                )
+            } else if operation.is_atomic() {
+                format!(
+                    "builtin.runtime_impl.atomics.target.Atomic.{}",
+                    operation.name().strip_prefix("atomic_").unwrap()
+                )
+            } else if operation.is_control_runtime() {
+                format!(
+                    "builtin.runtime_impl.control.target.Control.{}",
+                    operation.name().strip_prefix("runtime_").unwrap()
+                )
+            } else if operation.is_continuation() {
+                format!(
+                    "builtin.runtime_impl.continuation.target.Continuation.{}",
+                    operation.name().strip_prefix("continuation_").unwrap()
                 )
             } else {
                 format!(

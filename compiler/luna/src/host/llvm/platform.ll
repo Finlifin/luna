@@ -8,8 +8,6 @@ declare i32 @close(i32)
 declare i32 @unlink(ptr)
 declare i32 @getpid()
 declare ptr @memchr(ptr, i32, i64)
-declare i32 @posix_memalign(ptr, i64, i64)
-declare void @free(ptr)
 
 define internal i64 @flurry_linux_error() {
 entry:

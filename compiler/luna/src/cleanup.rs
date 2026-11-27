@@ -1350,7 +1350,7 @@ fn prepare_source_impl(
                             }
                         }
                         if matches!(&expr.kind, K::EffectHandle { handlers, .. }
-                        if handlers.iter().any(|h|h.abi == nir::effects::Abi::DirectPassing))
+                        if handlers.iter().any(|h| matches!(h.abi, nir::effects::Abi::DirectPassing | nir::effects::Abi::Capturing)))
                         {
                             hooks.push((expr.source, Boundary::PredicateFailure));
                         }

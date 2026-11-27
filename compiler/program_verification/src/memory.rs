@@ -6837,7 +6837,9 @@ impl<'a> Infer<'a, '_> {
                         );
                     }
                     nir::intrinsics::Operation::MemRawRead
-                    | nir::intrinsics::Operation::MemManuallyDropUnwrap => {
+                    | nir::intrinsics::Operation::MemManuallyDropUnwrap
+                    | nir::intrinsics::Operation::AtomicLoad
+                    | nir::intrinsics::Operation::AtomicSwap => {
                         if self.local_pointer_value(&output)? {
                             self.expression_results.insert(
                                 expr as *const Expr as usize,

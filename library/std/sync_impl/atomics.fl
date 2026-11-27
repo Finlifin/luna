@@ -4,14 +4,9 @@ use process_impl.process.panic;
 use sync_impl.marker.{Send, Sync}
 
 {-
-    Atomic memory orderings, atomic scalar/pointer types, and memory fences.
-
-    HOOK(@llvm-effects #17): Atomic load/store/swap/cmpxchg/fetch_* and fence
-    operations currently execute single-threaded in-memory fallbacks until
-    `@llvm-effects` Commit 2 merges `host-intrinsic.atomic_{load,store,swap,
-    cmpxchg,cmpxchg_weak,fetch_add,fetch_sub,fetch_and,fetch_or,fetch_xor,
-    fetch_max,fetch_min,fence,compiler_fence}` (`u8` order tag `0..4`).
-    Ordering validation is enforced eagerly here.
+    Atomic memory orderings, atomic scalar/pointer types, and memory fences
+    wired to `builtin.atomics` (`host-intrinsic.atomic_*` with `u8` order tag `0..4`).
+    Ordering validation is enforced eagerly before intrinsic dispatch.
 -}
 pub enum AtomicOrdering {
     relaxed,
@@ -248,22 +243,18 @@ where
 
     pub fn load(*self, order: AtomicOrdering) -> T {
         validate_load_order(order);
-        -- HOOK(@llvm-effects): emit LLVM atomic load with `order`.
-        self.inner.*
+        unsafe { builtin.atomics.atomic_load<T>(self.inner, ordering_llvm_tag(order)) }
     }
 
     pub fn store(*self, val: T, order: AtomicOrdering) {
         validate_store_order(order);
-        -- HOOK(@llvm-effects): emit LLVM atomic store with `order`.
-        self.inner.* = val;
+        unsafe {
+            builtin.atomics.atomic_store<T>(self.inner, val, ordering_llvm_tag(order));
+        }
     }
 
     pub fn swap(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw xchg with `order`.
-        let prev = self.inner.*;
-        self.inner.* = val;
-        prev
+        unsafe { builtin.atomics.atomic_swap<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn compare_exchange(
@@ -275,13 +266,20 @@ where
     ) -> !CompareExchangeErr<T> T
     {
         validate_cmpxchg_orders(success, failure);
-        -- HOOK(@llvm-effects): emit LLVM strong cmpxchg.
-        let observed = self.inner.*;
-        if observed.ref.as(Eq).eq(current.ref) {
-            self.inner.* = new;
-            observed
+        var expected: T = current;
+        let ok = unsafe {
+            builtin.atomics.atomic_cmpxchg<T>(
+                self.inner,
+                expected.ref,
+                new,
+                ordering_llvm_tag(success),
+                ordering_llvm_tag(failure),
+            )
+        };
+        if ok {
+            expected
         } else {
-            error CompareExchangeErr<T>.new(observed)
+            error CompareExchangeErr<T>.new(expected)
         }
     }
 
@@ -294,13 +292,20 @@ where
     ) -> !CompareExchangeErr<T> T
     {
         validate_cmpxchg_orders(success, failure);
-        -- HOOK(@llvm-effects): emit LLVM weak cmpxchg.
-        let observed = self.inner.*;
-        if observed.ref.as(Eq).eq(current.ref) {
-            self.inner.* = new;
-            observed
+        var expected: T = current;
+        let ok = unsafe {
+            builtin.atomics.atomic_cmpxchg_weak<T>(
+                self.inner,
+                expected.ref,
+                new,
+                ordering_llvm_tag(success),
+                ordering_llvm_tag(failure),
+            )
+        };
+        if ok {
+            expected
         } else {
-            error CompareExchangeErr<T>.new(observed)
+            error CompareExchangeErr<T>.new(expected)
         }
     }
 
@@ -331,117 +336,6 @@ where
     }
 }
 
-pure fn wrapping_step_u64(a: u64, b: u64, sub: bool) -> u64 {
-    let a128 = a'bitvec.as(u128);
-    let b128 = b'bitvec.as(u128);
-    assumes a128 <= 18446744073709551615 and b128 <= 18446744073709551615;
-    if sub {
-        let shifted = a128 + 18446744073709551616;
-        (shifted - b128)'bitvec[0..64].as(u64)
-    } else {
-        (a128 + b128)'bitvec[0..64].as(u64)
-    }
-}
-
-fn wrapping_step_atomic(a: T, b: T, sub: bool) -> T
-where
-    T: Type,
-    requires
-        T == i8
-            or T == u8
-            or T == i16
-            or T == u16
-            or T == i32
-            or T == u32
-            or T == i64
-            or T == u64
-            or T == isize
-            or T == usize,
-{
-    inline if T == u8 {
-        let au: u8 = a;
-        let bu: u8 = b;
-        wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..8].as(u8)
-    } else {
-        inline if T == i8 {
-            let ai: i8 = a;
-            let bi: i8 = b;
-            wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..8].as(i8)
-        } else {
-            inline if T == u16 {
-                let au: u16 = a;
-                let bu: u16 = b;
-                wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..16].as(u16)
-            } else {
-                inline if T == i16 {
-                    let ai: i16 = a;
-                    let bi: i16 = b;
-                    wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..16].as(i16)
-                } else {
-                    inline if T == u32 {
-                        let au: u32 = a;
-                        let bu: u32 = b;
-                        wrapping_step_u64(au'bitvec.as(u64), bu'bitvec.as(u64), sub)'bitvec[0..32].as(u32)
-                    } else {
-                        inline if T == i32 {
-                            let ai: i32 = a;
-                            let bi: i32 = b;
-                            wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..32].as(i32)
-                        } else {
-                            inline if T == u64 {
-                                let au: u64 = a;
-                                let bu: u64 = b;
-                                wrapping_step_u64(au, bu, sub)
-                            } else {
-                                inline if T == i64 {
-                                    let ai: i64 = a;
-                                    let bi: i64 = b;
-                                    wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub)'bitvec[0..64].as(i64)
-                                } else {
-                                    inline if T == usize {
-                                        let au: u64 = builtin.compiler.try_usize_to_u64(a) match {
-                                            v? => v,
-                                            null => 0,
-                                        };
-                                        let bu: u64 = builtin.compiler.try_usize_to_u64(b) match {
-                                            v? => v,
-                                            null => 0,
-                                        };
-                                        let ru = wrapping_step_u64(au, bu, sub);
-                                        builtin.compiler.try_u64_to_usize(ru) match {
-                                            v? => v,
-                                            null => a,
-                                        }
-                                    } else {
-                                        inline if T == isize {
-                                            let ai: i64 = builtin.compiler.try_isize_to_i64(a) match {
-                                                v? => v,
-                                                null => 0,
-                                            };
-                                            let bi: i64 = builtin.compiler.try_isize_to_i64(b) match {
-                                                v? => v,
-                                                null => 0,
-                                            };
-                                            let ru = wrapping_step_u64(ai'bitvec.as(u64), bi'bitvec.as(u64), sub);
-                                            let ri = ru'bitvec[0..64].as(i64);
-                                            builtin.compiler.try_i64_to_isize(ri) match {
-                                                v? => v,
-                                                null => a,
-                                            }
-                                        } else {
-                                            a
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl Atomic<T>
 where
     T: Type,
@@ -459,59 +353,31 @@ where
             or T == usize,
 {
     pub fn fetch_add(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw add.
-        let prev = self.inner.*;
-        self.inner.* = wrapping_step_atomic<T>(prev, val, false);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_add<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_sub(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw sub.
-        let prev = self.inner.*;
-        self.inner.* = wrapping_step_atomic<T>(prev, val, true);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_sub<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_and(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw and.
-        let prev = self.inner.*;
-        self.inner.* = builtin.math.bit_and(prev, val);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_and<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_or(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw or.
-        let prev = self.inner.*;
-        self.inner.* = builtin.math.bit_or(prev, val);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_or<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_xor(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw xor.
-        let prev = self.inner.*;
-        self.inner.* = builtin.math.bit_xor(prev, val);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_xor<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_max(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw max/umax.
-        let prev = self.inner.*;
-        self.inner.* = builtin.math.max(prev, val);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_max<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 
     pub fn fetch_min(*self, val: T, order: AtomicOrdering) -> T {
-        let _ = order;
-        -- HOOK(@llvm-effects): emit LLVM atomicrmw min/umin.
-        let prev = self.inner.*;
-        self.inner.* = builtin.math.min(prev, val);
-        prev
+        unsafe { builtin.atomics.atomic_fetch_min<T>(self.inner, val, ordering_llvm_tag(order)) }
     }
 }
 
@@ -618,14 +484,16 @@ fn validate_fence_order(order: AtomicOrdering) {
 
 pub fn fence(order: AtomicOrdering) {
     validate_fence_order(order);
-    let _ = ordering_llvm_tag(order);
-    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.atomic_fence(ordering_llvm_tag(order))`.
+    unsafe {
+        builtin.atomics.atomic_fence(ordering_llvm_tag(order));
+    }
 }
 
 pub fn compiler_fence(order: AtomicOrdering) {
     validate_fence_order(order);
-    let _ = ordering_llvm_tag(order);
-    -- HOOK(@llvm-effects #17): invoke `host-intrinsic.atomic_compiler_fence(ordering_llvm_tag(order))`.
+    unsafe {
+        builtin.atomics.atomic_compiler_fence(ordering_llvm_tag(order));
+    }
 }
 
 pub typealias AtomicBool = Atomic<bool>;

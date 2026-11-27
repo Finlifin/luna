@@ -310,12 +310,16 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             outer,
         } = &expr.kind
         {
-            let (may_reject, return_values, loop_targets, mut result_inputs) =
+            let (may_reject, return_values, loop_targets, mut result_inputs, capturing_completions) =
                 self.handler_resources(expr, handlers, flow, depth + 1)?;
             let may_return = !return_values.is_empty();
-            if may_reject {
-                // Providers run before any subject argument is prepared. Their
-                // failure therefore unwinds the installer's current owners.
+            if may_reject
+                || handlers
+                    .iter()
+                    .any(|h| h.abi == nir::effects::Abi::Capturing)
+            {
+                // Providers and outlined capturing computations can fail/unwind
+                // before returning control to the installer's current owners.
                 let mut rejected = flow.clone();
                 self.exit(&mut rejected, expr.source, CleanupReason::PredicateFailure)?;
             }
@@ -407,7 +411,68 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         self.effect_loop_checkpoints(flow, expr.source)?;
                     }
                 }
-                self.evaluate_value_origins(computation, flow, depth + 1)
+                let mut comp_origins = self.evaluate_value_origins(computation, flow, depth + 1)?;
+                if flow.live {
+                    for completion in &capturing_completions {
+                        let result_guards = self.join_result_pointer_guards(
+                            &flow.value_pointer_guards,
+                            &comp_origins,
+                            &completion.value_pointer_guards,
+                            &completion.origins,
+                            expr.source,
+                            Some((
+                                completion_type(&expr.ty),
+                                &flow.value_variants,
+                                &completion.value_variants,
+                            )),
+                        )?;
+                        self.join_value_origins(
+                            completion_type(&expr.ty),
+                            &mut comp_origins,
+                            &flow.value_variants,
+                            &completion.origins,
+                            &completion.value_variants,
+                            expr.source,
+                        )?;
+                        self.join_captured_env_maps(
+                            &mut flow.value_captured_envs,
+                            &completion.value_captured_envs,
+                            expr.source,
+                        )?;
+                        flow.value_callable =
+                            match (&flow.value_callable, &completion.value_callable) {
+                                (Some(a), Some(b))
+                                    if same_callable_definition(&a.definition, &b.definition)
+                                        && a.choices == b.choices
+                                        && a.alternatives == b.alternatives
+                                        && a.captures == b.captures
+                                        && a.enum_captures == b.enum_captures =>
+                                {
+                                    Some(a.clone())
+                                }
+                                (Some(a), Some(b)) => {
+                                    merge_callable_provenance(a, b, &mut self.fuel, expr.source, 0)?
+                                }
+                                _ => None,
+                            };
+                        flow.value_callables = join_guarded_callables(
+                            &flow.value_callables,
+                            &completion.value_callables,
+                            &flow.value_variants,
+                            &completion.value_variants,
+                            &mut self.fuel,
+                            expr.source,
+                        )?;
+                        flow.value_variants = join_enum_domains(
+                            &flow.value_variants,
+                            &completion.value_variants,
+                            &mut self.fuel,
+                            expr.source,
+                        )?;
+                        flow.value_pointer_guards = result_guards;
+                    }
+                }
+                Ok(comp_origins)
             })();
             self.effect_return_enabled = previous;
             self.effect_return_values.truncate(return_floor);

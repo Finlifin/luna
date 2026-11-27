@@ -26,23 +26,6 @@ impl NativeCase {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library")
     }
 
-    fn intrinsic_flags() -> Vec<&'static str> {
-        vec![
-            "--host-intrinsic",
-            "continuation_resume_raw=input.ContOps.resume_raw",
-            "--host-intrinsic",
-            "continuation_abort_raw=input.ContOps.abort_raw",
-            "--host-intrinsic",
-            "continuation_crosses_c_frame=input.ContOps.crosses_c_frame",
-            "--host-intrinsic",
-            "continuation_origin_thread_id=input.ContOps.origin_thread_id",
-            "--host-intrinsic",
-            "mem_ptr_addr=input.MemOps.ptr_addr",
-            "--host-intrinsic",
-            "runtime_panic=input.ControlOps.panic",
-        ]
-    }
-
     fn build(&self, entry: &str, opt_level: &str) -> Output {
         let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"));
         cmd.current_dir(&self.0)
@@ -59,8 +42,7 @@ impl NativeCase {
                 "10000000",
                 "--sysroot",
             ])
-            .arg(Self::sysroot())
-            .args(Self::intrinsic_flags());
+            .arg(Self::sysroot());
         cmd.output().unwrap()
     }
 
@@ -91,46 +73,28 @@ const PREAMBLE: &str = r#"
 use std.prelude.*;
 use std.os.linux;
 
-^attrs.compilation.intrinsic_enum
-enum ContOps {
-    resume_raw,
-    abort_raw,
-    crosses_c_frame,
-    origin_thread_id,
-}
-
-^attrs.compilation.intrinsic_enum
-enum MemOps {
-    ptr_addr,
-}
-
-^attrs.compilation.intrinsic_enum
-enum ControlOps {
-    panic,
-}
-
 fn cont_resume_raw(k: builtin.Continuation, arg_addr: usize, out_addr: usize) -> usize {
-    unsafe { ContOps.resume_raw'intrinsic(k, arg_addr, out_addr).as(usize) }
+    unsafe { k.resume_raw(arg_addr, out_addr) }
 }
 
 fn cont_abort_raw(k: builtin.Continuation) {
-    unsafe { ContOps.abort_raw'intrinsic(k); }
+    unsafe { k.abort_raw(); }
 }
 
 fn cont_crosses_c(k: *builtin.Continuation) -> bool {
-    unsafe { ContOps.crosses_c_frame'intrinsic(k).as(bool) }
+    k.crosses_c_frame()
 }
 
 fn cont_thread_id(k: *builtin.Continuation) -> u64 {
-    unsafe { ContOps.origin_thread_id'intrinsic(k).as(u64) }
+    k.origin_thread_id()
 }
 
 fn addr_of(p: *T) -> usize where T {
-    unsafe { MemOps.ptr_addr'intrinsic(p).as(usize) }
+    unsafe { builtin.mem.ptr_addr(p) }
 }
 
 fn trigger_panic(msg: str) -> NoReturn {
-    unsafe { ControlOps.panic'intrinsic(msg).as(NoReturn) }
+    builtin.control.runtime_panic(msg)
 }
 "#;
 
@@ -165,10 +129,11 @@ fn capturing_effect_resume_and_cross_function_calls_execute_at_o0_and_o3() {
         }}
 
         fn run() -> bool {{
-            var log: u32 = 0;
-            let out = produce(log.ref)# {{
+            var prod_log: u32 = 0;
+            var handler_log: u32 = 0;
+            let out = produce(prod_log.ref)# {{
                 yield_number(v, _k) => {{
-                    if log < 10000 and v < 1000 {{ log = log + v; }}
+                    if handler_log < 10000 and v < 1000 {{ handler_log = handler_log + v; }}
                     resume;
                     0
                 }},
@@ -177,16 +142,16 @@ fn capturing_effect_resume_and_cross_function_calls_execute_at_o0_and_o3() {
                     0
                 }},
                 emit_item(v, _k) => {{
-                    if log < 10000 and v < 1000 {{ log = log + v; }}
+                    if handler_log < 10000 and v < 1000 {{ handler_log = handler_log + v; }}
                     resume;
                     0
                 }},
             }};
-            -- yield_number(10) -> log += 10
+            -- yield_number(10) -> handler_log += 10
             -- ask_step(12) -> resume 24 -> a = 24
-            -- Stream.emit_item(24) -> log += 24
-            -- produce: log += 24 -> total log = 10 + 24 + 24 = 58, out = 124
-            out == 124 and log == 58
+            -- Stream.emit_item(24) -> handler_log += 24
+            -- produce: prod_log += 24 -> prod_log = 24, handler_log = 34, out = 124
+            out == 124 and prod_log == 24 and handler_log == 34
         }}
         "#
     );
@@ -496,5 +461,147 @@ drop:inner\n\
 drop:mid\n\
 drop:outer\n";
         assert_eq!(stderr, expected, "opt={opt}: stderr was:\n{stderr}");
+    }
+}
+
+#[test]
+fn std_runtime_typed_continuation_abort_and_drop_execute_at_o0_and_o3() {
+    let source = format!(
+        r#"{PREAMBLE}
+        use std.runtime.TypedContinuation;
+
+        effect yield_u32(v: u32, catch continuation: builtin.Continuation) -> u32;
+
+        struct Guard {{
+            id: u32,
+        }}
+        impl Drop for Guard {{
+            fn drop(*self) {{
+                if self.id.* == 1 {{
+                    let _ = linux.write_str(2, "drop:guard1\n", 0);
+                }} else {{
+                    let _ = linux.write_str(2, "drop:guard2\n", 0);
+                }}
+            }}
+        }}
+
+        enum Step {{
+            done(u32),
+            paused(TypedContinuation<u32, Step>),
+        }}
+
+        fn body_with_drop(tag: u32) -> #yield_u32 Step {{
+            let _g = Guard {{ id: tag }};
+            let x = yield_u32(5)#;
+            Step.done(if x < 1000 {{ x * 2 }} else {{ 0 }})
+        }}
+
+        fn run() -> bool {{
+            -- 1. Escaped TypedContinuation inspected and resumed via inner Continuation
+            let step1 = body_with_drop(1)# {{
+                yield_u32(_v, k) => Step.paused(unsafe {{ TypedContinuation<u32, Step>.from_raw(k) }}),
+            }};
+            let ok1 = step1 match {{
+                Step.paused(tc) => {{
+                    let no_c = not tc.ref.crosses_c_frame();
+                    let tid = tc.ref.origin_thread_id();
+                    var arg: u32 = 21;
+                    var out: Step = Step.done(0);
+                    let raw_k = tc.into_raw();
+                    let ctrl = cont_resume_raw(raw_k, addr_of(arg.ref), addr_of(out.ref));
+                    let next = out;
+                    let val_ok = next match {{
+                        Step.done(v) => v == 42,
+                        Step.paused(unused) => {{
+                            unused.abort();
+                            false
+                        }},
+                    }};
+                    no_c and tid != 0 and ctrl == 0 and val_ok
+                }},
+                Step.done(_) => false,
+            }};
+
+            -- 2. Escaped TypedContinuation aborted explicitly via .abort()
+            let step2 = body_with_drop(2)# {{
+                yield_u32(_v, k) => Step.paused(unsafe {{ TypedContinuation<u32, Step>.from_raw(k) }}),
+            }};
+            let ok2 = step2 match {{
+                Step.paused(tc) => {{
+                    tc.abort();
+                    true
+                }},
+                Step.done(_) => false,
+            }};
+
+            -- 3. Unconsumed TypedContinuation dropped via implicit Drop for Continuation
+            do {{
+                let _dropped = body_with_drop(2)# {{
+                    yield_u32(_v, k) => Step.paused(unsafe {{ TypedContinuation<u32, Step>.from_raw(k) }}),
+                }};
+            }}
+
+            ok1 and ok2
+        }}
+        "#
+    );
+
+    let case = NativeCase::new(&source);
+    for opt in ["0", "3"] {
+        let build = case.build("run", opt);
+        assert_success(&build);
+        let run = case.run();
+        assert_success(&run);
+        assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "(bool true)");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let expected = "drop:guard1\ndrop:guard2\ndrop:guard2\n";
+        assert_eq!(stderr, expected, "opt={opt}: stderr was:\n{stderr}");
+    }
+}
+
+#[test]
+#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call via std.process.panic (transfers.rs:811)"]
+fn std_runtime_typed_continuation_resume_with_executes_at_o0_and_o3() {
+    let source = format!(
+        r#"{PREAMBLE}
+        use std.runtime.TypedContinuation;
+
+        effect yield_u32(v: u32, catch continuation: builtin.Continuation) -> u32;
+
+        enum Step {{
+            done(u32),
+            paused(TypedContinuation<u32, Step>),
+        }}
+
+        fn body() -> #yield_u32 Step {{
+            let x = yield_u32(5)#;
+            Step.done(if x < 1000 {{ x * 2 }} else {{ 0 }})
+        }}
+
+        fn run() -> bool {{
+            let step1 = body()# {{
+                yield_u32(_v, k) => Step.paused(unsafe {{ TypedContinuation<u32, Step>.from_raw(k) }}),
+            }};
+            step1 match {{
+                Step.paused(tc) => tc.resume_with(21) match {{
+                    Step.done(v) => v == 42,
+                    Step.paused(unused) => {{
+                        unused.abort();
+                        false
+                    }},
+                }},
+                Step.done(_) => false,
+            }}
+        }}
+        "#
+    );
+
+    let case = NativeCase::new(&source);
+    for opt in ["0", "3"] {
+        let build = case.build("run", opt);
+        assert_success(&build);
+        let run = case.run();
+        assert_success(&run);
+        assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "(bool true)");
     }
 }

@@ -6,14 +6,8 @@ use process_impl.process.panic;
 
     `TypedContinuation<Y, B>` is affine (`Once`) and intentionally does NOT
     implement `Copy`, `Clone`, `Send`, or `Sync` (a captured continuation must
-    be consumed at most once on its origin thread).
-
-    HOOK(@llvm-effects #17): `builtin.Continuation` primitive and `builtin.mem`
-    (`MaybeUninit`, `TypeMarker`) are wired; Commit 3 intrinsics
-    (`host-intrinsic.continuation_resume_raw(k, arg_addr, out_addr) -> usize`,
-    `host-intrinsic.continuation_abort_raw(k) -> ()`,
-    `host-intrinsic.continuation_crosses_c_frame(*k) -> bool`,
-    `host-intrinsic.continuation_origin_thread_id(*k) -> u64`) are marked below.
+    be consumed at most once on its origin thread). Delegates raw control and
+    query operations directly to `builtin.Continuation`.
 -}
 pub struct TypedContinuation
 where
@@ -43,30 +37,30 @@ where
     }
 
     pub fn crosses_c_frame(*self) -> bool {
-        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_crosses_c_frame(self.inner.ref)`.
-        false
+        self.inner.crosses_c_frame()
     }
 
     pub fn origin_thread_id(*self) -> u64 {
-        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_origin_thread_id(self.inner.ref)`.
-        0
+        self.inner.origin_thread_id()
     }
 
     pub fn resume_with(self, value: Y) -> B {
-        let _ = self.inner;
-        let _ = value;
+        var in_slot = MaybeUninit<Y>.new(value);
         var out_slot: MaybeUninit<B> = unsafe { MaybeUninit<B>.uninit() };
-        let _ = out_slot;
-        -- HOOK(@llvm-effects #17): write `out_slot` via
-        -- `host-intrinsic.continuation_resume_raw(k, in_addr, out_slot.as_mut_ptr())`,
-        -- panic on non-zero control word, and return `unsafe { out_slot.assume_init() }`.
-        panic("TypedContinuation.resume_with awaits @llvm-effects continuation runtime")
+        let in_addr = unsafe { builtin.mem.ptr_addr<Y>(in_slot.as_mut_ptr()) };
+        let out_addr = unsafe { builtin.mem.ptr_addr<B>(out_slot.as_mut_ptr()) };
+        let k = self.into_raw();
+        let ctrl = unsafe { k.resume_raw(in_addr, out_addr) };
+        if ctrl != 0 {
+            panic("suspended continuation terminated abnormally");
+        }
+        unsafe { out_slot.assume_init() }
     }
 
     pub fn abort(self) {
-        let _ = self.inner;
-        -- HOOK(@llvm-effects #17): call `host-intrinsic.continuation_abort_raw(self.into_raw())`
-        -- to unwind along the hidden abort channel and trap if crossing `^attrs.abi(.c)`.
-        panic("TypedContinuation.abort awaits @llvm-effects continuation runtime")
+        let k = self.into_raw();
+        unsafe {
+            k.abort_raw();
+        }
     }
 }

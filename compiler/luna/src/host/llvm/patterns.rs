@@ -610,14 +610,13 @@ impl Emitter<'_> {
                         schedule.sites.iter().any(|site| {
                             site.source == arm.body.source
                                 && site.boundary == iir::cleanup::Boundary::HandlerEnd
-                                && k_binding.is_some_and(|id| {
-                                    site.actions.iter().any(|action| {
-                                        matches!(
-                                            &action.target,
-                                            iir::cleanup::Target::Local { binding, fields }
-                                                if *binding == id && fields.is_empty()
-                                        )
-                                    })
+                                && site.actions.iter().any(|action| match &action.target {
+                                    iir::cleanup::Target::Local { binding, fields } => k_binding
+                                        .is_some_and(|id| *binding == id && fields.is_empty()),
+                                    iir::cleanup::Target::Temporary { source, .. } => {
+                                        k_binding.is_none() && *source == arm.body.source
+                                    }
+                                    _ => false,
                                 })
                         })
                     });
