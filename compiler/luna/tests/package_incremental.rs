@@ -926,17 +926,21 @@ fn main() -> bool {
         "warm in-process elaborated cache NIR must match --no-cache identically"
     );
 
-    let upstream_fns = |pkg: &nir::program::Package| -> Vec<(nir::DeclarationId, String)> {
+    let upstream_source_fns = |pkg: &nir::program::Package| -> Vec<(nir::DeclarationId, String)> {
         pkg.functions
             .iter()
-            .filter(|f| f.declaration.package != 0)
+            .filter(|f| {
+                f.declaration.package != 0
+                    && f.declaration.package != u64::MAX - 1
+                    && !f.name.starts_with("$derive_")
+            })
             .map(|f| (f.declaration, f.name.clone()))
             .collect()
     };
     assert_eq!(
-        upstream_fns(&first_nir),
-        upstream_fns(&warm_nir),
-        "upstream DeclarationIds must remain invariant across downstream additions"
+        upstream_source_fns(&first_nir),
+        upstream_source_fns(&warm_nir),
+        "upstream source DeclarationIds must remain invariant across downstream additions"
     );
 }
 

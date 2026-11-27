@@ -1069,7 +1069,9 @@ fn all_resolved_protocols_in(
             .is_none_or(|(d, _)| upstream_identities.contains(&d.package))
     };
     [
+        protocols.clone,
         protocols.copy,
+        protocols.default_trait,
         protocols.drop,
         protocols.index,
         protocols.index_mut,
@@ -2195,7 +2197,7 @@ fn compile_packages_core(
     crate::protocols::type_constructors::validate(&nir, &protocols)?;
     if let Some(upstream_key) = upstream_cache_key
         && let Some(bodies) = recorded_bodies
-        && !bodies.functions.is_empty()
+        && !bodies.is_empty()
     {
         global_elaborated_cache().insert(
             upstream_key,

@@ -201,13 +201,16 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower an AST node in expression position into an HIR [`Expr`].
     pub(crate) fn lower_expr(&mut self, ctx: ExprContext, node: NodeIndex) -> Expr<'hir> {
-        let kind = self.ast.get_node(node).expect("valid expression node").0;
-        if binary_operator(kind).is_some() || matches!(kind, NodeKind::Negative | NodeKind::BoolNot)
-        {
-            self.lower_operator_expr(ctx, node)
-        } else {
-            self.lower_non_operator_expr(ctx, node)
-        }
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            let kind = self.ast.get_node(node).expect("valid expression node").0;
+            if binary_operator(kind).is_some()
+                || matches!(kind, NodeKind::Negative | NodeKind::BoolNot)
+            {
+                self.lower_operator_expr(ctx, node)
+            } else {
+                self.lower_non_operator_expr(ctx, node)
+            }
+        })
     }
 
     #[inline(never)]
@@ -1375,6 +1378,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower an AST block (or block-like) node into an HIR [`Block`].
     pub(crate) fn lower_block(&mut self, ctx: ExprContext, node: NodeIndex) -> Block<'hir> {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.lower_block_inner(ctx, node)
+        })
+    }
+
+    fn lower_block_inner(&mut self, ctx: ExprContext, node: NodeIndex) -> Block<'hir> {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid block node: no such node index {:?}", node);
         };
@@ -1425,6 +1434,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower a list of statement-level nodes into a Block.
     fn lower_stmts_to_block(
+        &mut self,
+        ctx: ExprContext,
+        stmt_nodes: &[NodeIndex],
+        span: Span,
+    ) -> Block<'hir> {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.lower_stmts_to_block_inner(ctx, stmt_nodes, span)
+        })
+    }
+
+    fn lower_stmts_to_block_inner(
         &mut self,
         ctx: ExprContext,
         stmt_nodes: &[NodeIndex],

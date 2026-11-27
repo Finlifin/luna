@@ -11,4 +11,5 @@ diagnostic = { path = "../diagnostic" }
 resolve = { path = "../resolve" }
 vfs = { path = "../vfs" }
 rustc_span = { workspace = true }
+stacker = "0.1.25"
 middle = { path = "../middle" }

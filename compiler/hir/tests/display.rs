@@ -260,7 +260,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (function-template-bodies) (function-template-applications) (definition-attributes) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (function-template-bodies) (function-template-applications) (match-arm-imports) (quote-fn-arms) (pattern-fn-arms) (lexical-call-locals) (function-template-origins) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
