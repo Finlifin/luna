@@ -109,6 +109,9 @@ pub enum Command {
     HelpTopic(String),
     Fmt(Vec<OsString>),
     Lsp(Vec<OsString>),
+    Clean {
+        cache_dir: Option<PathBuf>,
+    },
     Check(Options),
     CheckPackages(Box<crate::package_cli::Request>),
     Packages(Box<crate::package_cli::Request>),

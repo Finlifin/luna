@@ -43,16 +43,17 @@ where
         }
     }
 
-    pub(crate) fn node(&self, key: &K) -> crate::dependencies::NodeId
+    pub(crate) fn node(&self, key: &K) -> Result<crate::dependencies::NodeId, crate::QueryFailure>
     where
         K: Clone,
     {
-        *self
-            .nodes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(key.clone())
-            .or_insert_with(crate::dependencies::NodeId::fresh)
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = nodes.get(key) {
+            return Ok(id);
+        }
+        let id = crate::dependencies::NodeId::fresh()?;
+        nodes.insert(key.clone(), id);
+        Ok(id)
     }
 
     pub(crate) fn invalidate(&self, key: &K) {
@@ -146,10 +147,25 @@ where
     }
 }
 
-// Independent cache clones cannot inherit dependency evidence from an engine.
-// Share Arc<QueryCache<...>> to share memoized results; cloning the cache is cold.
-impl<K: Eq + Hash, V> Clone for QueryCache<K, V> {
+/// Cloning a [`QueryCache`] preserves all completed and poisoned memoized
+/// entries as well as key-to-dependency-node identities (`nodes`), omitting any
+/// transient `InProgress`/`NotComputed` slots from another evaluation stack.
+impl<K: Eq + Hash + Clone, V: Clone> Clone for QueryCache<K, V> {
     fn clone(&self) -> Self {
-        Self::new()
+        let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let cloned_map: HashMap<K, CacheState<V>> = map
+            .iter()
+            .filter_map(|(k, state)| match state {
+                CacheState::InProgress | CacheState::NotComputed => None,
+                CacheState::Complete(v) => Some((k.clone(), CacheState::Complete(v.clone()))),
+                CacheState::Poisoned => Some((k.clone(), CacheState::Poisoned)),
+            })
+            .collect();
+        let cloned_nodes = nodes.clone();
+        QueryCache {
+            map: std::sync::Mutex::new(cloned_map),
+            nodes: std::sync::Mutex::new(cloned_nodes),
+        }
     }
 }

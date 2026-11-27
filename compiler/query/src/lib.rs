@@ -53,6 +53,43 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
 
+/// Structured error returned when query evaluation cannot produce a value
+/// (cycle, poisoned prior panic, or internal dependency invariant violation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryFailure {
+    Cycle(CycleError),
+    Poisoned { query: &'static str },
+    DependencyInvariant { detail: &'static str },
+}
+
+impl std::fmt::Display for QueryFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cycle(err) => write!(f, "query cycle detected:\n{err}"),
+            Self::Poisoned { query } => {
+                write!(f, "query `{query}` was poisoned by a previous panic")
+            }
+            Self::DependencyInvariant { detail } => {
+                write!(f, "query dependency invariant failed: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for QueryFailure {}
+
+impl<V> QueryResult<V> {
+    /// Convert a [`QueryResult`] into a standard [`Result`], mapping `Cycle` and
+    /// `Poisoned` to [`QueryFailure`].
+    pub fn into_result(self, query: &'static str) -> Result<V, QueryFailure> {
+        match self {
+            Self::Ok(v) => Ok(v),
+            Self::Cycle(err) => Err(QueryFailure::Cycle(err)),
+            Self::Poisoned => Err(QueryFailure::Poisoned { query }),
+        }
+    }
+}
+
 /// Shared query-engine state owned by `middle::Db`.
 ///
 /// Holds the active query stack and optional dep-graph hooks.  Caches
@@ -124,12 +161,12 @@ impl QueryEngine {
         cache: &QueryCache<K, V>,
         key: &K,
         update: impl FnOnce(),
-    ) -> Result<(), InputUpdateDuringQuery> {
+    ) -> Result<(), InputUpdateError> {
         let _evaluation = self.enter();
         if !self.stack().is_empty() {
-            return Err(InputUpdateDuringQuery);
+            return Err(InputUpdateError::DuringQuery);
         }
-        let node = cache.node(key);
+        let node = cache.node(key).map_err(InputUpdateError::Failure)?;
         self.dependencies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -154,6 +191,25 @@ impl QueryEngine {
         Ok(())
     }
 
+    /// Look up `key` in `cache`, computing it with `compute` on a miss and
+    /// returning structured [`QueryFailure`] on cycle, poison, or dependency error.
+    pub fn get<K, V, D, F>(
+        &self,
+        cache: &QueryCache<K, V>,
+        desc: QueryDesc,
+        key: K,
+        key_display: D,
+        compute: F,
+    ) -> Result<V, QueryFailure>
+    where
+        K: Eq + Hash + Clone,
+        V: Clone,
+        D: FnOnce(&K) -> String,
+        F: FnOnce() -> V,
+    {
+        try_get_with(self, cache, desc, key, key_display, compute)
+    }
+
     /// Diagnostic session-local identities; not persistent cache keys.
     pub fn dependency_dump(&self) -> String {
         self.dependencies
@@ -175,25 +231,50 @@ impl Default for QueryEngine {
 
 impl Clone for QueryEngine {
     fn clone(&self) -> Self {
-        // Fresh engine: do not share in-flight stack across clones.
-        QueryEngine::with_hooks(self.hooks.clone())
+        // Fresh evaluation stack across clones, while preserving committed
+        // dependency edges and dirty flags so cloned caches stay consistent.
+        let dependencies = self
+            .dependencies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone_settled();
+        QueryEngine {
+            stack: Mutex::new(QueryStack::new()),
+            owner: Mutex::new(None),
+            available: Condvar::new(),
+            hooks: self.hooks.clone(),
+            dependencies: Mutex::new(dependencies),
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InputUpdateDuringQuery;
-impl std::fmt::Display for InputUpdateDuringQuery {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputUpdateError {
+    DuringQuery,
+    Failure(QueryFailure),
+}
+
+impl std::fmt::Display for InputUpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("cannot update query input during an active evaluation")
+        match self {
+            Self::DuringQuery => {
+                f.write_str("cannot update query input during an active evaluation")
+            }
+            Self::Failure(err) => err.fmt(f),
+        }
     }
 }
-impl std::error::Error for InputUpdateDuringQuery {}
+
+impl std::error::Error for InputUpdateError {}
+
+pub type InputUpdateDuringQuery = InputUpdateError;
 
 // Providers may recursively request queries on this thread. Other threads wait
 // until the complete evaluation finishes, including its hooks and unwind path.
 struct EvaluationGuard<'a> {
     engine: &'a QueryEngine,
 }
+
 impl Drop for EvaluationGuard<'_> {
     fn drop(&mut self) {
         let mut owner = self.engine.owner.lock().unwrap_or_else(|e| e.into_inner());
@@ -214,8 +295,8 @@ impl Drop for EvaluationGuard<'_> {
 /// 1. If the cache holds [`CacheState::Complete`], return a clone.
 /// 2. If [`CacheState::InProgress`], build a [`CycleError`] from the
 ///    active stack (including the would-be re-entrant frame) and return
-///    [`QueryResult::Cycle`].
-/// 3. If [`CacheState::Poisoned`], return [`QueryResult::Poisoned`].
+///    [`Err(QueryFailure::Cycle(..))`].
+/// 3. If [`CacheState::Poisoned`], return [`Err(QueryFailure::Poisoned { .. })`].
 /// 4. Otherwise mark `InProgress`, push onto the stack, run `compute`
 ///    under `catch_unwind`.  On success store `Complete`; on panic store
 ///    `Poisoned` and resume unwind.
@@ -228,7 +309,7 @@ pub fn try_get_with<K, V, D, F>(
     key: K,
     key_display: D,
     compute: F,
-) -> QueryResult<V>
+) -> Result<V, QueryFailure>
 where
     K: Eq + Hash + Clone,
     V: Clone,
@@ -239,7 +320,7 @@ where
     // Format the key once for diagnostics / hooks.
     let key_str = key_display(&key);
 
-    let node = cache.node(&key);
+    let node = cache.node(&key)?;
     if engine
         .dependencies
         .lock()
@@ -262,13 +343,13 @@ where
                 query: desc.name,
                 key: key_str,
             });
-            return QueryResult::Ok(v);
+            return Ok(v);
         }
-        Some(CacheState::Poisoned) => return QueryResult::Poisoned,
+        Some(CacheState::Poisoned) => return Err(QueryFailure::Poisoned { query: desc.name }),
         Some(CacheState::InProgress) => {
             let mut frames = engine.stack().frames().to_vec();
             frames.push(ActiveQuery { desc, key: key_str });
-            return QueryResult::Cycle(CycleError { frames });
+            return Err(QueryFailure::Cycle(CycleError { frames }));
         }
         Some(CacheState::NotComputed) | None => {}
     }
@@ -281,12 +362,14 @@ where
     // Claim the slot before entering compute so re-entrant calls see InProgress.
     if !cache.start(&key) {
         match cache.get(&key) {
-            Some(CacheState::Complete(v)) => return QueryResult::Ok(v),
-            Some(CacheState::Poisoned) => return QueryResult::Poisoned,
+            Some(CacheState::Complete(v)) => return Ok(v),
+            Some(CacheState::Poisoned) => {
+                return Err(QueryFailure::Poisoned { query: desc.name });
+            }
             Some(CacheState::InProgress) => {
                 let mut frames = engine.stack().frames().to_vec();
                 frames.push(ActiveQuery { desc, key: key_str });
-                return QueryResult::Cycle(CycleError { frames });
+                return Err(QueryFailure::Cycle(CycleError { frames }));
             }
             _ => {
                 // Absent after failed start — claim again.
@@ -308,9 +391,32 @@ where
         completed: bool,
     }
 
+    impl<'a, K: Eq + Hash + Clone, V> StackGuard<'a, K, V> {
+        fn finish_ok(mut self) -> Result<(), QueryFailure> {
+            let finish_res = self
+                .engine
+                .dependencies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish();
+            self.engine
+                .stack
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop();
+            self.completed = finish_res.is_ok();
+            if finish_res.is_err() {
+                self.cache.poison(&self.key);
+            }
+            std::mem::forget(self);
+            finish_res
+        }
+    }
+
     impl<'a, K: Eq + Hash + Clone, V> Drop for StackGuard<'a, K, V> {
         fn drop(&mut self) {
-            self.engine
+            let _ = self
+                .engine
                 .dependencies
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -332,7 +438,7 @@ where
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .begin(node);
-    let mut guard = StackGuard {
+    let guard = StackGuard {
         engine,
         cache,
         key: key.clone(),
@@ -347,10 +453,9 @@ where
     match outcome {
         Ok(value) => {
             cache.complete(&key, value.clone());
-            guard.completed = true;
-            drop(guard);
+            guard.finish_ok()?;
             (engine.hooks.on_query_end)(dep);
-            QueryResult::Ok(value)
+            Ok(value)
         }
         Err(payload) => {
             // Drop guard poisons + pops; then resume.
@@ -361,11 +466,8 @@ where
     }
 }
 
-/// Convenience: like [`try_get_with`], but panics on cycle / poison.
-///
-/// Prefer [`try_get_with`] when the caller can emit diagnostics from
-/// [`CycleError`].  Provider-driven queries that treat cycles as ICE
-/// can use this.
+/// Convenience alias for [`try_get_with`] that returns `Result<V, QueryFailure>`
+/// without panicking on query cycles or poisoned slots.
 pub fn force_get_with<K, V, F>(
     engine: &QueryEngine,
     cache: &QueryCache<K, V>,
@@ -373,17 +475,13 @@ pub fn force_get_with<K, V, F>(
     key: K,
     key_display: impl FnOnce(&K) -> String,
     compute: F,
-) -> V
+) -> Result<V, QueryFailure>
 where
     K: Eq + Hash + Clone,
     V: Clone,
     F: FnOnce() -> V,
 {
-    match try_get_with(engine, cache, desc, key, key_display, compute) {
-        QueryResult::Ok(v) => v,
-        QueryResult::Cycle(err) => panic!("query cycle detected:\n{err}"),
-        QueryResult::Poisoned => panic!("query `{}` was poisoned by a previous panic", desc.name),
-    }
+    try_get_with(engine, cache, desc, key, key_display, compute)
 }
 
 /// Shared [`QueryEngine`] wrapped for cheap `Clone` of `Db`.

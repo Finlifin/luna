@@ -26,6 +26,130 @@ pub struct SourcePackage {
     pub entry: PathBuf,
 }
 
+/// Conventional root source file kind for a `package.fl` package layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageEntryKind {
+    Library,
+    Binary,
+}
+
+/// Evaluation boundary for `package.fl` manifests.
+///
+/// Full comptime evaluation of `build.{package,targets,tasks}` DAGs is deferred
+/// until `08-library` lands the `library/build` package APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestEvaluation {
+    DeferredAwaitingBuildLibrary { manifest_path: PathBuf },
+}
+
+/// Discovered `package.fl` manifest root and conventional source layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageManifest {
+    pub root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub entry: Option<(PackageEntryKind, PathBuf)>,
+    pub scripts_dir: Option<PathBuf>,
+    pub evaluation: ManifestEvaluation,
+}
+
+/// Discover the nearest ancestor `package.fl` manifest starting from `start`
+/// (either a directory or a file inside a package) and probe conventional
+/// `src/{lib,main}.fl` (or `{lib,main}.fl`) and `scripts/` layout without
+/// evaluating `build.{package,targets,tasks}` yet.
+pub fn discover_package_manifest(
+    start: &std::path::Path,
+) -> Result<Option<PackageManifest>, String> {
+    if start.as_os_str().is_empty() {
+        return Err("package manifest discovery path must not be empty".into());
+    }
+    let start_dir = if start.is_dir() {
+        start
+    } else {
+        start
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."))
+    };
+    let mut cursor = Some(start_dir);
+    let mut found_dir = None;
+    while let Some(dir) = cursor {
+        let candidate = dir.join("package.fl");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "package manifest discovery does not support symlink '{}'",
+                        candidate.display()
+                    ));
+                }
+                if meta.is_file() {
+                    found_dir = Some(dir.to_path_buf());
+                    break;
+                }
+                return Err(format!(
+                    "expected '{}' to be a regular package.fl manifest file",
+                    candidate.display()
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "cannot inspect package manifest '{}': {err}",
+                    candidate.display()
+                ));
+            }
+        }
+        cursor = dir.parent().filter(|p| !p.as_os_str().is_empty());
+    }
+    let Some(dir) = found_dir else {
+        return Ok(None);
+    };
+    let root = std::fs::canonicalize(&dir)
+        .map_err(|e| format!("cannot canonicalize package root '{}': {e}", dir.display()))?;
+    let manifest_path = root.join("package.fl");
+    let probe_pair = |lib: PathBuf,
+                      main: PathBuf|
+     -> Result<Option<(PackageEntryKind, PathBuf)>, String> {
+        match (lib.is_file(), main.is_file()) {
+            (true, true) => Err(format!(
+                "package '{}' contains both {} and {}; explicit target selection awaits build.package evaluation",
+                root.display(),
+                lib.display(),
+                main.display()
+            )),
+            (true, false) => Ok(Some((PackageEntryKind::Library, lib))),
+            (false, true) => Ok(Some((PackageEntryKind::Binary, main))),
+            (false, false) => Ok(None),
+        }
+    };
+    let entry = match probe_pair(root.join("src/lib.fl"), root.join("src/main.fl"))? {
+        Some(found) => Some(found),
+        None => probe_pair(root.join("lib.fl"), root.join("main.fl"))?,
+    };
+    let scripts_candidate = root.join("scripts");
+    let scripts_dir = scripts_candidate.is_dir().then_some(scripts_candidate);
+    Ok(Some(PackageManifest {
+        root,
+        manifest_path: manifest_path.clone(),
+        entry,
+        scripts_dir,
+        evaluation: ManifestEvaluation::DeferredAwaitingBuildLibrary { manifest_path },
+    }))
+}
+
+/// Observed filesystem state of an external configuration file (such as `language-items.conf`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigFileState {
+    Present([u8; 32]),
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFileInput {
+    pub path: PathBuf,
+    pub state: ConfigFileState,
+}
+
 /// Inputs observed by the frontend, not a cache key or a filesystem transaction.
 #[derive(Debug, Default)]
 pub struct CompilationInputs {
@@ -34,6 +158,7 @@ pub struct CompilationInputs {
     /// Revalidate membership as well as file contents before reusing a result.
     pub directories: Vec<(u32, PathBuf)>,
     pub discovery: Vec<SourceDiscovery>,
+    pub config_files: Vec<ConfigFileInput>,
 }
 
 #[derive(Debug)]
@@ -168,8 +293,37 @@ pub fn compile(
     compile_with_builtin(packages, dependencies, primary, None)
 }
 
-/// The caller designates a supplied source package as builtin. No package is
-/// chosen by an incidental source name or automatically read from the host.
+const DEFAULT_PRELUDE_PACKAGE_NAMES: [&str; 5] =
+    ["builtin", "meta", "build", "attrs", "verification"];
+
+/// Resolve the 5-prelude provider set (`builtin`, `meta`, `build`, `attrs`,
+/// `verification`, excluding `std`) when a caller designates `builtin` without
+/// supplying an explicit `preludes` slice.
+pub(crate) fn default_preludes_for_builtin(
+    packages: &[SourcePackage],
+    builtin: Option<u32>,
+) -> Vec<u32> {
+    let Some(builtin_id) = builtin else {
+        return Vec::new();
+    };
+    let mut preludes = Vec::new();
+    if packages.iter().any(|pkg| pkg.resolution_id == builtin_id) {
+        preludes.push(builtin_id);
+    }
+    for pkg in packages {
+        if pkg.resolution_id != builtin_id
+            && DEFAULT_PRELUDE_PACKAGE_NAMES.contains(&pkg.name.as_str())
+            && !preludes.contains(&pkg.resolution_id)
+        {
+            preludes.push(pkg.resolution_id);
+        }
+    }
+    preludes
+}
+
+/// The caller designates a supplied source package as builtin; when sysroot
+/// sibling packages (`meta`, `build`, `attrs`, `verification`) are also
+/// supplied, their preludes are injected per the 5-prelude rule (`std` excluded).
 pub fn compile_with_builtin(
     packages: &[SourcePackage],
     dependencies: &[resolve::DependencyEdge],
@@ -177,6 +331,34 @@ pub fn compile_with_builtin(
     builtin: Option<u32>,
 ) -> Result<Artifact, String> {
     compile_stage(packages, dependencies, primary, builtin, Emit::Nir, None)
+}
+
+/// Compile an explicit package set with explicit prelude provider IDs.
+pub fn compile_with_preludes(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    preludes: &[u32],
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<Artifact, String> {
+    compile_observed_with_preludes(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        protocols,
+        selectors,
+        None,
+        target,
+        preludes,
+        None,
+    )
+    .map(|(artifact, _)| artifact)
 }
 
 pub(crate) fn compile_stage(
@@ -456,7 +638,7 @@ pub(crate) fn compile_observed_for_target_with_incremental(
     if emit == Emit::Ast {
         return Err("package sets support HIR or NIR, not AST output".into());
     }
-    let preludes: Vec<_> = builtin.into_iter().collect();
+    let preludes = default_preludes_for_builtin(packages, builtin);
     compile_observed_with_preludes_and_macro_selectors_and_incremental(
         packages,
         dependencies,
@@ -601,7 +783,7 @@ pub fn compile_with_definitions(
     fuel: &mut usize,
     expand: &mut DefinitionExpander<'_>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
-    let preludes: Vec<_> = builtin.into_iter().collect();
+    let preludes = default_preludes_for_builtin(packages, builtin);
     compile_with_definitions_and_preludes(
         packages,
         dependencies,
@@ -1307,6 +1489,27 @@ fn compile_packages_core(
                 inputs.directories.extend(obs.directories);
             }
         }
+        let mut config_paths: Vec<PathBuf> = extra_config_files
+            .iter()
+            .map(|p| crate::package_cache::normalize_config_path(p))
+            .collect();
+        for package in caller_packages {
+            if (builtin == Some(package.resolution_id) || package.name == "builtin")
+                && package.entry.file_name().and_then(|n| n.to_str()) == Some("lib.fl")
+            {
+                if let Some(pkg_dir) = package.entry.parent()
+                    && pkg_dir.file_name().and_then(|n| n.to_str()) == Some("builtin")
+                    && let Some(sysroot_dir) = pkg_dir.parent()
+                {
+                    config_paths.push(crate::package_cache::normalize_config_path(
+                        &sysroot_dir.join("language-items.conf"),
+                    ));
+                }
+            }
+        }
+        config_paths.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+        config_paths.dedup();
+        inputs.observe_config_files(&config_paths)?;
     }
 
     // Closed-upstream ParsedPackage AST cache lookup (memory LRU + `.flpkg`).
@@ -1322,6 +1525,7 @@ fn compile_packages_core(
         struct PkgScanInput {
             pkg_idx: usize,
             pkg_name: String,
+            directories: Vec<PathBuf>,
             files: Vec<(vfs::FileId, PathBuf, rustc_span::BytePos, Option<Arc<str>>)>,
         }
         struct PkgScanOutput {
@@ -1362,6 +1566,7 @@ fn compile_packages_core(
             scan_inputs.push(PkgScanInput {
                 pkg_idx,
                 pkg_name: pkg.name.clone(),
+                directories: vfs.source_directories.clone(),
                 files,
             });
         }
@@ -1379,10 +1584,13 @@ fn compile_packages_core(
                     has_macro_refs = true;
                     break;
                 }
-                let rel_str = rel_path.to_string_lossy().into_owned();
+                let Some(rel_str) = rel_path.to_str() else {
+                    has_macro_refs = true;
+                    break;
+                };
                 let hash = Sha256::hash(src.as_bytes());
                 key_files.push((rel_path.clone(), src.as_bytes()));
-                file_meta.push((rel_str, hash));
+                file_meta.push((rel_str.to_owned(), hash));
             }
             if has_macro_refs {
                 return Ok(PkgScanOutput {
@@ -1394,7 +1602,7 @@ fn compile_packages_core(
                 });
             }
 
-            let pkg_key = compute_parsed_package_key(&item.pkg_name, &key_files);
+            let pkg_key = compute_parsed_package_key(&item.pkg_name, &key_files, &item.directories);
             let cached = global_parsed_cache()
                 .get(pkg_key, ArtifactKind::ParsedPackage)
                 .or_else(|| {
@@ -1749,7 +1957,9 @@ fn compile_packages_core(
     ast_lowering::set_providers(&mut instance.db.providers);
     let module_tree_arc = Arc::clone(&input.module_tree);
     instance.set_hir_input(Arc::new(input));
-    let hir = instance.enter(|compiler| compiler.hir_package());
+    let hir = instance
+        .enter(|compiler| compiler.try_hir_package())
+        .map_err(|err| format!("HIR lowering query failed: {err}"))?;
     if instance.diag_ctx.has_errors() {
         return Err(instance
             .diag_ctx
@@ -2163,6 +2373,67 @@ impl CompilationInputs {
         Ok(changes)
     }
 
+    /// Record external configuration file states (such as `language-items.conf`)
+    /// so resident caches invalidate when any config file is created, edited, or deleted.
+    pub fn observe_config_files(&mut self, paths: &[PathBuf]) -> Result<(), String> {
+        for path in paths {
+            let normalized = crate::package_cache::normalize_config_path(path);
+            if self.config_files.iter().any(|cfg| cfg.path == normalized) {
+                continue;
+            }
+            let state = match std::fs::read(&normalized) {
+                Ok(bytes) => ConfigFileState::Present(Sha256::hash(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ConfigFileState::Missing
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot inspect config file '{}': {error}",
+                        normalized.display()
+                    ));
+                }
+            };
+            self.config_files.push(ConfigFileInput {
+                path: normalized,
+                state,
+            });
+        }
+        Ok(())
+    }
+
+    /// Compare external configuration files with the observed states recorded during compilation.
+    pub fn changed_config_files(&self) -> Result<Vec<&ConfigFileInput>, String> {
+        let mut changed = Vec::new();
+        for cfg in &self.config_files {
+            let matches = match (&cfg.state, std::fs::read(&cfg.path)) {
+                (ConfigFileState::Present(expected), Ok(bytes)) => {
+                    Sha256::hash(&bytes) == *expected
+                }
+                (ConfigFileState::Present(_), Err(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    false
+                }
+                (ConfigFileState::Missing, Err(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    true
+                }
+                (ConfigFileState::Missing, Ok(_)) => false,
+                (_, Err(error)) => {
+                    return Err(format!(
+                        "cannot revalidate config file '{}': {error}",
+                        cfg.path.display()
+                    ));
+                }
+            };
+            if !matches {
+                changed.push(cfg);
+            }
+        }
+        Ok(changed)
+    }
+
     /// Compare current file bytes with the exact inputs originally loaded.
     /// Missing files are changes; other I/O failures remain errors. This does
     /// not validate directory membership, request options or atomicity.
@@ -2245,6 +2516,25 @@ impl std::fmt::Display for CompilationInputs {
                 f.write_str(")")?;
             }
             f.write_str(")")?;
+        }
+        if !self.config_files.is_empty() {
+            f.write_str(") (config-files")?;
+            for cfg in &self.config_files {
+                f.write_str(" (config-file ")?;
+                write_input_path(f, &cfg.path)?;
+                match &cfg.state {
+                    ConfigFileState::Present(hash) => {
+                        write!(
+                            f,
+                            " (present \"{}\"))",
+                            crate::package_cache::PackageSnapshotKey(*hash).to_hex()
+                        )?;
+                    }
+                    ConfigFileState::Missing => {
+                        f.write_str(" (missing))")?;
+                    }
+                }
+            }
         }
         f.write_str("))")
     }

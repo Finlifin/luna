@@ -8,10 +8,12 @@ pub struct CachedCompilation {
     pub bindings: elaboration::program::Protocols,
     pub inputs: CompilationInputs,
 }
+
 pub struct CompilationOutcome {
     pub compilation: Arc<CachedCompilation>,
     pub reused: bool,
 }
+
 /// Full requests and the current directory form conservative process-local
 /// keys. The running compiler binary fixes its implementation and target model.
 /// This is not a serialized cache or a cross-process compiler identity scheme.
@@ -19,6 +21,7 @@ pub struct CompilationCache {
     capacity: usize,
     entries: VecDeque<CacheEntry>,
 }
+
 struct CacheEntry {
     root: PathBuf,
     request: Request,
@@ -33,12 +36,15 @@ impl CompilationCache {
             entries: VecDeque::new(),
         }
     }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -74,6 +80,9 @@ impl CompilationCache {
         }
         let mut inputs = CompilationInputs::default();
         let (artifact, bindings) = request.compile_observed(Some(&mut inputs))?;
+        if let Some(sysroot) = &request.options.sysroot {
+            inputs.observe_config_files(&[sysroot.join("language-items.conf")])?;
+        }
         if entry_identities(request)? != canonical_entries || !current(&inputs)? {
             return Err(
                 "source inputs changed during compilation; retry with stable inputs".into(),
@@ -102,6 +111,7 @@ impl CompilationCache {
         })
     }
 }
+
 // Canonical entry paths determine package ownership exclusions, even for a
 // non-root source file whose bytes and parent directory membership stay equal.
 fn entry_identities(request: &Request) -> Result<Vec<PathBuf>, String> {
@@ -136,9 +146,12 @@ fn entry_identities(request: &Request) -> Result<Vec<PathBuf>, String> {
 
 fn current(inputs: &CompilationInputs) -> Result<bool, String> {
     // Scan first: newly added sources must invalidate even when every old
-    // source still has the same bytes.
-    Ok(inputs.changed_discovery()?.is_empty() && inputs.changed_sources()?.is_empty())
+    // source still has the same bytes. Also revalidate tracked external configs.
+    Ok(inputs.changed_discovery()?.is_empty()
+        && inputs.changed_sources()?.is_empty()
+        && inputs.changed_config_files()?.is_empty())
 }
+
 fn protect_output(request: &Request, inputs: &CompilationInputs) -> Result<(), String> {
     for source in &inputs.sources {
         crate::packages::protect_source_output(&source.path, request.options.output.as_deref())?;

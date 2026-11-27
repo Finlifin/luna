@@ -5,7 +5,7 @@ use std::fmt;
 use crate::stack::ActiveQuery;
 
 /// A query cycle: some `InProgress` query was re-entered.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CycleError {
     /// Active stack at the moment the cycle was detected, including the
     /// re-entrant frame as the last element.

@@ -87,6 +87,7 @@ fn replacing_hir_input_recomputes_hir_and_observed_consumers_across_db_clones() 
                 db.hir_input().unwrap().file_id().raw()
             },
         )
+        .unwrap()
     };
     assert_eq!(observed(), 1);
     clone.set_hir_input(input(2));
@@ -261,42 +262,44 @@ fn midend_interface_signature_and_elaboration_queries_track_dependencies_and_cyc
     assert!(!Arc::ptr_eq(&elab, &elab2));
     assert_eq!(INTERFACE_CALLS.load(Ordering::SeqCst), 2);
 
-    // Cycle-safe `try_item_signature` reports QueryResult::Cycle without panicking.
+    // Cycle-safe `try_item_signature` reports Err(QueryFailure::Cycle) without panicking.
     static SAW_CYCLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn cyclic_sig(db: &Db, owner: hir::OwnerId) -> Option<Arc<middle::ItemInterfaceSummary>> {
         match db.try_item_signature(owner) {
-            query::QueryResult::Ok(v) => v,
-            query::QueryResult::Cycle(_) => {
+            Ok(v) => v,
+            Err(query::QueryFailure::Cycle(_)) => {
                 SAW_CYCLE.store(true, Ordering::SeqCst);
                 None
             }
-            query::QueryResult::Poisoned => None,
+            Err(_) => None,
         }
     }
     let mut cyclic_db = Db::new();
     cyclic_db.providers.item_signature = cyclic_sig;
     assert!(matches!(
         cyclic_db.try_item_signature(trait_owner),
-        query::QueryResult::Ok(None)
+        Ok(None)
     ));
     assert!(SAW_CYCLE.load(Ordering::SeqCst));
     // Actually force a cycle on `try_elaborated_package`:
     fn cyclic_elab(db: &Db) -> Arc<ElaboratedPackage> {
         match db.try_elaborated_package(()) {
-            query::QueryResult::Ok(v) => v,
-            query::QueryResult::Cycle(_) | query::QueryResult::Poisoned => {
-                Arc::new(ElaboratedPackage {
-                    succeeded: false,
-                    struct_count: 0,
-                    enum_count: 0,
-                    function_count: 0,
-                    trait_count: 0,
-                    impl_count: 0,
-                    warnings: vec![],
-                    errors: vec!["cycle detected".into()],
-                    nir_lisp: String::new(),
-                })
-            }
+            Ok(v) => v,
+            Err(
+                query::QueryFailure::Cycle(_)
+                | query::QueryFailure::Poisoned { .. }
+                | query::QueryFailure::DependencyInvariant { .. },
+            ) => Arc::new(ElaboratedPackage {
+                succeeded: false,
+                struct_count: 0,
+                enum_count: 0,
+                function_count: 0,
+                trait_count: 0,
+                impl_count: 0,
+                warnings: vec![],
+                errors: vec!["cycle detected".into()],
+                nir_lisp: String::new(),
+            }),
         }
     }
     cyclic_db.providers.elaborated_package = cyclic_elab;

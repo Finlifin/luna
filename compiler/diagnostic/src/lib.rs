@@ -1,4 +1,4 @@
-use ariadne::{Color, ColorGenerator, Label, Report, ReportKind, Source};
+use ariadne::{Color, ColorGenerator, Label, Report, ReportKind};
 use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
 use std::{
     cell::{Cell, Ref, RefCell},
@@ -9,7 +9,9 @@ use std::{
 // 罢了, warning也用这个trait吧
 pub trait FlurryError {
     fn error_code(&self) -> u32;
+
     fn error_name(&self) -> &'static str;
+
     fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: rustc_span::BytePos);
 }
 
@@ -313,20 +315,93 @@ impl<'a> DiagnosticContext<'a> {
         DiagnosticBuilder::help(message)
     }
 
-    /// Emit diagnostic using ariadne
+    /// Render a diagnostic to a UTF-8 string (useful for testing and plain callers).
+    pub fn render_to_string(&self, diagnostic: &Diagnostic) -> String {
+        let mut buf = Vec::new();
+        self.render_diagnostic(diagnostic, &mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// Emit diagnostic using ariadne (with plain-text fallback for `DUMMY_SP` or
+    /// missing source text).
     fn emit_to_ariadne(&self, diagnostic: &Diagnostic) {
-        let primary_span = diagnostic.primary_span.unwrap_or_else(|| {
-            // Use the first label span if no primary span is provided
-            diagnostic
-                .labels
-                .first()
-                .map(|label| label.span)
-                .unwrap_or(rustc_span::DUMMY_SP)
-        });
+        let mut stderr = io::stderr().lock();
+        self.render_diagnostic(diagnostic, &mut stderr);
+    }
+
+    fn write_plain_diagnostic(&self, diagnostic: &Diagnostic, writer: &mut dyn Write) {
+        let _ = write!(writer, "{}", diagnostic.level.name());
+        if let Some(code) = diagnostic.code {
+            let _ = write!(writer, "[E{code:04}]");
+        }
+        let _ = writeln!(writer, ": {}", diagnostic.message);
+        for label in &diagnostic.labels {
+            if label.span != rustc_span::DUMMY_SP && !self.source_map.files().is_empty() {
+                let loc = self.source_map.lookup_char_pos(label.span.lo());
+                let _ = writeln!(
+                    writer,
+                    "  {}:{}:{}: {}: {}",
+                    loc.file.name.display(FileNameDisplayPreference::Local),
+                    loc.line,
+                    loc.col.0 + 1,
+                    label.level.name(),
+                    label.message
+                );
+            } else {
+                let _ = writeln!(writer, "  {}: {}", label.level.name(), label.message);
+            }
+        }
+        for note in &diagnostic.notes {
+            let _ = writeln!(writer, "  note: {note}");
+        }
+        for help in &diagnostic.helps {
+            let _ = writeln!(writer, "  help: {help}");
+        }
+    }
+
+    fn render_diagnostic(&self, diagnostic: &Diagnostic, writer: &mut dyn Write) {
+        let primary_span = diagnostic
+            .primary_span
+            .filter(|&span| span != rustc_span::DUMMY_SP)
+            .or_else(|| {
+                diagnostic
+                    .labels
+                    .iter()
+                    .map(|label| label.span)
+                    .find(|&span| span != rustc_span::DUMMY_SP)
+            })
+            .unwrap_or(rustc_span::DUMMY_SP);
+
+        if primary_span == rustc_span::DUMMY_SP || self.source_map.files().is_empty() {
+            self.write_plain_diagnostic(diagnostic, writer);
+            return;
+        }
 
         let source_file = self.source_map.lookup_source_file(primary_span.lo());
-        let mut colors = ColorGenerator::new();
-        let file_id_str = format!(
+        let primary_content = match &source_file.src {
+            Some(content) => content.as_str(),
+            None => {
+                self.write_plain_diagnostic(diagnostic, writer);
+                return;
+            }
+        };
+
+        let byte_to_char =
+            |content: &str, base: rustc_span::BytePos, pos: rustc_span::BytePos| -> usize {
+                let raw_offset = pos.0.saturating_sub(base.0) as usize;
+                let clamped = raw_offset.min(content.len());
+                if let Some(prefix) = content.get(..clamped) {
+                    prefix.chars().count()
+                } else {
+                    let mut idx = clamped;
+                    while idx > 0 && !content.is_char_boundary(idx) {
+                        idx -= 1;
+                    }
+                    content[..idx].chars().count()
+                }
+            };
+
+        let primary_id = format!(
             "{}",
             source_file
                 .name
@@ -334,34 +409,13 @@ impl<'a> DiagnosticContext<'a> {
                 .to_string_lossy()
         );
 
-        // Convert byte positions to character positions for ariadne
-        let source_content = match &source_file.src {
-            Some(content) => content.as_str(),
-            None => {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "Error: Source file content not available"
-                );
-                return;
-            }
-        };
-
-        let byte_start = (primary_span.lo().0 - source_file.start_pos.0) as usize;
-        let byte_end = (primary_span.hi().0 - source_file.start_pos.0) as usize;
-
-        // Convert byte indices to character indices by counting UTF-8 chars
-        let char_start = source_content
-            .get(..byte_start.min(source_content.len()))
-            .map(|s| s.chars().count())
-            .unwrap_or(0);
-        let char_end = source_content
-            .get(..byte_end.min(source_content.len()))
-            .map(|s| s.chars().count())
-            .unwrap_or(char_start);
+        let char_start = byte_to_char(primary_content, source_file.start_pos, primary_span.lo());
+        let char_end =
+            byte_to_char(primary_content, source_file.start_pos, primary_span.hi()).max(char_start);
 
         let mut report = Report::build(
             diagnostic.level.to_ariadne_kind(),
-            (&file_id_str, char_start..char_end),
+            (primary_id.clone(), char_start..char_end),
         );
 
         if let Some(code) = diagnostic.code {
@@ -370,61 +424,90 @@ impl<'a> DiagnosticContext<'a> {
 
         report = report.with_message(&diagnostic.message);
 
-        // Add labels - only from the same file for simplicity
+        let mut colors = ColorGenerator::new();
+        let mut owned_sources: Vec<(String, std::sync::Arc<rustc_span::SourceFile>)> =
+            vec![(primary_id.clone(), source_file.clone())];
+        let mut seen_files: Vec<(usize, String)> = vec![(
+            source_file.as_ref() as *const _ as usize,
+            primary_id.clone(),
+        )];
+
+        let mut extra_notes: Vec<String> = Vec::new();
+
         for label in &diagnostic.labels {
-            // 检查 span 是否来自同一个文件
-            let label_file = self.source_map.lookup_source_file(label.span.lo());
-            if std::ptr::eq(label_file.as_ref(), source_file.as_ref()) {
-                let color = colors.next();
-
-                let label_byte_start = (label.span.lo().0 - source_file.start_pos.0) as usize;
-                let label_byte_end = (label.span.hi().0 - source_file.start_pos.0) as usize;
-
-                // Convert byte indices to character indices for label
-                let label_char_start = source_content
-                    .get(..label_byte_start.min(source_content.len()))
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                let label_char_end = source_content
-                    .get(..label_byte_end.min(source_content.len()))
-                    .map(|s| s.chars().count())
-                    .unwrap_or(label_char_start);
-
-                report = report.with_label(
-                    Label::new((&file_id_str, label_char_start..label_char_end))
-                        .with_message(&label.message)
-                        .with_color(color),
-                );
+            if label.span == rustc_span::DUMMY_SP {
+                extra_notes.push(format!("{}: {}", label.level.name(), label.message));
+                continue;
             }
+            let label_file = self.source_map.lookup_source_file(label.span.lo());
+            let Some(label_content) = label_file.src.as_deref() else {
+                let loc = self.source_map.lookup_char_pos(label.span.lo());
+                extra_notes.push(format!(
+                    "{}:{}:{}: {}: {}",
+                    loc.file.name.display(FileNameDisplayPreference::Local),
+                    loc.line,
+                    loc.col.0 + 1,
+                    label.level.name(),
+                    label.message
+                ));
+                continue;
+            };
+
+            let label_ptr = label_file.as_ref() as *const _ as usize;
+            let label_id = if let Some((_, existing_id)) =
+                seen_files.iter().find(|(ptr, _)| *ptr == label_ptr)
+            {
+                existing_id.clone()
+            } else {
+                let base_name = format!(
+                    "{}",
+                    label_file
+                        .name
+                        .display(FileNameDisplayPreference::Local)
+                        .to_string_lossy()
+                );
+                let mut candidate = base_name.clone();
+                let mut suffix = 1usize;
+                while owned_sources.iter().any(|(id, _)| id == &candidate) {
+                    candidate = format!("{base_name}#{suffix}");
+                    suffix += 1;
+                }
+                seen_files.push((label_ptr, candidate.clone()));
+                owned_sources.push((candidate.clone(), label_file.clone()));
+                candidate
+            };
+
+            let label_char_start =
+                byte_to_char(label_content, label_file.start_pos, label.span.lo());
+            let label_char_end = byte_to_char(label_content, label_file.start_pos, label.span.hi())
+                .max(label_char_start);
+
+            let color = colors.next();
+            report = report.with_label(
+                Label::new((label_id, label_char_start..label_char_end))
+                    .with_message(&label.message)
+                    .with_color(color),
+            );
         }
 
-        // Add notes
-        for note in &diagnostic.notes {
+        for note in extra_notes.iter().chain(diagnostic.notes.iter()) {
             report = report.with_note(note);
         }
 
-        // Add helps
         for help in &diagnostic.helps {
             report = report.with_help(help);
         }
 
-        // Print the report - use file_id as identifier
-        let source_content = match &source_file.src {
-            Some(content) => content.as_str(),
-            None => {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "Error: Source file content not available"
-                );
-                return;
-            }
-        };
+        let file_sources: Vec<(String, &str)> = owned_sources
+            .iter()
+            .filter_map(|(id, sf)| sf.src.as_deref().map(|src| (id.clone(), src.as_str())))
+            .collect();
 
         if let Err(e) = report
             .finish()
-            .eprint((&file_id_str, Source::from(source_content)))
+            .write(ariadne::sources(file_sources), &mut *writer)
         {
-            let _ = writeln!(io::stderr().lock(), "Error printing diagnostic: {}", e);
+            let _ = writeln!(writer, "Error printing diagnostic: {}", e);
         }
     }
 }
@@ -488,5 +571,110 @@ mod context_tests {
             .borrow_mut()
             .push(Diagnostic::error("second".into()));
         assert_eq!(context.diagnostics().len(), 2);
+    }
+
+    #[test]
+    fn dummy_span_with_bytepos_one_source_does_not_underflow() {
+        use rustc_span::{BytePos, DUMMY_SP, FileName};
+
+        let map = SourceMap::new(FilePathMapping::empty());
+        // Simulate a dummy 1-byte reservation at BytePos(0) so real files start at BytePos(1),
+        // or directly register a file whose start_pos > DUMMY_SP.lo() (0) via offset padding.
+        let pad = map.new_source_file(FileName::Custom("dummy".into()), " ".into());
+        assert_eq!(pad.start_pos, BytePos(0));
+        let real = map.new_source_file(FileName::Custom("main.fl".into()), "fn main() {}".into());
+        assert!(real.start_pos >= BytePos(1));
+
+        let context = DiagnosticContext::new(&map);
+        let diag = DiagnosticBuilder::error("missing entry point".into())
+            .with_code(7)
+            .with_primary_span(DUMMY_SP)
+            .with_note("checked package root".into())
+            .with_help("add fn main()".into())
+            .build();
+
+        let rendered = context.render_to_string(&diag);
+        assert!(
+            rendered.contains("error[E0007]: missing entry point"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("note: checked package root"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("help: add fn main()"), "{rendered}");
+
+        context.emit(diag);
+        assert_eq!(context.error_count(), 1);
+
+        // Also test None primary_span + empty labels on non-empty SourceMap starting at BytePos(1).
+        let bare = DiagnosticBuilder::warning("standalone warning".into()).build();
+        let bare_rendered = context.render_to_string(&bare);
+        assert!(
+            bare_rendered.contains("warning: standalone warning"),
+            "{bare_rendered}"
+        );
+        context.emit(bare);
+        assert_eq!(context.warning_count(), 1);
+    }
+
+    #[test]
+    fn dummy_secondary_label_alongside_valid_primary_span_does_not_underflow() {
+        use rustc_span::{BytePos, DUMMY_SP, FileName};
+
+        let map = SourceMap::new(FilePathMapping::empty());
+        let _ = map.new_source_file(FileName::Custom("pad".into()), " ".into());
+        let sf = map.new_source_file(FileName::Custom("a.fl".into()), "let x = 1;".into());
+        let primary = Span::new(sf.start_pos + BytePos(4), sf.start_pos + BytePos(5));
+
+        let context = DiagnosticContext::new(&map);
+        let diag = DiagnosticBuilder::error("invalid binding".into())
+            .with_primary_span(primary)
+            .with_error_label(primary, "bound here".into())
+            .with_note_label(DUMMY_SP, "synthetic context".into())
+            .build();
+
+        let rendered = context.render_to_string(&diag);
+        assert!(rendered.contains("a.fl"), "{rendered}");
+        assert!(rendered.contains("bound here"), "{rendered}");
+        assert!(rendered.contains("synthetic context"), "{rendered}");
+    }
+
+    #[test]
+    fn cross_file_secondary_labels_are_rendered() {
+        use rustc_span::{BytePos, FileName};
+
+        let map = SourceMap::new(FilePathMapping::empty());
+        let def_file = map.new_source_file(
+            FileName::Custom("defs.fl".into()),
+            "pub fn helper(a: bool) -> bool { a }".into(),
+        );
+        let use_file = map.new_source_file(
+            FileName::Custom("caller.fl".into()),
+            "fn main() { helper(1); }".into(),
+        );
+
+        let call_span = Span::new(
+            use_file.start_pos + BytePos(12),
+            use_file.start_pos + BytePos(21),
+        );
+        let def_span = Span::new(
+            def_file.start_pos + BytePos(7),
+            def_file.start_pos + BytePos(13),
+        );
+
+        let context = DiagnosticContext::new(&map);
+        let diag = DiagnosticBuilder::error("mismatched argument type".into())
+            .with_code(101)
+            .with_primary_span(call_span)
+            .with_error_label(call_span, "expected bool here".into())
+            .with_note_label(def_span, "helper defined in defs.fl".into())
+            .build();
+
+        let rendered = context.render_to_string(&diag);
+        assert!(rendered.contains("caller.fl"), "{rendered}");
+        assert!(rendered.contains("expected bool here"), "{rendered}");
+        assert!(rendered.contains("defs.fl"), "{rendered}");
+        assert!(rendered.contains("helper defined in defs.fl"), "{rendered}");
     }
 }

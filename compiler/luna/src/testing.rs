@@ -80,7 +80,20 @@ pub fn run_filtered(
     protocols: Option<&elaboration::program::Protocols>,
     filter: Option<&str>,
 ) -> Result<String, String> {
-    let report = run_report_filtered(package, identity, fuel, inline, protocols, filter)?;
+    run_filtered_with_jobs(package, identity, fuel, inline, protocols, filter, 1)
+}
+
+pub fn run_filtered_with_jobs(
+    package: &Package,
+    identity: u64,
+    fuel: u64,
+    inline: bool,
+    protocols: Option<&elaboration::program::Protocols>,
+    filter: Option<&str>,
+    jobs: usize,
+) -> Result<String, String> {
+    let report =
+        run_report_filtered_with_jobs(package, identity, fuel, inline, protocols, filter, jobs)?;
     if report.is_success() {
         Ok(report.to_string())
     } else {
@@ -132,6 +145,18 @@ pub fn run_report_filtered(
     protocols: Option<&elaboration::program::Protocols>,
     filter: Option<&str>,
 ) -> Result<TestReport, String> {
+    run_report_filtered_with_jobs(package, identity, fuel, inline, protocols, filter, 1)
+}
+
+pub fn run_report_filtered_with_jobs(
+    package: &Package,
+    identity: u64,
+    fuel: u64,
+    inline: bool,
+    protocols: Option<&elaboration::program::Protocols>,
+    filter: Option<&str>,
+    jobs: usize,
+) -> Result<TestReport, String> {
     if fuel == 0 {
         return Err("test fuel must be positive".into());
     }
@@ -177,104 +202,200 @@ pub fn run_report_filtered(
             std::collections::BTreeMap::new(),
         )
     };
-    let mut pending_adapted = Some(adapted_package);
-    let mut checked = None;
-    let mut reference = None;
-    for (function, label) in selected_functions {
-        let Some(kind) = classify_test_return(function) else {
+    let run_one_checked = |session: &Result<crate::execution::CheckedSession, String>,
+                           function: &nir::program::Function,
+                           kind: TestReturnKind|
+     -> Option<String> {
+        match (session, kind) {
+            (Ok(session), TestReturnKind::Void) => {
+                match session.invoke(function.declaration, &function.name) {
+                    Ok(comptime_interpretor::Value::Unit) => None,
+                    Ok(_) => Some("test must return void or !E void".into()),
+                    Err(error) => Some(error),
+                }
+            }
+            (Ok(session), TestReturnKind::ErrorResultVoid) => {
+                let (adapter, error_descriptions) = &error_adapters[&function.declaration];
+                match session.invoke(*adapter, &function.name) {
+                    Ok(comptime_interpretor::Value::UnsignedInteger(0)) => None,
+                    Ok(comptime_interpretor::Value::UnsignedInteger(tag)) => {
+                        let branch = usize::try_from(tag)
+                            .ok()
+                            .and_then(|value| value.checked_sub(1))
+                            .and_then(|index| {
+                                error_descriptions
+                                    .get(index)
+                                    .map(|desc| (index, desc.as_str()))
+                            });
+                        match branch {
+                            Some((index, desc)) => Some(format!(
+                                "test returned error (branch (error {index})) {desc}"
+                            )),
+                            None => Some(format!("unexpected error test tag: {tag}")),
+                        }
+                    }
+                    Ok(other) => Some(format!("unexpected error test adapter result: {other}")),
+                    Err(error) => Some(error),
+                }
+            }
+            (Err(error), _) => Some(error.clone()),
+        }
+    };
+    let run_one_reference = |session: &Result<crate::execution::ReferenceSession, String>,
+                             function: &nir::program::Function,
+                             kind: TestReturnKind|
+     -> Option<String> {
+        let result = match session {
+            Ok(session) => session.invoke(function.declaration, &function.name),
+            Err(error) => Err(error.clone()),
+        };
+        match (result, kind) {
+            (Ok(comptime_interpretor::Value::Unit), TestReturnKind::Void) => None,
+            (
+                Ok(comptime_interpretor::Value::ErrorResult {
+                    error: None, value, ..
+                }),
+                TestReturnKind::ErrorResultVoid,
+            ) if *value == comptime_interpretor::Value::Unit => None,
+            (
+                Ok(comptime_interpretor::Value::ErrorResult {
+                    ty,
+                    error: Some(index),
+                    value,
+                }),
+                TestReturnKind::ErrorResultVoid,
+            ) => {
+                let desc = crate::host::describe_error_branch(package, &ty, index);
+                Some(format!(
+                    "test returned error (branch (error {index})) {desc} (value {value})"
+                ))
+            }
+            (Ok(_), _) => Some("test must return void or !E void".into()),
+            (Err(error), _) => Some(error),
+        }
+    };
+
+    let worker_count = jobs.max(1).min(selected_functions.len().max(1));
+    if worker_count <= 1 || selected_functions.len() <= 1 {
+        let mut pending_adapted = Some(adapted_package);
+        let mut checked = None;
+        let mut reference = None;
+        for (function, label) in selected_functions {
+            let Some(kind) = classify_test_return(function) else {
+                report.results.push(TestResult {
+                    declaration: function.declaration,
+                    name: label.to_owned(),
+                    failure: Some("test must return void or !E void".into()),
+                });
+                continue;
+            };
+            let failure = if let Some((copy, drop)) = selected {
+                let session = checked.get_or_insert_with(|| {
+                    let input = pending_adapted
+                        .take()
+                        .expect("adapted test package available for checked session");
+                    crate::execution::CheckedSession::new(
+                        input,
+                        crate::resources::Selection::Identity(copy),
+                        crate::resources::Selection::Identity(drop),
+                        fuel,
+                        inline,
+                    )
+                });
+                run_one_checked(session, function, kind)
+            } else {
+                let session = reference.get_or_insert_with(|| {
+                    crate::execution::ReferenceSession::new(
+                        std::borrow::Cow::Borrowed(package),
+                        fuel,
+                    )
+                });
+                run_one_reference(session, function, kind)
+            };
             report.results.push(TestResult {
                 declaration: function.declaration,
                 name: label.to_owned(),
-                failure: Some("test must return void or !E void".into()),
+                failure,
             });
-            continue;
-        };
-        let failure = if let Some((copy, drop)) = selected {
-            let session = checked.get_or_insert_with(|| {
-                let input = pending_adapted
-                    .take()
-                    .expect("adapted test package available for checked session");
-                crate::execution::CheckedSession::new(
-                    input,
-                    crate::resources::Selection::Identity(copy),
-                    crate::resources::Selection::Identity(drop),
-                    fuel,
-                    inline,
-                )
-            });
-            match (session, kind) {
-                (Ok(session), TestReturnKind::Void) => {
-                    match session.invoke(function.declaration, &function.name) {
-                        Ok(comptime_interpretor::Value::Unit) => None,
-                        Ok(_) => Some("test must return void or !E void".into()),
-                        Err(error) => Some(error),
-                    }
-                }
-                (Ok(session), TestReturnKind::ErrorResultVoid) => {
-                    let (adapter, error_descriptions) = &error_adapters[&function.declaration];
-                    match session.invoke(*adapter, &function.name) {
-                        Ok(comptime_interpretor::Value::UnsignedInteger(0)) => None,
-                        Ok(comptime_interpretor::Value::UnsignedInteger(tag)) => {
-                            let branch = usize::try_from(tag)
-                                .ok()
-                                .and_then(|value| value.checked_sub(1))
-                                .and_then(|index| {
-                                    error_descriptions
-                                        .get(index)
-                                        .map(|desc| (index, desc.as_str()))
-                                });
-                            match branch {
-                                Some((index, desc)) => Some(format!(
-                                    "test returned error (branch (error {index})) {desc}"
-                                )),
-                                None => Some(format!("unexpected error test tag: {tag}")),
-                            }
-                        }
-                        Ok(other) => Some(format!("unexpected error test adapter result: {other}")),
-                        Err(error) => Some(error),
-                    }
-                }
-                (Err(error), _) => Some(error.clone()),
-            }
-        } else {
-            let session = reference.get_or_insert_with(|| {
-                crate::execution::ReferenceSession::new(std::borrow::Cow::Borrowed(package), fuel)
-            });
-            let result = match session {
-                Ok(session) => session.invoke(function.declaration, &function.name),
-                Err(error) => Err(error.clone()),
-            };
-            match (result, kind) {
-                (Ok(comptime_interpretor::Value::Unit), TestReturnKind::Void) => None,
-                (
-                    Ok(comptime_interpretor::Value::ErrorResult {
-                        error: None, value, ..
-                    }),
-                    TestReturnKind::ErrorResultVoid,
-                ) if *value == comptime_interpretor::Value::Unit => None,
-                (
-                    Ok(comptime_interpretor::Value::ErrorResult {
-                        ty,
-                        error: Some(index),
-                        value,
-                    }),
-                    TestReturnKind::ErrorResultVoid,
-                ) => {
-                    let desc = crate::host::describe_error_branch(package, &ty, index);
-                    Some(format!(
-                        "test returned error (branch (error {index})) {desc} (value {value})"
-                    ))
-                }
-                (Ok(_), _) => Some("test must return void or !E void".into()),
-                (Err(error), _) => Some(error),
-            }
-        };
-        report.results.push(TestResult {
-            declaration: function.declaration,
-            name: label.to_owned(),
-            failure,
-        });
+        }
+        return Ok(report);
     }
+
+    let next_index = std::sync::atomic::AtomicUsize::new(0);
+    let adapted_ref = adapted_package.as_ref();
+    let selected_ref = &selected_functions;
+    let run_one_checked_ref = &run_one_checked;
+    let run_one_reference_ref = &run_one_reference;
+    let mut worker_results: Vec<Vec<(usize, TestResult)>> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let next_index = &next_index;
+            let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+            let handle = builder
+                .spawn_scoped(scope, move || {
+                    let mut local_checked = None;
+                    let mut local_reference = None;
+                    let mut local_out = Vec::new();
+                    loop {
+                        let idx = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= selected_ref.len() {
+                            break;
+                        }
+                        let (function, label) = selected_ref[idx];
+                        let Some(kind) = classify_test_return(function) else {
+                            local_out.push((
+                                idx,
+                                TestResult {
+                                    declaration: function.declaration,
+                                    name: label.to_owned(),
+                                    failure: Some("test must return void or !E void".into()),
+                                },
+                            ));
+                            continue;
+                        };
+                        let failure = if let Some((copy, drop)) = selected {
+                            let session = local_checked.get_or_insert_with(|| {
+                                crate::execution::CheckedSession::new(
+                                    std::borrow::Cow::Borrowed(adapted_ref),
+                                    crate::resources::Selection::Identity(copy),
+                                    crate::resources::Selection::Identity(drop),
+                                    fuel,
+                                    inline,
+                                )
+                            });
+                            run_one_checked_ref(session, function, kind)
+                        } else {
+                            let session = local_reference.get_or_insert_with(|| {
+                                crate::execution::ReferenceSession::new(
+                                    std::borrow::Cow::Borrowed(package),
+                                    fuel,
+                                )
+                            });
+                            run_one_reference_ref(session, function, kind)
+                        };
+                        local_out.push((
+                            idx,
+                            TestResult {
+                                declaration: function.declaration,
+                                name: label.to_owned(),
+                                failure,
+                            },
+                        ));
+                    }
+                    local_out
+                })
+                .expect("failed to spawn test worker thread");
+            handles.push(handle);
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("test worker thread panicked"))
+            .collect()
+    });
+
+    let mut ordered: Vec<(usize, TestResult)> = worker_results.drain(..).flatten().collect();
+    ordered.sort_by_key(|(idx, _)| *idx);
+    report.results = ordered.into_iter().map(|(_, r)| r).collect();
     Ok(report)
 }
 
@@ -407,6 +528,23 @@ pub fn run_native_report_filtered_with_inlining(
     timeout: std::time::Duration,
     inline: bool,
 ) -> Result<TestReport, String> {
+    run_native_report_filtered_with_inlining_and_jobs(
+        package, identity, fuel, protocols, filter, toolchain, timeout, inline, 1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_native_report_filtered_with_inlining_and_jobs(
+    package: &Package,
+    identity: u64,
+    fuel: u64,
+    protocols: Option<&elaboration::program::Protocols>,
+    filter: Option<&str>,
+    toolchain: &crate::host::Toolchain,
+    timeout: std::time::Duration,
+    inline: bool,
+    jobs: usize,
+) -> Result<TestReport, String> {
     if fuel == 0 {
         return Err("test fuel must be positive".into());
     }
@@ -416,7 +554,6 @@ pub fn run_native_report_filtered_with_inlining(
     if inline && protocols.is_none() {
         return Err("inline native tests require Copy and Drop bindings".into());
     }
-    let mut expanded = None;
     let selected = protocols
         .map(|protocols| {
             Ok::<_, String>((
@@ -426,20 +563,32 @@ pub fn run_native_report_filtered_with_inlining(
         })
         .transpose()?;
     let mut report = TestReport::default();
+    let mut selected_functions = Vec::new();
     for function in test_functions(package, identity)? {
         let label = test_label(function);
         if filter.is_some_and(|filter| !label.contains(filter)) {
             report.filtered_out += 1;
             continue;
         }
+        selected_functions.push((function, label));
+    }
+
+    let expanded = if inline
+        && selected_functions
+            .iter()
+            .any(|(function, _)| classify_test_return(function).is_some())
+    {
+        Some(crate::host::inline_package(package, fuel))
+    } else {
+        None
+    };
+
+    let run_one = |function: &nir::program::Function, label: &str| -> TestResult {
         let result = if classify_test_return(function).is_some() {
-            let input = if inline {
-                expanded
-                    .get_or_insert_with(|| crate::host::inline_package(package, fuel))
-                    .as_ref()
-                    .map_err(Clone::clone)
-            } else {
-                Ok(package)
+            let input = match &expanded {
+                Some(Ok(pkg)) => Ok(pkg),
+                Some(Err(err)) => Err(err.clone()),
+                None => Ok(package),
             };
             input
                 .and_then(|input| {
@@ -454,11 +603,26 @@ pub fn run_native_report_filtered_with_inlining(
         } else {
             Err("test must return void or !E void".into())
         };
-        report.results.push(TestResult {
+        TestResult {
             declaration: function.declaration,
             name: label.into(),
             failure: result.err(),
-        });
+        }
+    };
+
+    let worker_count = jobs.max(1).min(selected_functions.len().max(1));
+    if worker_count <= 1 || selected_functions.len() <= 1 {
+        for (function, label) in selected_functions {
+            report.results.push(run_one(function, label));
+        }
+        return Ok(report);
     }
+
+    let results = crate::package_cache::parallel_map_ordered(
+        &selected_functions,
+        worker_count,
+        |&(function, label)| Ok::<_, String>(run_one(function, label)),
+    )?;
+    report.results = results;
     Ok(report)
 }

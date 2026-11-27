@@ -522,7 +522,9 @@ fn compile_bound_for_target_with_invocation(
             .push((id, Arc::new(ast.clone()), scope));
     }
     instance.set_hir_input(Arc::new(hir_input));
-    let package = instance.enter(|compiler| compiler.hir_package());
+    let package = instance
+        .enter(|compiler| compiler.try_hir_package())
+        .map_err(|err| format!("HIR lowering query failed: {err}"))?;
     if instance.diag_ctx.has_errors() {
         return Err(instance.diag_ctx.failure_summary("HIR lowering"));
     }
@@ -849,17 +851,9 @@ fn compile_sysroot_internal(
         options.emit,
         Emit::Nir | Emit::Attributes | Emit::MergedAttributes
     );
-    let defaults = if needs_sysroot_bindings || root.join("language-items.conf").is_file() {
-        if needs_sysroot_bindings {
-            crate::packages::protect_source_output(
-                &root.join("language-items.conf"),
-                options.output.as_deref(),
-            )?;
-        }
-        crate::protocols::type_constructors::SysrootBindings::load(root)?
-    } else {
-        Default::default()
-    };
+    let config_path = root.join("language-items.conf");
+    crate::packages::protect_source_output(&config_path, options.output.as_deref())?;
+    let defaults = crate::protocols::type_constructors::SysrootBindings::load(root)?;
     let host_intrinsics = defaults.merged_host_intrinsics(selectors, protocols);
     let comptime_intrinsics = defaults.merged_comptime_intrinsics(selectors, protocols);
     let full_selectors = defaults.apply(
@@ -880,7 +874,7 @@ fn compile_sysroot_internal(
         .filter(|package| package.name != "std")
         .map(|package| package.resolution_id)
         .collect();
-    let config_files = [root.join("language-items.conf")];
+    let config_files = [config_path];
     crate::packages::compile_observed_with_preludes_and_macro_selectors_and_incremental(
         &packages,
         &dependencies,

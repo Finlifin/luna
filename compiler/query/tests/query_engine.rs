@@ -5,10 +5,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use query::{
-    CacheState, QueryCache, QueryDesc, QueryEngine, QueryResult, force_get_with, try_get_with,
+    CacheState, QueryCache, QueryDesc, QueryEngine, QueryFailure, force_get_with, try_get_with,
 };
 
 const A: QueryDesc = QueryDesc::new("query_a");
+
 const B: QueryDesc = QueryDesc::new("query_b");
 
 #[test]
@@ -27,7 +28,8 @@ fn memoises_compute() {
             hits.set(hits.get() + 1);
             42
         },
-    );
+    )
+    .unwrap();
     let r2 = force_get_with(
         &engine,
         &cache,
@@ -38,7 +40,8 @@ fn memoises_compute() {
             hits.set(hits.get() + 1);
             42
         },
-    );
+    )
+    .unwrap();
     assert_eq!(r1, 42);
     assert_eq!(r2, 42);
     assert_eq!(hits.get(), 1);
@@ -65,7 +68,7 @@ fn detects_cycle() {
                 "b",
                 |k| (*k).to_string(),
                 || match try_get_with(&engine, &cache_a, A, "a", |k| (*k).to_string(), || 0) {
-                    QueryResult::Cycle(err) => {
+                    Err(QueryFailure::Cycle(err)) => {
                         cycle_frames.set(Some(
                             err.frames.iter().map(|f| f.desc.name).collect::<Vec<_>>(),
                         ));
@@ -75,17 +78,51 @@ fn detects_cycle() {
                 },
             );
             match inner {
-                QueryResult::Ok(v) => v,
+                Ok(v) => v,
                 other => panic!("expected Ok from b, got {other:?}"),
             }
         },
     );
 
-    assert!(matches!(result, QueryResult::Ok(0)));
+    assert!(matches!(result, Ok(0)));
     assert_eq!(
         cycle_frames.take().as_deref(),
         Some(["query_a", "query_b", "query_a"].as_slice())
     );
+
+    // Direct cycle through force_get_with / engine.get returns Err(QueryFailure::Cycle) without panicking.
+    let direct_cycle = engine.get(
+        &cache_a,
+        A,
+        "reenter",
+        |k| (*k).to_string(),
+        || {
+            force_get_with(&engine, &cache_a, A, "reenter", |k| (*k).to_string(), || 1)
+                .unwrap_or(-1)
+        },
+    );
+    assert_eq!(direct_cycle, Ok(-1));
+    let mut inner_err = None;
+    let propagated = try_get_with(
+        &engine,
+        &cache_a,
+        A,
+        "propagate",
+        |k| (*k).to_string(),
+        || {
+            inner_err = Some(try_get_with(
+                &engine,
+                &cache_a,
+                A,
+                "propagate",
+                |k| (*k).to_string(),
+                || 1,
+            ));
+            -2
+        },
+    );
+    assert_eq!(propagated, Ok(-2));
+    assert!(matches!(inner_err, Some(Err(QueryFailure::Cycle(_)))));
 }
 
 #[test]
@@ -94,7 +131,7 @@ fn poison_on_panic() {
     let cache = QueryCache::<u32, u32>::new();
 
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        force_get_with(
+        let _ = force_get_with(
             &engine,
             &cache,
             A,
@@ -113,9 +150,13 @@ fn poison_on_panic() {
     }
 
     match try_get_with(&engine, &cache, A, 7, |k| k.to_string(), || 1) {
-        QueryResult::Poisoned => {}
+        Err(QueryFailure::Poisoned { query: "query_a" }) => {}
         other => panic!("expected Poisoned result, got {other:?}"),
     }
+    assert!(matches!(
+        force_get_with(&engine, &cache, A, 7, |k| k.to_string(), || 1),
+        Err(QueryFailure::Poisoned { query: "query_a" })
+    ));
 }
 
 #[test]
@@ -135,7 +176,8 @@ fn different_keys_independent() {
             h.set(h.get() + 1);
             10
         },
-    );
+    )
+    .unwrap();
     let h = hits.clone();
     force_get_with(
         &engine,
@@ -147,10 +189,11 @@ fn different_keys_independent() {
             h.set(h.get() + 1);
             20
         },
-    );
+    )
+    .unwrap();
     assert_eq!(hits.get(), 2);
     assert_eq!(
-        force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || 99),
+        force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || 99).unwrap(),
         10
     );
 }
@@ -181,9 +224,11 @@ fn shared_engine_serializes_concurrent_requests_and_computes_once() {
                     || {
                         calls.fetch_add(1, Ordering::SeqCst);
                         // Reentrant evaluation must not deadlock on the engine gate.
-                        force_get_with(&engine, &cache, B, 2, |key| key.to_string(), || 41) + 1
+                        force_get_with(&engine, &cache, B, 2, |key| key.to_string(), || 41).unwrap()
+                            + 1
                     },
                 )
+                .unwrap()
             }));
         }
         for thread in threads {
@@ -202,14 +247,14 @@ fn shared_engine_releases_ownership_after_provider_panic() {
         assert!(
             scope
                 .spawn(|| {
-                    force_get_with(
+                    let _ = force_get_with(
                         &engine,
                         &cache,
                         A,
                         1,
                         |key| key.to_string(),
                         || -> u32 { panic!("provider panic") },
-                    )
+                    );
                 })
                 .join()
                 .is_err()
@@ -218,10 +263,10 @@ fn shared_engine_releases_ownership_after_provider_panic() {
             .spawn(|| {
                 assert!(matches!(
                     try_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 0),
-                    QueryResult::Poisoned
+                    Err(QueryFailure::Poisoned { .. })
                 ));
                 assert_eq!(
-                    force_get_with(&engine, &cache, A, 2, |key| key.to_string(), || 42),
+                    force_get_with(&engine, &cache, A, 2, |key| key.to_string(), || 42).unwrap(),
                     42
                 );
             })
@@ -240,7 +285,7 @@ fn start_hook_panic_poisoning_keeps_the_stack_balanced() {
     let cache = QueryCache::new();
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            force_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 42)
+            let _ = force_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 42);
         }))
         .is_err()
     );
@@ -264,7 +309,7 @@ fn start_hook_reentry_observes_claimed_slot_and_cycle_stack() {
             on_query_start: Arc::new(move |_| {
                 let engine = weak.upgrade().unwrap();
                 let result = try_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 0);
-                let QueryResult::Cycle(cycle) = result else {
+                let Err(QueryFailure::Cycle(cycle)) = result else {
                     panic!("expected hook reentry cycle")
                 };
                 assert_eq!(cycle.frames.len(), 2);
@@ -274,7 +319,7 @@ fn start_hook_reentry_observes_claimed_slot_and_cycle_stack() {
         })
     });
     assert_eq!(
-        force_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 42),
+        force_get_with(&engine, &cache, A, 1, |key| key.to_string(), || 42).unwrap(),
         42
     );
     assert!(observed.load(Ordering::SeqCst));
@@ -307,6 +352,7 @@ fn competing_query_waits_for_active_provider_instead_of_reporting_a_cycle() {
                     42
                 },
             )
+            .unwrap()
         });
         started.recv().unwrap();
         let consumer = scope.spawn(|| {
@@ -329,6 +375,6 @@ fn competing_query_waits_for_active_provider_instead_of_reporting_a_cycle() {
         assert_eq!(producer.join().unwrap(), 42);
         consumer.join().unwrap();
         assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
-        assert!(matches!(received.recv().unwrap(), QueryResult::Ok(42)));
+        assert!(matches!(received.recv().unwrap(), Ok(42)));
     });
 }

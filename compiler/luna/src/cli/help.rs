@@ -1,7 +1,7 @@
 //! Command-scoped help for the public CLI.
 pub const USAGE: &str = "Usage: luna <command> [options]\n       luna help [command]";
 
-pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  fmt         Format Flurry source files or check formatting\n  lsp         Serve editor requests over stdio (syntax and HIR)\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
+pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  fmt         Format Flurry source files or check formatting\n  lsp         Serve editor requests over stdio (syntax and HIR)\n  clean       Remove cached package artifacts\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
 
 const FRONTEND: &str = "
 Frontend options:
@@ -114,10 +114,13 @@ fn command_help(name: &str) -> Result<String, String> {
         "serve" => {
             "serve packages-v1 [--cache-entries <count>]\n  Read versioned package requests from stdin; write protocol responses to\n  stdout. The request wire format remains unchanged. Default cache size: 8."
         }
+        "clean" => {
+            "clean [--cache-dir <path>]\n  Remove cached .flpkg package snapshots from the cache directory\n  (defaults to LUNA_CACHE_DIR or the system cache directory)."
+        }
         _ => return Err(format!("unknown command '{name}'")),
     };
     let mut text = format!("Usage: luna {usage}\n");
-    if matches!(name, "serve" | "packages" | "analyze") {
+    if matches!(name, "serve" | "packages" | "analyze" | "clean") {
         return Ok(text);
     }
     if name != "check" {
@@ -170,7 +173,10 @@ pub fn help(path: &[&str]) -> Result<String, String> {
         }
         ["packages", rest @ ..]
             if !rest.is_empty()
-                && !matches!(rest[0], "packages" | "serve" | "bindings" | "fmt" | "lsp") =>
+                && !matches!(
+                    rest[0],
+                    "packages" | "serve" | "bindings" | "fmt" | "lsp" | "clean"
+                ) =>
         {
             let text = help(rest)?;
             Ok(format!("{}{PACKAGE_INPUTS}", text.replacen("Usage: luna ", "Usage: luna packages ", 1)

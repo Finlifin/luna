@@ -160,6 +160,7 @@ fn package_and_stream_commands_keep_versioned_input_contracts() {
         "analyze",
         "packages",
         "serve",
+        "clean",
     ] {
         let Command::HelpTopic(text) = parse(&[command, "--help"]).unwrap() else {
             panic!("missing help")
@@ -548,4 +549,127 @@ test failing { assumes false; }
     }
 
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clean_subcommand_removes_cached_flpkg_artifacts_and_validates_args() {
+    assert_eq!(
+        parse(&["clean"]).unwrap(),
+        Command::Clean { cache_dir: None }
+    );
+    assert_eq!(
+        parse(&["clean", "--cache-dir", "/tmp/x"]).unwrap(),
+        Command::Clean {
+            cache_dir: Some(std::path::PathBuf::from("/tmp/x"))
+        }
+    );
+    assert!(matches!(
+        parse(&["clean", "--help"]).unwrap(),
+        Command::HelpTopic(text) if text.contains("Usage: luna clean")
+    ));
+    assert!(parse(&["clean", "--unknown"]).is_err());
+    assert!(parse(&["clean", "extra"]).is_err());
+    assert!(parse(&["packages", "clean"]).is_err());
+
+    let directory = std::env::temp_dir().join(format!("luna-clean-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let cache_dir = directory.join("cache");
+    let cache = luna::package_cache::DiskPackageCache::new(cache_dir.clone());
+    let key = luna::package_cache::PackageSnapshotKey([0x42; 32]);
+    let stored = cache
+        .store(
+            &key,
+            luna::package_cache::ArtifactKind::ParsedPackage,
+            b"payload",
+        )
+        .unwrap()
+        .unwrap();
+    assert!(stored.is_file());
+
+    // Unrelated file outside v* cache subdirectories is never touched.
+    let unrelated = cache_dir.join("keep.txt");
+    std::fs::write(&unrelated, b"keep").unwrap();
+
+    let output = Process::new(env!("CARGO_BIN_EXE_luna"))
+        .arg("clean")
+        .arg("--cache-dir")
+        .arg(&cache_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("(clean "), "{stdout}");
+    assert!(stdout.contains("(removed-files 1)"), "{stdout}");
+    assert!(!stored.exists());
+    assert!(unrelated.is_file());
+
+    // Running clean a second time is idempotent.
+    let again = Process::new(env!("CARGO_BIN_EXE_luna"))
+        .arg("clean")
+        .arg("--cache-dir")
+        .arg(&cache_dir)
+        .output()
+        .unwrap();
+    assert!(again.status.success());
+    assert!(String::from_utf8_lossy(&again.stdout).contains("(removed-files 0)"));
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn parallel_test_execution_preserves_deterministic_order_for_reference_and_native() {
+    let directory =
+        std::env::temp_dir().join(format!("luna-parallel-tests-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("suite.fl");
+    primitive_bindings::write_fixture(
+        &input,
+        "test alpha { assumes true; }
+test beta { assumes true; }
+test gamma { assumes false; }
+test delta { assumes true; }
+",
+    )
+    .unwrap();
+
+    let luna = env!("CARGO_BIN_EXE_luna");
+    for engine in ["reference", "native"] {
+        let seq = Process::new(luna)
+            .args(["test", "--engine", engine, "-j", "1"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        let par = Process::new(luna)
+            .args(["test", "--engine", engine, "-j", "4"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert_eq!(seq.status.code(), Some(1));
+        assert_eq!(par.status.code(), Some(1));
+        assert_eq!(
+            seq.stderr, par.stderr,
+            "{engine} parallel test output must match sequential byte-for-byte"
+        );
+
+        let pass_seq = Process::new(luna)
+            .args(["test", "--engine", engine, "--filter", "alpha", "-j", "1"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        let pass_par = Process::new(luna)
+            .args(["test", "--engine", engine, "-j", "4", "--filter", "a"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(pass_seq.status.success());
+        assert_eq!(pass_par.status.code(), Some(1)); // gamma matches "a" and fails
+    }
+
+    let _ = std::fs::remove_dir_all(&directory);
 }

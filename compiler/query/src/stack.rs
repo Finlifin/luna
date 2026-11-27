@@ -16,7 +16,7 @@ impl QueryDesc {
 }
 
 /// One frame on the active query stack.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveQuery {
     pub desc: QueryDesc,
     /// Human-readable key (already formatted).

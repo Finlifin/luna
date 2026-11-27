@@ -535,7 +535,12 @@ impl Request {
                 .ok_or("comptime invocation requires NIR")?
                 .to_string()
         } else {
-            self.action.run(artifact, &bindings, identity)?
+            self.action.run_with_jobs(
+                artifact,
+                &bindings,
+                identity,
+                self.options.incremental.effective_jobs(),
+            )?
         };
         let result = if self.with_inputs && matches!(self.action, Action::EmitHost { .. }) {
             let kind = if matches!(self.action, Action::EmitHost { assembly: true, .. }) {
@@ -897,6 +902,21 @@ impl Action {
         bindings: &elaboration::program::Protocols,
         identity: u64,
     ) -> Result<String, String> {
+        self.run_with_jobs(
+            artifact,
+            bindings,
+            identity,
+            crate::package_cache::resolve_jobs(None),
+        )
+    }
+
+    pub fn run_with_jobs(
+        &self,
+        artifact: Artifact,
+        bindings: &elaboration::program::Protocols,
+        identity: u64,
+        jobs: usize,
+    ) -> Result<String, String> {
         if *self == Action::Compile {
             return Ok(artifact.to_string());
         }
@@ -979,7 +999,7 @@ impl Action {
                     optimization: optimization.unwrap_or_default(),
                     ..Default::default()
                 };
-                let report = crate::testing::run_native_report_filtered_with_inlining(
+                let report = crate::testing::run_native_report_filtered_with_inlining_and_jobs(
                     &package,
                     identity,
                     *fuel,
@@ -989,6 +1009,7 @@ impl Action {
                     &toolchain,
                     *timeout,
                     *inline,
+                    jobs,
                 )?;
                 if report.is_success() {
                     Ok(report.to_string())
@@ -1002,7 +1023,7 @@ impl Action {
                 inline,
                 protocols,
                 ..
-            } => crate::testing::run_filtered(
+            } => crate::testing::run_filtered_with_jobs(
                 &package,
                 identity,
                 *fuel,
@@ -1010,6 +1031,7 @@ impl Action {
                 (protocols.is_some() || bindings.copy.is_some() || bindings.drop.is_some())
                     .then_some(bindings),
                 filter.as_deref(),
+                jobs,
             ),
             Action::Invoke { entry, fuel, .. } => {
                 elaboration::verification::flow::validate_machine_operations(&package)
