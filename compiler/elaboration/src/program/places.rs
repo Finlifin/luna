@@ -78,6 +78,18 @@ impl Checker<'_, '_> {
             }
             return Ok(true);
         }
+        if let Some((element, len)) = self.array_element_and_len(ty) {
+            if len == 0 {
+                return Ok(true);
+            }
+            return self.readable_storage_input(
+                &element,
+                fuel,
+                depth + 1,
+                pointer && nested_pointers,
+                nested_pointers,
+            );
+        }
         if matches!(ty, Term::Function { .. } | Term::Primitive(P::Str)) {
             // Form a descriptor transfer without granting Copy or proving the
             // lifetime of the separate backing character region. Resource
