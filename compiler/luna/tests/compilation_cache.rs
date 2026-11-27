@@ -74,7 +74,9 @@ fn bind_build_libraries(files: &Files, request: &mut Request) {
             .into_iter()
             .map(|edge| (edge.requester, edge.alias, edge.provider)),
     );
+    request.builtin = Some(11);
     request.options.meta_list_type = Some("meta.List".into());
+    request.options.tuple_type = Some("builtin.types.tuple.Tuple".into());
     request.options.comptime_intrinsics = build_libraries::comptime_intrinsics();
 }
 
@@ -82,7 +84,7 @@ fn result(value: &luna::compilation_cache::CompilationOutcome) -> comptime_inter
     let Artifact::Nir(package) = &value.compilation.artifact else {
         panic!("expected NIR")
     };
-    luna::execution::interpret(package, "run", 100_000).unwrap()
+    luna::execution::interpret(package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap()
 }
 
 #[test]

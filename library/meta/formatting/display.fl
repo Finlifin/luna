@@ -1,3 +1,4 @@
+use bindings;
 use builtin.{Integer, Symbol, Type, bool, char, isize, str, u8, u16, u32, u64, u128, usize}
 use builtin.fmt.options.{
     FormatOptions,
@@ -151,8 +152,9 @@ comptime impl ComptimeDisplay for isize {
     comptime fn fmt(self, .format: str = "") -> str {
         let opts: FormatOptions = parse_int_options(format);
         let twos = comptime_isize_representation(self);
-        if self < 0 {
-            let inv = comptime_isize_representation(-(self + 1));
+        let value = bindings.from_isize(self);
+        if value < 0 {
+            let inv = comptime_isize_representation(bindings.to_isize(-(value + 1)));
             assumes inv < 340282366920938463463374607431768211455;
             format_signed_comptime(true, inv + 1, twos, opts)
         } else {

@@ -450,59 +450,13 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         "use builtin.bool; const size=(meta.List<bool>.concat([true], [false,true])).length(); comptime fn run()->bool {size == 3}",
     )
     .unwrap();
-    let library =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
-    let builtin = directory.join("builtin.fl");
-    std::fs::write(
-        &builtin,
-        concat!(
-            "mod primitives {\n",
-            include_str!("../../../library/builtin/primitives.fl"),
-            "\n} pub use primitives.*;\n",
-            include_str!("../../../library/builtin/numeric/comparison.fl"),
-            "\npub mod compiler {\n",
-            include_str!("../../../library/builtin/bindings.fl"),
-            "\n}\n",
-        ),
-    )
-    .unwrap();
+    let lib_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
-        .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
-        .args(["--builtin-impl-package", "2"])
-        .args(["--package", "2", "202", "meta"])
-        .arg(&library)
-        .args(["--package", "3", "303", "builtin"])
-        .arg(&builtin)
-        .args(["--dependency", "2", "builtin", "3"])
-        .args(["--dependency", "1", "builtin", "3"])
-        .args(["--package", "4", "404", "attrs"])
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
-        .args(["--dependency", "2", "attrs", "4"])
-        .args(["--dependency", "4", "builtin", "3"])
-        .args(["--dependency", "4", "meta", "2"])
-        .args(nir::intrinsics::Operation::scalar_math().flat_map(|op| {
-            [
-                "--comptime-intrinsic".to_owned(),
-                format!(
-                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
-                    op.name(),
-                    op.name()
-                ),
-            ]
-        }))
-        .args([
-            "--dependency",
-            "1",
-            "meta",
-            "2",
-            "--primary",
-            "1",
-            "--meta-list-type",
-            "meta.List",
-            "--invoke-comptime",
-            "run",
-        ])
+        .arg("--sysroot")
+        .arg(&lib_dir)
+        .args(["--build-target", "x86_64", "linux", "64"])
+        .args(["--invoke-comptime", "run"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();

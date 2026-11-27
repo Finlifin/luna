@@ -235,7 +235,14 @@ fn with_libraries(mut args: Vec<String>, builtin: &std::path::Path) -> Vec<Strin
             edge.provider.to_string(),
         ]);
     }
-    args.extend(["--meta-list-type".into(), "meta.List".into()]);
+    args.extend([
+        "--builtin".into(),
+        "11".into(),
+        "--meta-list-type".into(),
+        "meta.List".into(),
+        "--tuple-type".into(),
+        "builtin.types.tuple.Tuple".into(),
+    ]);
     for (operation, path) in comptime_intrinsics() {
         args.extend([
             "--comptime-intrinsic".into(),
@@ -332,10 +339,18 @@ impl SourceFixture {
             &packages,
             &dependencies,
             3,
-            None,
+            Some(11),
             &protocols,
             luna::protocols::type_constructors::Selectors {
+                clone: Some("builtin.protocols.resources.Clone"),
+                copy: Some("builtin.protocols.resources.Copy"),
+                drop: Some("builtin.protocols.resources.Drop"),
+                ordering: Some("builtin.numeric.comparison.Ord"),
+                equality: Some("builtin.numeric.comparison.Eq"),
+                comptime_ordering: Some("meta.numeric.ordering.ComptimeOrd"),
+                comptime_equality: Some("meta.numeric.equality.ComptimeEq"),
                 meta_list: Some("meta.List"),
+                tuple: Some("builtin.types.tuple.Tuple"),
                 comptime_intrinsics: &comptime_intrinsics,
                 ..Default::default()
             },
@@ -368,7 +383,7 @@ fn source_build_mode_preserves_definition_origin_aliases_and_constants() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
     let luna::frontend::Artifact::Nir(changed) = fixture
@@ -378,7 +393,7 @@ fn source_build_mode_preserves_definition_origin_aliases_and_constants() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&changed, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&changed, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(false)
     );
 }
@@ -410,7 +425,7 @@ fn source_build_mode_keeps_normal_shadowing_and_runtime_stage_checks() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
     let runtime = SourceFixture::new("fn run()->bool {build.mode matches .debug}", "");
@@ -431,7 +446,7 @@ fn inline_configuration_branch_uses_dependency_mode() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -631,7 +646,7 @@ fn target_values_preserve_origin_aliases_and_optional_feature_states() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -777,7 +792,7 @@ fn inline_target_branches_keep_dependency_configuration() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -1080,7 +1095,7 @@ fn template_defaults_keep_provider_context_and_instance_bodies_keep_consumer_con
             panic!("expected NIR")
         };
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
             comptime_interpretor::Value::Bool(true),
             "{category}"
         );
@@ -1105,7 +1120,7 @@ fn template_target_defaults_keep_source_configuration() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -1138,7 +1153,7 @@ fn quote_functions_and_generated_code_keep_provider_configuration() {
             panic!("expected NIR")
         };
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
             comptime_interpretor::Value::Bool(true)
         );
         let error = fixture.compile(&[(100, "debug")]).err().unwrap();
@@ -1165,7 +1180,7 @@ fn derived_members_keep_generator_source_configuration() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
     let mut missing = protocols;
@@ -1237,7 +1252,7 @@ fn source_package_metadata_uses_public_build_library_and_saved_origin() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -1260,7 +1275,8 @@ fn source_package_metadata_reports_unknown_alias_and_missing_input() {
         else {
             panic!("expected NIR")
         };
-        let error = luna::invocation::invoke(&package, "run", 100_000).unwrap_err();
+        let error = luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL)
+            .unwrap_err();
         assert!(
             error.to_string().contains("BuildMetadataUnavailable"),
             "{error}"
@@ -1308,7 +1324,7 @@ fn source_package_metadata_retains_dependency_enum_identity() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -1400,7 +1416,7 @@ fn forwarded_metadata_callable_keeps_the_defining_packages_aliases() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }
@@ -1430,7 +1446,7 @@ fn source_metadata_admission_rejects_bad_payload_and_recovers() {
     else {
         panic!("expected NIR")
     };
-    assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
+    assert!(luna::invocation::invoke(&package, "run", luna::cli::DEFAULT_COMPTIME_FUEL).is_err());
     let luna::frontend::Artifact::Nir(recovered) = fixture
         .compile_configured(&metadata_protocols(), None)
         .unwrap()
@@ -1438,7 +1454,7 @@ fn source_metadata_admission_rejects_bad_payload_and_recovers() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::invocation::invoke(&recovered, "run", 100_000).unwrap(),
+        luna::invocation::invoke(&recovered, "run", luna::cli::DEFAULT_COMPTIME_FUEL).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
 }

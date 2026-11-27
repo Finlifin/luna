@@ -85,10 +85,15 @@ fn sysroot_grants_all_six_packages_but_not_the_application() {
     for name in names {
         let directory = library.join(name);
         std::fs::create_dir(&directory).unwrap();
+        let prelude = if name == "builtin" {
+            "pub typealias bool=.bool'builtin;pub mod prelude {pub use .bool;}"
+        } else {
+            "pub mod prelude {}"
+        };
         std::fs::write(
             directory.join("lib.fl"),
             format!(
-                "pub typealias Object=.Object'builtin;pub mod prelude {{}}
+                "pub typealias Object=.Object'builtin;{prelude}
             impl Object {{pub comptime fn ready_{name}(self)->bool {{true}}}}"
             ),
         )
@@ -160,10 +165,14 @@ fn designated_builtin_package_can_implement_a_foreign_trait() {
     std::fs::create_dir(&root).unwrap();
     let api = root.join("api.fl");
     let implementation = root.join("implementation.fl");
-    std::fs::write(&api, "pub trait Marker {fn marker(self)->bool;}").unwrap();
+    std::fs::write(
+        &api,
+        "typealias bool=.bool'builtin;pub trait Marker {fn marker(self)->bool;}",
+    )
+    .unwrap();
     std::fs::write(
         &implementation,
-        "pub mod prelude {} typealias Byte=.u8'builtin;use api.Marker;
+        "pub mod prelude {} typealias bool=.bool'builtin;typealias Byte=.u8'builtin;use api.Marker;
         impl Marker for Byte {fn marker(self)->bool {true}}
         fn run(value:Byte)->bool {value.as(Marker).marker()}",
     )
@@ -203,7 +212,7 @@ fn package_cli_grants_are_explicit_validated_and_part_of_request_identity() {
     let path = std::env::temp_dir().join(format!("luna-impl-provider-{}.fl", std::process::id()));
     std::fs::write(
         &path,
-        "typealias Object=.Object'builtin;impl Object {pub comptime fn ready(self)->bool {true}}
+        "typealias bool=.bool'builtin;typealias Object=.Object'builtin;impl Object {pub comptime fn ready(self)->bool {true}}
         comptime fn run()->bool {let value:Object={};value.ready()}",
     )
     .unwrap();

@@ -56,11 +56,11 @@ impl TargetCfg {
     }
 
     pub pure comptime fn is_64_bit(self) -> bool {
-        self.pointer_bits == 64
+        self.pointer_bits == bindings.to_usize(64)
     }
 
     pub pure comptime fn is_32_bit(self) -> bool {
-        self.pointer_bits == 32
+        self.pointer_bits == bindings.to_usize(32)
     }
 }
 
@@ -87,9 +87,8 @@ impl IIR {
 {- Observe current target pointer width via usize layout without requiring --build-target metadata. -}
 pub pure comptime fn cfg() -> TargetCfg {
     let pointer_bytes = Type.size_of(usize);
-    assumes pointer_bytes <= 16;
     TargetCfg {
-        pointer_bits: pointer_bytes * 8,
+        pointer_bits: bindings.to_usize(bindings.from_usize(pointer_bytes) * 8),
         pointer_bytes: pointer_bytes,
     }
 }
@@ -101,12 +100,12 @@ pub comptime fn err(message: str) -> NoReturn {
 
 {- Emit a non-fatal compiler warning during comptime evaluation. -}
 pub comptime fn warn(message: str) -> void {
-    bindings.emit_diagnostic_raw(1, message, "", 0, 0);
+    bindings.emit_diagnostic_raw(1, message, "", bindings.to_usize(0), bindings.to_usize(0));
 }
 
 {- Emit a compiler note diagnostic during comptime evaluation. -}
 pub comptime fn note(message: str) -> void {
-    bindings.emit_diagnostic_raw(2, message, "", 0, 0);
+    bindings.emit_diagnostic_raw(2, message, "", bindings.to_usize(0), bindings.to_usize(0));
 }
 
 {- Emit a structured diagnostic through the compiler diagnostic sink. -}

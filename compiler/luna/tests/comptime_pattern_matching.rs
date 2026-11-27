@@ -37,34 +37,277 @@ fn library_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library")
 }
 
-type IntrinsicBindingVec = Vec<(nir::intrinsics::Operation, String)>;
+#[derive(Default)]
+struct LoadedLanguageItems {
+    comptime_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
+    host_intrinsics: Vec<(nir::intrinsics::Operation, String)>,
+    clone: Option<String>,
+    copy: Option<String>,
+    default_trait: Option<String>,
+    drop: Option<String>,
+    index: Option<String>,
+    index_mut: Option<String>,
+    space_apply: Option<String>,
+    comptime_index: Option<String>,
+    ordering: Option<String>,
+    equality: Option<String>,
+    comptime_ordering: Option<String>,
+    comptime_equality: Option<String>,
+    list_pattern: Option<String>,
+    comptime_list_pattern: Option<String>,
+    stable_list_pattern: Option<String>,
+    list_pattern_endless: Option<String>,
+    stable_list_pattern_endless: Option<String>,
+    range_full: Option<String>,
+    range_from: Option<String>,
+    range_to: Option<String>,
+    range_to_inclusive: Option<String>,
+    range: Option<String>,
+    range_inclusive: Option<String>,
+    range_end: Option<String>,
+    range_pattern: Option<String>,
+    stable_range_pattern: Option<String>,
+    concat: Option<String>,
+    comptime_concat: Option<String>,
+    concat_pattern: Option<String>,
+    stable_concat_pattern: Option<String>,
+    map_pattern: Option<String>,
+    stable_map_pattern: Option<String>,
+    struct_pattern: Option<String>,
+    stable_struct_pattern: Option<String>,
+    type_pattern: Option<String>,
+    iterator: Option<String>,
+    into_iterator: Option<String>,
+    variadic_collector: Option<String>,
+    try_variadic_collector: Option<String>,
+    extended_variadic_collector: Option<String>,
+    literal_into: Option<String>,
+    implies: Option<String>,
+    comptime_implies: Option<String>,
+    handle_error: Option<String>,
+    deref: Option<String>,
+    deref_mut: Option<String>,
+    reference: Option<String>,
+    implicit_passing: Option<String>,
+    call_context: Option<String>,
+    call_description: Option<String>,
+    source_span: Option<String>,
+    arithmetic: [Option<String>; 7],
+    compound_arithmetic: [Option<String>; 5],
+    comptime_compound_arithmetic: [Option<String>; 5],
+    comptime_arithmetic: [Option<String>; 7],
+    splice: Option<String>,
+    meta_list: Option<String>,
+    tuple: Option<String>,
+    array: Option<String>,
+    maybe_uninit_storage: Option<String>,
+    manually_drop_storage: Option<String>,
+}
 
-fn load_intrinsic_selectors() -> (IntrinsicBindingVec, IntrinsicBindingVec) {
-    let conf = fs::read_to_string(library_dir().join("language-items.conf"))
-        .expect("read language-items.conf");
-    let mut comptime = Vec::new();
-    let mut host = Vec::new();
-    for line in conf.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value.trim().to_string();
-        if let Some(name) = key.strip_prefix("comptime-intrinsic.") {
-            if !value.starts_with("std.")
-                && let Some(op) = nir::intrinsics::Operation::from_name(name)
-            {
-                comptime.push((op, value));
+impl LoadedLanguageItems {
+    fn load() -> Self {
+        let conf = fs::read_to_string(library_dir().join("language-items.conf"))
+            .expect("read language-items.conf");
+        let mut items = Self::default();
+        for line in conf.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim().to_string();
+            if key == "version" {
+                continue;
             }
-        } else if let Some(name) = key.strip_prefix("host-intrinsic.")
-            && !value.starts_with("std.")
-            && let Some(op) = nir::intrinsics::Operation::from_name(name)
-        {
-            host.push((op, value));
+            if let Some(name) = key.strip_prefix("comptime-intrinsic.") {
+                if !value.starts_with("std.")
+                    && let Some(op) = nir::intrinsics::Operation::from_name(name)
+                {
+                    items.comptime_intrinsics.push((op, value));
+                }
+                continue;
+            }
+            if let Some(name) = key.strip_prefix("host-intrinsic.") {
+                if !value.starts_with("std.")
+                    && let Some(op) = nir::intrinsics::Operation::from_name(name)
+                {
+                    items.host_intrinsics.push((op, value));
+                }
+                continue;
+            }
+            let target = match key {
+                "clone-protocol" => &mut items.clone,
+                "copy-protocol" => &mut items.copy,
+                "default-protocol" => &mut items.default_trait,
+                "drop-protocol" => &mut items.drop,
+                "index-protocol" => &mut items.index,
+                "index-mut-protocol" => &mut items.index_mut,
+                "space-apply-protocol" => &mut items.space_apply,
+                "comptime-index-protocol" => &mut items.comptime_index,
+                "ord-protocol" => &mut items.ordering,
+                "eq-protocol" => &mut items.equality,
+                "comptime-ord-protocol" => &mut items.comptime_ordering,
+                "comptime-eq-protocol" => &mut items.comptime_equality,
+                "list-pattern-protocol" => &mut items.list_pattern,
+                "comptime-list-pattern-protocol" => &mut items.comptime_list_pattern,
+                "stable-list-pattern-protocol" => &mut items.stable_list_pattern,
+                "list-pattern-endless-protocol" => &mut items.list_pattern_endless,
+                "stable-list-pattern-endless-protocol" => &mut items.stable_list_pattern_endless,
+                "range-full-type" => &mut items.range_full,
+                "range-from-type" => &mut items.range_from,
+                "range-to-type" => &mut items.range_to,
+                "range-to-inclusive-type" => &mut items.range_to_inclusive,
+                "range-type" => &mut items.range,
+                "range-inclusive-type" => &mut items.range_inclusive,
+                "range-end-type" => &mut items.range_end,
+                "range-pattern-protocol" => &mut items.range_pattern,
+                "stable-range-pattern-protocol" => &mut items.stable_range_pattern,
+                "concat-protocol" => &mut items.concat,
+                "comptime-concat-protocol" => &mut items.comptime_concat,
+                "concat-pattern-protocol" => &mut items.concat_pattern,
+                "stable-concat-pattern-protocol" => &mut items.stable_concat_pattern,
+                "map-pattern-protocol" => &mut items.map_pattern,
+                "stable-map-pattern-protocol" => &mut items.stable_map_pattern,
+                "struct-pattern-protocol" => &mut items.struct_pattern,
+                "stable-struct-pattern-protocol" => &mut items.stable_struct_pattern,
+                "type-pattern-protocol" => &mut items.type_pattern,
+                "iterator-protocol" => &mut items.iterator,
+                "into-iterator-protocol" => &mut items.into_iterator,
+                "variadic-collector-protocol" => &mut items.variadic_collector,
+                "try-variadic-collector-protocol" => &mut items.try_variadic_collector,
+                "extended-variadic-collector-protocol" => &mut items.extended_variadic_collector,
+                "literal-into-protocol" => &mut items.literal_into,
+                "implies-protocol" => &mut items.implies,
+                "comptime-implies-protocol" => &mut items.comptime_implies,
+                "handle-error-protocol" => &mut items.handle_error,
+                "deref-protocol" => &mut items.deref,
+                "deref-mut-protocol" => &mut items.deref_mut,
+                "reference-protocol" => &mut items.reference,
+                "implicit-passing-protocol" => &mut items.implicit_passing,
+                "call-context-type" => &mut items.call_context,
+                "call-description-type" => &mut items.call_description,
+                "source-span-type" => &mut items.source_span,
+                "add-protocol" => &mut items.arithmetic[0],
+                "sub-protocol" => &mut items.arithmetic[1],
+                "mul-protocol" => &mut items.arithmetic[2],
+                "div-protocol" => &mut items.arithmetic[3],
+                "rem-protocol" => &mut items.arithmetic[4],
+                "neg-protocol" => &mut items.arithmetic[5],
+                "not-protocol" => &mut items.arithmetic[6],
+                "add-assign-protocol" => &mut items.compound_arithmetic[0],
+                "sub-assign-protocol" => &mut items.compound_arithmetic[1],
+                "mul-assign-protocol" => &mut items.compound_arithmetic[2],
+                "div-assign-protocol" => &mut items.compound_arithmetic[3],
+                "rem-assign-protocol" => &mut items.compound_arithmetic[4],
+                "comptime-add-assign-protocol" => &mut items.comptime_compound_arithmetic[0],
+                "comptime-sub-assign-protocol" => &mut items.comptime_compound_arithmetic[1],
+                "comptime-mul-assign-protocol" => &mut items.comptime_compound_arithmetic[2],
+                "comptime-div-assign-protocol" => &mut items.comptime_compound_arithmetic[3],
+                "comptime-rem-assign-protocol" => &mut items.comptime_compound_arithmetic[4],
+                "comptime-add-protocol" => &mut items.comptime_arithmetic[0],
+                "comptime-sub-protocol" => &mut items.comptime_arithmetic[1],
+                "comptime-mul-protocol" => &mut items.comptime_arithmetic[2],
+                "comptime-div-protocol" => &mut items.comptime_arithmetic[3],
+                "comptime-rem-protocol" => &mut items.comptime_arithmetic[4],
+                "comptime-neg-protocol" => &mut items.comptime_arithmetic[5],
+                "comptime-not-protocol" => &mut items.comptime_arithmetic[6],
+                "splice-protocol" => &mut items.splice,
+                "meta-list-type" => &mut items.meta_list,
+                "tuple-type" => &mut items.tuple,
+                "array-type" => &mut items.array,
+                "maybe-uninit-storage-type" => &mut items.maybe_uninit_storage,
+                "manually-drop-storage-type" => &mut items.manually_drop_storage,
+                other => panic!("unrecognized key in language-items.conf: {other}"),
+            };
+            *target = Some(value);
+        }
+        items
+    }
+
+    fn selectors(
+        &self,
+        comptime_comparison: bool,
+    ) -> luna::protocols::type_constructors::Selectors<'_> {
+        luna::protocols::type_constructors::Selectors {
+            dispatch_fuel: None,
+            host_fma: None,
+            host_sqrt: None,
+            host_copysign: None,
+            comptime_intrinsics: &self.comptime_intrinsics,
+            host_intrinsics: &self.host_intrinsics,
+            clone: self.clone.as_deref(),
+            copy: self.copy.as_deref(),
+            default_trait: self.default_trait.as_deref(),
+            drop: self.drop.as_deref(),
+            index: self.index.as_deref(),
+            index_mut: self.index_mut.as_deref(),
+            space_apply: self.space_apply.as_deref(),
+            comptime_index: self.comptime_index.as_deref(),
+            ordering: if comptime_comparison {
+                self.comptime_ordering.as_deref()
+            } else {
+                self.ordering.as_deref()
+            },
+            equality: if comptime_comparison {
+                self.comptime_equality.as_deref()
+            } else {
+                self.equality.as_deref()
+            },
+            comptime_ordering: self.comptime_ordering.as_deref(),
+            comptime_equality: self.comptime_equality.as_deref(),
+            list_pattern: self.list_pattern.as_deref(),
+            comptime_list_pattern: self.comptime_list_pattern.as_deref(),
+            stable_list_pattern: self.stable_list_pattern.as_deref(),
+            list_pattern_endless: self.list_pattern_endless.as_deref(),
+            stable_list_pattern_endless: self.stable_list_pattern_endless.as_deref(),
+            range_full: self.range_full.as_deref(),
+            range_from: self.range_from.as_deref(),
+            range_to: self.range_to.as_deref(),
+            range_to_inclusive: self.range_to_inclusive.as_deref(),
+            range: self.range.as_deref(),
+            range_inclusive: self.range_inclusive.as_deref(),
+            range_end: self.range_end.as_deref(),
+            range_pattern: self.range_pattern.as_deref(),
+            stable_range_pattern: self.stable_range_pattern.as_deref(),
+            concat: self.concat.as_deref(),
+            comptime_concat: self.comptime_concat.as_deref(),
+            concat_pattern: self.concat_pattern.as_deref(),
+            stable_concat_pattern: self.stable_concat_pattern.as_deref(),
+            map_pattern: self.map_pattern.as_deref(),
+            stable_map_pattern: self.stable_map_pattern.as_deref(),
+            struct_pattern: self.struct_pattern.as_deref(),
+            stable_struct_pattern: self.stable_struct_pattern.as_deref(),
+            type_pattern: self.type_pattern.as_deref(),
+            iterator: self.iterator.as_deref(),
+            into_iterator: self.into_iterator.as_deref(),
+            variadic_collector: self.variadic_collector.as_deref(),
+            try_variadic_collector: self.try_variadic_collector.as_deref(),
+            extended_variadic_collector: self.extended_variadic_collector.as_deref(),
+            literal_into: self.literal_into.as_deref(),
+            implies: self.implies.as_deref(),
+            comptime_implies: self.comptime_implies.as_deref(),
+            handle_error: self.handle_error.as_deref(),
+            deref: self.deref.as_deref(),
+            deref_mut: self.deref_mut.as_deref(),
+            reference: self.reference.as_deref(),
+            implicit_passing: self.implicit_passing.as_deref(),
+            call_context: self.call_context.as_deref(),
+            call_description: self.call_description.as_deref(),
+            source_span: self.source_span.as_deref(),
+            arithmetic: std::array::from_fn(|i| self.arithmetic[i].as_deref()),
+            compound_arithmetic: std::array::from_fn(|i| self.compound_arithmetic[i].as_deref()),
+            comptime_compound_arithmetic: std::array::from_fn(|i| {
+                self.comptime_compound_arithmetic[i].as_deref()
+            }),
+            comptime_arithmetic: std::array::from_fn(|i| self.comptime_arithmetic[i].as_deref()),
+            splice: self.splice.as_deref(),
+            meta_list: self.meta_list.as_deref(),
+            tuple: self.tuple.as_deref(),
+            array: self.array.as_deref(),
+            maybe_uninit_storage: self.maybe_uninit_storage.as_deref(),
+            manually_drop_storage: self.manually_drop_storage.as_deref(),
         }
     }
-    (comptime, host)
 }
 
 fn compile_with_sysroot(source: &str) -> Result<nir::program::Package, String> {
@@ -131,43 +374,8 @@ fn compile_with_sysroot_mode(
         .builtin_implementation_packages
         .extend(sysroot_ids.iter().map(|(_, _, ident)| *ident));
 
-    let (ci, hi) = load_intrinsic_selectors();
-    let selectors = luna::protocols::type_constructors::Selectors {
-        comptime_intrinsics: &ci,
-        host_intrinsics: &hi,
-        copy: Some("builtin.protocols.resources.Copy"),
-        drop: Some("builtin.protocols.resources.Drop"),
-        splice: Some("builtin.protocols.staging.Splice"),
-        meta_list: Some("meta.List"),
-        tuple: Some("builtin.types.tuple.Tuple"),
-        index: Some("builtin.protocols.ops.Index"),
-        ordering: Some(if comptime_comparison {
-            "meta.numeric.ordering.ComptimeOrd"
-        } else {
-            "builtin.numeric.comparison.Ord"
-        }),
-        equality: Some(if comptime_comparison {
-            "meta.numeric.equality.ComptimeEq"
-        } else {
-            "builtin.numeric.comparison.Eq"
-        }),
-        comptime_ordering: Some("meta.numeric.ordering.ComptimeOrd"),
-        comptime_equality: Some("meta.numeric.equality.ComptimeEq"),
-        iterator: Some("builtin.protocols.iterator.Iterator"),
-        into_iterator: Some("builtin.protocols.iterator.IntoIterator"),
-        list_pattern: Some("builtin.protocols.patterns.ListPatternView"),
-        comptime_list_pattern: Some("meta.data.patterns.ComptimeListPatternView"),
-        arithmetic: [
-            Some("builtin.protocols.ops.Add"),
-            Some("builtin.protocols.ops.Sub"),
-            Some("builtin.protocols.ops.Mul"),
-            Some("builtin.protocols.ops.Div"),
-            Some("builtin.protocols.ops.Rem"),
-            Some("builtin.protocols.ops.Neg"),
-            Some("builtin.protocols.ops.Not"),
-        ],
-        ..Default::default()
-    };
+    let items = LoadedLanguageItems::load();
+    let selectors = items.selectors(comptime_comparison);
 
     let target = Some(nir::target::TargetData::new(64).unwrap());
     let (artifact, _) = packages::compile_with_target_and_inputs(

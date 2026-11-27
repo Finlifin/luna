@@ -233,7 +233,13 @@ impl Diagnostic {
         let rendered = render_diagnostic(self);
         primary_span(self) match {
             span? => if span.is_synthetic() {
-                bindings.emit_diagnostic_raw(level_code, rendered, "", 0, 0);
+                bindings.emit_diagnostic_raw(
+                    level_code,
+                    rendered,
+                    "",
+                    bindings.to_usize(0),
+                    bindings.to_usize(0),
+                );
             } else {
                 bindings.emit_diagnostic_raw(
                     level_code,
@@ -243,7 +249,13 @@ impl Diagnostic {
                     span.as(ComptimeSourceSpanOps).end(),
                 );
             },
-            null => bindings.emit_diagnostic_raw(level_code, rendered, "", 0, 0),
+            null => bindings.emit_diagnostic_raw(
+                level_code,
+                rendered,
+                "",
+                bindings.to_usize(0),
+                bindings.to_usize(0),
+            ),
         }
     }
 }
