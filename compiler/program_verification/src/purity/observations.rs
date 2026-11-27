@@ -70,9 +70,16 @@ fn validate_with_budget<'a>(
     protocols: &Protocols,
     fuel: &mut usize,
 ) -> Result<(), Error> {
+    let mut obligations = obligations.into_iter().peekable();
+    if obligations.peek().is_none() {
+        return Ok(());
+    }
+    let mut shared = Analysis::with_fuel(package, true, *fuel);
+    shared.protocols = protocols.clone();
+    *fuel = shared.fuel;
     let mut world = None;
     for obligation in obligations {
-        if !validate_observation(package, obligation, protocols, fuel, &mut world) {
+        if !validate_observation(&shared, obligation, fuel, &mut world) {
             return Err(error(
                 obligation.source,
                 "default expression requires P3 stability/termination evidence; call graph or operations could not be certified",
@@ -83,9 +90,8 @@ fn validate_with_budget<'a>(
 }
 
 fn validate_observation(
-    package: &n::Package,
+    shared: &Analysis<'_>,
     obligation: &StableObservation,
-    protocols: &Protocols,
     fuel: &mut usize,
     world: &mut Option<ResourceWorld>,
 ) -> bool {
@@ -108,14 +114,7 @@ fn validate_observation(
     // Unknown coverage retains the original generic obligation. A trait
     // premise alone is not representation, cleanup or termination evidence.
     let Some(cases) = cases else {
-        return check_expression(
-            package,
-            &obligation.value,
-            obligation,
-            protocols,
-            fuel,
-            world,
-        );
+        return check_expression(shared, &obligation.value, obligation, fuel, world);
     };
     for inputs in cases {
         if nir::copy_budget::charge_substitution(
@@ -136,7 +135,7 @@ fn validate_observation(
         ) else {
             return false;
         };
-        if !check_expression(package, &value, obligation, protocols, fuel, world) {
+        if !check_expression(shared, &value, obligation, fuel, world) {
             return false;
         }
     }
@@ -144,17 +143,15 @@ fn validate_observation(
 }
 
 fn check_expression(
-    package: &n::Package,
+    shared: &Analysis<'_>,
     value: &n::Expr,
     obligation: &StableObservation,
-    protocols: &Protocols,
     fuel: &mut usize,
     world: &mut Option<ResourceWorld>,
 ) -> bool {
     // Only immutable declaration indexing is shared. Behavior/callable proofs
     // and staged bindings belong to this one case of this one obligation.
-    let mut analysis = Analysis::with_fuel(package, true, *fuel);
-    analysis.protocols = protocols.clone();
+    let mut analysis = shared.for_subcheck(true, *fuel);
     analysis.resource_world = world.clone();
     let Some(remaining) = analysis
         .fuel
@@ -164,9 +161,7 @@ fn check_expression(
         return false;
     };
     analysis.fuel = remaining;
-    analysis
-        .staged_parameters
-        .extend(&obligation.staged_parameters);
+    std::rc::Rc::make_mut(&mut analysis.staged_parameters).extend(&obligation.staged_parameters);
     let valid = analysis.fuel != 0 && analysis.default_expression(value);
     *fuel = analysis.fuel;
     *world = analysis.resource_world;
