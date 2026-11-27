@@ -9,7 +9,7 @@
 
 ## 挂接边界（待 `@llvm-effects` / `08-library` / async lowering 合入后接通）
 
-- `TypedContinuation.{resume_with, abort, crosses_c_frame, origin_thread_id}` 待 `@llvm-effects` Commit 3 合入 `host-intrinsic.continuation_{resume_raw,abort_raw,crosses_c_frame,origin_thread_id}`（`resume_with` 的栈结果槽另待 `builtin.mem.MaybeUninit`）。
-- `BoundedStackPool` 的编译期栈上界校验钩子 `meta.runtime.bounded_stack_bytes` 依 `OQ-08-03` 待 `08-library` 合入后接通。
+- `TypedContinuation.{resume_with, abort, crosses_c_frame, origin_thread_id}` 待 `@llvm-effects` Commit 3 合入 `host-intrinsic.continuation_{resume_raw,abort_raw,crosses_c_frame,origin_thread_id}`（`TypedContinuation` 与 `FutureBox` 已接入 `builtin.mem.{TypeMarker, MaybeUninit}`）。
+- `BoundedStackPool` 已通过 `bounded_stack_bytes_for` / `verify_bounded_stack_bytes` / `require_bounded_stack_bytes` 接通 `meta.runtime.bounded_stack_bytes` 与 `meta.compilation.err` 编译期栈上界校验（`OQ-08-03`）。
 - `GuardedStackPool` 待 OS 虚拟内存保留与 guard page 平台 intrinsic（当前经由 `Allocator` 托管栈缓冲，支持完整池化分配、归还与 `Drop` 回收）。
 - `AsyncCore` 组合子的 `.await` 与 `async` handler arm 降码待前端 HIR/elaboration 支持 `.await` 与 `Abi::Async` handler 后接通。

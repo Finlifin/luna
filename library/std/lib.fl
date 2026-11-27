@@ -286,6 +286,9 @@ pub mod runtime {
         StackPool,
         StackPoolErr,
         StackSlot,
+        bounded_stack_bytes_for,
+        require_bounded_stack_bytes,
+        verify_bounded_stack_bytes,
     }
     pub use runtime_task.{
         AsyncCore,

@@ -115,6 +115,10 @@ fn ipv4_ipv6_and_socket_addr_parsing_formatting_and_predicates() {
                 a! => a,
                 error _ => return false,
             };
+            let v4_octs: builtin.Array<u8, 4> = v4.octets();
+            if v4_octs.len() != 4 or v4_octs[0].* != 127 or v4_octs[3].* != 1 {
+                return false;
+            }
             let localhost4 = Ipv4Addr.LOCALHOST;
             if not v4.is_loopback() or not v4.ref.as(Eq).eq(localhost4.ref) {
                 return false;
@@ -157,8 +161,11 @@ fn ipv4_ipv6_and_socket_addr_parsing_formatting_and_predicates() {
                 a! => a,
                 error _ => return false,
             };
-            let (_, _, _, _, _, s5, s6, s7) = v6_mapped.segments();
-            if s5 != 65535 or s6 != 32512 or s7 != 1 {
+            let v6_segs: builtin.Array<u16, 8> = v6_mapped.segments();
+            if v6_segs.len() != 8 or v6_segs[5].* != 65535 or v6_segs[6].* != 32512 or v6_segs[7].* != 1 {
+                return false;
+            }
+            if localhost6.segments()[7].* != 1 {
                 return false;
             }
 

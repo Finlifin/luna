@@ -3,6 +3,7 @@ use collections_impl.vec.Vec;
 use io_impl.errors.IoErr;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
+use meta.{compilation, runtime};
 use process_impl.process.panic;
 use sync_impl.atomics.{AtomicOrdering, AtomicU64, static_atomic_u64}
 use sync_impl.marker.{Send, Sync}
@@ -14,7 +15,8 @@ use sync_impl.marker.{Send, Sync}
     - `StackPool`: protocol used by `.use(pool)` and async runtimes.
     - `BoundedStackPool<slot_bytes, .A, .allocator>`: fixed-slot slab pool
       (Silver P0-3). OQ-08-03: compile-time `meta.runtime.bounded_stack_bytes`
-      check hook awaits `08-library` merge.
+      verification wired via `bounded_stack_bytes_for`, `verify_bounded_stack_bytes`,
+      and `require_bounded_stack_bytes`.
     - `GuardedStackPool<.A, .allocator>`: general-purpose pool for unbounded
       recursion / dynamic closures (Silver P1-1).
 -}
@@ -205,9 +207,63 @@ fn slab_layout(slot_bytes: usize, slots_per_slab: usize) -> ?Tuple<Layout, usize
 }
 
 {-
-    Fixed-size pooled stack allocator.
-    OQ-08-03: Address-stable pooled stacks only; compile-time `meta.runtime.bounded_stack_bytes`
-    verification awaits `08-library` integration.
+    Compile-time OQ-08-03 stack-bound query against `meta.runtime.bounded_stack_bytes`.
+    Returns `null` if `entry_fn` contains recursion or dynamic/indirect calls.
+-}
+pub pure comptime fn bounded_stack_bytes_for(entry_fn: F) -> ?usize
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn)
+}
+
+{-
+    Compile-time OQ-08-03 stack-bound predicate for `BoundedStackPool<slot_bytes>`.
+    Returns `true` iff `entry_fn` has a statically bounded frame size `<= slot_bytes`.
+-}
+pub pure comptime fn verify_bounded_stack_bytes(
+    entry_fn: F,
+    slot_bytes: usize,
+) -> bool
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn) match {
+        bytes? => bytes <= slot_bytes,
+        null => false,
+    }
+}
+
+{-
+    Enforce at compile time that `entry_fn` has a statically bounded stack frame
+    of at most `slot_bytes`, emitting a compiler error diagnostic otherwise.
+-}
+pub comptime fn require_bounded_stack_bytes(
+    entry_fn: F,
+    slot_bytes: usize,
+) -> usize
+where
+    F: Type,
+{
+    runtime.bounded_stack_bytes(entry_fn) match {
+        bytes? => {
+            if bytes > slot_bytes {
+                compilation.err(
+                    "BoundedStackPool slot_bytes is smaller than statically bounded entry_fn stack usage",
+                );
+            }
+            bytes
+        },
+        null => compilation.err(
+            "BoundedStackPool entry_fn stack usage is unbounded (recursive or dynamic call)",
+        ),
+    }
+}
+
+{-
+    Fixed-size pooled stack allocator (`OQ-08-03`): address-stable fixed-slot
+    stack pool for call graphs whose static stack usage fits within `slot_bytes`
+    (verified at compile time via `require_bounded_stack_bytes` / `verify_bounded_stack_bytes`).
 -}
 pub struct BoundedStackPool
 where

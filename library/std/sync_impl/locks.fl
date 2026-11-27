@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use builtin.mem.MaybeUninit;
 use process_impl.process.panic;
 use sync_impl.atomics.{AtomicBool, AtomicOrdering, AtomicU32, AtomicU8, AtomicUsize}
 use sync_impl.marker.{Send, Sync}
@@ -637,7 +638,7 @@ where
     T: Type,
 {
     state: AtomicU8,
-    value: ?T,
+    value: MaybeUninit<T>,
 }
 
 impl OnceLock<T>
@@ -647,7 +648,7 @@ where
     pub fn new() -> Self {
         OnceLock<T> {
             state: AtomicU8.new(0),
-            value: null,
+            value: unsafe { MaybeUninit<T>.uninit() },
         }
     }
 
@@ -663,9 +664,8 @@ where
             AtomicOrdering.relaxed,
         ) match {
             _! => {
-                let wrapped: ?T = value;
                 unsafe {
-                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), wrapped);
+                    let _ = self.value.write(value);
                 }
                 self.state.store(2, AtomicOrdering.release);
             },
@@ -693,11 +693,7 @@ where
             AtomicOrdering.relaxed,
         ) match {
             _! => {
-                let taken = unsafe { builtin.mem.raw_read<?T>(builtin.mem.ptr_addr(self.value)) }
-                let empty: ?T = null;
-                unsafe {
-                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), empty);
-                }
+                let taken = unsafe { self.value.assume_init_read() }
                 self.state.store(0, AtomicOrdering.release);
                 taken
             },
@@ -710,24 +706,8 @@ where
         R: Type,
         c: Type.vars.Closure,
     {
-        if self.state.load(AtomicOrdering.acquire) != 2 {
-            return null;
-        }
-        let taken = unsafe { builtin.mem.raw_read<?T>(builtin.mem.ptr_addr(self.value)) }
-        let empty: ?T = null;
-        unsafe {
-            builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), empty);
-        }
-        taken match {
-            val? => {
-                var slot = val;
-                let out = f(slot.ref);
-                let restored: ?T = slot;
-                unsafe {
-                    builtin.mem.raw_write<?T>(builtin.mem.ptr_addr(self.value), restored);
-                }
-                out
-            },
+        self.get() match {
+            p? => f(p),
             null => null,
         }
     }
@@ -736,24 +716,39 @@ where
         if self.state.load(AtomicOrdering.acquire) != 2 {
             return null;
         }
-        -- TODO(08-library): return `self.value.assume_init_ref()` once `builtin.mem.MaybeUninit<T>` lands.
-        panic("OnceLock.get(*self) -> ?*T awaits builtin.mem.MaybeUninit<T>")
+        unsafe { self.value.as_ptr() }
     }
 
     pub fn get_or_init(*self, f: %c fn() -> T) -> *T
     where
         c: Type.vars.Closure,
     {
-        if self.state.load(AtomicOrdering.acquire) != 2 {
-            let v = f();
-            let _ = self.set(v) match {
-                _! => {},
-                error _ => {},
-            }
-        }
         self.get() match {
-            p? => p,
-            null => panic("OnceLock.get_or_init failed"),
+            p? => return p,
+            null => {},
+        }
+        self.state.compare_exchange(
+            0,
+            1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                let v = f();
+                unsafe {
+                    let _ = self.value.write(v);
+                }
+                self.state.store(2, AtomicOrdering.release);
+                unsafe { self.value.as_ptr() }
+            },
+            error _ => {
+                while self.state.load(AtomicOrdering.acquire) == 1 {
+                }
+                self.get() match {
+                    p? => p,
+                    null => self.get_or_init(f),
+                }
+            },
         }
     }
 
@@ -762,16 +757,53 @@ where
         E: Type,
         c: Type.vars.Closure,
     {
-        if self.state.load(AtomicOrdering.acquire) != 2 {
-            let v = f()!;
-            let _ = self.set(v) match {
-                _! => {},
-                error _ => {},
-            }
-        }
         self.get() match {
-            p? => p,
-            null => panic("OnceLock.get_or_try_init failed"),
+            p? => return p,
+            null => {},
+        }
+        self.state.compare_exchange(
+            0,
+            1,
+            AtomicOrdering.acquire,
+            AtomicOrdering.relaxed,
+        ) match {
+            _! => {
+                f() match {
+                    v! => {
+                        unsafe {
+                            let _ = self.value.write(v);
+                        }
+                        self.state.store(2, AtomicOrdering.release);
+                        unsafe { self.value.as_ptr() }
+                    },
+                    error err => {
+                        self.state.store(0, AtomicOrdering.release);
+                        error err
+                    },
+                }
+            },
+            error _ => {
+                while self.state.load(AtomicOrdering.acquire) == 1 {
+                }
+                self.get() match {
+                    p? => p,
+                    null => self.get_or_try_init(f),
+                }
+            },
+        }
+    }
+}
+
+impl Drop for OnceLock<T>
+where
+    T: Type,
+{
+    fn drop(*self) {
+        if self.state.load(AtomicOrdering.acquire) == 2 {
+            unsafe {
+                self.value.assume_init_drop();
+            }
+            self.state.store(0, AtomicOrdering.release);
         }
     }
 }
@@ -794,7 +826,8 @@ where
     c: Type.vars.Closure,
 {
     once: OnceLock<T>,
-    init: ?(%c fn() -> T),
+    init: MaybeUninit<%c fn() -> T>,
+    init_taken: AtomicBool,
 }
 
 impl LazyLock<T, c>
@@ -805,7 +838,8 @@ where
     pub fn new(init_fn: %c fn() -> T) -> Self {
         LazyLock<T, c> {
             once: OnceLock<T>.new(),
-            init: init_fn,
+            init: MaybeUninit<%c fn() -> T>.new(init_fn),
+            init_taken: AtomicBool.new(false),
         }
     }
 
@@ -813,51 +847,29 @@ where
         self.once.is_initialized()
     }
 
-    pub fn with_ref(*self, f: %u fn(*T) -> R) -> R
-    where
-        R: Type,
-        u: Type.vars.Closure,
-    {
-        if not self.once.is_initialized() {
-            let init_fn = unsafe { builtin.mem.raw_read<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init)) }
-            let empty: ?(%c fn() -> T) = null;
-            unsafe {
-                builtin.mem.raw_write<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init), empty);
-            }
-            init_fn match {
-                cb? => {
-                    let val = cb();
-                    let _ = self.once.set(val) match {
-                        _! => {},
-                        error _ => {},
-                    }
-                },
-                null => {},
-            }
-        }
-        self.once.with_ref(f) match {
-            res? => res,
-            null => panic("LazyLock value unavailable"),
-        }
-    }
-
     pub fn force(*self) -> *T {
-        if not self.once.is_initialized() {
-            let init_fn = unsafe { builtin.mem.raw_read<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init)) }
-            let empty: ?(%c fn() -> T) = null;
-            unsafe {
-                builtin.mem.raw_write<?(%c fn() -> T)>(builtin.mem.ptr_addr(self.init), empty);
-            }
-            init_fn match {
-                cb? => {
-                    let val = cb();
-                    let _ = self.once.set(val) match {
-                        _! => {},
-                        error _ => {},
-                    }
-                },
-                null => {},
-            }
+        self.once.get() match {
+            p? => return p,
+            null => {},
+        }
+        self.init_taken.compare_exchange(
+            false,
+            true,
+            AtomicOrdering.acq_rel,
+            AtomicOrdering.acquire,
+        ) match {
+            _! => {
+                let cb = unsafe { self.init.assume_init_read() }
+                let val = cb();
+                let _ = self.once.set(val) match {
+                    _! => {},
+                    error _ => {},
+                }
+            },
+            error _ => {
+                while not self.once.is_initialized() {
+                }
+            },
         }
         self.once.get() match {
             p? => p,
@@ -865,8 +877,30 @@ where
         }
     }
 
+    pub fn with_ref(*self, f: %u fn(*T) -> R) -> R
+    where
+        R: Type,
+        u: Type.vars.Closure,
+    {
+        f(self.force())
+    }
+
     pub fn get(*self) -> ?*T {
         self.once.get()
+    }
+}
+
+impl Drop for LazyLock<T, c>
+where
+    T: Type,
+    c: Type.vars.Closure,
+{
+    fn drop(*self) {
+        if not self.init_taken.swap(true, AtomicOrdering.acq_rel) {
+            unsafe {
+                self.init.assume_init_drop();
+            }
+        }
     }
 }
 

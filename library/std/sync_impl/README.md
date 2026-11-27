@@ -12,6 +12,6 @@
 
 - `Atomic<T>` 与 `fence`/`compiler_fence` 的叶节点待接入 `@llvm-effects` Commit 2 的 `host-intrinsic.atomic_{load,store,swap,cmpxchg,cmpxchg_weak,fetch_add,fetch_sub,fetch_and,fetch_or,fetch_xor,fetch_max,fetch_min,fence,compiler_fence}`（`u8` tag `0..4`）。
 - `Mutex`/`RwLock`/`Condvar`/`Barrier`/`Semaphore` 的竞争等待与锁守卫 `Drop` 中毒检测待接入 OS futex 与 `host-intrinsic.runtime_panic`（`{ T, ptr = 1 }`）展开状态。
-- `OnceLock.get(*self) -> ?*T` / `LazyLock.force(*self) -> *T` 的就地指针投影待 `08-library` 合入 `builtin.mem.MaybeUninit<T>`（当前 `set`/`take`/`with_ref` 在 `HEAD` 完整工作）。
+- `OnceLock.get(*self) -> ?*T`、`get_or_init`/`get_or_try_init`、`LazyLock.{force, get}` 与 `ThreadPacket` 结果槽已接入 `builtin.mem.MaybeUninit<T>`，`AtomicPtr<T>` 已接入 `builtin.mem.TypeMarker<T>`；`OnceLock`/`LazyLock` 并在 `Drop` 中按状态安全析构。
 - `std.sync.thread` 的 `spawn`/`sleep`/`yield_now`/`park`/`available_parallelism` 待接入 OS 线程与时间平台 intrinsic。
 - `std.sync.stm` 依 `OQ-08-05` 明确延后，不提供。

@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use builtin.mem.MaybeUninit;
 use collections_impl.vec.Vec;
 use io_impl.errors.IoErr;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
@@ -94,10 +95,9 @@ where
     thread_info: Thread,
     finished: AtomicBool,
     refs: AtomicUsize,
-    outcome: ?(!TaskErr T),
+    outcome_present: AtomicBool,
+    outcome: MaybeUninit<!TaskErr T>,
 }
-
-fn retire_outcome(v: ?(!TaskErr T)) where T: Type {}
 
 fn release_thread_packet(alloc: *A, addr: usize)
 where
@@ -111,8 +111,12 @@ where
     let pkt = unsafe { builtin.mem.raw_ptr<ThreadPacket<T>>(addr) }
     let prev = pkt.refs.fetch_sub(1, AtomicOrdering.acq_rel);
     if prev == 1 {
-        let owned = unsafe { builtin.mem.raw_read<ThreadPacket<T>>(addr) }
-        retire_outcome(owned.outcome);
+        if pkt.outcome_present.swap(false, AtomicOrdering.acq_rel) {
+            unsafe {
+                pkt.outcome.assume_init_drop();
+            }
+        }
+        let _ = unsafe { builtin.mem.raw_read<ThreadPacket<T>>(addr) }
         let layout = Layout.of<ThreadPacket<T>>() match {
             l? => l,
             null => return,
@@ -167,17 +171,11 @@ where
             -- HOOK(@llvm-effects): pthread_join / futex wait on completion.
             break;
         }
-        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome)) }
-        let empty: ?(!TaskErr T) = null;
-        unsafe {
-            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome), empty);
-        }
-        taken match {
-            res? => res,
-            null => {
-                let err: !TaskErr T = error TaskErr.Panicked;
-                err
-            },
+        if pkt.outcome_present.swap(false, AtomicOrdering.acq_rel) {
+            unsafe { pkt.outcome.assume_init_read() }
+        } else {
+            let err: !TaskErr T = error TaskErr.Panicked;
+            err
         }
     }
 }
@@ -247,17 +245,11 @@ where
             -- HOOK(@llvm-effects): wait for scoped child completion.
             break;
         }
-        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome)) }
-        let empty: ?(!TaskErr T) = null;
-        unsafe {
-            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(pkt.outcome), empty);
-        }
-        taken match {
-            res? => res,
-            null => {
-                let err: !TaskErr T = error TaskErr.Panicked;
-                err
-            },
+        if pkt.outcome_present.swap(false, AtomicOrdering.acq_rel) {
+            unsafe { pkt.outcome.assume_init_read() }
+        } else {
+            let err: !TaskErr T = error TaskErr.Panicked;
+            err
         }
     }
 }
@@ -353,7 +345,8 @@ where
             thread_info: Thread { raw_id: tid, raw_thread_handle: 0 },
             finished: AtomicBool.new(true),
             refs: AtomicUsize.new(1),
-            outcome: outcome_ok,
+            outcome_present: AtomicBool.new(true),
+            outcome: MaybeUninit<!TaskErr T>.new(outcome_ok),
         }
         unsafe {
             builtin.mem.raw_write<ThreadPacket<T>>(block.address(), pkt);
@@ -407,7 +400,8 @@ where
             thread_info: Thread { raw_id: tid, raw_thread_handle: 0 },
             finished: AtomicBool.new(true),
             refs: AtomicUsize.new(1),
-            outcome: outcome_ok,
+            outcome_present: AtomicBool.new(true),
+            outcome: MaybeUninit<!TaskErr T>.new(outcome_ok),
         }
         unsafe {
             builtin.mem.raw_write<ThreadPacket<T>>(block.address(), pkt);

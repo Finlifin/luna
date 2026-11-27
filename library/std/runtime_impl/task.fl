@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use builtin.mem.MaybeUninit;
 use collections_impl.vec.Vec;
 use io_impl.errors.IoErr;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
@@ -479,10 +480,8 @@ where
 {
     state_tag: AtomicUsize,
     refs: AtomicUsize,
-    result: ?(!TaskErr T),
+    result: MaybeUninit<!TaskErr T>,
 }
-
-fn retire_future_result(val: ?(!TaskErr T)) where T: Type {}
 
 pub struct Future
 where
@@ -510,7 +509,7 @@ where
         let box_val = FutureBox<T> {
             state_tag: AtomicUsize.new(0),
             refs: AtomicUsize.new(1),
-            result: null,
+            result: unsafe { MaybeUninit<!TaskErr T>.uninit() },
         }
         unsafe {
             builtin.mem.raw_write<FutureBox<T>>(block.address(), box_val);
@@ -529,7 +528,7 @@ where
         let box_val = FutureBox<T> {
             state_tag: AtomicUsize.new(1),
             refs: AtomicUsize.new(1),
-            result: outcome,
+            result: MaybeUninit<!TaskErr T>.new(outcome),
         }
         unsafe {
             builtin.mem.raw_write<FutureBox<T>>(block.address(), box_val);
@@ -574,9 +573,8 @@ where
             return;
         }
         let box_ptr = unsafe { builtin.mem.raw_ptr<FutureBox<T>>(addr) }
-        let wrapped: ?(!TaskErr T) = outcome;
         unsafe {
-            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result), wrapped);
+            let _ = box_ptr.result.write(outcome);
         }
         box_ptr.state_tag.store(1, AtomicOrdering.release);
     }
@@ -610,13 +608,15 @@ where
             let err: !TaskErr T = error TaskErr.Cancelled;
             return err;
         }
-        box_ptr.state_tag.store(3, AtomicOrdering.release);
-        let taken = unsafe { builtin.mem.raw_read<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result)) }
-        let empty: ?(!TaskErr T) = null;
-        unsafe {
-            builtin.mem.raw_write<?(!TaskErr T)>(builtin.mem.ptr_addr(box_ptr.result), empty);
+        box_ptr.state_tag.compare_exchange(
+            1,
+            3,
+            AtomicOrdering.acq_rel,
+            AtomicOrdering.acquire,
+        ) match {
+            _! => unsafe { box_ptr.result.assume_init_read() },
+            error _ => null,
         }
-        taken
     }
 
     pub fn wait(self) -> #AsyncCore !TaskErr T {
@@ -653,8 +653,12 @@ where
                 l? => l,
                 null => return,
             }
-            let box_val = unsafe { builtin.mem.raw_read<FutureBox<T>>(addr) }
-            retire_future_result(box_val.result);
+            if box_ptr.state_tag.swap(3, AtomicOrdering.acq_rel) == 1 {
+                unsafe {
+                    box_ptr.result.assume_init_drop();
+                }
+            }
+            let _ = unsafe { builtin.mem.raw_read<FutureBox<T>>(addr) }
             unsafe {
                 alloc
                     .as(Allocator)

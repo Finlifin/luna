@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use builtin.mem.{TypeMarker, make_type_marker}
 use process_impl.process.panic;
 use sync_impl.marker.{Send, Sync}
 
@@ -545,6 +546,7 @@ where
     T: Type,
 {
     ptr_addr: Atomic<usize>,
+    marker: TypeMarker<T>,
 }
 
 impl Send for AtomicPtr<T> where T: Type {}
@@ -557,6 +559,7 @@ where
     pub fn new(ptr: *T) -> Self {
         AtomicPtr<T> {
             ptr_addr: Atomic<usize>.new(unsafe { builtin.mem.ptr_addr(ptr) }),
+            marker: make_type_marker<T>(),
         }
     }
 

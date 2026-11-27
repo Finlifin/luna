@@ -1,3 +1,4 @@
+use builtin.Array;
 use builtin.fmt.{ByteWriter, Debug, Display}
 use builtin.hash.{Hash, Hasher}
 use collections_impl.vec.Vec;
@@ -9,10 +10,9 @@ use sync_impl.marker.{Send, Sync}
     Layer-3 / Layer-4 network address types, RFC-compliant parsing & formatting,
     error types, and allocator-parameterized `ToSocketAddrs`.
 
-    Note on unmerged `builtin.Array<T, N>` (`08-library`):
-    `Ipv4Addr` and `Ipv6Addr` store their octets/hextets in fixed scalar fields
-    and expose `octets() -> Tuple<u8, u8, u8, u8>` / `segments() -> Tuple<u16, ...>`
-    plus `from_bits`/`to_bits` until `builtin.Array<T, N>` merges.
+    `Ipv4Addr` and `Ipv6Addr` store their octets/hextets in `builtin.Array<u8, 4>`
+    and `builtin.Array<u16, 8>`, exposing `octets() -> Array<u8, 4>` and
+    `segments() -> Array<u16, 8>` plus `from_bits`/`to_bits`.
 -}
 pub enum AddrParseErr {
     InvalidIp,
@@ -445,66 +445,74 @@ pure fn parse_ipv4_range(s: str, start: u64, end: u64) -> !AddrParseErr Ipv4Addr
 -- ── Ipv4Addr ─────────────────────────────────────────────────────────────────
 
 pub struct Ipv4Addr {
-    b0: u8,
-    b1: u8,
-    b2: u8,
-    b3: u8,
-    pub const LOCALHOST: Ipv4Addr = Ipv4Addr { b0: 127, b1: 0, b2: 0, b3: 1 };
-    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr { b0: 0, b1: 0, b2: 0, b3: 0 };
-    pub const BROADCAST: Ipv4Addr = Ipv4Addr { b0: 255, b1: 255, b2: 255, b3: 255 };
+    raw_octets: Array<u8, 4>,
+    pub const LOCALHOST: Ipv4Addr = Ipv4Addr { raw_octets: [127, 0, 0, 1] };
+    pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr { raw_octets: [0, 0, 0, 0] };
+    pub const BROADCAST: Ipv4Addr = Ipv4Addr { raw_octets: [255, 255, 255, 255] };
 }
 
 impl Ipv4Addr {
     pub pure fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Ipv4Addr { b0: a, b1: b, b2: c, b3: d }
+        Ipv4Addr { raw_octets: [a, b, c, d] }
     }
 
     pub pure fn from_bits(bits: u32) -> Self {
         let v = bits'bitvec;
         Ipv4Addr {
-            b0: v[24..32].as(u8),
-            b1: v[16..24].as(u8),
-            b2: v[8..16].as(u8),
-            b3: v[0..8].as(u8),
+            raw_octets: [
+                v[24..32].as(u8),
+                v[16..24].as(u8),
+                v[8..16].as(u8),
+                v[0..8].as(u8),
+            ],
         }
     }
 
-    pub pure fn to_bits(self) -> u32 {
-        let a = self.b0'bitvec.as(u32) * 16777216;
-        let b = self.b1'bitvec.as(u32) * 65536;
-        let c = self.b2'bitvec.as(u32) * 256;
-        let d = self.b3'bitvec.as(u32);
+    pub fn to_bits(self) -> u32 {
+        let a = self.raw_octets[0].*'bitvec.as(u32) * 16777216;
+        let b = self.raw_octets[1].*'bitvec.as(u32) * 65536;
+        let c = self.raw_octets[2].*'bitvec.as(u32) * 256;
+        let d = self.raw_octets[3].*'bitvec.as(u32);
         a + b + c + d
     }
 
-    pub pure fn octets(self) -> Tuple<u8, u8, u8, u8> {
-        (self.b0, self.b1, self.b2, self.b3)
+    pub pure fn octets(self) -> Array<u8, 4> {
+        self.raw_octets
     }
 
-    pub pure fn is_unspecified(self) -> bool {
-        self.b0 == 0 and self.b1 == 0 and self.b2 == 0 and self.b3 == 0
+    pub fn is_unspecified(self) -> bool {
+        self.raw_octets[0].* == 0
+            and self.raw_octets[1].* == 0
+            and self.raw_octets[2].* == 0
+            and self.raw_octets[3].* == 0
     }
 
-    pub pure fn is_loopback(self) -> bool {
-        self.b0 == 127
+    pub fn is_loopback(self) -> bool {
+        self.raw_octets[0].* == 127
     }
 
-    pub pure fn is_private(self) -> bool {
-        if self.b0 == 10 {
+    pub fn is_private(self) -> bool {
+        let b0 = self.raw_octets[0].*;
+        let b1 = self.raw_octets[1].*;
+        if b0 == 10 {
             return true;
         }
-        if self.b0 == 172 and self.b1 >= 16 and self.b1 <= 31 {
+        if b0 == 172 and b1 >= 16 and b1 <= 31 {
             return true;
         }
-        self.b0 == 192 and self.b1 == 168
+        b0 == 192 and b1 == 168
     }
 
-    pub pure fn is_multicast(self) -> bool {
-        self.b0 >= 224 and self.b0 <= 239
+    pub fn is_multicast(self) -> bool {
+        let b0 = self.raw_octets[0].*;
+        b0 >= 224 and b0 <= 239
     }
 
-    pub pure fn is_broadcast(self) -> bool {
-        self.b0 == 255 and self.b1 == 255 and self.b2 == 255 and self.b3 == 255
+    pub fn is_broadcast(self) -> bool {
+        self.raw_octets[0].* == 255
+            and self.raw_octets[1].* == 255
+            and self.raw_octets[2].* == 255
+            and self.raw_octets[3].* == 255
     }
 
     pub pure fn parse(s: str) -> !AddrParseErr Self {
@@ -554,13 +562,13 @@ impl Display for Ipv4Addr {
         W :- ByteWriter,
     {
         let _ = format;
-        self.b0.as(Display).fmt(output)!;
+        self.raw_octets[0].*.as(Display).fmt(output)!;
         output.write_byte(46)!;
-        self.b1.as(Display).fmt(output)!;
+        self.raw_octets[1].*.as(Display).fmt(output)!;
         output.write_byte(46)!;
-        self.b2.as(Display).fmt(output)!;
+        self.raw_octets[2].*.as(Display).fmt(output)!;
         output.write_byte(46)!;
-        self.b3.as(Display).fmt(output)
+        self.raw_octets[3].*.as(Display).fmt(output)
     }
 }
 
@@ -576,19 +584,12 @@ impl Sync for Ipv4Addr {}
 -- ── Ipv6Addr ─────────────────────────────────────────────────────────────────
 
 pub struct Ipv6Addr {
-    s0: u16,
-    s1: u16,
-    s2: u16,
-    s3: u16,
-    s4: u16,
-    s5: u16,
-    s6: u16,
-    s7: u16,
+    raw_segments: Array<u16, 8>,
     pub const LOCALHOST: Ipv6Addr = Ipv6Addr {
-        s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 1,
+        raw_segments: [0, 0, 0, 0, 0, 0, 0, 1],
     };
     pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr {
-        s0: 0, s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, s6: 0, s7: 0,
+        raw_segments: [0, 0, 0, 0, 0, 0, 0, 0],
     };
 }
 
@@ -849,62 +850,63 @@ impl Ipv6Addr {
         h: u16,
     ) -> Self
     {
-        Ipv6Addr { s0: a, s1: b, s2: c, s3: d, s4: e, s5: f, s6: g, s7: h }
+        Ipv6Addr { raw_segments: [a, b, c, d, e, f, g, h] }
     }
 
     pub pure fn from_bits(bits: u128) -> Self {
         let v = bits'bitvec;
         Ipv6Addr {
-            s0: v[112..128].as(u16),
-            s1: v[96..112].as(u16),
-            s2: v[80..96].as(u16),
-            s3: v[64..80].as(u16),
-            s4: v[48..64].as(u16),
-            s5: v[32..48].as(u16),
-            s6: v[16..32].as(u16),
-            s7: v[0..16].as(u16),
+            raw_segments: [
+                v[112..128].as(u16),
+                v[96..112].as(u16),
+                v[80..96].as(u16),
+                v[64..80].as(u16),
+                v[48..64].as(u16),
+                v[32..48].as(u16),
+                v[16..32].as(u16),
+                v[0..16].as(u16),
+            ],
         }
     }
 
-    pub pure fn to_bits(self) -> u128 {
-        var acc: u128 = self.s0'bitvec.as(u128);
-        acc = acc * 65536 + self.s1'bitvec.as(u128);
-        acc = acc * 65536 + self.s2'bitvec.as(u128);
-        acc = acc * 65536 + self.s3'bitvec.as(u128);
-        acc = acc * 65536 + self.s4'bitvec.as(u128);
-        acc = acc * 65536 + self.s5'bitvec.as(u128);
-        acc = acc * 65536 + self.s6'bitvec.as(u128);
-        acc * 65536 + self.s7'bitvec.as(u128)
+    pub fn to_bits(self) -> u128 {
+        var acc: u128 = 0;
+        var i: usize = 0;
+        while i < 8 {
+            acc = acc * 65536 + self.raw_segments[i].*'bitvec.as(u128);
+            i = i + 1;
+        }
+        acc
     }
 
-    pub pure fn segments(self) -> Tuple<u16, u16, u16, u16, u16, u16, u16, u16> {
-        (self.s0, self.s1, self.s2, self.s3, self.s4, self.s5, self.s6, self.s7)
+    pub pure fn segments(self) -> Array<u16, 8> {
+        self.raw_segments
     }
 
-    pub pure fn is_unspecified(self) -> bool {
-        self.s0 == 0
-            and self.s1 == 0
-            and self.s2 == 0
-            and self.s3 == 0
-            and self.s4 == 0
-            and self.s5 == 0
-            and self.s6 == 0
-            and self.s7 == 0
+    pub fn is_unspecified(self) -> bool {
+        var i: usize = 0;
+        while i < 8 {
+            if self.raw_segments[i].* != 0 {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
     }
 
-    pub pure fn is_loopback(self) -> bool {
-        self.s0 == 0
-            and self.s1 == 0
-            and self.s2 == 0
-            and self.s3 == 0
-            and self.s4 == 0
-            and self.s5 == 0
-            and self.s6 == 0
-            and self.s7 == 1
+    pub fn is_loopback(self) -> bool {
+        var i: usize = 0;
+        while i < 7 {
+            if self.raw_segments[i].* != 0 {
+                return false;
+            }
+            i = i + 1;
+        }
+        self.raw_segments[7].* == 1
     }
 
-    pub pure fn is_multicast(self) -> bool {
-        (self.s0 / 256) == 255
+    pub fn is_multicast(self) -> bool {
+        (self.raw_segments[0].* / 256) == 255
     }
 
     pub pure fn parse(s: str) -> !AddrParseErr Self {
@@ -955,16 +957,13 @@ impl Display for Ipv6Addr {
     {
         let _ = format;
         -- Find longest run of zeros >= 2 per RFC 5952.
-        var best_start: u8 = 255;
-        var best_len: u8 = 0;
-        var cur_start: u8 = 255;
-        var cur_len: u8 = 0;
-        var i: u8 = 0;
+        var best_start: usize = 255;
+        var best_len: usize = 0;
+        var cur_start: usize = 255;
+        var cur_len: usize = 0;
+        var i: usize = 0;
         while i < 8 {
-            let seg = get_u16_at(
-                self.s0.*, self.s1.*, self.s2.*, self.s3.*,
-                self.s4.*, self.s5.*, self.s6.*, self.s7.*, i,
-            );
+            let seg = self.raw_segments[i].*;
             if seg == 0 {
                 if cur_start == 255 {
                     cur_start = i;
@@ -982,8 +981,8 @@ impl Display for Ipv6Addr {
             }
             i = i + 1;
         }
-        let final_best_start: u8 = if best_start <= 7 { best_start } else { 255 };
-        let final_best_len: u8 = if best_len <= 8 { best_len } else { 8 };
+        let final_best_start: usize = if best_start <= 7 { best_start } else { 255 };
+        let final_best_len: usize = if best_len <= 8 { best_len } else { 8 };
         i = 0;
         while i < 8 {
             if final_best_start <= 7 and final_best_len <= 8 and i == final_best_start {
@@ -1000,10 +999,7 @@ impl Display for Ipv6Addr {
             {
                 output.write_byte(58)!;
             }
-            let seg = get_u16_at(
-                self.s0.*, self.s1.*, self.s2.*, self.s3.*,
-                self.s4.*, self.s5.*, self.s6.*, self.s7.*, i,
-            );
+            let seg = self.raw_segments[i].*;
             write_hex_u16(seg, output)!;
             i = i + 1;
         }
@@ -1064,21 +1060,21 @@ impl IpAddr {
         }
     }
 
-    pub pure fn is_unspecified(self) -> bool {
+    pub fn is_unspecified(self) -> bool {
         self match {
             .v4(a) => a.is_unspecified(),
             .v6(a) => a.is_unspecified(),
         }
     }
 
-    pub pure fn is_loopback(self) -> bool {
+    pub fn is_loopback(self) -> bool {
         self match {
             .v4(a) => a.is_loopback(),
             .v6(a) => a.is_loopback(),
         }
     }
 
-    pub pure fn is_multicast(self) -> bool {
+    pub fn is_multicast(self) -> bool {
         self match {
             .v4(a) => a.is_multicast(),
             .v6(a) => a.is_multicast(),

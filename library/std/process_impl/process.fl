@@ -72,8 +72,8 @@ impl Splice for ExitCode {
 
 {-
     Source call-site location metadata for panic reporting.
-    OQ-08-02: Implicit CallerLocation wiring is deferred until parameter
-    elaboration (`03`) merges; callers currently see `location: ?CallerLocation = null`.
+    OQ-08-02: `std.process.panic` populates `.location` automatically from
+    `ImplicitPassing` (`__file__`, `__line__`) while permitting explicit override.
 -}
 pub struct CallerLocation {
     raw_file: str,
@@ -256,10 +256,15 @@ pub fn abort() -> NoReturn {
     }
 }
 
-pub fn panic(message: str, .location: ?CallerLocation = null) -> NoReturn {
+pub fn panic(
+    message: str,
+    implicit __file__: str,
+    implicit __line__: u32,
+    .location: ?CallerLocation = CallerLocation.new(__file__, __line__, 0),
+) -> NoReturn {
     -- OQ-08-02: Unwind strategy via `{ T, ptr = 1 }` control word once
-    -- `@llvm-effects` lands the panic unwind intrinsic; implicit CallerLocation
-    -- wiring awaits `03` parameter elaboration.
+    -- `@llvm-effects` lands the panic unwind intrinsic; call-site location is
+    -- captured automatically via `ImplicitPassing` (`__file__`, `__line__`).
     let info = PanicInfo {
         raw_message: message,
         raw_location: location,

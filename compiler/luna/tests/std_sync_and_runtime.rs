@@ -267,27 +267,63 @@ fn std_sync_locks_once_barrier_and_semaphore_execute_natively() {
             cv.ref.notify_one();
             cv.ref.notify_all();
 
-            -- OnceLock + LazyLock
+            -- OnceLock + LazyLock (`MaybeUninit<T>` get/force/get_or_init/get_or_try_init + Drop)
             var once = OnceLock<u64>.new();
+            if once.ref.get() matches _? {
+                return false;
+            }
             let set_ok = once.ref.set(77) match { _! => true, error _ => false };
             let dup_err = once.ref.set(88) match {
                 _! => false,
                 error e => e.into_inner() == 88,
             };
+            let get_ok = once.ref.get() match {
+                p? => p.* == 77,
+                null => false,
+            };
             let read_ok = once.ref.with_ref(|p| p.* == 77) match {
                 v? => v,
                 null => false,
             };
-            if not set_ok or not dup_err or not read_ok {
+            if not set_ok or not dup_err or not get_ok or not read_ok {
                 return false;
             }
             let taken = once.ref.take() match { v? => v == 77, null => false };
-            if not taken or once.ref.is_initialized() {
+            if not taken or once.ref.is_initialized() or (once.ref.get() matches _?) {
+                return false;
+            }
+            if once.ref.get_or_init(|| 55).* != 55 {
+                return false;
+            }
+            var once_try = OnceLock<u64>.new();
+            let try_failed = once_try.ref.get_or_try_init(|| -> !u64 u64 { error 99 }) match {
+                _! => false,
+                error e => e == 99,
+            };
+            if not try_failed or once_try.ref.is_initialized() {
+                return false;
+            }
+            let try_ok = once_try.ref.get_or_try_init(|| -> !u64 u64 { 88 }) match {
+                p! => p.* == 88,
+                error _ => false,
+            };
+            if not try_ok {
                 return false;
             }
 
             var lazy = make_lazy(|| 123);
-            let lazy_ok = lazy.ref.with_ref(|p| p.* == 123);
+            if lazy.ref.get() matches _? {
+                return false;
+            }
+            let lazy_ptr_ok = lazy.ref.force().* == 123;
+            let lazy_get_ok = lazy.ref.get() match {
+                p? => p.* == 123,
+                null => false,
+            };
+            let lazy_ok = lazy_ptr_ok and lazy_get_ok and lazy.ref.with_ref(|p| p.* == 123);
+            if not lazy_ok {
+                return false;
+            }
 
             -- Barrier (n = 1 leader) + Semaphore
             var bar = Barrier.new(1);
@@ -929,7 +965,11 @@ fn std_process_sync_and_runtime_check_cleanly() {
             let _ = unwind.ref.as(Eq).eq(abort_strat.ref);
             set_panic_hook(hook_fn);
             if false {
+                panic("auto-location");
+            } else if false {
                 panic("unreachable", .location = loc);
+            } else if false {
+                panic("suppressed-location", .location = null);
             } else if false {
                 abort();
             }
@@ -966,7 +1006,10 @@ fn std_process_sync_and_runtime_check_cleanly() {
             cv.ref.notify_one();
             let once = OnceLock<u64>.new();
             let _ = once.ref.set(42);
+            let _ = once.ref.get();
+            let _ = once.ref.get_or_init(|| 7);
             let lazy = make_lazy(|| 99);
+            let _ = lazy.ref.get();
             let _ = lazy.ref.force();
             let barrier = Barrier.new(1);
             let _ = barrier.ref.wait().is_leader();
@@ -1014,4 +1057,100 @@ fn std_process_sync_and_runtime_check_cleanly() {
         }
     "#;
     assert_success(&NativeCase::new(source).check());
+}
+
+#[test]
+fn meta_bounded_stack_pool_and_attrs_effects_stack_strategy() {
+    let positive = r#"
+        use std.prelude.*;
+        use std.runtime.{
+            bounded_stack_bytes_for, require_bounded_stack_bytes, verify_bounded_stack_bytes,
+        };
+
+        ^attrs.layout.align(64)
+        struct Frame64 {
+            x: u64,
+        }
+
+        fn leaf_worker(x: u64) -> u64 {
+            assumes x < 1000000;
+            x + 1
+        }
+
+        fn aligned_worker(x: u64) -> u64 {
+            let f = Frame64 { x: x };
+            leaf_worker(f.x)
+        }
+
+        fn recursive_worker(n: u64) -> u64 {
+            if n == 0 { 0 } else { recursive_worker(n - 1) }
+        }
+
+        comptime fn verify_phase2a_contracts() -> bool {
+            let leaf_ok = verify_bounded_stack_bytes(leaf_worker, 256);
+            let aligned_too_small = not verify_bounded_stack_bytes(aligned_worker, 32);
+            let rec_unbounded = not verify_bounded_stack_bytes(recursive_worker, 4096)
+                and (bounded_stack_bytes_for(recursive_worker) matches null);
+            let req_bytes = require_bounded_stack_bytes(leaf_worker, 256);
+
+            let bp: meta.Object = attrs.effects.stack_strategy(.bounded_pool);
+            let gp: meta.Object = attrs.effects.stack_strategy(.guarded_pool);
+            let inl: meta.Object = attrs.effects.stack_strategy(.inline);
+
+            let bp_ok = bp.get<Symbol>(.__flurry_effect_strategy) match {
+                s? => s == .bounded_pool,
+                null => false,
+            };
+            let gp_ok = gp.get<Symbol>(.__flurry_effect_strategy) match {
+                s? => s == .guarded_pool,
+                null => false,
+            };
+            let inl_ok = inl.get<Symbol>(.__flurry_effect_strategy) match {
+                s? => s == .inline,
+                null => false,
+            };
+
+            leaf_ok
+                and aligned_too_small
+                and rec_unbounded
+                and req_bytes <= 256
+                and bp_ok
+                and gp_ok
+                and inl_ok
+        }
+
+        fn run() -> bool {
+            const ok = verify_phase2a_contracts();
+            ok
+        }
+    "#;
+    let pos_case = NativeCase::new(positive);
+    assert_success(&pos_case.build());
+    let pos_out = pos_case.run();
+    assert_success(&pos_out);
+    assert_eq!(pos_out.stdout, b"(bool true)\n");
+
+    let recursive_reject = r#"
+        use std.runtime.require_bounded_stack_bytes;
+        fn rec(n: u64) -> u64 { if n == 0 { 0 } else { rec(n - 1) } }
+        comptime fn bad() -> usize { require_bounded_stack_bytes(rec, 4096) }
+        fn run() -> bool { const _ = bad(); true }
+    "#;
+    let rec_out = NativeCase::new(recursive_reject).check();
+    assert!(!rec_out.status.success());
+    let rec_err = String::from_utf8_lossy(&rec_out.stderr);
+    assert!(rec_err.contains("unbounded"), "{rec_err}");
+
+    let overflow_reject = r#"
+        use std.runtime.require_bounded_stack_bytes;
+        ^attrs.layout.align(64)
+        struct BigFrame { x: u64 }
+        fn heavy(x: u64) -> u64 { let b = BigFrame { x: x }; b.x }
+        comptime fn bad() -> usize { require_bounded_stack_bytes(heavy, 32) }
+        fn run() -> bool { const _ = bad(); true }
+    "#;
+    let ov_out = NativeCase::new(overflow_reject).check();
+    assert!(!ov_out.status.success());
+    let ov_err = String::from_utf8_lossy(&ov_out.stderr);
+    assert!(ov_err.contains("slot_bytes"), "{ov_err}");
 }
