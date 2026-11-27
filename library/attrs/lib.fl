@@ -26,7 +26,7 @@ pub mod packed {
 }
 
 pub mod effects {
-    pub use .effects_impl.strategy.direct_passing;
+    pub use .effects_impl.strategy.{direct_passing, stack_strategy};
 }
 
 pub mod derivation {
