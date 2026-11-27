@@ -1553,7 +1553,9 @@ fn hash_scoped_protocols(
     hash_intrinsic_list(hasher, &protocols.host_intrinsics);
 
     for decl in [
+        protocols.clone,
         protocols.copy,
+        protocols.default_trait,
         protocols.drop,
         protocols.index,
         protocols.index_mut,

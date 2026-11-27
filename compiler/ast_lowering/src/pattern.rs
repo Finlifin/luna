@@ -247,6 +247,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower an AST node in pattern position into an HIR [`Pattern`].
     pub fn lower_pattern(&mut self, node: NodeIndex) -> Pattern<'hir> {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.lower_pattern_inner(node)
+        })
+    }
+
+    fn lower_pattern_inner(&mut self, node: NodeIndex) -> Pattern<'hir> {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid pattern node: no such node index {:?}", node);
         };

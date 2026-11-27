@@ -111,6 +111,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     /// Lower a single top-level AST node (definition or statement) into an
     /// HIR item and return its [`OwnerId`].
     fn lower_top_level_node(&mut self, node: NodeIndex) -> OwnerId {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.lower_top_level_node_inner(node)
+        })
+    }
+
+    fn lower_top_level_node_inner(&mut self, node: NodeIndex) -> OwnerId {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid top-level node: no such node index {:?}", node);
         };
@@ -513,10 +519,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     /// Lower an item that appears inside a block (definition inside a
     /// function body, struct body, etc.)  Returns the new [`OwnerId`].
     pub fn lower_item_in_block(&mut self, node: NodeIndex) -> OwnerId {
-        let parent = self.current_owner;
-        let owner = self.lower_top_level_node(node);
-        self.package.lexical_parents.insert(owner, parent);
-        owner
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            let parent = self.current_owner;
+            let owner = self.lower_top_level_node(node);
+            self.package.lexical_parents.insert(owner, parent);
+            owner
+        })
     }
 
     fn lower_test_template_instance(&mut self, node: NodeIndex) -> OwnerId {

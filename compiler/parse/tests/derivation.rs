@@ -13,6 +13,7 @@ fn declaration(source: &str) -> Result<(Ast, NodeIndex), String> {
     let root = parser
         .try_statement_or_definition()
         .map_err(|error| format!("{error:?}"))?;
+    parser.eat_token(TokenKind::Semi);
     if root == 0 || parser.peek_next_token().kind != TokenKind::Eof {
         return Err("incomplete declaration".into());
     }

@@ -61,6 +61,7 @@ dependencies = [
  "middle",
  "resolve",
  "rustc_span",
+ "stacker",
  "vfs",
 ]
 

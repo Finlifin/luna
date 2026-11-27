@@ -63,6 +63,7 @@ mod dependent_inputs;
 mod derivation;
 mod dynamic_instances;
 mod enum_groups;
+mod incremental;
 mod input_domains;
 mod input_facts;
 mod interfaces;
@@ -491,38 +492,7 @@ impl Protocols {
     }
 }
 
-/// Pre-elaborated NIR function body and whether it is an ordinary behavior
-/// witness for a pure function template (`checker.ordinary_behavior_functions`).
-#[derive(Clone, Debug)]
-pub struct CachedUpstreamFunction {
-    pub function: n::Function,
-    pub is_template_behavior: bool,
-    pub match_plans: Vec<(n::MatchPlanKey, n::MatchPlan)>,
-    pub safety_level: Option<n::SafetyLevel>,
-    pub decreases: Option<Vec<n::Expr>>,
-}
-
-/// Side-effect-free elaborated upstream function bodies reusable across compiles.
-#[derive(Clone, Debug, Default)]
-pub struct CachedUpstreamBodies {
-    pub functions: BTreeMap<DeclarationId, CachedUpstreamFunction>,
-}
-
-/// Controls incremental upstream skip gates and multi-threaded verification.
-#[derive(Clone, Debug, Default)]
-pub struct IncrementalOptions {
-    /// Semantic package identities whose source declarations and implementations
-    /// already passed contract inheritance, purity, and machine-flow checks in
-    /// the upstream base.
-    pub verified_upstream_packages: BTreeSet<u64>,
-    /// Pre-elaborated source function bodies for verified upstream declarations.
-    pub cached_upstream_bodies: Option<std::sync::Arc<CachedUpstreamBodies>>,
-    /// Semantic upstream package identities whose side-effect-free function bodies
-    /// may be recorded for reuse after all checks succeed.
-    pub record_upstream_packages: BTreeSet<u64>,
-    /// Worker count for parallel verification passes (`None` uses default).
-    pub jobs: Option<usize>,
-}
+pub use incremental::{CachedUpstreamBodies, CachedUpstreamFunction, IncrementalOptions};
 
 pub fn elaborate_packages_with_protocols(
     package: &hir::Package<'_>,
@@ -1133,77 +1103,6 @@ fn elaborate_in_mode(
     match result {
         Ok(result) => result,
         Err(payload) => std::panic::resume_unwind(payload),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct BodySideState {
-    next_temporary_binding: u32,
-    next_runtime_id: u32,
-    definition_identity_next: u32,
-    generated_functions: (u32, usize, usize),
-    structs: usize,
-    enums: usize,
-    newtypes: usize,
-    alias_contracts: usize,
-    computed_scalar_packets: usize,
-    internal_return_empty_replacements: usize,
-    code_packet_nominals: usize,
-    expansion_sources: usize,
-    runtime_domains: usize,
-    global_runtime_deliveries: usize,
-    pending_default_stability: usize,
-    pending_predicate_stability: usize,
-    refinements: usize,
-    volatile_storage: usize,
-    layout_alignments: usize,
-    observed_associated_types: usize,
-    delivered_types: usize,
-    constants: usize,
-    ordinary_behavior_functions: usize,
-    default_behavior_functions: usize,
-    safety_other_levels: usize,
-    safety_other_decreases: usize,
-    safety_predicate_roles: usize,
-}
-
-fn checker_body_side_state(checker: &Checker<'_, '_>, decl_id: DeclarationId) -> BodySideState {
-    BodySideState {
-        next_temporary_binding: checker.next_temporary_binding,
-        next_runtime_id: checker.next_runtime_id,
-        definition_identity_next: checker.definition_identities.next(),
-        generated_functions: checker.generated_functions.snapshot_counts(),
-        structs: checker.structs.len(),
-        enums: checker.enums.len(),
-        newtypes: checker.newtypes.len(),
-        alias_contracts: checker.alias_contracts.len(),
-        computed_scalar_packets: checker.computed_scalar_packets.len(),
-        internal_return_empty_replacements: checker.internal_return_empty_replacements.len(),
-        code_packet_nominals: checker.code_packet_nominals.len(),
-        expansion_sources: checker.expansion_sources.len(),
-        runtime_domains: checker.runtime_domains.len(),
-        global_runtime_deliveries: checker.global_runtime_deliveries.len(),
-        pending_default_stability: checker.pending_default_stability.len(),
-        pending_predicate_stability: checker.pending_predicate_stability.len(),
-        refinements: checker.refinements.len(),
-        volatile_storage: checker.volatile_storage.entry_count(),
-        layout_alignments: checker.layout_alignments.entry_count(),
-        observed_associated_types: checker.observed_associated_types.len(),
-        delivered_types: checker.delivered_types.len(),
-        constants: checker.constants.len(),
-        ordinary_behavior_functions: checker.ordinary_behavior_functions.len(),
-        default_behavior_functions: checker.default_behavior_functions.len(),
-        safety_other_levels: checker
-            .safety_contracts
-            .levels
-            .len()
-            .saturating_sub(usize::from(
-                checker.safety_contracts.levels.contains_key(&decl_id),
-            )),
-        safety_other_decreases: checker.safety_contracts.decreases.len().saturating_sub(
-            usize::from(checker.safety_contracts.decreases.contains_key(&decl_id)),
-        ),
-        safety_predicate_roles: checker.safety_contracts.predicate_roles.len(),
     }
 }
 
@@ -2203,8 +2102,25 @@ fn elaborate_candidate<'a, 'h>(
     output.newtypes = checker.newtypes.values().cloned().collect();
     output.structs = checker.structs.values().cloned().collect();
     output.enums = checker.enums.values().cloned().collect();
+    let mut body_recorder = (!incremental.record_upstream_packages.is_empty())
+        .then(|| incremental::UpstreamBodyRecorder::new(checker));
     for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
+        let decl_id = declaration(package, package_identities, owner);
+        if incremental::try_reuse_open_definition(checker, incremental, owner, decl_id) {
+            continue;
+        }
+        let pending = body_recorder.as_ref().and_then(|recorder| {
+            (incremental
+                .record_upstream_packages
+                .contains(&decl_id.package)
+                && checker.source_declarations.owner(decl_id) == Some(owner))
+            .then(|| recorder.begin_open(checker, owner, decl_id))
+            .flatten()
+        });
         checker.check_open_definition(owner)?;
+        if let (Some(recorder), Some(pending)) = (body_recorder.as_mut(), pending) {
+            recorder.finish_open(checker, pending);
+        }
     }
     for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
         if checker
@@ -2242,8 +2158,6 @@ fn elaborate_candidate<'a, 'h>(
     }
     checker.check_all_quote_fn_arms()?;
     checker.check_all_pattern_functions()?;
-    let mut recorded_bodies =
-        (!incremental.record_upstream_packages.is_empty()).then(CachedUpstreamBodies::default);
     for (owner, item, sig) in functions {
         if checker.open_functions.contains_key(&owner) {
             continue;
@@ -2256,45 +2170,7 @@ fn elaborate_candidate<'a, 'h>(
             !skip_non_pure_template && checker.source_declarations.owner(decl_id) == Some(owner);
         let is_plain_runtime =
             !template_behavior && !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head;
-        if eligible_upstream_decl
-            && incremental
-                .verified_upstream_packages
-                .contains(&decl_id.package)
-            && let Some(cached_fn) = incremental
-                .cached_upstream_bodies
-                .as_ref()
-                .and_then(|cache| cache.functions.get(&decl_id))
-            && cached_fn.is_template_behavior == template_behavior
-            && cached_fn.function.declaration == decl_id
-            && cached_fn.function.interface.signature == signature
-        {
-            if is_plain_runtime {
-                checker
-                    .checked_runtime_functions
-                    .insert(owner, cached_fn.function.clone());
-            }
-            if template_behavior {
-                checker
-                    .ordinary_behavior_functions
-                    .push(cached_fn.function.clone());
-            } else {
-                output.functions.push(cached_fn.function.clone());
-            }
-            for (key, plan) in &cached_fn.match_plans {
-                checker.match_plans.insert(*key, plan.clone());
-            }
-            if let Some(level) = cached_fn.safety_level {
-                checker.safety_contracts.levels.insert(decl_id, level);
-            }
-            if let Some(decreases) = &cached_fn.decreases {
-                checker
-                    .safety_contracts
-                    .decreases
-                    .insert(decl_id, decreases.clone());
-            }
-            continue;
-        }
-        let should_record = recorded_bodies.is_some()
+        let should_record = body_recorder.is_some()
             && eligible_upstream_decl
             && incremental
                 .record_upstream_packages
@@ -2312,7 +2188,29 @@ fn elaborate_candidate<'a, 'h>(
             output.functions.push(cached);
             continue;
         }
-        let before_state = should_record.then(|| checker_body_side_state(checker, decl_id));
+        if incremental::try_reuse_function(
+            checker,
+            &mut output,
+            incremental,
+            owner,
+            decl_id,
+            &signature,
+            template_behavior,
+            sig.modifiers.is_spec,
+            is_plain_runtime,
+            eligible_upstream_decl,
+        ) {
+            continue;
+        }
+        let pending = body_recorder.as_ref().filter(|_| should_record).map(|r| {
+            r.begin_function(
+                checker,
+                owner,
+                decl_id,
+                template_behavior,
+                sig.modifiers.is_spec,
+            )
+        });
         let function = checker.check_source_function(
             owner,
             signature,
@@ -2330,27 +2228,8 @@ fn elaborate_candidate<'a, 'h>(
                 .entry(owner)
                 .or_insert_with(|| function.clone());
         }
-        if let Some(expected_state) = before_state
-            && checker_body_side_state(checker, decl_id) == expected_state
-            && let Some(cache) = recorded_bodies.as_mut()
-        {
-            let body_match_plans = checker
-                .match_plans
-                .plans
-                .iter()
-                .filter(|(key, _)| key.function == Some(decl_id))
-                .map(|(key, plan)| (*key, plan.clone()))
-                .collect();
-            cache.functions.insert(
-                decl_id,
-                CachedUpstreamFunction {
-                    function: function.clone(),
-                    is_template_behavior: template_behavior,
-                    match_plans: body_match_plans,
-                    safety_level: checker.safety_contracts.levels.get(&decl_id).copied(),
-                    decreases: checker.safety_contracts.decreases.get(&decl_id).cloned(),
-                },
-            );
+        if let (Some(recorder), Some(pending)) = (body_recorder.as_mut(), pending) {
+            recorder.finish_function(checker, pending, &function);
         }
         if skip_non_pure_template {
             continue;
@@ -2361,6 +2240,7 @@ fn elaborate_candidate<'a, 'h>(
             output.functions.push(function);
         }
     }
+    let recorded_bodies = body_recorder.map(|recorder| recorder.bodies);
     let attributes = prepared_attributes;
     for function in checker.checked_pattern_functions.values().cloned() {
         output.functions.push(function);
