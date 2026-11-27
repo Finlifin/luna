@@ -911,7 +911,7 @@ impl<'a> Infer<'a, '_> {
                     stable_writes.extend(stationary_handler_write_sites_for(
                         self.package,
                         arm,
-                        parameters.len(),
+                        summary.capture_base,
                         &captures,
                         &summary.memory,
                         self.round.text_provenance,
@@ -1422,6 +1422,7 @@ pub struct HandlerParameterSummary {
     /// Borrowed environment accesses retain their lexical binding separately
     /// from operation parameters. Virtual slots exist only in `memory`.
     pub capture_accesses: Vec<(LocalId, Access)>,
+    pub(crate) capture_base: usize,
 }
 
 impl fmt::Display for HandlerParameterSummary {
@@ -1779,19 +1780,89 @@ fn infer_handler_arm_memory_with_captures_for(
         });
         bound_type(&signature, fuel)?;
     }
-    let capture_base = bindings.len();
+    let env_base = bindings.len();
+    let definition_ty = Term::Closure {
+        environment: captures.iter().map(|(_, ty)| ty.clone()).collect(),
+        signature: Box::new(signature),
+    };
+    let closure_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        std::slice::from_ref(&definition_ty),
+        &[],
+    )
+    .map_err(|reason| reason.to_string())?;
+    let env_bindings: BTreeSet<_> = closure_envs.iter().map(|env| env.binding).collect();
+    let mut capture_remap = BTreeMap::new();
+    for (binding, _) in captures {
+        if env_bindings.contains(binding) {
+            let index = u32::try_from(env_base + capture_remap.len())
+                .map_err(|_| "handler capture binding index overflow")?;
+            capture_remap.insert(*binding, LocalId { owner, index });
+        }
+    }
+    if !capture_remap.is_empty() {
+        nir::visit::expression_mut_in_closure_environment(&mut body, fuel, |node, _| {
+            match &mut node.kind {
+                K::Local(binding) => {
+                    if let Some(next) = capture_remap.get(binding) {
+                        *binding = *next;
+                    }
+                }
+                K::Assign { place, .. }
+                | K::BitUpdate { place, .. }
+                | K::BitAssign { place, .. } => {
+                    if let Some(next) = capture_remap.get(&place.root) {
+                        place.root = *next;
+                    }
+                }
+                K::Closure {
+                    captures: inner, ..
+                } => {
+                    for capture in inner {
+                        if let Some(next) = capture_remap.get(&capture.binding) {
+                            capture.binding = *next;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+    }
+    let remapped_captured_code = (!capture_remap.is_empty()).then(|| {
+        captured_code
+            .iter()
+            .map(|(place, result)| {
+                let mut mapped = place.clone();
+                if let Some(next) = capture_remap.get(&mapped.binding) {
+                    mapped.binding = *next;
+                }
+                (mapped, result.clone())
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
+    let remapped_prepared_code = (!capture_remap.is_empty()).then(|| {
+        prepared_code
+            .iter()
+            .map(|(place, codes)| {
+                let mut mapped = place.clone();
+                if let Some(next) = capture_remap.get(&mapped.binding) {
+                    mapped.binding = *next;
+                }
+                (mapped, codes.clone())
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
     let definition = Expr {
-        ty: Term::Closure {
-            environment: captures.iter().map(|(_, ty)| ty.clone()).collect(),
-            signature: Box::new(signature),
-        },
+        ty: definition_ty,
         source: arm.body.source,
         kind: K::Closure {
             parameters: bindings,
             captures: captures
                 .iter()
                 .map(|(binding, ty)| nir::program::Capture {
-                    binding: *binding,
+                    binding: capture_remap.get(binding).copied().unwrap_or(*binding),
                     ty: ty.clone(),
                     value: None,
                 })
@@ -1799,11 +1870,12 @@ fn infer_handler_arm_memory_with_captures_for(
             body: std::sync::Arc::new(body),
         },
     };
+    let capture_base = env_base + closure_envs.len();
     let memory = infer_closure_with_borrowed_effect_context_for(
         package,
         &definition,
-        captured_code,
-        prepared_code,
+        remapped_captured_code.as_ref().unwrap_or(captured_code),
+        remapped_prepared_code.as_ref().unwrap_or(prepared_code),
         &BTreeMap::new(),
         &BTreeMap::new(),
         effects,
@@ -1864,6 +1936,8 @@ fn infer_handler_arm_memory_with_captures_for(
             }
             capture_accesses.push((*binding, access.clone()));
             continue;
+        } else if access.target.parameter >= env_base {
+            continue;
         } else if access.target.parameter >= parameters.len() {
             return Err("handler continuation parameter cannot expose pointer accesses".into());
         }
@@ -1894,6 +1968,7 @@ fn infer_handler_arm_memory_with_captures_for(
         memory,
         accesses,
         capture_accesses,
+        capture_base,
     })
 }
 
@@ -2039,7 +2114,7 @@ pub(crate) fn direct_handler_accesses_with_code_for(
         && !handler_capture_origins_preserved_for(
             Some(package),
             &summary.memory,
-            parameters.len(),
+            summary.capture_base,
             captures,
             text_provenance,
             fuel,
