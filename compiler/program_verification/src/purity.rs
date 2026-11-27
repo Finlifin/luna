@@ -1575,6 +1575,7 @@ struct Analysis<'a> {
     // Lookup/memo tables containing `Term` (`Term: Eq + Hash`, not `Ord`).
     active: HashSet<Key>,
     proven: HashMap<Key, bool>,
+    assumption_free_copy_types: HashSet<Term>,
     fuel: usize,
 }
 
@@ -1633,6 +1634,7 @@ impl<'a> Analysis<'a> {
             result_fields: BTreeMap::new(),
             active: HashSet::new(),
             proven: HashMap::new(),
+            assumption_free_copy_types: HashSet::new(),
             fuel,
         }
     }
@@ -3737,7 +3739,12 @@ impl<'a> Analysis<'a> {
                 }
             }
         }
-        let mut copy_types = HashSet::new();
+        let empty_assumptions = function.capabilities.is_empty();
+        let mut copy_types = if empty_assumptions {
+            self.assumption_free_copy_types.clone()
+        } else {
+            HashSet::new()
+        };
         if self.protocols.drop.is_none() {
             let report = moves::analyze_with_declarations(
                 self.declarations.clone(),
@@ -3819,6 +3826,18 @@ impl<'a> Analysis<'a> {
         let Ok(report) = report else {
             return false;
         };
+        if empty_assumptions {
+            for ty in &copy_types {
+                if !self.assumption_free_copy_types.contains(ty) {
+                    let mut closed_fuel = self.fuel.max(1024);
+                    if nir::type_computations::has_rigid_parameters_bounded(ty, &mut closed_fuel)
+                        == Ok(false)
+                    {
+                        self.assumption_free_copy_types.insert(ty.clone());
+                    }
+                }
+            }
+        }
         self.fuel = self.fuel.saturating_sub(report.entry_steps_used);
         self.cleanup_report_is_pure(&report, &copy_types, Some(&world), 0)
     }

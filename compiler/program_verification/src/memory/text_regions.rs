@@ -3199,7 +3199,7 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             K::SymbolName { .. } | K::EnumName { .. } => {
                 self.transfer_symbol_name(expr, locals, returned, next)
             }
-            K::Tuple { .. } | K::Record { .. } | K::AnonymousRecord { .. } => {
+            K::Tuple { .. } | K::Array { .. } | K::Record { .. } | K::AnonymousRecord { .. } => {
                 self.transfer_tuple(expr, locals, returned, next)
             }
             K::TupleAppend { .. } => self.transfer_tuple_append(expr, locals, returned, next),
