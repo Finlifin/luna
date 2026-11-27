@@ -1,8 +1,8 @@
 //! Language items – well-known types and traits that the compiler must
 //! know about in order to lower certain constructs.
 //!
-//! For example, `for` uses the `Iter` and `IntoIterator` protocols, and the
-//! `?` operator needs to know about the `Optional` type. Language items
+//! For example, `for` uses the `Iter` and `IntoIterator` protocols, and
+//! resource management uses `Once`, `Copy`, `Clone`, and `Drop`. Language items
 //! connect these abstract compiler concepts to concrete user-visible
 //! definitions.
 //!
@@ -283,6 +283,7 @@ pub struct RegistrationConflict {
     pub previous: LangItemDef,
     pub attempted: LangItemDef,
 }
+
 impl fmt::Display for LangItemDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -291,6 +292,7 @@ impl fmt::Display for LangItemDef {
         }
     }
 }
+
 impl fmt::Display for LangItems {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(language-items")?;
@@ -300,6 +302,7 @@ impl fmt::Display for LangItems {
         f.write_str(")")
     }
 }
+
 impl fmt::Display for RegistrationConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -309,6 +312,7 @@ impl fmt::Display for RegistrationConflict {
         )
     }
 }
+
 impl std::error::Error for RegistrationConflict {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +329,7 @@ pub enum SourceBindingError {
     },
     Conflict(RegistrationConflict),
 }
+
 impl fmt::Display for SourceBindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -346,4 +351,5 @@ impl fmt::Display for SourceBindingError {
         }
     }
 }
+
 impl std::error::Error for SourceBindingError {}

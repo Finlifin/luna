@@ -398,7 +398,9 @@ impl ValueFreezer<'_, '_> {
                 {
                     return Err("staged callable phase mismatch".into());
                 }
-                let (declaration, arguments) = value.declaration_instance().unwrap();
+                let (declaration, arguments) = value
+                    .declaration_instance()
+                    .ok_or("staged callable lacks declaration instance")?;
                 // The source VM has checked this result against `ty`. Named
                 // identities can belong to either phase; freezing preserves
                 // the original signature rather than granting runtime entry.
@@ -651,7 +653,7 @@ impl ValueFreezer<'_, '_> {
                 K::Literal(
                     literal
                         .map_err(|e| e.to_string())?
-                        .expect("scalar value representation"),
+                        .ok_or("staged scalar lacks literal representation")?,
                 )
             }
             Value::Type(v) => {

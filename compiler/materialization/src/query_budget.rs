@@ -51,15 +51,15 @@ mod tests {
             world,
             value_scope: Default::default(),
             queue: VecDeque::new(),
-            functions: HashSet::new(),
-            staged_functions: HashMap::new(),
-            generated_functions: HashMap::new(),
-            recursive_factories: HashMap::new(),
+            functions: BTreeSet::new(),
+            staged_functions: BTreeMap::new(),
+            generated_functions: BTreeMap::new(),
+            recursive_factories: BTreeMap::new(),
             invocation_snapshot: None,
-            types: HashSet::new(),
+            types: BTreeSet::new(),
             staging_views: HashMap::new(),
-            interfaces: HashMap::new(),
-            associated_demands: HashSet::new(),
+            interfaces: BTreeMap::new(),
+            associated_demands: BTreeSet::new(),
             output: vec![],
             fuel,
             budget,
@@ -72,7 +72,9 @@ mod tests {
             dyn_interfaces: vec![],
             dyn_vtables: vec![],
             effect_contracts: vec![],
-            effect_instances: HashSet::new(),
+            effect_instances: BTreeSet::new(),
+            statics: vec![],
+            static_declarations: BTreeSet::new(),
             frozen_methods: vec![],
             callable_identities: vec![],
             type_cores: Default::default(),
@@ -166,7 +168,10 @@ mod tests {
         assert!(
             builder
                 .staged_functions
-                .contains_key(&(declaration, vec![Term::Pointer(Box::new(boolean))]))
+                .contains_key(&OrderedFunctionKey::new(
+                    declaration,
+                    &[Term::Pointer(Box::new(boolean))]
+                ))
         );
         assert!(builder.invocation_snapshot.is_some());
     }

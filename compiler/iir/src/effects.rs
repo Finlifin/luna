@@ -15,7 +15,8 @@ use nir::{Primitive, Sort, Term};
 pub fn suspension_boundary(expr: &Expr) -> bool {
     match &expr.kind {
         K::EffectRequest {
-            abi: Abi::Direct, ..
+            abi: Abi::Direct | Abi::Capturing,
+            ..
         } => true,
         K::Call { callee, .. } => matches!(callee.ty.callable_signature(),
             Term::Function {result, ..} if matches!(result.as_ref(),
@@ -463,7 +464,10 @@ fn expression(
                 }
                 let mut installed = Vec::new();
                 for handler in handlers {
-                    if !matches!(handler.abi, Abi::Direct | Abi::DirectPassing) {
+                    if !matches!(
+                        handler.abi,
+                        Abi::Direct | Abi::DirectPassing | Abi::Capturing
+                    ) {
                         return Err("IIR non-direct effects require control ABI lowering".into());
                     }
                     operation(package, links, &handler.operation, &handler.signature, fuel)?;
@@ -485,8 +489,13 @@ fn expression(
                             return Err("IIR handler fallback selects the wrong occurrence".into());
                         }
                     }
+                    let branch_result = if handler.abi == Abi::Capturing {
+                        row_result(&expr.ty).1
+                    } else {
+                        result
+                    };
                     for arm in &handler.arms {
-                        if !compatible(&arm.body.ty, result) {
+                        if !compatible(&arm.body.ty, branch_result) {
                             return Err("IIR handler branch result mismatch".into());
                         }
                         pattern(
@@ -505,7 +514,7 @@ fn expression(
                                 links,
                                 guard,
                                 outer,
-                                Some(result),
+                                None,
                                 runtime,
                                 false,
                                 fuel,
@@ -551,7 +560,7 @@ fn expression(
                 signature,
                 arguments,
             } => {
-                if !matches!(abi, Abi::Direct | Abi::DirectPassing) {
+                if !matches!(abi, Abi::Direct | Abi::DirectPassing | Abi::Capturing) {
                     return Err("IIR non-direct effects require control ABI lowering".into());
                 }
                 operation(package, links, op, signature, fuel)?;
@@ -936,14 +945,29 @@ pub(crate) fn validate_contracts(
     collect_contracts(package, links, fuel).map(|_| ())
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct OrderedOperation(Operation);
+
+impl Ord for OrderedOperation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        nir::cmp_effect_operation(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for OrderedOperation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 fn collect_contracts(
     package: &Package,
     links: &TypeLinks<'_>,
     fuel: &mut usize,
 ) -> Result<Vec<Contract>, String> {
     // The index accelerates lookup; only first source traversal order is exposed
-    // in the resulting table/dump, never hash iteration or pointer ordering.
-    let mut index = std::collections::HashMap::<Operation, usize>::new();
+    // in the resulting table/dump, never map or pointer ordering.
+    let mut index = std::collections::BTreeMap::<OrderedOperation, usize>::new();
     let mut contracts: Vec<Contract> = Vec::new();
     for contract in &package.effect_contracts {
         spend(fuel)?;
@@ -960,7 +984,10 @@ fn collect_contracts(
             return Err("IIR direct passing operation contract has parameters".into());
         }
         if index
-            .insert(contract.operation.clone(), contracts.len())
+            .insert(
+                OrderedOperation(contract.operation.clone()),
+                contracts.len(),
+            )
             .is_some()
         {
             return Err("duplicate IIR declared effect contract".into());
@@ -971,9 +998,10 @@ fn collect_contracts(
         visit::expressions(&instance.function, fuel, |expr, fuel| {
             let mut insert = |op: &Operation, abi: Abi, signature: &Term| -> Result<(), String> {
                 spend(fuel)?;
-                // Validate/charge the complete key before hashing or comparing it.
+                // Validate/charge the complete key before ordering or comparing it.
                 operation(package, links, op, signature, fuel)?;
-                if let Some(&position) = index.get(op) {
+                let ordered = OrderedOperation(op.clone());
+                if let Some(&position) = index.get(&ordered) {
                     let prior = &contracts[position];
                     if prior.abi != abi || &prior.signature != signature {
                         return Err(
@@ -981,7 +1009,7 @@ fn collect_contracts(
                         );
                     }
                 } else {
-                    index.insert(op.clone(), contracts.len());
+                    index.insert(ordered, contracts.len());
                     contracts.push(Contract {
                         operation: op.clone(),
                         abi,

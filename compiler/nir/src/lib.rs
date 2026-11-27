@@ -26,6 +26,8 @@ pub use trait_parameters::{
 pub mod member_types;
 pub mod phases;
 
+pub use phases::storage_key::{OrderedTerm, cmp_effect_operation, cmp_term, cmp_term_slice};
+
 pub mod callable_types;
 pub mod function_parameters;
 pub mod normal_forms;
