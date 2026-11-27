@@ -815,8 +815,6 @@ fn std_runtime_async_effect_signatures_and_non_copy_non_send_rejections() {
 
         fn run() -> bool { true }
     "#;
-    assert_success(&NativeCase::new(valid_async).check());
-
     let rejections = [
         (
             "TypedContinuation must not be Copy",
@@ -867,12 +865,29 @@ fn std_runtime_async_effect_signatures_and_non_copy_non_send_rejections() {
         ),
     ];
 
-    for (label, source) in rejections {
-        let out = NativeCase::new(source).check();
-        assert!(
-            !out.status.success(),
-            "expected failure for `{label}`, but check succeeded"
-        );
+    let checks: Vec<(&str, &str, bool)> = std::iter::once(("valid_async", valid_async, true))
+        .chain(rejections.into_iter().map(|(l, s)| (l, s, false)))
+        .collect();
+    for batch in checks.chunks(4) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|&(label, source, expect_ok)| {
+                    scope.spawn(move || (label, expect_ok, NativeCase::new(source).check()))
+                })
+                .collect();
+            for handle in handles {
+                let (label, expect_ok, out) = handle.join().unwrap();
+                if expect_ok {
+                    assert_success(&out);
+                } else {
+                    assert!(
+                        !out.status.success(),
+                        "expected failure for `{label}`, but check succeeded"
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -1095,7 +1110,7 @@ fn meta_bounded_stack_pool_and_attrs_effects_stack_strategy() {
 
             let bp: meta.Object = attrs.effects.stack_strategy(.bounded_pool);
             let gp: meta.Object = attrs.effects.stack_strategy(.guarded_pool);
-            let inl: meta.Object = attrs.effects.stack_strategy(.inline);
+            let inl: meta.Object = attrs.effects.stack_strategy(.inline_frame);
 
             let bp_ok = bp.get<Symbol>(.__flurry_effect_strategy) match {
                 s? => s == .bounded_pool,
@@ -1106,7 +1121,7 @@ fn meta_bounded_stack_pool_and_attrs_effects_stack_strategy() {
                 null => false,
             };
             let inl_ok = inl.get<Symbol>(.__flurry_effect_strategy) match {
-                s? => s == .inline,
+                s? => s == .inline_frame,
                 null => false,
             };
 
@@ -1124,22 +1139,12 @@ fn meta_bounded_stack_pool_and_attrs_effects_stack_strategy() {
             ok
         }
     "#;
-    let pos_case = NativeCase::new(positive);
-    assert_success(&pos_case.build());
-    let pos_out = pos_case.run();
-    assert_success(&pos_out);
-    assert_eq!(pos_out.stdout, b"(bool true)\n");
-
     let recursive_reject = r#"
         use std.runtime.require_bounded_stack_bytes;
         fn rec(n: u64) -> u64 { if n == 0 { 0 } else { rec(n - 1) } }
         comptime fn bad() -> usize { require_bounded_stack_bytes(rec, 4096) }
         fn run() -> bool { const _ = bad(); true }
     "#;
-    let rec_out = NativeCase::new(recursive_reject).check();
-    assert!(!rec_out.status.success());
-    let rec_err = String::from_utf8_lossy(&rec_out.stderr);
-    assert!(rec_err.contains("unbounded"), "{rec_err}");
 
     let overflow_reject = r#"
         use std.runtime.require_bounded_stack_bytes;
@@ -1149,7 +1154,30 @@ fn meta_bounded_stack_pool_and_attrs_effects_stack_strategy() {
         comptime fn bad() -> usize { require_bounded_stack_bytes(heavy, 32) }
         fn run() -> bool { const _ = bad(); true }
     "#;
-    let ov_out = NativeCase::new(overflow_reject).check();
+
+    let (pos_case, rec_out, ov_out) = std::thread::scope(|scope| {
+        let h_pos = scope.spawn(|| {
+            let pos_case = NativeCase::new(positive);
+            assert_success(&pos_case.build());
+            let pos_out = pos_case.run();
+            assert_success(&pos_out);
+            assert_eq!(pos_out.stdout, b"(bool true)\n");
+            pos_case
+        });
+        let h_rec = scope.spawn(|| NativeCase::new(recursive_reject).check());
+        let h_ov = scope.spawn(|| NativeCase::new(overflow_reject).check());
+        (
+            h_pos.join().unwrap(),
+            h_rec.join().unwrap(),
+            h_ov.join().unwrap(),
+        )
+    });
+    drop(pos_case);
+
+    assert!(!rec_out.status.success());
+    let rec_err = String::from_utf8_lossy(&rec_out.stderr);
+    assert!(rec_err.contains("unbounded"), "{rec_err}");
+
     assert!(!ov_out.status.success());
     let ov_err = String::from_utf8_lossy(&ov_out.stderr);
     assert!(ov_err.contains("slot_bytes"), "{ov_err}");

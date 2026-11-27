@@ -260,14 +260,18 @@ pub fn panic(
     message: str,
     implicit __file__: str,
     implicit __line__: u32,
-    .location: ?CallerLocation = CallerLocation.new(__file__, __line__, 0),
+    .location: ?CallerLocation = null,
 ) -> NoReturn {
     -- OQ-08-02: Unwind strategy via `{ T, ptr = 1 }` control word once
     -- `@llvm-effects` lands the panic unwind intrinsic; call-site location is
     -- captured automatically via `ImplicitPassing` (`__file__`, `__line__`).
+    let resolved_location: ?CallerLocation = location match {
+        loc? => loc,
+        null => CallerLocation.new(__file__, __line__, 0),
+    };
     let info = PanicInfo {
         raw_message: message,
-        raw_location: location,
+        raw_location: resolved_location,
         raw_is_unwind: true,
     }
     let current = unsafe {
