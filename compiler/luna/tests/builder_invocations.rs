@@ -37,23 +37,7 @@ impl Fixture {
         Self(path)
     }
     fn builtin_entry(&self) -> PathBuf {
-        // This explicit-package fixture isolates meta and its compiler bindings.
-        // The complete sysroot has a separate end-to-end case below.
-        std::fs::create_dir_all(self.0.join("builtin")).unwrap();
-        std::fs::write(
-            self.0.join("builtin/lib.fl"),
-            concat!(
-                "mod primitives {\n",
-                include_str!("../../../library/builtin/primitives.fl"),
-                "\n} pub use primitives.*;\n",
-                include_str!("../../../library/builtin/numeric/comparison.fl"),
-                "\npub mod compiler {\n",
-                include_str!("../../../library/builtin/bindings.fl"),
-                "\n}\n",
-            ),
-        )
-        .unwrap();
-        self.0.join("builtin/lib.fl")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/lib.fl")
     }
     fn packages(&self) -> Vec<SourcePackage> {
         vec![SourcePackage {
@@ -118,7 +102,7 @@ fn inherent_builder_can_form_the_subject_of_a_trait_implementation() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -205,7 +189,7 @@ fn early_inherent_builder_retains_receiver_type_arguments() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let generated = package
@@ -426,14 +410,32 @@ impl Fixture {
             name: "builtin".into(),
             entry: self.builtin_entry(),
         });
-        let intrinsics: Vec<_> = nir::intrinsics::Operation::scalar_math()
-            .map(|op| {
-                (
-                    *op,
-                    format!("meta.numeric.scalar_math.target.Scalar.{}", op.name()),
-                )
-            })
-            .collect();
+        let conf = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/language-items.conf"),
+        )
+        .expect("read language-items.conf");
+        let mut comptime_intrinsics = Vec::new();
+        let mut host_intrinsics = Vec::new();
+        for line in conf.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim().to_string();
+            if value.starts_with("std.") {
+                continue;
+            }
+            if let Some(name) = key.strip_prefix("comptime-intrinsic.") {
+                if let Some(op) = nir::intrinsics::Operation::from_name(name) {
+                    comptime_intrinsics.push((op, value));
+                }
+            } else if let Some(name) = key.strip_prefix("host-intrinsic.")
+                && let Some(op) = nir::intrinsics::Operation::from_name(name)
+            {
+                host_intrinsics.push((op, value));
+            }
+        }
         compile_and_invoke_with_struct_builders(
             &packages,
             &[
@@ -441,6 +443,16 @@ impl Fixture {
                     requester: 42,
                     alias: "attrs".into(),
                     provider: 44,
+                },
+                resolve::DependencyEdge {
+                    requester: 43,
+                    alias: "attrs".into(),
+                    provider: 44,
+                },
+                resolve::DependencyEdge {
+                    requester: 43,
+                    alias: "meta".into(),
+                    provider: 42,
                 },
                 resolve::DependencyEdge {
                     requester: 44,
@@ -469,18 +481,111 @@ impl Fixture {
                 },
             ],
             17,
-            None,
+            Some(43),
             &elaboration::program::Protocols {
-                builtin_implementation_packages: [901].into(),
+                builtin_implementation_packages: [901, 902, 903].into(),
                 ..Default::default()
             },
             luna::protocols::type_constructors::Selectors {
+                comptime_intrinsics: &comptime_intrinsics,
+                host_intrinsics: &host_intrinsics,
+                clone: Some("builtin.protocols.resources.Clone"),
+                copy: Some("builtin.protocols.resources.Copy"),
+                default_trait: Some("builtin.protocols.traits.Default"),
+                drop: Some("builtin.protocols.resources.Drop"),
+                index: Some("builtin.protocols.ops.Index"),
+                index_mut: Some("builtin.protocols.ops.IndexMut"),
+                space_apply: Some("builtin.protocols.ops.SpaceApply"),
+                comptime_index: Some("meta.ops_impl.ComptimeIndex"),
+                iterator: Some("builtin.protocols.iterator.Iterator"),
+                into_iterator: Some("builtin.protocols.iterator.IntoIterator"),
+                variadic_collector: Some("builtin.protocols.ops.VariadicCollector"),
+                try_variadic_collector: Some("builtin.protocols.ops.TryVariadicCollector"),
+                extended_variadic_collector: Some(
+                    "builtin.protocols.ops.ExtendedVariadicCollector",
+                ),
+                ordering: Some("builtin.numeric.comparison.Ord"),
+                equality: Some("builtin.numeric.comparison.Eq"),
+                comptime_ordering: Some("meta.numeric.ordering.ComptimeOrd"),
+                comptime_equality: Some("meta.numeric.equality.ComptimeEq"),
+                list_pattern: Some("builtin.protocols.patterns.ListPatternView"),
+                comptime_list_pattern: Some("meta.data.patterns.ComptimeListPatternView"),
+                stable_list_pattern: Some("builtin.protocols.patterns.StableListPatternView"),
+                list_pattern_endless: Some("builtin.protocols.patterns.ListPatternViewEndless"),
+                stable_list_pattern_endless: Some(
+                    "builtin.protocols.patterns.StableListPatternViewEndless",
+                ),
+                range_full: Some("builtin.range.RangeFull"),
+                range_from: Some("builtin.range.RangeFrom"),
+                range_to: Some("builtin.range.RangeTo"),
+                range_to_inclusive: Some("builtin.range.RangeToInclusive"),
+                range: Some("builtin.range.Range"),
+                range_inclusive: Some("builtin.range.RangeInclusive"),
+                range_end: Some("builtin.protocols.patterns.RangeEnd"),
+                range_pattern: Some("builtin.protocols.patterns.RangePatternView"),
+                stable_range_pattern: Some("builtin.protocols.patterns.StableRangePatternView"),
+                concat: Some("builtin.protocols.ops.Concat"),
+                comptime_concat: Some("meta.ops_impl.ComptimeConcat"),
+                concat_pattern: Some("builtin.protocols.patterns.ConcatPatternView"),
+                stable_concat_pattern: Some("builtin.protocols.patterns.StableConcatPatternView"),
+                map_pattern: Some("builtin.protocols.patterns.MapPatternView"),
+                stable_map_pattern: Some("builtin.protocols.patterns.StableMapPatternView"),
+                struct_pattern: Some("builtin.protocols.patterns.StructPatternView"),
+                stable_struct_pattern: Some("builtin.protocols.patterns.StableStructPatternView"),
+                type_pattern: Some("meta.patterns.TypePatternView"),
+                literal_into: Some("builtin.protocols.conversion.LiteralInto"),
+                implies: Some("builtin.protocols.ops.Implies"),
+                comptime_implies: Some("meta.ops_impl.ComptimeImplies"),
+                handle_error: Some("builtin.protocols.capabilities.errors.HandleError"),
+                deref: Some("builtin.protocols.ops.Deref"),
+                deref_mut: Some("builtin.protocols.ops.DerefMut"),
+                reference: Some("builtin.protocols.ops.Reference"),
+                implicit_passing: Some("builtin.protocols.implicit_passing.ImplicitPassing"),
+                call_context: Some("builtin.protocols.implicit_passing.Context"),
+                call_description: Some("builtin.protocols.implicit_passing.CallDescription"),
+                source_span: Some("meta.ast_impl.span.SourceSpan"),
+                arithmetic: [
+                    Some("builtin.protocols.ops.Add"),
+                    Some("builtin.protocols.ops.Sub"),
+                    Some("builtin.protocols.ops.Mul"),
+                    Some("builtin.protocols.ops.Div"),
+                    Some("builtin.protocols.ops.Rem"),
+                    Some("builtin.protocols.ops.Neg"),
+                    Some("builtin.protocols.ops.Not"),
+                ],
+                compound_arithmetic: [
+                    Some("builtin.protocols.ops.AddAssign"),
+                    Some("builtin.protocols.ops.SubAssign"),
+                    Some("builtin.protocols.ops.MulAssign"),
+                    Some("builtin.protocols.ops.DivAssign"),
+                    Some("builtin.protocols.ops.RemAssign"),
+                ],
+                comptime_compound_arithmetic: [
+                    Some("meta.ops_impl.ComptimeAddAssign"),
+                    Some("meta.ops_impl.ComptimeSubAssign"),
+                    Some("meta.ops_impl.ComptimeMulAssign"),
+                    Some("meta.ops_impl.ComptimeDivAssign"),
+                    Some("meta.ops_impl.ComptimeRemAssign"),
+                ],
+                comptime_arithmetic: [
+                    Some("meta.ops_impl.ComptimeAdd"),
+                    Some("meta.ops_impl.ComptimeSub"),
+                    Some("meta.ops_impl.ComptimeMul"),
+                    Some("meta.ops_impl.ComptimeDiv"),
+                    Some("meta.ops_impl.ComptimeRem"),
+                    Some("meta.ops_impl.ComptimeNeg"),
+                    Some("meta.ops_impl.ComptimeNot"),
+                ],
+                splice: Some("builtin.protocols.staging.Splice"),
                 meta_list: Some("meta.List"),
-                comptime_intrinsics: &intrinsics,
+                tuple: Some("builtin.types.tuple.Tuple"),
+                array: Some("builtin.mem_impl.array.Array"),
+                maybe_uninit_storage: Some("builtin.mem_impl.maybe_uninit.MaybeUninitStorage"),
+                manually_drop_storage: Some("builtin.mem_impl.manually_drop.ManuallyDropStorage"),
                 ..Default::default()
             },
-            None,
-            &[42],
+            Some(nir::target::TargetData::new(64).unwrap()),
+            &[43, 44, 42],
             entry,
             &mut 1_000_000,
             1_000_000,
@@ -578,33 +683,183 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
         }
     ",
     );
+    let conf = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/language-items.conf"),
+    )
+    .expect("read language-items.conf");
+    let mut cli_items = Vec::new();
+    for line in conf.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key == "version"
+            || value.starts_with("std.")
+            || matches!(
+                key,
+                "clone-protocol"
+                    | "default-protocol"
+                    | "handle-error-protocol"
+                    | "iterator-protocol"
+                    | "into-iterator-protocol"
+                    | "variadic-collector-protocol"
+                    | "try-variadic-collector-protocol"
+                    | "extended-variadic-collector-protocol"
+                    | "comptime-ord-protocol"
+                    | "comptime-eq-protocol"
+                    | "map-pattern-protocol"
+                    | "stable-map-pattern-protocol"
+                    | "struct-pattern-protocol"
+                    | "stable-struct-pattern-protocol"
+                    | "type-pattern-protocol"
+                    | "array-type"
+                    | "maybe-uninit-storage-type"
+                    | "manually-drop-storage-type"
+            )
+        {
+            continue;
+        }
+        if let Some(name) = key.strip_prefix("comptime-intrinsic.") {
+            cli_items.push("--comptime-intrinsic".to_owned());
+            cli_items.push(format!("{name}={value}"));
+        } else if !key.starts_with("host-intrinsic.") {
+            cli_items.push(format!("--{key}"));
+            cli_items.push(value.to_owned());
+        }
+    }
+    let builtin_cli = fixture.0.join("builtin_cli.fl");
+    std::fs::write(
+        &builtin_cli,
+        concat!(
+            "mod primitives {\n",
+            include_str!("../../../library/builtin/primitives.fl"),
+            "\n}\nmod bindings {\n",
+            include_str!("../../../library/builtin/bindings.fl"),
+            "\n}\nmod implicit_bindings {\n",
+            include_str!("../../../library/builtin/implicit_bindings.fl"),
+            "\n}\nmod numeric {\npub mod comparison {\n",
+            include_str!("../../../library/builtin/numeric/comparison.fl"),
+            "\n}\n}\n",
+            "mod text_impl {\npub mod bytes {\n",
+            include_str!("../../../library/builtin/text_impl/bytes.fl"),
+            "\n}\n}\n",
+            "mod types {\npub mod tuple {\n",
+            include_str!("../../../library/builtin/types/tuple.fl"),
+            "\n}\n}\n",
+            "mod mem_impl {\npub mod raw {\n",
+            "use ..primitives.usize;\n",
+            "pub fn checked_add_usize(a: usize, b: usize) -> ?usize { null }\n",
+            "}\n}\n",
+            "mod range {\n",
+            include_str!("../../../library/builtin/range.fl"),
+            "\n}\n",
+            "mod protocols {\n",
+            "pub mod conversion {\n",
+            include_str!("../../../library/builtin/protocols/conversion.fl"),
+            "\n}\npub mod ops {\n",
+            include_str!("../../../library/builtin/protocols/ops.fl"),
+            "\n}\npub mod resources {\n",
+            include_str!("../../../library/builtin/protocols/resources.fl"),
+            "\n}\npub mod staging {\n",
+            include_str!("../../../library/builtin/protocols/staging.fl"),
+            "\n}\npub mod patterns {\n",
+            include_str!("../../../library/builtin/protocols/patterns.fl"),
+            "\n}\npub mod implicit_passing {\n",
+            include_str!("../../../library/builtin/protocols/implicit_passing.fl"),
+            "\n}\npub mod iterator {\n",
+            include_str!("../../../library/builtin/protocols/iterator.fl"),
+            "\n}\npub mod formatting {\n",
+            "pub mod debug {\n",
+            "use protocols.formatting.writer.ByteWriter;\n",
+            "use primitives.void;\n",
+            "pub trait Debug {\n",
+            "    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;\n",
+            "}\n}\n",
+            "pub mod writer {\n",
+            "use bindings.{str_byte, str_byte_length}\n",
+            "use primitives.{str, u64, u8, void}\n",
+            "pub trait ByteWriter {\n",
+            "    assoc Err: Type;\n",
+            "    fn write_byte(*self, byte: u8) -> !Err void;\n",
+            "    fn write_str(*self, s: str) -> !Err void {\n",
+            "        let len = str_byte_length(s);\n",
+            "        var i: u64 = 0;\n",
+            "        while i < len {\n",
+            "            let b = str_byte(s, i) match { v? => v, null => 0 };\n",
+            "            self.write_byte(b)!;\n",
+            "            i = i + 1;\n",
+            "        }\n",
+            "    }\n",
+            "}\n}\npub mod options {\n",
+            include_str!("../../../library/builtin/protocols/formatting/options.fl"),
+            "\n}\n}\n}\n",
+            "use numeric.comparison;\n",
+            "use protocols.formatting.{options as formatting_options, writer};\n",
+            "use protocols.{implicit_passing, ops, patterns, resources, staging};\n",
+            "pub use comparison.{Eq, Ord, Order, TotalFloat, TotalOrd};\n",
+            "pub use implicit_passing.{CallDescription, Context, ImplicitPassing};\n",
+            "pub use ops.*;\n",
+            "pub use patterns.{ConcatPatternView, ListPatternView, ListPatternViewEndless, MapPatternView, RangeEnd, RangePatternView, StableConcatPatternView, StableListPatternView, StableListPatternViewEndless, StableMapPatternView, StableRangePatternView, StableStructPatternView, StructPatternView};\n",
+            "pub use primitives.*;\n",
+            "pub use range.{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};\n",
+            "pub use resources.*;\n",
+            "pub use staging.{Splice, splice_auto};\n",
+            "pub use text_impl.bytes.TextBytes;\n",
+            "pub use types.tuple.Tuple;\n",
+            "pub enum InfallibleErr {}\n",
+            "pub enum ConversionErr { Overflow, Underflow, OutOfRange, InvalidFormat }\n",
+            "pub mod compiler { pub use bindings.*; }\n",
+            "pub mod convert { pub use ConversionErr; pub use InfallibleErr; }\n",
+            "pub mod fmt {\n",
+            "    pub use formatting_options.FormatOptions;\n",
+            "    pub use writer.ByteWriter;\n",
+            "    pub mod options { pub use formatting_options.*; }\n",
+            "}\n",
+            "pub mod prelude {\n",
+            "    pub use comparison.{Eq, Ord, Order, TotalFloat, TotalOrd};\n",
+            "    pub use implicit_passing.{CallDescription, Context, ImplicitPassing};\n",
+            "    pub use ops.*;\n",
+            "    pub use patterns.{ConcatPatternView, ListPatternView, ListPatternViewEndless, MapPatternView, RangeEnd, RangePatternView, StableConcatPatternView, StableListPatternView, StableListPatternViewEndless, StableMapPatternView, StableRangePatternView, StableStructPatternView, StructPatternView};\n",
+            "    pub use primitives.*;\n",
+            "    pub use range.{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};\n",
+            "    pub use resources.*;\n",
+            "    pub use staging.{Splice, splice_auto};\n",
+            "    pub use text_impl.bytes.TextBytes;\n",
+            "    pub use types.tuple.Tuple;\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
     let meta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
     for observed in [false, true] {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_luna"));
         command
             .args(["--packages-v1", "--package", "17", "900", "app"])
             .arg(fixture.0.join("lib.fl"))
-            .args(["--builtin-impl-package", "42"])
+            .args([
+                "--builtin-impl-package",
+                "42",
+                "--builtin-impl-package",
+                "43",
+                "--builtin-impl-package",
+                "44",
+            ])
             .args(["--package", "42", "901", "meta"])
             .arg(&meta)
             .args(["--package", "43", "902", "builtin"])
-            .arg(fixture.builtin_entry())
+            .arg(&builtin_cli)
+            .args(["--builtin", "43"])
             .args(["--dependency", "42", "builtin", "43"])
+            .args(["--dependency", "43", "meta", "42"])
+            .args(["--dependency", "43", "attrs", "44"])
             .args(["--package", "44", "903", "attrs"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
             .args(["--dependency", "42", "attrs", "44"])
             .args(["--dependency", "44", "builtin", "43"])
             .args(["--dependency", "44", "meta", "42"])
-            .args(nir::intrinsics::Operation::scalar_math().flat_map(|op| {
-                [
-                    "--comptime-intrinsic".to_owned(),
-                    format!(
-                        "{}=meta.numeric.scalar_math.target.Scalar.{}",
-                        op.name(),
-                        op.name()
-                    ),
-                ]
-            }))
+            .args(&cli_items)
             .args([
                 "--dependency",
                 "17",
@@ -612,8 +867,10 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
                 "42",
                 "--primary",
                 "17",
-                "--meta-list-type",
-                "meta.List",
+                "--build-target",
+                "x86_64",
+                "linux",
+                "64",
                 "--invoke-comptime",
                 "run",
             ]);
@@ -703,11 +960,14 @@ fn sysroot_cli_installs_builder_service_after_loading_meta_bindings() {
     ",
     );
     let root = fixture.0.join("library");
-    for name in ["builtin", "std", "meta"] {
+    for name in ["builtin", "std", "meta", "build", "attrs", "verification"] {
         std::fs::create_dir_all(root.join(name)).unwrap();
     }
     std::fs::write(root.join("builtin/lib.fl"), "pub mod prelude {}").unwrap();
     std::fs::write(root.join("std/lib.fl"), "pub mod prelude {}").unwrap();
+    std::fs::write(root.join("build/lib.fl"), "pub mod prelude {}").unwrap();
+    std::fs::write(root.join("attrs/lib.fl"), "pub mod prelude {}").unwrap();
+    std::fs::write(root.join("verification/lib.fl"), "pub mod prelude {}").unwrap();
     std::fs::write(root.join("meta/lib.fl"), include!("support/meta_source.rs")).unwrap();
     std::fs::write(
         root.join("language-items.conf"),
@@ -1075,7 +1335,7 @@ fn required_builder_type_alias_can_be_constructed_and_extended_by_explicit_invoc
     };
     assert_eq!(package.structs.len(), 3);
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let built = package
@@ -1124,7 +1384,7 @@ fn required_builder_constants_and_chained_aliases_keep_distinct_identities() {
     };
     assert_eq!(package.structs.len(), 4);
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let definitions: Vec<_> = package
@@ -1188,7 +1448,7 @@ fn public_builder_can_define_a_type_alias_from_reflected_fields() {
     };
     assert_eq!(observed, Value::Bool(true));
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let generated: Vec<_> = package
@@ -1253,7 +1513,7 @@ fn early_public_builder_reflects_nested_and_applied_source_types() {
             panic!("expected NIR")
         };
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
             Value::Bool(true)
         );
     }
@@ -1306,7 +1566,7 @@ fn early_public_builder_reflects_computed_nominal_applications() {
             panic!("expected NIR")
         };
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
             Value::Bool(true)
         );
     }
@@ -1345,7 +1605,7 @@ fn effectful_reflection_indexing_preserves_order_and_bounds() {
             panic!("expected NIR")
         };
         assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
             Value::Bool(true)
         );
     }
@@ -1489,7 +1749,7 @@ fn deferred_annotation_can_reflect_a_type_generated_after_its_snapshot() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -1552,7 +1812,7 @@ fn computed_constructor_publishes_its_type_once() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -1581,7 +1841,7 @@ fn generated_nominals_remain_distinct_in_fresh_type_requirement_contexts() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -1618,7 +1878,7 @@ fn explicit_staged_type_input_skips_a_failing_builder_default() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(package.structs.len(), 1);
@@ -1658,7 +1918,7 @@ fn body_generated_types_are_available_during_quote_purity_validation() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -1692,7 +1952,7 @@ fn public_enum_builder_publishes_payload_shapes_and_runtime_matching() {
         panic!()
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let generated = package
@@ -1862,7 +2122,7 @@ fn public_enum_builder_preserves_nested_group_paths_and_prefix_boundaries() {
         panic!()
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let generated = package
@@ -1919,7 +2179,7 @@ fn code_generator_reflects_its_published_struct_to_select_runtime_code() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -1946,7 +2206,7 @@ fn struct_builder_copies_instantiated_fields_and_extends_the_draft() {
         panic!("expected NIR")
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let copied = package
@@ -2026,7 +2286,7 @@ fn enum_builder_copies_instantiated_source_structure_and_extends_it() {
         panic!()
     };
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let copied = package
@@ -2161,7 +2421,7 @@ fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
     };
     assert_eq!(observed, Value::Bool(true));
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
     let generated: Vec<_> = package
@@ -2354,7 +2614,7 @@ fn enum_builder_edits_payloads_groups_and_runtime_patterns() {
     };
     assert_eq!(result, Value::Bool(true));
     assert_eq!(
-        luna::execution::interpret(&package, "exercise_enum", 100_000).unwrap(),
+        luna::execution::interpret(&package, "exercise_enum", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -2996,7 +3256,7 @@ fn public_newtype_builder_preserves_identity_and_runtime_conversions() {
         );
     }
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -3038,7 +3298,7 @@ fn public_newtype_builder_edits_use_value_references_and_preserve_snapshots() {
         nir::Term::Primitive(nir::Primitive::Bool)
     );
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -3131,7 +3391,7 @@ fn public_newtype_builder_reflects_applied_representation_with_fresh_identity() 
     assert_eq!(generated.len(), 3);
     assert_ne!(generated[0].declaration, generated[1].declaration);
     assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        luna::execution::interpret(&package, "run", 2_000_000).unwrap(),
         Value::Bool(true)
     );
 }

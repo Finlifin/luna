@@ -1554,12 +1554,12 @@ struct Analysis<'a> {
     protocols: Protocols,
     // Only immutable declarations are shared; each query supplies its own assumptions.
     resource_world: Option<ResourceWorld>,
-    declaration_catalog: ::type_resolution::dispatch::BorrowedCatalog<'a>,
-    functions: BTreeMap<DeclarationId, &'a n::Function>,
-    tuple_heads: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
+    declaration_catalog: std::rc::Rc<::type_resolution::dispatch::BorrowedCatalog<'a>>,
+    functions: std::rc::Rc<BTreeMap<DeclarationId, &'a n::Function>>,
+    tuple_heads: std::rc::Rc<BTreeMap<DeclarationId, &'a nir::normal_forms::Head>>,
     declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     parameter_sorts: Option<std::sync::Arc<BTreeMap<DeclarationId, Sort>>>,
-    staged_parameters: BTreeSet<n::LocalId>,
+    staged_parameters: std::rc::Rc<BTreeSet<n::LocalId>>,
     finite: bool,
     finite_loop_breaks: BTreeSet<n::LocalId>,
     resource_scope: bool,
@@ -1607,23 +1607,57 @@ impl<'a> Analysis<'a> {
             finite_loop_breaks: BTreeSet::new(),
             parameter_sorts,
             declarations,
-            staged_parameters,
+            staged_parameters: std::rc::Rc::new(staged_parameters),
             package,
             method_callees: Default::default(),
             protocols: Protocols::default(),
             resource_world: None,
-            declaration_catalog: ::type_resolution::dispatch::BorrowedCatalog::new(package),
-            functions: package
-                .functions
-                .iter()
-                .map(|f| (f.declaration, f))
-                .collect(),
-            tuple_heads: package
-                .normal_forms
-                .iter()
-                .filter(|head| head.role == nir::normal_forms::Role::Tuple)
-                .map(|head| (head.declaration, head))
-                .collect(),
+            declaration_catalog: std::rc::Rc::new(
+                ::type_resolution::dispatch::BorrowedCatalog::new(package),
+            ),
+            functions: std::rc::Rc::new(
+                package
+                    .functions
+                    .iter()
+                    .map(|f| (f.declaration, f))
+                    .collect(),
+            ),
+            tuple_heads: std::rc::Rc::new(
+                package
+                    .normal_forms
+                    .iter()
+                    .filter(|head| head.role == nir::normal_forms::Role::Tuple)
+                    .map(|head| (head.declaration, head))
+                    .collect(),
+            ),
+            finite,
+            resource_scope: false,
+            callables: BTreeMap::new(),
+            private_addresses: BTreeMap::new(),
+            closures: vec![],
+            result_code: None,
+            result_addresses: None,
+            result_fields: BTreeMap::new(),
+            active: HashSet::new(),
+            proven: HashMap::new(),
+            assumption_free_copy_types: HashSet::new(),
+            fuel,
+        }
+    }
+
+    pub(super) fn for_subcheck(&self, finite: bool, fuel: usize) -> Self {
+        Self {
+            finite_loop_breaks: BTreeSet::new(),
+            parameter_sorts: self.parameter_sorts.clone(),
+            declarations: self.declarations.clone(),
+            staged_parameters: self.staged_parameters.clone(),
+            package: self.package,
+            method_callees: Default::default(),
+            protocols: self.protocols.clone(),
+            resource_world: self.resource_world.clone(),
+            declaration_catalog: self.declaration_catalog.clone(),
+            functions: self.functions.clone(),
+            tuple_heads: self.tuple_heads.clone(),
             finite,
             resource_scope: false,
             callables: BTreeMap::new(),
@@ -1690,10 +1724,7 @@ impl<'a> Analysis<'a> {
             return false;
         };
         self.fuel = remaining;
-        let mut observation = Self::with_fuel(self.package, self.finite, self.fuel);
-        observation.protocols = self.protocols.clone();
-        observation.resource_world = self.resource_world.clone();
-        observation.staged_parameters = self.staged_parameters.clone();
+        let mut observation = self.for_subcheck(self.finite, self.fuel);
         let observed = observation.expression(value, &mut BTreeSet::new(), false, 0);
         self.fuel = observation.fuel;
         if observed {

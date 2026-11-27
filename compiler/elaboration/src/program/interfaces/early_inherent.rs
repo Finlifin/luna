@@ -26,6 +26,7 @@ impl Checker<'_, '_> {
         &mut self,
         subject: Term,
         name: &str,
+        allow_contextual: bool,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
         if self.active_early_inherent.len() >= 64 || !self.active_early_inherent.insert(name.into())
@@ -37,7 +38,7 @@ impl Checker<'_, '_> {
         }
         let saved_owner = self.signature_owner;
         let saved_context = self.context.clone();
-        let result = self.prepare_early_inherent_method(subject, name, span);
+        let result = self.prepare_early_inherent_method(subject, name, allow_contextual, span);
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.active_early_inherent.remove(name);
@@ -67,6 +68,7 @@ impl Checker<'_, '_> {
         &mut self,
         subject: Term,
         name: &str,
+        allow_contextual: bool,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
         let context = self.context.clone();
@@ -260,7 +262,11 @@ impl Checker<'_, '_> {
         }
         self.signature_owner = query_owner;
         self.context = context.clone();
-        self.ensure_signature(method, span)?;
+        if self.is_data_consumer(method) {
+            self.ensure_data_consumer(method, span)?;
+        } else if !self.is_code_generator(method) && !self.is_pattern_generator(method) {
+            self.ensure_signature(method, span)?;
+        }
         self.ensure_contract(method, span)?;
         if self
             .capabilities
@@ -273,6 +279,11 @@ impl Checker<'_, '_> {
             ));
         }
         self.context = context;
-        self.inherent_method_value(method, evidence.type_arguments.clone(), span)
+        self.inherent_method_value(
+            method,
+            evidence.type_arguments.clone(),
+            allow_contextual,
+            span,
+        )
     }
 }
