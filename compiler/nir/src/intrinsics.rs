@@ -122,6 +122,26 @@ pub enum Operation {
     MemZeroed,
     MemManuallyDropWrap,
     MemManuallyDropUnwrap,
+    AtomicLoad,
+    AtomicStore,
+    AtomicSwap,
+    AtomicCompareExchange,
+    AtomicCompareExchangeWeak,
+    AtomicFetchAdd,
+    AtomicFetchSub,
+    AtomicFetchAnd,
+    AtomicFetchOr,
+    AtomicFetchXor,
+    AtomicFetchMax,
+    AtomicFetchMin,
+    AtomicFence,
+    AtomicCompilerFence,
+    RuntimePanic,
+    RuntimeAbort,
+    ContinuationResumeRaw,
+    ContinuationAbortRaw,
+    ContinuationCrossesCFrame,
+    ContinuationOriginThreadId,
 }
 
 impl Operation {
@@ -195,6 +215,26 @@ impl Operation {
         Self::MemZeroed,
         Self::MemManuallyDropWrap,
         Self::MemManuallyDropUnwrap,
+        Self::AtomicLoad,
+        Self::AtomicStore,
+        Self::AtomicSwap,
+        Self::AtomicCompareExchange,
+        Self::AtomicCompareExchangeWeak,
+        Self::AtomicFetchAdd,
+        Self::AtomicFetchSub,
+        Self::AtomicFetchAnd,
+        Self::AtomicFetchOr,
+        Self::AtomicFetchXor,
+        Self::AtomicFetchMax,
+        Self::AtomicFetchMin,
+        Self::AtomicFence,
+        Self::AtomicCompilerFence,
+        Self::RuntimePanic,
+        Self::RuntimeAbort,
+        Self::ContinuationResumeRaw,
+        Self::ContinuationAbortRaw,
+        Self::ContinuationCrossesCFrame,
+        Self::ContinuationOriginThreadId,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -267,6 +307,26 @@ impl Operation {
             Self::MemZeroed => "mem_zeroed",
             Self::MemManuallyDropWrap => "mem_manually_drop_wrap",
             Self::MemManuallyDropUnwrap => "mem_manually_drop_unwrap",
+            Self::AtomicLoad => "atomic_load",
+            Self::AtomicStore => "atomic_store",
+            Self::AtomicSwap => "atomic_swap",
+            Self::AtomicCompareExchange => "atomic_cmpxchg",
+            Self::AtomicCompareExchangeWeak => "atomic_cmpxchg_weak",
+            Self::AtomicFetchAdd => "atomic_fetch_add",
+            Self::AtomicFetchSub => "atomic_fetch_sub",
+            Self::AtomicFetchAnd => "atomic_fetch_and",
+            Self::AtomicFetchOr => "atomic_fetch_or",
+            Self::AtomicFetchXor => "atomic_fetch_xor",
+            Self::AtomicFetchMax => "atomic_fetch_max",
+            Self::AtomicFetchMin => "atomic_fetch_min",
+            Self::AtomicFence => "atomic_fence",
+            Self::AtomicCompilerFence => "atomic_compiler_fence",
+            Self::RuntimePanic => "runtime_panic",
+            Self::RuntimeAbort => "runtime_abort",
+            Self::ContinuationResumeRaw => "continuation_resume_raw",
+            Self::ContinuationAbortRaw => "continuation_abort_raw",
+            Self::ContinuationCrossesCFrame => "continuation_crosses_c_frame",
+            Self::ContinuationOriginThreadId => "continuation_origin_thread_id",
         }
     }
 
@@ -309,7 +369,48 @@ impl Operation {
         )
     }
 
-    /// Raw typed reads and writes accept an arbitrary `Type` payload instead of a fixed scalar set.
+    /// Atomic memory operations and fences execute in runtime code only.
+    pub fn is_atomic(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicLoad
+                | Self::AtomicStore
+                | Self::AtomicSwap
+                | Self::AtomicCompareExchange
+                | Self::AtomicCompareExchangeWeak
+                | Self::AtomicFetchAdd
+                | Self::AtomicFetchSub
+                | Self::AtomicFetchAnd
+                | Self::AtomicFetchOr
+                | Self::AtomicFetchXor
+                | Self::AtomicFetchMax
+                | Self::AtomicFetchMin
+                | Self::AtomicFence
+                | Self::AtomicCompilerFence
+        )
+    }
+
+    pub fn is_polymorphic_atomic(self) -> bool {
+        self.is_atomic() && !matches!(self, Self::AtomicFence | Self::AtomicCompilerFence)
+    }
+
+    /// Runtime panic unwind and process abort operations are runtime-only.
+    pub fn is_control_runtime(self) -> bool {
+        matches!(self, Self::RuntimePanic | Self::RuntimeAbort)
+    }
+
+    /// Pooled-stack delimited continuation runtime operations are runtime-only.
+    pub fn is_continuation(self) -> bool {
+        matches!(
+            self,
+            Self::ContinuationResumeRaw
+                | Self::ContinuationAbortRaw
+                | Self::ContinuationCrossesCFrame
+                | Self::ContinuationOriginThreadId
+        )
+    }
+
+    /// Raw typed reads, writes, and polymorphic atomics accept a `Type` payload instead of a fixed scalar set.
     pub fn is_polymorphic_memory(self) -> bool {
         matches!(
             self,
@@ -322,12 +423,47 @@ impl Operation {
                 | Self::MemZeroed
                 | Self::MemManuallyDropWrap
                 | Self::MemManuallyDropUnwrap
-        )
+        ) || self.is_polymorphic_atomic()
+    }
+
+    pub fn supports_payload(self, scalar: &Term) -> bool {
+        use Primitive::*;
+        if !self.is_polymorphic_atomic() {
+            return true;
+        }
+        match self {
+            Self::AtomicFetchAdd
+            | Self::AtomicFetchSub
+            | Self::AtomicFetchAnd
+            | Self::AtomicFetchOr
+            | Self::AtomicFetchXor
+            | Self::AtomicFetchMax
+            | Self::AtomicFetchMin => matches!(
+                scalar,
+                Term::Primitive(U8 | U16 | U32 | U64 | I8 | I16 | I32 | I64 | Usize | Isize)
+            ),
+            Self::AtomicLoad
+            | Self::AtomicStore
+            | Self::AtomicSwap
+            | Self::AtomicCompareExchange
+            | Self::AtomicCompareExchangeWeak => matches!(
+                scalar,
+                Term::Pointer(_)
+                    | Term::Primitive(
+                        Bool | U8 | U16 | U32 | U64 | I8 | I16 | I32 | I64 | Usize | Isize
+                    )
+            ),
+            _ => false,
+        }
     }
 
     /// Runtime-only host operations cannot execute at comptime or satisfy pure observations.
     pub fn is_runtime_only(self) -> bool {
-        self.is_platform() || self.is_memory()
+        self.is_platform()
+            || self.is_memory()
+            || self.is_atomic()
+            || self.is_control_runtime()
+            || self.is_continuation()
     }
 
     /// Numeric operations exported by the scalar math libraries. Platform and
@@ -361,10 +497,12 @@ impl Operation {
     pub fn payload_or_scalar<'a>(self, inputs: &'a [Term], output: &'a Term) -> &'a Term {
         if self.is_float_predicate() {
             inputs.first().unwrap_or(output)
-        } else if matches!(
-            self,
-            Self::MemBorrowStr | Self::MemPtrAddr | Self::MemManuallyDropUnwrap
-        ) {
+        } else if self.is_polymorphic_atomic()
+            || matches!(
+                self,
+                Self::MemBorrowStr | Self::MemPtrAddr | Self::MemManuallyDropUnwrap
+            )
+        {
             match inputs.first() {
                 Some(Term::Pointer(inner)) => inner.as_ref(),
                 Some(inner) if self == Self::MemManuallyDropUnwrap => inner,
@@ -435,6 +573,76 @@ impl Operation {
                 (Self::MemSetBytes, 1) => Term::Primitive(U8),
                 _ => unreachable!("memory operand index validated by arity"),
             }
+        } else if self.is_atomic() {
+            use Primitive::*;
+            match (self, index) {
+                (Self::AtomicFence | Self::AtomicCompilerFence, 0) => Term::Primitive(U8),
+                (Self::AtomicLoad, 0) => Term::Pointer(Box::new(scalar.clone())),
+                (Self::AtomicLoad, 1) => Term::Primitive(U8),
+                (
+                    Self::AtomicStore
+                    | Self::AtomicSwap
+                    | Self::AtomicFetchAdd
+                    | Self::AtomicFetchSub
+                    | Self::AtomicFetchAnd
+                    | Self::AtomicFetchOr
+                    | Self::AtomicFetchXor
+                    | Self::AtomicFetchMax
+                    | Self::AtomicFetchMin,
+                    0,
+                ) => Term::Pointer(Box::new(scalar.clone())),
+                (
+                    Self::AtomicStore
+                    | Self::AtomicSwap
+                    | Self::AtomicFetchAdd
+                    | Self::AtomicFetchSub
+                    | Self::AtomicFetchAnd
+                    | Self::AtomicFetchOr
+                    | Self::AtomicFetchXor
+                    | Self::AtomicFetchMax
+                    | Self::AtomicFetchMin,
+                    1,
+                ) => scalar.clone(),
+                (
+                    Self::AtomicStore
+                    | Self::AtomicSwap
+                    | Self::AtomicFetchAdd
+                    | Self::AtomicFetchSub
+                    | Self::AtomicFetchAnd
+                    | Self::AtomicFetchOr
+                    | Self::AtomicFetchXor
+                    | Self::AtomicFetchMax
+                    | Self::AtomicFetchMin,
+                    2,
+                ) => Term::Primitive(U8),
+                (Self::AtomicCompareExchange | Self::AtomicCompareExchangeWeak, 0 | 1) => {
+                    Term::Pointer(Box::new(scalar.clone()))
+                }
+                (Self::AtomicCompareExchange | Self::AtomicCompareExchangeWeak, 2) => {
+                    scalar.clone()
+                }
+                (Self::AtomicCompareExchange | Self::AtomicCompareExchangeWeak, 3 | 4) => {
+                    Term::Primitive(U8)
+                }
+                _ => unreachable!("atomic operand index validated by arity"),
+            }
+        } else if self.is_control_runtime() {
+            match (self, index) {
+                (Self::RuntimePanic, 0) => Term::Primitive(Primitive::Str),
+                _ => unreachable!("runtime control operand index validated by arity"),
+            }
+        } else if self.is_continuation() {
+            use Primitive::*;
+            match (self, index) {
+                (Self::ContinuationResumeRaw, 0) | (Self::ContinuationAbortRaw, 0) => {
+                    Term::Primitive(Continuation)
+                }
+                (Self::ContinuationResumeRaw, 1 | 2) => Term::Primitive(Usize),
+                (Self::ContinuationCrossesCFrame | Self::ContinuationOriginThreadId, 0) => {
+                    Term::Pointer(Box::new(Term::Primitive(Continuation)))
+                }
+                _ => unreachable!("continuation operand index validated by arity"),
+            }
         } else if self.has_integer_exponent() && index == 1 {
             Term::Primitive(Primitive::I32)
         } else {
@@ -463,6 +671,26 @@ impl Operation {
             Self::MemCompareBytes => Term::Primitive(Primitive::I32),
             Self::MemBorrowStr => Term::Primitive(Primitive::Str),
             Self::MemPtrAddr => Term::Primitive(Primitive::Usize),
+            Self::AtomicStore | Self::AtomicFence | Self::AtomicCompilerFence => {
+                Term::Primitive(Primitive::Void)
+            }
+            Self::AtomicCompareExchange | Self::AtomicCompareExchangeWeak => {
+                Term::Primitive(Primitive::Bool)
+            }
+            Self::AtomicLoad
+            | Self::AtomicSwap
+            | Self::AtomicFetchAdd
+            | Self::AtomicFetchSub
+            | Self::AtomicFetchAnd
+            | Self::AtomicFetchOr
+            | Self::AtomicFetchXor
+            | Self::AtomicFetchMax
+            | Self::AtomicFetchMin => scalar.clone(),
+            Self::RuntimePanic | Self::RuntimeAbort => Term::Primitive(Primitive::Never),
+            Self::ContinuationResumeRaw => Term::Primitive(Primitive::Usize),
+            Self::ContinuationAbortRaw => Term::Primitive(Primitive::Void),
+            Self::ContinuationCrossesCFrame => Term::Primitive(Primitive::Bool),
+            Self::ContinuationOriginThreadId => Term::Primitive(Primitive::U64),
             _ if self.is_platform() => Term::Primitive(Primitive::I64),
             _ if self.is_float_predicate() => Term::Primitive(Primitive::Bool),
             _ => scalar.clone(),
@@ -493,14 +721,35 @@ impl Operation {
             | Self::MemUninit
             | Self::MemZeroed
             | Self::MemManuallyDropWrap
-            | Self::MemManuallyDropUnwrap => &[Usize],
+            | Self::MemManuallyDropUnwrap
+            | Self::ContinuationResumeRaw => &[Usize],
             Self::MemCompareBytes => &[I32],
             Self::MemBorrowStr => &[Str],
             Self::LinuxDealloc
             | Self::MemRawWrite
             | Self::MemCopy
             | Self::MemCopyNonOverlapping
-            | Self::MemSetBytes => &[Void],
+            | Self::MemSetBytes
+            | Self::AtomicFence
+            | Self::AtomicCompilerFence
+            | Self::ContinuationAbortRaw => &[Void],
+            Self::ContinuationCrossesCFrame => &[Bool],
+            Self::ContinuationOriginThreadId => &[U64],
+            Self::RuntimePanic | Self::RuntimeAbort => &[Never],
+            Self::AtomicFetchAdd
+            | Self::AtomicFetchSub
+            | Self::AtomicFetchAnd
+            | Self::AtomicFetchOr
+            | Self::AtomicFetchXor
+            | Self::AtomicFetchMax
+            | Self::AtomicFetchMin => &[U8, U16, U32, U64, I8, I16, I32, I64, Usize, Isize],
+            Self::AtomicLoad
+            | Self::AtomicStore
+            | Self::AtomicSwap
+            | Self::AtomicCompareExchange
+            | Self::AtomicCompareExchangeWeak => {
+                &[Bool, U8, U16, U32, U64, I8, I16, I32, I64, Usize, Isize]
+            }
             Self::WrappingAbsoluteValue => &[I8, I16, I32, I64, I128, Isize],
             Self::BitAnd | Self::BitOr | Self::BitXor => &[
                 U8, U16, U32, U64, U128, I8, I16, I32, I64, I128, Usize, Isize,
@@ -552,6 +801,7 @@ impl Operation {
 
     pub fn operand_count(self) -> usize {
         match self {
+            Self::AtomicCompareExchange | Self::AtomicCompareExchangeWeak => 5,
             Self::LinuxWrite
             | Self::LinuxOpen
             | Self::LinuxDealloc
@@ -561,8 +811,18 @@ impl Operation {
             | Self::MemCopyNonOverlapping
             | Self::MemSetBytes
             | Self::MemCompareBytes
-            | Self::MemBorrowStr => 3,
-            Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite => 2,
+            | Self::MemBorrowStr
+            | Self::AtomicStore
+            | Self::AtomicSwap
+            | Self::AtomicFetchAdd
+            | Self::AtomicFetchSub
+            | Self::AtomicFetchAnd
+            | Self::AtomicFetchOr
+            | Self::AtomicFetchXor
+            | Self::AtomicFetchMax
+            | Self::AtomicFetchMin
+            | Self::ContinuationResumeRaw => 3,
+            Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite | Self::AtomicLoad => 2,
             Self::LinuxReadByte
             | Self::LinuxClose
             | Self::LinuxUnlink
@@ -570,8 +830,14 @@ impl Operation {
             | Self::MemRawPtr
             | Self::MemPtrAddr
             | Self::MemManuallyDropWrap
-            | Self::MemManuallyDropUnwrap => 1,
-            Self::LinuxGetPid | Self::MemUninit | Self::MemZeroed => 0,
+            | Self::MemManuallyDropUnwrap
+            | Self::AtomicFence
+            | Self::AtomicCompilerFence
+            | Self::RuntimePanic
+            | Self::ContinuationAbortRaw
+            | Self::ContinuationCrossesCFrame
+            | Self::ContinuationOriginThreadId => 1,
+            Self::LinuxGetPid | Self::MemUninit | Self::MemZeroed | Self::RuntimeAbort => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot
             | Self::WrappingAbsoluteValue
@@ -800,7 +1066,7 @@ impl Registry {
             return Err(Error::OutputType(tag));
         }
         if operation.is_polymorphic_memory() {
-            if !concrete_payload(scalar) {
+            if !concrete_payload(scalar) || !operation.supports_payload(scalar) {
                 return Err(Error::OutputType(tag));
             }
             for (index, input) in inputs.iter().enumerate() {
@@ -973,6 +1239,9 @@ impl Checked {
         if self.comptime && self.operation.is_memory() {
             return Err("raw memory operations are runtime-only");
         }
+        if self.comptime && self.operation.is_runtime_only() {
+            return Err("host runtime operations are runtime-only");
+        }
         if tag != self.tag {
             return Err("intrinsic binding has a different tag identity");
         }
@@ -989,6 +1258,9 @@ impl Checked {
             Signature::Payload(ty)
                 if self.operation.is_polymorphic_memory() && ty.sort() == crate::Sort::Type =>
             {
+                if concrete_payload(ty) && !self.operation.supports_payload(ty) {
+                    return Err("invalid intrinsic scalar specialization");
+                }
                 ty.clone()
             }
             _ => return Err("invalid intrinsic scalar specialization"),

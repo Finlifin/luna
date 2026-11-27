@@ -4,6 +4,8 @@ use super::*;
 
 pub(super) const FAILURE: &str = "inttoptr (i32 1 to ptr)";
 
+pub(super) const ABORT: &str = "inttoptr (i32 2 to ptr)";
+
 pub(super) const LIKELY: &str = "!prof !{!\"branch_weights\", i32 2000, i32 1}";
 
 pub(super) fn packet(payload: &Ty) -> Ty {
@@ -30,7 +32,24 @@ impl Emitter<'_> {
     }
 
     pub(super) fn machine_return(&mut self, value: &Value, control: &str) {
+        if control != "null" {
+            self.emitted_effects.has_trap_or_unwind = true;
+        }
         if self.failure_result.is_some() {
+            if control != "null"
+                && let Some(guard_slot) = self
+                    .capturing_resume
+                    .as_ref()
+                    .map(|cap| cap.unconsumed_guard_slot.clone())
+            {
+                let pending_k =
+                    self.instruction(Ty::Pointer, format!("load ptr, ptr {guard_slot}, align 8"));
+                self.line(format!("store ptr null, ptr {guard_slot}, align 8"));
+                self.line(format!(
+                    "call void @flurry_cont_abort(ptr {}, ptr %task)",
+                    pending_k.text
+                ));
+            }
             let ty = packet(&value.ty);
             let mut fields = "zeroinitializer".to_string();
             if value.ty != Ty::Unit && control == "null" {
@@ -108,6 +127,13 @@ impl Emitter<'_> {
             }
             args.push_str("ptr %task");
         }
+        if !target.starts_with('@')
+            || target.starts_with("@flurry_linux_")
+            || target.starts_with("@flurry_task_")
+            || target == "@dprintf"
+        {
+            self.emitted_effects.has_external_or_indirect_call = true;
+        }
         let call = format!("call {} {symbol}({args}){suffix}", ty.llvm());
         if ty == Ty::Unit {
             self.line(call);
@@ -142,8 +168,14 @@ impl Emitter<'_> {
         ));
         self.label(&escape);
         if effects {
-            let failed =
+            let is_failure =
                 self.instruction(Ty::Bool, format!("icmp eq ptr {}, {FAILURE}", ctrl.text));
+            let is_abort =
+                self.instruction(Ty::Bool, format!("icmp eq ptr {}, {ABORT}", ctrl.text));
+            let failed = self.instruction(
+                Ty::Bool,
+                format!("or i1 {}, {}", is_failure.text, is_abort.text),
+            );
             let failure = self.fresh();
             let transfer = self.fresh();
             self.line(format!(
@@ -169,6 +201,7 @@ pub(super) fn export_c_entries(
     attributes: &nir::program::DefinitionAttributes,
     module: &mut String,
     checked: bool,
+    target_triple: Option<&str>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if attributes.is_empty() {
@@ -269,9 +302,20 @@ pub(super) fn export_c_entries(
                 result.llvm()
             )
         };
-        let cc = super::abi_calling_convention(convention, graph.target);
+        let track_c_frame = module.contains("@flurry_c_frame_depth");
+        let cc = super::abi_calling_convention_for_triple(convention, graph.target, target_triple);
         let symbol: String = name.bytes().map(|b| format!("\\{b:02X}")).collect();
-        module.push_str(&format!("define {cc}{}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %r = call {packet} @flurry_{index}({args})\n  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
+        let c_depth_enter = if track_c_frame {
+            "  %c_depth_0 = load i64, ptr @flurry_c_frame_depth, align 8\n  %c_depth_1 = add i64 %c_depth_0, 1\n  store i64 %c_depth_1, ptr @flurry_c_frame_depth, align 8\n"
+        } else {
+            ""
+        };
+        let c_depth_exit = if track_c_frame {
+            "  store i64 %c_depth_0, ptr @flurry_c_frame_depth, align 8\n"
+        } else {
+            ""
+        };
+        module.push_str(&format!("define {cc}{}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n{c_depth_enter}  %r = call {packet} @flurry_{index}({args})\n{c_depth_exit}  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
     }
     Ok(())
 }

@@ -22,13 +22,70 @@ pub(super) struct ReturnStorage {
     pub(super) value: Slot,
 }
 
+#[derive(Clone)]
+pub(super) struct CapturingResume {
+    pub(super) y_slot: String,
+    pub(super) y_ty: Ty,
+    pub(super) resumed_slot: String,
+    pub(super) exit_label: String,
+    pub(super) k_slot: Option<Slot>,
+    pub(super) unconsumed_guard_slot: String,
+}
+
+pub(super) fn capturing_continuation_binding(pattern: &nir::program::Pattern) -> Option<LocalId> {
+    use nir::program::Pattern;
+    let inner = match pattern {
+        Pattern::Guard { pattern, .. } => pattern.as_ref(),
+        other => other,
+    };
+    let Pattern::Tuple(elements) = inner else {
+        return None;
+    };
+    match elements.last()? {
+        Pattern::Binding { binding, .. } => Some(*binding),
+        _ => None,
+    }
+}
+
+pub(super) fn arm_mentions_local(body: &Expr, guard: Option<&Expr>, target: LocalId) -> bool {
+    let mut found = false;
+    let mut fuel = 100_000usize;
+    for part in guard.into_iter().chain(std::iter::once(body)) {
+        let _ = nir::visit::expression_in_closure_environment(part, &mut fuel, |node, _| {
+            match &node.kind {
+                K::Local(id) if *id == target => found = true,
+                K::Closure { captures, .. }
+                    if captures
+                        .iter()
+                        .any(|c| c.value.is_none() && c.binding == target) =>
+                {
+                    found = true;
+                }
+                K::Assign { place, .. }
+                | K::BitAssign { place, .. }
+                | K::BitUpdate { place, .. }
+                    if place.root == target =>
+                {
+                    found = true;
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+        if found {
+            break;
+        }
+    }
+    found
+}
+
 pub(super) struct DirectHandler {
     return_storage: Option<ReturnStorage>,
     outer_loop_controls: BTreeMap<LocalId, (String, String)>,
     scope: Option<HandlerScope>,
-    handler: nir::program::EffectHandler,
+    pub(super) handler: nir::program::EffectHandler,
     provided: Option<Value>,
-    machine: Option<(String, String)>,
+    pub(super) machine: Option<(String, String)>,
     locals: BTreeMap<LocalId, Slot>,
     loops: BTreeMap<LocalId, frames::LoopTarget>,
     outer: Vec<Arc<DirectHandler>>,
@@ -58,6 +115,22 @@ impl Emitter<'_> {
                 if self.terminated {
                     return Ok(Value::unit());
                 }
+                if let Some(cap) = self.capturing_resume.clone() {
+                    self.line(format!(
+                        "store ptr null, ptr {}, align 8",
+                        cap.unconsumed_guard_slot
+                    ));
+                    if let Some(k_slot) = &cap.k_slot {
+                        self.line(format!("store ptr null, ptr {}, align 8", k_slot.pointer));
+                    }
+                    self.cleanup_boundary(expr.source, iir::cleanup::Boundary::EffectResume)?;
+                    if cap.y_ty != Ty::Unit {
+                        self.store(&Slot::new(cap.y_ty, cap.y_slot, None), &value)?;
+                    }
+                    self.line(format!("store i8 1, ptr {}, align 1", cap.resumed_slot));
+                    self.branch(&cap.exit_label);
+                    return Ok(Value::unit());
+                }
                 let (slot, target, _) = self
                     .effect_resume
                     .clone()
@@ -85,9 +158,13 @@ impl Emitter<'_> {
                 let previous = self.effects.clone();
                 let mut installed = Vec::new();
                 for (handler_index, handler) in handlers.iter().enumerate() {
-                    if !matches!(handler.abi, Abi::Direct | Abi::DirectPassing) {
+                    if !matches!(
+                        handler.abi,
+                        Abi::Direct | Abi::DirectPassing | Abi::Capturing
+                    ) {
                         return Err(
-                            "host lexical handlers require direct or direct-passing ABI".into()
+                            "host lexical handlers require direct, direct-passing, or capturing ABI"
+                                .into(),
                         );
                     }
                     if handler.abi == Abi::DirectPassing
@@ -166,11 +243,28 @@ impl Emitter<'_> {
                         Arc::get_mut(&mut entry)
                             .ok_or("host provider activation escaped during installation")?
                             .provided = Some(value);
+                    } else if handler.abi == Abi::Capturing {
+                        let machine =
+                            self.outline_capturing_handler(&entry, &expr.ty, depth + 1)?;
+                        Arc::get_mut(&mut entry)
+                            .ok_or("host capturing handler escaped during installation")?
+                            .machine = Some(machine);
                     }
                     installed.push(entry);
                 }
+                let own_handlers_len = installed.len();
                 installed.extend(previous.iter().cloned());
-                self.expr_with_effects(computation, depth, Some(&installed))
+                if handlers.iter().any(|h| h.abi == Abi::Capturing) {
+                    self.run_capturing_handle(
+                        computation,
+                        &installed,
+                        own_handlers_len,
+                        expr.source,
+                        &expr.ty,
+                    )
+                } else {
+                    self.expr_with_effects(computation, depth, Some(&installed))
+                }
             }
             K::EffectRun { computation, slots } => {
                 let row = match &computation.ty {
@@ -206,8 +300,11 @@ impl Emitter<'_> {
                 signature,
                 arguments,
             } => {
-                if !matches!(abi, Abi::Direct | Abi::DirectPassing) {
-                    return Err("host effect request requires direct or direct-passing ABI".into());
+                if !matches!(abi, Abi::Direct | Abi::DirectPassing | Abi::Capturing) {
+                    return Err(
+                        "host effect request requires direct, direct-passing, or capturing ABI"
+                            .into(),
+                    );
                 }
                 let entry = self
                     .effects
@@ -220,7 +317,7 @@ impl Emitter<'_> {
                 {
                     return Err("host effect request entry identity or signature mismatch".into());
                 }
-                let Term::Function { parameters, .. } = signature.as_ref() else {
+                let Term::Function { parameters, result } = signature.as_ref() else {
                     return Err("host effect signature is not a function".into());
                 };
                 if parameters.len() != arguments.len() {
@@ -261,7 +358,11 @@ impl Emitter<'_> {
                     );
                 }
                 self.finish_prepared_construction(expr.source)?;
-                self.dispatch_direct(entry, packet, depth + 1, expr.source)
+                if *abi == Abi::Capturing {
+                    self.request_capturing(entry, packet, result, expr.source)
+                } else {
+                    self.dispatch_direct(entry, packet, depth + 1, expr.source)
+                }
             }
             _ => unreachable!(),
         }
@@ -415,9 +516,11 @@ impl Emitter<'_> {
                 return Err("host effect entry signature missing".into());
             };
             let (provided, machine) = match contract.abi {
-                Abi::Direct => {
+                Abi::Direct | Abi::Capturing => {
                     for parameter in parameters {
-                        if parameter.sort != Sort::Runtime { return Err("host direct entry retains staged parameters".into()); }
+                        if parameter.sort != Sort::Runtime {
+                            return Err("host direct entry retains staged parameters".into());
+                        }
                         repr(self.graph, &parameter.ty, self.checked)?;
                     }
                     return_repr(self.graph, result, self.checked)?;
@@ -481,6 +584,15 @@ impl Emitter<'_> {
             }
             if entry.handler.abi == Abi::Direct {
                 let (callee, environment) = self.outline_direct(&entry)?;
+                inputs.push(format!("ptr {callee}"));
+                inputs.push(format!("ptr {environment}"));
+                continue;
+            }
+            if entry.handler.abi == Abi::Capturing {
+                let (callee, environment) = entry
+                    .machine
+                    .clone()
+                    .ok_or("host capturing effect call entry missing")?;
                 inputs.push(format!("ptr {callee}"));
                 inputs.push(format!("ptr {environment}"));
                 continue;
@@ -768,6 +880,7 @@ impl Emitter<'_> {
             failure_result: self.checked.then(|| result_ty.clone()),
             effects: vec![],
             effect_resume: None,
+            capturing_resume: None,
             native_return: None,
             // Remote targets travel as tokens in outlined_loops. Only loops
             // created by this outlined tree need fresh local destinations.
@@ -791,6 +904,7 @@ impl Emitter<'_> {
             prologue: String::new(),
             body: String::new(),
             emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: self.target_triple.clone(),
             declarations: self.declarations,
             text_constants: self.text_constants,
             attr_table: self.attr_table.as_deref_mut(),
@@ -981,6 +1095,844 @@ impl Emitter<'_> {
         self.emitted_effects.merge(child_effects);
         Ok((format!("@{symbol}"), env.pointer))
     }
+
+    fn collect_outlined_captures(
+        &mut self,
+        parts: &[&Expr],
+        source_locals: &BTreeMap<LocalId, Slot>,
+        source_loops: &BTreeMap<LocalId, frames::LoopTarget>,
+        outer_loop_controls: &BTreeMap<LocalId, (String, String)>,
+        has_return_storage: bool,
+        checked_captures: bool,
+        extra_cleanup_contexts: &[(&iir::InstanceKey, Vec<iir::cleanup::ContextKey>)],
+    ) -> Result<
+        (
+            BTreeSet<LocalId>,
+            BTreeMap<LocalId, (String, String)>,
+            Vec<(LocalId, Slot)>,
+        ),
+        String,
+    > {
+        let mut captures = BTreeSet::new();
+        let mut local_loops = BTreeSet::new();
+        for part in parts {
+            nir::visit::expression_in_closure_environment(part, self.fuel, |node, _| {
+                if let K::Loop { identity, .. } = node.kind {
+                    local_loops.insert(identity);
+                }
+                Ok(())
+            })?;
+        }
+        let mut remote_loops = BTreeMap::new();
+        for part in parts {
+            nir::visit::expression_in_closure_environment(part, self.fuel, |node, _| {
+                match node.kind {
+                    K::Return(_) if !has_return_storage => {
+                        return Err("host outlined effect return requires checked cleanup".into());
+                    }
+                    K::Break(id) | K::Continue(id) if !local_loops.contains(&id) => {
+                        let controls = source_loops
+                            .get(&id)
+                            .and_then(|t| t.control.clone())
+                            .or_else(|| outer_loop_controls.get(&id).cloned())
+                            .ok_or(
+                                "host outlined effect loop exit requires checked target evidence",
+                            )?;
+                        remote_loops.insert(id, controls);
+                    }
+                    _ => (),
+                }
+                if let K::Closure {
+                    captures: closure_captures,
+                    ..
+                } = &node.kind
+                {
+                    for capture in closure_captures {
+                        if capture.value.is_none() && source_locals.contains_key(&capture.binding) {
+                            if !checked_captures
+                                && !matches!(capture.ty, Term::Primitive(_) | Term::Pointer(_))
+                            {
+                                return Err("host outlined aggregate captures require checked resource evidence".into());
+                            }
+                            captures.insert(capture.binding);
+                        }
+                    }
+                }
+                let written = match &node.kind {
+                    K::Assign { place, value } => Some((place, &value.ty)),
+                    K::BitAssign {
+                        place,
+                        storage_type,
+                        ..
+                    }
+                    | K::BitUpdate {
+                        place,
+                        storage_type,
+                        ..
+                    } => Some((place, storage_type)),
+                    _ => None,
+                };
+                if let Some((place, ty)) = written {
+                    if source_locals.contains_key(&place.root) {
+                        if !checked_captures
+                            && (!place.fields.is_empty()
+                                || !matches!(ty, Term::Primitive(_) | Term::Pointer(_)))
+                        {
+                            return Err("host outlined aggregate captures require checked resource evidence".into());
+                        }
+                        captures.insert(place.root);
+                    }
+                }
+                if let K::Local(id) = node.kind {
+                    if source_locals.contains_key(&id) {
+                        if !checked_captures
+                            && !matches!(node.ty, Term::Primitive(_) | Term::Pointer(_))
+                        {
+                            return Err("host outlined aggregate captures require checked resource evidence".into());
+                        }
+                        captures.insert(id);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        if let Some(schedule) = self.schedules {
+            for (instance, context) in extra_cleanup_contexts {
+                let env_locals =
+                    closures::schedule_cleanup_env_locals(schedule, instance, context, self.fuel)?;
+                for id in env_locals.keys() {
+                    if source_locals.contains_key(id) {
+                        captures.insert(*id);
+                    }
+                }
+            }
+        }
+        let capture_slots = captures
+            .into_iter()
+            .map(|id| (id, source_locals[&id].clone()))
+            .collect::<Vec<_>>();
+        for (_, slot) in &capture_slots {
+            if !checked_captures
+                && !matches!(
+                    slot.ty,
+                    Ty::Unit | Ty::Bool | Ty::Int(..) | Ty::Float32 | Ty::Float64 | Ty::Pointer
+                )
+            {
+                return Err(
+                    "host outlined aggregate captures require checked resource evidence".into(),
+                );
+            }
+        }
+        Ok((local_loops, remote_loops, capture_slots))
+    }
+
+    fn pack_and_populate_outlined(
+        &mut self,
+        captures: &[(LocalId, Slot)],
+        outer_effects: &[Arc<DirectHandler>],
+        return_storage: Option<&ReturnStorage>,
+        remote_loops: &BTreeMap<LocalId, (String, String)>,
+        depth: usize,
+    ) -> Result<
+        (
+            Slot,
+            Ty,
+            Vec<(Arc<DirectHandler>, usize, bool)>,
+            Option<usize>,
+            usize,
+        ),
+        String,
+    > {
+        let pointer_ty = Ty::Pointer;
+        let mut fields = captures
+            .iter()
+            .map(|(_, slot)| Value {
+                ty: Ty::Pointer,
+                text: slot.pointer.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut outer_layout = Vec::new();
+        for outer in outer_effects {
+            let offset = fields.len();
+            if let Some(value) = &outer.provided {
+                fields.push(value.clone());
+                outer_layout.push((outer.clone(), offset, false));
+            } else {
+                let (callee, environment) = if let Some(machine) = &outer.machine {
+                    machine.clone()
+                } else {
+                    self.outline_direct_at(outer, depth + 1)?
+                };
+                fields.push(Value {
+                    ty: pointer_ty.clone(),
+                    text: callee,
+                });
+                fields.push(Value {
+                    ty: pointer_ty.clone(),
+                    text: environment,
+                });
+                outer_layout.push((outer.clone(), offset, true));
+            }
+        }
+        let return_offset = return_storage.map(|storage| {
+            let offset = fields.len();
+            fields.push(Value {
+                ty: pointer_ty.clone(),
+                text: storage.token.clone(),
+            });
+            fields.push(Value {
+                ty: pointer_ty.clone(),
+                text: storage.value.pointer.clone(),
+            });
+            offset
+        });
+        let loop_offset = fields.len();
+        for (exit, again) in remote_loops.values() {
+            fields.push(Value {
+                ty: pointer_ty.clone(),
+                text: exit.clone(),
+            });
+            fields.push(Value {
+                ty: pointer_ty.clone(),
+                text: again.clone(),
+            });
+        }
+        let env_ty = Ty::Record(Arc::new(fields.iter().map(|v| v.ty.clone()).collect()));
+        let env = self.slot(env_ty.clone());
+        for (index, value) in fields.iter().enumerate() {
+            if value.ty == Ty::Unit {
+                continue;
+            }
+            let address = self.instruction(
+                pointer_ty.clone(),
+                format!(
+                    "getelementptr {}, ptr {}, i32 0, i32 {index}",
+                    env_ty.llvm(),
+                    env.pointer
+                ),
+            );
+            self.store(&Slot::new(value.ty.clone(), address.text, None), value)?;
+        }
+        Ok((env, env_ty, outer_layout, return_offset, loop_offset))
+    }
+
+    fn bind_outlined_child_env(
+        child: &mut Emitter<'_>,
+        env_ty: &Ty,
+        captures: &[(LocalId, Slot)],
+        outer_layout: &[(Arc<DirectHandler>, usize, bool)],
+        return_offset: Option<usize>,
+        return_storage: Option<&ReturnStorage>,
+        loop_offset: usize,
+        remote_loops: &BTreeMap<LocalId, (String, String)>,
+    ) -> Result<(), String> {
+        let Ty::Record(field_tys) = env_ty else {
+            return Err("host outlined environment is not a record".into());
+        };
+        let pointer_ty = Ty::Pointer;
+        for (index, (id, slot)) in captures.iter().enumerate() {
+            let address = child.instruction(
+                Ty::Pointer,
+                format!(
+                    "getelementptr {}, ptr %environment, i32 0, i32 {index}",
+                    env_ty.llvm()
+                ),
+            );
+            let pointer = child.instruction(Ty::Pointer, format!("load ptr, ptr {}", address.text));
+            child.locals.insert(
+                *id,
+                Slot {
+                    ty: slot.ty.clone(),
+                    pointer: pointer.text,
+                    align: slot.align,
+                    volatile: slot.volatile,
+                },
+            );
+        }
+        for (outer, offset, machine) in outer_layout {
+            let mut load = |index: usize| -> Value {
+                let ty = field_tys[index].clone();
+                let address = child.instruction(
+                    pointer_ty.clone(),
+                    format!(
+                        "getelementptr {}, ptr %environment, i32 0, i32 {index}",
+                        env_ty.llvm()
+                    ),
+                );
+                child.load(&Slot::new(ty, address.text, None))
+            };
+            let first = load(*offset);
+            let (provided, machine) = if *machine {
+                (None, Some((first.text, load(*offset + 1).text)))
+            } else {
+                (Some(first), None)
+            };
+            child.effects.push(Arc::new(DirectHandler {
+                return_storage: None,
+                outer_loop_controls: BTreeMap::new(),
+                scope: None,
+                handler: outer.handler.clone(),
+                provided,
+                machine,
+                locals: BTreeMap::new(),
+                loops: BTreeMap::new(),
+                outer: vec![],
+            }));
+        }
+        let load_pointer = |child: &mut Emitter<'_>, index: usize| {
+            let address = child.instruction(
+                pointer_ty.clone(),
+                format!(
+                    "getelementptr {}, ptr %environment, i32 0, i32 {index}",
+                    env_ty.llvm()
+                ),
+            );
+            child
+                .instruction(
+                    pointer_ty.clone(),
+                    format!("load ptr, ptr {}", address.text),
+                )
+                .text
+        };
+        if let (Some(offset), Some(storage)) = (return_offset, return_storage) {
+            let token = load_pointer(child, offset);
+            let pointer = load_pointer(child, offset + 1);
+            child.outlined_return = Some(ReturnStorage {
+                token,
+                value: Slot {
+                    ty: storage.value.ty.clone(),
+                    pointer,
+                    align: storage.value.align,
+                    volatile: storage.value.volatile,
+                },
+            });
+        }
+        for (position, id) in remote_loops.keys().enumerate() {
+            let exit = load_pointer(child, loop_offset + position * 2);
+            let again = load_pointer(child, loop_offset + position * 2 + 1);
+            child.outlined_loops.insert(*id, (exit, again));
+        }
+        Ok(())
+    }
+
+    fn outline_capturing_handler(
+        &mut self,
+        entry: &Arc<DirectHandler>,
+        overall_result_term: &Term,
+        depth: usize,
+    ) -> Result<(String, String), String> {
+        if !self.checked {
+            return Err("host capturing handlers require checked resource compilation".into());
+        }
+        self.install_continuation_runtime()?;
+        let mut parts = Vec::new();
+        for arm in &entry.handler.arms {
+            parts.extend(nir::visit::pattern_observations(&arm.pattern, self.fuel)?);
+            parts.extend(arm.guard.iter());
+            parts.push(&arm.body);
+        }
+        let mut cleanup_contexts = Vec::new();
+        if let Some(scope) = &entry.scope {
+            for arm_index in 0..entry.handler.arms.len() {
+                let mut ctx = scope.context.clone();
+                ctx.push(iir::cleanup::ContextKey::EffectHandler {
+                    installation: scope.installation,
+                    handler: scope.handler,
+                    arm: arm_index,
+                });
+                cleanup_contexts.push((&scope.instance, ctx));
+            }
+        }
+        let (local_loops, remote_loops, captures) = self.collect_outlined_captures(
+            &parts,
+            &entry.locals,
+            &entry.loops,
+            &entry.outer_loop_controls,
+            entry.return_storage.is_some(),
+            self.checked && entry.scope.is_some(),
+            &cleanup_contexts,
+        )?;
+        let Term::Function { parameters, result } = &entry.handler.signature else {
+            return Err("host capturing handler signature missing".into());
+        };
+        let y_ty = return_repr(self.graph, result, self.checked)?;
+        let b_ty = return_repr(self.graph, overall_result_term, self.checked)?;
+        let (env, env_ty, outer_layout, return_offset, loop_offset) = self
+            .pack_and_populate_outlined(
+                &captures,
+                &entry.outer,
+                entry.return_storage.as_ref(),
+                &remote_loops,
+                depth,
+            )?;
+        let symbol = format!("flurry_cap_handler_{}", self.declarations.len());
+        self.declarations.insert(format!("; reserved {symbol}"));
+
+        let mut child = Emitter {
+            graph: self.graph,
+            cleanup: None,
+            schedules: self.schedules,
+            resource_unwinds: vec![],
+            checked: self.checked,
+            function: None,
+            closure_body: None,
+            failure_result: Some(Ty::Unit),
+            effects: vec![],
+            effect_resume: None,
+            capturing_resume: None,
+            native_return: None,
+            loop_destinations: local_loops
+                .intersection(&self.loop_destinations)
+                .copied()
+                .collect(),
+            outlined_return: None,
+            outlined_loops: BTreeMap::new(),
+            lambdas: self.lambdas,
+            template_identities: self.template_identities,
+            locals: BTreeMap::new(),
+            live: BTreeMap::new(),
+            temporaries: BTreeMap::new(),
+            temporary_live: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            receipt_paths: vec![],
+            pattern_orders: BTreeMap::new(),
+            temporary_fields: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            prologue: String::new(),
+            body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: self.target_triple.clone(),
+            declarations: self.declarations,
+            text_constants: self.text_constants,
+            attr_table: self.attr_table.as_deref_mut(),
+            bitvec_cache: self.bitvec_cache.as_deref_mut(),
+            serial: 0,
+            terminated: false,
+            fuel: self.fuel,
+        };
+        Self::bind_outlined_child_env(
+            &mut child,
+            &env_ty,
+            &captures,
+            &outer_layout,
+            return_offset,
+            entry.return_storage.as_ref(),
+            loop_offset,
+            &remote_loops,
+        )?;
+        let fallback = entry
+            .handler
+            .fallback
+            .map(|index| {
+                child
+                    .effects
+                    .get(index)
+                    .cloned()
+                    .ok_or("host outlined capturing fallback missing")
+            })
+            .transpose()?;
+
+        let param_tys = parameters
+            .iter()
+            .map(|p| {
+                if p.sort != Sort::Runtime {
+                    return Err("host capturing entry retains staged parameters".to_string());
+                }
+                repr(child.graph, &p.ty, child.checked)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let args_record_ty = Ty::Record(Arc::new(param_tys.clone()));
+        let mut packet_tys = param_tys.clone();
+        packet_tys.push(Ty::Pointer);
+        let packet_ty = Ty::Record(Arc::new(packet_tys));
+        let mut packet = Value {
+            ty: packet_ty.clone(),
+            text: "zeroinitializer".into(),
+        };
+        if param_tys.iter().any(|ty| *ty != Ty::Unit) {
+            let args_loaded =
+                child.load(&Slot::new(args_record_ty.clone(), "%args_ptr".into(), None));
+            for (index, ty) in param_tys.iter().enumerate() {
+                if *ty == Ty::Unit {
+                    continue;
+                }
+                let field = child.instruction(
+                    ty.clone(),
+                    format!(
+                        "extractvalue {} {}, {index}",
+                        args_record_ty.llvm(),
+                        args_loaded.text
+                    ),
+                );
+                packet = child.instruction(
+                    packet_ty.clone(),
+                    format!(
+                        "insertvalue {} {}, {} {}, {index}",
+                        packet_ty.llvm(),
+                        packet.text,
+                        ty.llvm(),
+                        field.text
+                    ),
+                );
+            }
+        }
+        let k_index = param_tys.len();
+        packet = child.instruction(
+            packet_ty.clone(),
+            format!(
+                "insertvalue {} {}, ptr %k_val, {k_index}",
+                packet_ty.llvm(),
+                packet.text
+            ),
+        );
+
+        let guard_slot = child.fresh();
+        child
+            .prologue
+            .push_str(&format!("  %{guard_slot} = alloca ptr, align 8\n"));
+        child.line(format!("store ptr null, ptr %{guard_slot}, align 8"));
+        child.line("store i8 0, ptr %resumed_out_ptr, align 1");
+
+        let resume_exit = child.fresh();
+        child.capturing_resume = Some(CapturingResume {
+            y_slot: "%y_out_ptr".into(),
+            y_ty,
+            resumed_slot: "%resumed_out_ptr".into(),
+            exit_label: resume_exit.clone(),
+            k_slot: None,
+            unconsumed_guard_slot: format!("%{guard_slot}"),
+        });
+
+        let arm_value = child.match_with_fallback(
+            packet,
+            &entry.handler.arms,
+            overall_result_term,
+            0,
+            fallback,
+            Some(HandlerInvocation {
+                scope: entry.scope.as_ref(),
+                request: entry
+                    .scope
+                    .as_ref()
+                    .map(|s| s.installation)
+                    .unwrap_or(nir::program::SourceRange { start: 0, end: 0 }),
+            }),
+            None,
+        )?;
+        if !child.terminated {
+            if *overall_result_term != Term::Primitive(P::Never) && b_ty != Ty::Unit {
+                if arm_value.ty != b_ty {
+                    return Err("host capturing handler return representation mismatch".into());
+                }
+                child.store(&Slot::new(b_ty, "%out_b_ptr".into(), None), &arm_value)?;
+            }
+            child.machine_return(&Value::unit(), "null");
+        }
+        child.label(&resume_exit);
+        child.machine_return(&Value::unit(), "null");
+
+        let definition = format!(
+            "define internal {} @{symbol}(ptr %environment, ptr %args_ptr, ptr %k_val, ptr %y_out_ptr, ptr %out_b_ptr, ptr %resumed_out_ptr, ptr %task) {{\nentry:\n{}{}}}\n",
+            control::packet(&Ty::Unit).llvm(),
+            child.prologue,
+            child.body
+        );
+        let child_effects = child.emitted_effects;
+        child.declarations.insert(definition);
+        self.emitted_effects.merge(child_effects);
+        Ok((format!("@{symbol}"), env.pointer))
+    }
+
+    fn run_capturing_handle(
+        &mut self,
+        computation: &Expr,
+        installed: &[Arc<DirectHandler>],
+        own_handlers_len: usize,
+        source: nir::program::SourceRange,
+        overall_result_term: &Term,
+    ) -> Result<Value, String> {
+        if !self.checked {
+            return Err(
+                "host capturing effect handle requires checked resource compilation".into(),
+            );
+        }
+        self.install_continuation_runtime()?;
+        let body_inner = match &computation.kind {
+            K::EffectComputation { effects, body } => {
+                *self.fuel = self
+                    .fuel
+                    .checked_sub(effects.len().saturating_add(installed.len()))
+                    .ok_or("host capturing effect environment budget exhausted")?;
+                if effects.len() != installed.len()
+                    || effects
+                        .iter()
+                        .zip(installed)
+                        .any(|(op, entry)| *op != entry.handler.operation)
+                {
+                    return Err(
+                        "host capturing effect environment does not match its declared row".into(),
+                    );
+                }
+                body.as_ref()
+            }
+            _ => computation,
+        };
+        let return_storage = self
+            .outlined_return
+            .clone()
+            .or_else(|| self.native_return.clone());
+        let mut cleanup_contexts = Vec::new();
+        if let Some(scope) = self.cleanup {
+            cleanup_contexts.push((&scope.instance, scope.context.clone()));
+        }
+        let (local_loops, remote_loops, captures) = self.collect_outlined_captures(
+            &[body_inner],
+            &self.locals.clone(),
+            &self.loops.clone(),
+            &self.outlined_loops.clone(),
+            return_storage.is_some(),
+            self.checked,
+            &cleanup_contexts,
+        )?;
+        let (env, env_ty, outer_layout, return_offset, loop_offset) = self
+            .pack_and_populate_outlined(
+                &captures,
+                installed,
+                return_storage.as_ref(),
+                &remote_loops,
+                0,
+            )?;
+
+        let out_b_ty = return_repr(self.graph, overall_result_term, self.checked)?;
+        let body_sym = format!("flurry_cap_body_{}", self.declarations.len());
+        self.declarations.insert(format!("; reserved {body_sym}"));
+
+        let mut child = Emitter {
+            graph: self.graph,
+            cleanup: self.cleanup,
+            schedules: self.schedules,
+            resource_unwinds: vec![],
+            checked: self.checked,
+            function: self.function,
+            closure_body: self.closure_body,
+            failure_result: Some(Ty::Unit),
+            effects: vec![],
+            effect_resume: None,
+            capturing_resume: None,
+            native_return: None,
+            loop_destinations: local_loops
+                .intersection(&self.loop_destinations)
+                .copied()
+                .collect(),
+            outlined_return: None,
+            outlined_loops: BTreeMap::new(),
+            lambdas: self.lambdas,
+            template_identities: self.template_identities,
+            locals: BTreeMap::new(),
+            live: BTreeMap::new(),
+            temporaries: BTreeMap::new(),
+            temporary_live: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            receipt_paths: vec![],
+            pattern_orders: BTreeMap::new(),
+            temporary_fields: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            prologue: String::new(),
+            body: String::new(),
+            emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: self.target_triple.clone(),
+            declarations: self.declarations,
+            text_constants: self.text_constants,
+            attr_table: self.attr_table.as_deref_mut(),
+            bitvec_cache: self.bitvec_cache.as_deref_mut(),
+            serial: 0,
+            terminated: false,
+            fuel: self.fuel,
+        };
+        Self::bind_outlined_child_env(
+            &mut child,
+            &env_ty,
+            &captures,
+            &outer_layout,
+            return_offset,
+            return_storage.as_ref(),
+            loop_offset,
+            &remote_loops,
+        )?;
+        let body_val = child.expr(body_inner, 0)?;
+        if !child.terminated {
+            if out_b_ty != Ty::Unit && body_val.ty != Ty::Unit {
+                if body_val.ty != out_b_ty {
+                    return Err("host capturing computation return representation mismatch".into());
+                }
+                child.store(
+                    &Slot::new(out_b_ty.clone(), "%out_b_ptr".into(), None),
+                    &body_val,
+                )?;
+            }
+            child.machine_return(&Value::unit(), "null");
+        }
+        let body_def = format!(
+            "define internal {} @{body_sym}(ptr %environment, ptr %out_b_ptr, ptr %task) {{\nentry:\n{}{}}}\n",
+            control::packet(&Ty::Unit).llvm(),
+            child.prologue,
+            child.body
+        );
+        let child_effects = child.emitted_effects;
+        child.declarations.insert(body_def);
+        self.emitted_effects.merge(child_effects);
+
+        let (out_b_ptr, b_bytes) = if out_b_ty == Ty::Unit {
+            ("null".to_owned(), "0".to_owned())
+        } else {
+            let slot = self.slot(out_b_ty.clone());
+            let sz = self.instruction(
+                Ty::Int(64, false),
+                format!(
+                    "ptrtoint ptr getelementptr ({}, ptr null, i32 1) to i64",
+                    out_b_ty.llvm()
+                ),
+            );
+            (slot.pointer, sz.text)
+        };
+        let own_pairs = installed
+            .iter()
+            .take(own_handlers_len)
+            .filter_map(|entry| {
+                if entry.handler.abi == Abi::Capturing {
+                    entry.machine.clone()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let (own_arr_ptr, own_count) = if own_pairs.is_empty() {
+            ("null".to_owned(), 0usize)
+        } else {
+            let arr_slot = self.fresh();
+            let count = own_pairs.len();
+            self.prologue.push_str(&format!(
+                "  %{arr_slot} = alloca [{count} x {{ ptr, ptr }}], align 8\n"
+            ));
+            for (index, (callee, env)) in own_pairs.iter().enumerate() {
+                let entry_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr [{count} x {{ ptr, ptr }}], ptr %{arr_slot}, i32 0, i64 {index}"
+                    ),
+                );
+                let fn_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr {{ ptr, ptr }}, ptr {}, i32 0, i32 0",
+                        entry_ptr.text
+                    ),
+                );
+                self.line(format!("store ptr {callee}, ptr {}, align 8", fn_ptr.text));
+                let env_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!(
+                        "getelementptr {{ ptr, ptr }}, ptr {}, i32 0, i32 1",
+                        entry_ptr.text
+                    ),
+                );
+                self.line(format!("store ptr {env}, ptr {}, align 8", env_ptr.text));
+            }
+            (format!("%{arr_slot}"), count)
+        };
+        self.emitted_effects.has_external_or_indirect_call = true;
+        self.emitted_effects.has_trap_or_unwind = true;
+        let ctrl = self.instruction(
+            Ty::Pointer,
+            format!(
+                "call ptr @flurry_cap_run_with_handlers(ptr @{body_sym}, ptr {}, ptr {out_b_ptr}, i64 {b_bytes}, ptr {own_arr_ptr}, i64 {own_count}, ptr %task)",
+                env.pointer
+            ),
+        );
+        self.accept_control(&ctrl, source, true)?;
+        if *overall_result_term == Term::Primitive(P::Never) {
+            self.emit_trap();
+            self.line("unreachable");
+            self.terminated = true;
+            Ok(Value::unit())
+        } else if out_b_ty == Ty::Unit {
+            Ok(Value::unit())
+        } else {
+            Ok(self.load(&Slot::new(out_b_ty, out_b_ptr, None)))
+        }
+    }
+
+    fn request_capturing(
+        &mut self,
+        entry: Arc<DirectHandler>,
+        packet: Value,
+        result_term: &Term,
+        source: nir::program::SourceRange,
+    ) -> Result<Value, String> {
+        if !self.checked {
+            return Err(
+                "host capturing effect requests require checked resource compilation".into(),
+            );
+        }
+        self.install_continuation_runtime()?;
+        let (callee, environment) = entry
+            .machine
+            .as_ref()
+            .ok_or("host capturing effect entry missing")?;
+        let args_ptr =
+            if packet.ty == Ty::Unit || matches!(&packet.ty, Ty::Record(fs) if fs.is_empty()) {
+                "null".to_owned()
+            } else {
+                let slot = self.slot(packet.ty.clone());
+                self.store(&slot, &packet)?;
+                slot.pointer
+            };
+        let y_ty = return_repr(self.graph, result_term, self.checked)?;
+        let (y_ptr, y_bytes) = if y_ty == Ty::Unit {
+            ("null".to_owned(), "0".to_owned())
+        } else {
+            let slot = self.slot(y_ty.clone());
+            let sz = self.instruction(
+                Ty::Int(64, false),
+                format!(
+                    "ptrtoint ptr getelementptr ({}, ptr null, i32 1) to i64",
+                    y_ty.llvm()
+                ),
+            );
+            (slot.pointer, sz.text)
+        };
+        self.emitted_effects.has_external_or_indirect_call = true;
+        self.emitted_effects.has_trap_or_unwind = true;
+        let aborting = self.instruction(
+            Ty::Int(8, false),
+            format!(
+                "call i8 @flurry_cont_suspend(ptr {callee}, ptr {environment}, ptr {args_ptr}, ptr {y_ptr}, i64 {y_bytes})"
+            ),
+        );
+        let ok = self.instruction(Ty::Bool, format!("icmp eq i8 {}, 0", aborting.text));
+        let resumed_lbl = self.fresh();
+        let abort_lbl = self.fresh();
+        self.line(format!(
+            "br i1 {}, label %{resumed_lbl}, label %{abort_lbl}, {}",
+            ok.text,
+            control::LIKELY
+        ));
+        self.label(&abort_lbl);
+        self.cleanup_boundary(source, iir::cleanup::Boundary::PredicateFailure)?;
+        self.unwind_resources()?;
+        self.control_return(control::ABORT);
+        self.label(&resumed_lbl);
+        if *result_term == Term::Primitive(P::Never) {
+            self.emit_trap();
+            self.line("unreachable");
+            self.terminated = true;
+            Ok(Value::unit())
+        } else if y_ty == Ty::Unit {
+            Ok(Value::unit())
+        } else {
+            Ok(self.load(&Slot::new(y_ty, y_ptr, None)))
+        }
+    }
 }
 
 impl Emitter<'_> {
@@ -1070,10 +2022,18 @@ pub(super) fn control_destinations(
                     _ => {}
                 }
             }
-            if let K::EffectHandle { handlers, .. } = &node.kind {
+            if let K::EffectHandle {
+                computation,
+                handlers,
+                ..
+            } = &node.kind
+            {
                 *fuel = fuel
                     .checked_sub(handlers.len())
                     .ok_or("host control destination analysis budget exhausted")?;
+                if handlers.iter().any(|h| h.abi == Abi::Capturing) {
+                    scopes.push((computation, true));
+                }
                 for handler in handlers {
                     *fuel = fuel
                         .checked_sub(handler.arms.len())

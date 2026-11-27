@@ -483,16 +483,29 @@ fn bitvalue_decimal(bits: &BitValue) -> String {
     bits::decimal_words(&u32_words)
 }
 
-fn host_target_profile(graph: &iir::Package) -> TargetProfile {
+fn target_profile_for_triple(graph: &iir::Package, target_triple: Option<&str>) -> TargetProfile {
     if graph.target.is_some_and(|t| t.pointer_bits() != 64) {
         return TargetProfile::Generic;
     }
-    if cfg!(target_arch = "aarch64") {
-        TargetProfile::Aarch64
-    } else if cfg!(target_arch = "x86_64") {
-        TargetProfile::X86_64BmiBswap
+    let Some(triple) = target_triple else {
+        return TargetProfile::Generic;
+    };
+    let info = crate::host::tools::TargetTripleInfo::parse(triple);
+    if !info.is_64bit_arch {
+        return TargetProfile::Generic;
+    }
+    match info.arch {
+        "aarch64" | "aarch64_be" | "arm64" => TargetProfile::Aarch64,
+        "x86_64" | "amd64" => TargetProfile::X86_64BmiBswap,
+        _ => TargetProfile::Generic,
+    }
+}
+
+fn word_mask_for_bits(word_bits: u32) -> u64 {
+    if word_bits >= 64 {
+        u64::MAX
     } else {
-        TargetProfile::Generic
+        (1u64 << word_bits) - 1
     }
 }
 
@@ -536,10 +549,11 @@ fn empty_bits() -> Value {
     }
 }
 
-fn const_i64_value(value: u64) -> Value {
+fn const_word_value(word_bits: u32, value: u64) -> Value {
+    let masked = value & word_mask_for_bits(word_bits);
     Value {
-        ty: Ty::Int(64, false),
-        text: value.to_string(),
+        ty: Ty::Int(word_bits, false),
+        text: masked.to_string(),
     }
 }
 
@@ -768,7 +782,11 @@ impl Emitter<'_> {
             && simplified.region.inputs.len() <= MAX_SYNTH_INPUTS;
 
         if can_synth {
-            let profile = host_target_profile(self.graph);
+            let profile = {
+                let graph = self.graph;
+                let triple = self.resolved_target_triple();
+                target_profile_for_triple(graph, triple)
+            };
             let budget = Budget::with_limits(SYNTH_MAX_STEPS, SYNTH_MAX_CONFLICTS);
             let mut fallback_cache = SynthesisCache::new();
             let outcome = if let Some(cache) = self.bitvec_cache.take() {
@@ -1002,12 +1020,15 @@ impl Emitter<'_> {
         output_kind: OutputKind,
         leaf_values: &BTreeMap<InputIdentity, Value>,
     ) -> Result<Value, String> {
-        if program.word_bits != 64 {
+        let word_bits = program.word_bits;
+        if word_bits == 0 || word_bits > 64 {
             return Err(format!(
-                "host baseline emission requires 64-bit machine words, got {}",
-                program.word_bits
+                "host baseline emission requires 1..=64-bit machine words, got {word_bits}"
             ));
         }
+        let word_ty = Ty::Int(word_bits, false);
+        let word_llvm = format!("i{word_bits}");
+        let full_word_mask = word_mask_for_bits(word_bits);
         let mut regs: Vec<Vec<Value>> = Vec::with_capacity(program.reg_widths.len());
         for _ in 0..program.reg_widths.len() {
             regs.push(Vec::new());
@@ -1019,7 +1040,10 @@ impl Emitter<'_> {
                     regs[dst.0] = Vec::new();
                 }
                 BaselineOp::LoadConst { dst, words, .. } => {
-                    regs[dst.0] = words.iter().map(|&w| const_i64_value(w)).collect();
+                    regs[dst.0] = words
+                        .iter()
+                        .map(|&w| const_word_value(word_bits, w))
+                        .collect();
                 }
                 BaselineOp::AcquireInput {
                     dst,
@@ -1033,7 +1057,7 @@ impl Emitter<'_> {
                     if bit_width(&val.ty) != Some(*width) {
                         return Err("host BitVec baseline input width mismatch".into());
                     }
-                    regs[dst.0] = self.unpack_to_i64_words(&val, *width)?;
+                    regs[dst.0] = self.unpack_to_words(&val, *width, word_bits)?;
                 }
                 BaselineOp::WordAnd {
                     dst,
@@ -1041,7 +1065,8 @@ impl Emitter<'_> {
                     rhs,
                     num_words,
                 } => {
-                    regs[dst.0] = self.word_bitwise("and", &regs[lhs.0], &regs[rhs.0], *num_words);
+                    regs[dst.0] =
+                        self.word_bitwise("and", &regs[lhs.0], &regs[rhs.0], *num_words, word_bits);
                 }
                 BaselineOp::WordOr {
                     dst,
@@ -1049,7 +1074,8 @@ impl Emitter<'_> {
                     rhs,
                     num_words,
                 } => {
-                    regs[dst.0] = self.word_bitwise("or", &regs[lhs.0], &regs[rhs.0], *num_words);
+                    regs[dst.0] =
+                        self.word_bitwise("or", &regs[lhs.0], &regs[rhs.0], *num_words, word_bits);
                 }
                 BaselineOp::WordNot {
                     dst,
@@ -1060,12 +1086,12 @@ impl Emitter<'_> {
                     let mut out = Vec::with_capacity(*num_words);
                     for i in 0..*num_words {
                         let inv = self.instruction(
-                            Ty::Int(64, false),
-                            format!("xor i64 {}, -1", regs[src.0][i].text),
+                            word_ty.clone(),
+                            format!("xor {word_llvm} {}, -1", regs[src.0][i].text),
                         );
                         out.push(inv);
                     }
-                    self.mask_tail_word(&mut out, *tail_mask);
+                    self.mask_tail_word(&mut out, *tail_mask, word_bits);
                     regs[dst.0] = out;
                 }
                 BaselineOp::WordEqual {
@@ -1082,7 +1108,7 @@ impl Emitter<'_> {
                         let cmp = self.instruction(
                             Ty::Bool,
                             format!(
-                                "icmp eq i64 {}, {}",
+                                "icmp eq {word_llvm} {}, {}",
                                 regs[lhs.0][i].text, regs[rhs.0][i].text
                             ),
                         );
@@ -1092,8 +1118,14 @@ impl Emitter<'_> {
                             self.instruction(Ty::Bool, format!("and i1 {}, {}", acc.text, cmp.text))
                         };
                     }
-                    let word = self
-                        .instruction(Ty::Int(64, false), format!("zext i1 {} to i64", acc.text));
+                    let word = if word_bits == 1 {
+                        acc
+                    } else {
+                        self.instruction(
+                            word_ty.clone(),
+                            format!("zext i1 {} to {word_llvm}", acc.text),
+                        )
+                    };
                     regs[dst.0] = vec![word];
                 }
                 BaselineOp::WordZeroExtend {
@@ -1105,7 +1137,7 @@ impl Emitter<'_> {
                     let mut out = Vec::with_capacity(*dst_words);
                     out.extend(regs[src.0][..*src_words].iter().cloned());
                     while out.len() < *dst_words {
-                        out.push(const_i64_value(0));
+                        out.push(const_word_value(word_bits, 0));
                     }
                     regs[dst.0] = out;
                 }
@@ -1132,7 +1164,7 @@ impl Emitter<'_> {
                     total_words,
                     tail_mask,
                 } => {
-                    let mut out = vec![const_i64_value(0); *total_words];
+                    let mut out = vec![const_word_value(word_bits, 0); *total_words];
                     for i in 0..*low_words {
                         out[i] = regs[low.0][i].clone();
                     }
@@ -1140,25 +1172,33 @@ impl Emitter<'_> {
                     for j in 0..*high_words {
                         let hw = &regs[high.0][j];
                         let lo_part = self.instruction(
-                            Ty::Int(64, false),
-                            format!("shl i64 {}, {shift}", hw.text),
+                            word_ty.clone(),
+                            format!("shl {word_llvm} {}, {shift}", hw.text),
                         );
                         out[word_off + j] = self.instruction(
-                            Ty::Int(64, false),
-                            format!("or i64 {}, {}", out[word_off + j].text, lo_part.text),
+                            word_ty.clone(),
+                            format!(
+                                "or {word_llvm} {}, {}",
+                                out[word_off + j].text,
+                                lo_part.text
+                            ),
                         );
                         if word_off + j + 1 < *total_words {
                             let hi_part = self.instruction(
-                                Ty::Int(64, false),
-                                format!("lshr i64 {}, {inv_shift}", hw.text),
+                                word_ty.clone(),
+                                format!("lshr {word_llvm} {}, {inv_shift}", hw.text),
                             );
                             out[word_off + j + 1] = self.instruction(
-                                Ty::Int(64, false),
-                                format!("or i64 {}, {}", out[word_off + j + 1].text, hi_part.text),
+                                word_ty.clone(),
+                                format!(
+                                    "or {word_llvm} {}, {}",
+                                    out[word_off + j + 1].text,
+                                    hi_part.text
+                                ),
                             );
                         }
                     }
-                    self.mask_tail_word(&mut out, *tail_mask);
+                    self.mask_tail_word(&mut out, *tail_mask, word_bits);
                     regs[dst.0] = out;
                 }
                 BaselineOp::WordExtractSingleWord {
@@ -1171,14 +1211,14 @@ impl Emitter<'_> {
                     let mut word = regs[src.0][*word_idx].clone();
                     if *bit_shift != 0 {
                         word = self.instruction(
-                            Ty::Int(64, false),
-                            format!("lshr i64 {}, {bit_shift}", word.text),
+                            word_ty.clone(),
+                            format!("lshr {word_llvm} {}, {bit_shift}", word.text),
                         );
                     }
-                    if *mask != u64::MAX {
+                    if (*mask & full_word_mask) != full_word_mask {
                         word = self.instruction(
-                            Ty::Int(64, false),
-                            format!("and i64 {}, {mask}", word.text),
+                            word_ty.clone(),
+                            format!("and {word_llvm} {}, {}", word.text, *mask & full_word_mask),
                         );
                     }
                     regs[dst.0] = vec![word];
@@ -1191,7 +1231,7 @@ impl Emitter<'_> {
                     tail_mask,
                 } => {
                     let mut out = regs[src.0][*word_offset..*word_offset + *dst_words].to_vec();
-                    self.mask_tail_word(&mut out, *tail_mask);
+                    self.mask_tail_word(&mut out, *tail_mask, word_bits);
                     regs[dst.0] = out;
                 }
                 BaselineOp::WordExtractCrossWord {
@@ -1207,27 +1247,30 @@ impl Emitter<'_> {
                     let mut out = Vec::with_capacity(*dst_words);
                     for j in 0..*dst_words {
                         let lo = self.instruction(
-                            Ty::Int(64, false),
-                            format!("lshr i64 {}, {shift}", src_words[*word_offset + j].text),
+                            word_ty.clone(),
+                            format!(
+                                "lshr {word_llvm} {}, {shift}",
+                                src_words[*word_offset + j].text
+                            ),
                         );
                         let merged = if *word_offset + j + 1 < src_words.len() {
                             let hi = self.instruction(
-                                Ty::Int(64, false),
+                                word_ty.clone(),
                                 format!(
-                                    "shl i64 {}, {inv_shift}",
+                                    "shl {word_llvm} {}, {inv_shift}",
                                     src_words[*word_offset + j + 1].text
                                 ),
                             );
                             self.instruction(
-                                Ty::Int(64, false),
-                                format!("or i64 {}, {}", lo.text, hi.text),
+                                word_ty.clone(),
+                                format!("or {word_llvm} {}, {}", lo.text, hi.text),
                             )
                         } else {
                             lo
                         };
                         out.push(merged);
                     }
-                    self.mask_tail_word(&mut out, *tail_mask);
+                    self.mask_tail_word(&mut out, *tail_mask, word_bits);
                     regs[dst.0] = out;
                 }
                 BaselineOp::WordExtractDynamic {
@@ -1238,16 +1281,18 @@ impl Emitter<'_> {
                     width,
                     ..
                 } => {
-                    let src_val = self.pack_from_i64_words(&regs[src.0], *src_width);
+                    let src_val = self.pack_from_words(&regs[src.0], *src_width, word_bits);
                     let start_width = program.reg_widths[start_reg.0];
-                    let start_val = self.pack_from_i64_words(&regs[start_reg.0], start_width);
+                    let start_val =
+                        self.pack_from_words(&regs[start_reg.0], start_width, word_bits);
                     let sliced = self.dynamic_slice_checked(src_val, start_val, *width)?;
-                    regs[dst.0] = self.unpack_to_i64_words(&sliced, *width)?;
+                    regs[dst.0] = self.unpack_to_words(&sliced, *width, word_bits)?;
                 }
             }
         }
 
-        let root_val = self.pack_from_i64_words(&regs[program.output.0], program.output_width);
+        let root_val =
+            self.pack_from_words(&regs[program.output.0], program.output_width, word_bits);
         finalize_root_value(root_val, output_kind)
     }
 
@@ -1548,46 +1593,55 @@ impl Emitter<'_> {
         lhs: &[Value],
         rhs: &[Value],
         num_words: usize,
+        word_bits: u32,
     ) -> Vec<Value> {
+        let word_ty = Ty::Int(word_bits, false);
         let mut out = Vec::with_capacity(num_words);
         for i in 0..num_words {
             out.push(self.instruction(
-                Ty::Int(64, false),
-                format!("{op} i64 {}, {}", lhs[i].text, rhs[i].text),
+                word_ty.clone(),
+                format!("{op} i{word_bits} {}, {}", lhs[i].text, rhs[i].text),
             ));
         }
         out
     }
 
-    fn mask_tail_word(&mut self, words: &mut [Value], tail_mask: u64) {
-        if tail_mask != u64::MAX
+    fn mask_tail_word(&mut self, words: &mut [Value], tail_mask: u64, word_bits: u32) {
+        let full = word_mask_for_bits(word_bits);
+        let masked = tail_mask & full;
+        if masked != full
             && let Some(last) = words.last_mut()
         {
             *last = self.instruction(
-                Ty::Int(64, false),
-                format!("and i64 {}, {tail_mask}", last.text),
+                Ty::Int(word_bits, false),
+                format!("and i{word_bits} {}, {masked}", last.text),
             );
         }
     }
 
-    fn unpack_to_i64_words(&mut self, value: &Value, width: u32) -> Result<Vec<Value>, String> {
+    fn unpack_to_words(
+        &mut self,
+        value: &Value,
+        width: u32,
+        word_bits: u32,
+    ) -> Result<Vec<Value>, String> {
         if width == 0 {
             return Ok(Vec::new());
         }
-        if width < 64 {
+        if width < word_bits {
             let ext = self.instruction(
-                Ty::Int(64, false),
-                format!("zext i{width} {} to i64", value.text),
+                Ty::Int(word_bits, false),
+                format!("zext i{width} {} to i{word_bits}", value.text),
             );
             return Ok(vec![ext]);
         }
-        if width == 64 {
+        if width == word_bits {
             return Ok(vec![Value {
-                ty: Ty::Int(64, false),
+                ty: Ty::Int(word_bits, false),
                 text: value.text.clone(),
             }]);
         }
-        let num_words = width.div_ceil(64) as usize;
+        let num_words = width.div_ceil(word_bits) as usize;
         let mut out = Vec::with_capacity(num_words);
         for j in 0..num_words {
             let shifted = if j == 0 {
@@ -1595,44 +1649,44 @@ impl Emitter<'_> {
             } else {
                 self.instruction(
                     Ty::Int(width, false),
-                    format!("lshr i{width} {}, {}", value.text, j * 64),
+                    format!("lshr i{width} {}, {}", value.text, j * word_bits as usize),
                 )
             };
             let word = self.instruction(
-                Ty::Int(64, false),
-                format!("trunc i{width} {} to i64", shifted.text),
+                Ty::Int(word_bits, false),
+                format!("trunc i{width} {} to i{word_bits}", shifted.text),
             );
             out.push(word);
         }
         Ok(out)
     }
 
-    fn pack_from_i64_words(&mut self, words: &[Value], width: u32) -> Value {
+    fn pack_from_words(&mut self, words: &[Value], width: u32, word_bits: u32) -> Value {
         if width == 0 {
             return empty_bits();
         }
-        if width < 64 {
+        if width < word_bits {
             return self.instruction(
                 Ty::Int(width, false),
-                format!("trunc i64 {} to i{width}", words[0].text),
+                format!("trunc i{word_bits} {} to i{width}", words[0].text),
             );
         }
-        if width == 64 {
+        if width == word_bits {
             return words[0].clone();
         }
         let target = Ty::Int(width, false);
         let mut acc = self.instruction(
             target.clone(),
-            format!("zext i64 {} to i{width}", words[0].text),
+            format!("zext i{word_bits} {} to i{width}", words[0].text),
         );
         for (j, word) in words.iter().enumerate().skip(1) {
             let ext = self.instruction(
                 target.clone(),
-                format!("zext i64 {} to i{width}", word.text),
+                format!("zext i{word_bits} {} to i{width}", word.text),
             );
             let shifted = self.instruction(
                 target.clone(),
-                format!("shl i{width} {}, {}", ext.text, j * 64),
+                format!("shl i{width} {}, {}", ext.text, j * word_bits as usize),
             );
             acc = self.instruction(
                 target.clone(),
@@ -1668,6 +1722,7 @@ mod tests {
             failure_result: None,
             effects: vec![],
             effect_resume: None,
+            capturing_resume: None,
             native_return: None,
             loop_destinations: Default::default(),
             outlined_return: None,
@@ -1686,6 +1741,7 @@ mod tests {
             prologue: String::new(),
             body: String::new(),
             emitted_effects: attributes::EmittedBodyEffects::default(),
+            target_triple: None,
             declarations,
             text_constants,
             attr_table: None,
@@ -2274,6 +2330,122 @@ w:
   %ok2 = icmp eq i130 %r2, {exp_dec}
   br i1 %ok2, label %ok, label %fail
 ok:
+  ret i32 0
+fail:
+  call void @llvm.trap()
+  unreachable
+}}
+"
+        );
+        run_native_checks(&ir);
+    }
+
+    #[test]
+    fn target_profile_and_32bit_baseline_avoid_host_cfg_locks() {
+        let pkg64 = iir::Package {
+            target: Some(nir::target::TargetData::new(64).unwrap()),
+            ..Default::default()
+        };
+        let pkg32 = iir::Package {
+            target: Some(nir::target::TargetData::new(32).unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            target_profile_for_triple(&pkg64, Some("aarch64-unknown-linux-gnu")),
+            TargetProfile::Aarch64
+        );
+        assert_eq!(
+            target_profile_for_triple(&pkg64, Some("x86_64-pc-linux-gnu")),
+            TargetProfile::X86_64BmiBswap
+        );
+        assert_eq!(
+            target_profile_for_triple(&pkg64, Some("riscv64gc-unknown-linux-gnu")),
+            TargetProfile::Generic
+        );
+        assert_eq!(
+            target_profile_for_triple(&pkg32, Some("x86_64-pc-linux-gnu")),
+            TargetProfile::Generic
+        );
+        assert_eq!(
+            target_profile_for_triple(&pkg64, None),
+            TargetProfile::Generic
+        );
+
+        // Emit and execute a 32-bit word-width BaselineProgram (100 bits -> 4 x i32 words).
+        let region32 = {
+            let mut b = RegionBuilder::new();
+            let x = b.pure_input("x", 0, 55);
+            let y = b.pure_input("y", 1, 45);
+            let cat = b.concat(x, y).unwrap();
+            let inv = b.not(cat).unwrap();
+            b.build(inv).unwrap()
+        };
+        let baseline32 = lower_to_baseline(&region32, 32).unwrap();
+        assert_eq!(baseline32.word_bits, 32);
+
+        let graph = iir::Package::default();
+        let lambdas = BTreeMap::new();
+        let template_identities = callables::TemplateIdentities::default();
+        let mut declarations = BTreeSet::new();
+        let mut text_constants = strings::TextConstants::default();
+        let mut cache = SynthesisCache::new();
+        let mut fuel = 100_000;
+        let mut emitter = make_test_emitter(
+            &graph,
+            &lambdas,
+            &template_identities,
+            &mut declarations,
+            &mut text_constants,
+            &mut cache,
+            &mut fuel,
+        );
+        let out = emitter
+            .emit_baseline_program(
+                &baseline32,
+                region32.output_kind,
+                &BTreeMap::from([
+                    (
+                        InputIdentity::pure("x", 0),
+                        Value {
+                            ty: Ty::Int(55, false),
+                            text: "%x".into(),
+                        },
+                    ),
+                    (
+                        InputIdentity::pure("y", 1),
+                        Value {
+                            ty: Ty::Int(45, false),
+                            text: "%y".into(),
+                        },
+                    ),
+                ]),
+            )
+            .unwrap();
+        let test_x = BitValue::from_u64(55, 0x12_3456_789A_BCDF).unwrap();
+        let test_y = BitValue::from_u64(45, 0x0F_EDCB_A987).unwrap();
+        let expected = baseline32
+            .execute(&BTreeMap::from([
+                (InputIdentity::pure("x", 0), test_x.clone()),
+                (InputIdentity::pure("y", 1), test_y.clone()),
+            ]))
+            .unwrap()
+            .value;
+        let fn_ir = format!(
+            "define i100 @base32(i55 %x, i45 %y) {{\nentry:\n{}{}  ret i100 {}\n}}\n",
+            emitter.prologue, emitter.body, out.text
+        );
+        assert!(fn_ir.contains("i32"), "expected 32-bit word ops:\n{fn_ir}");
+        let x_dec = bitvalue_decimal(&test_x);
+        let y_dec = bitvalue_decimal(&test_y);
+        let exp_dec = bitvalue_decimal(&expected);
+        let ir = format!(
+            "declare void @llvm.trap()\n{fn_ir}
+define i32 @main() {{
+entry:
+  %r = call i100 @base32(i55 {x_dec}, i45 {y_dec})
+  %ok = icmp eq i100 %r, {exp_dec}
+  br i1 %ok, label %pass, label %fail
+pass:
   ret i32 0
 fail:
   call void @llvm.trap()

@@ -1705,6 +1705,50 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                 self.no_sync = false;
                 self.no_trap_or_unwind = false;
             }
+            Op::AtomicLoad => {
+                self.memory = self.memory.join(MemoryEffect::ReadOnly);
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+            }
+            Op::AtomicStore
+            | Op::AtomicSwap
+            | Op::AtomicCompareExchange
+            | Op::AtomicCompareExchangeWeak
+            | Op::AtomicFetchAdd
+            | Op::AtomicFetchSub
+            | Op::AtomicFetchAnd
+            | Op::AtomicFetchOr
+            | Op::AtomicFetchXor
+            | Op::AtomicFetchMax
+            | Op::AtomicFetchMin => {
+                self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+            }
+            Op::AtomicFence | Op::AtomicCompilerFence => {
+                self.memory = MemoryEffect::Unknown;
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+            }
+            Op::RuntimePanic | Op::RuntimeAbort => {
+                self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+                self.terminates = false;
+            }
+            Op::ContinuationResumeRaw | Op::ContinuationAbortRaw => {
+                self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
+                self.no_free = false;
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+            }
+            Op::ContinuationCrossesCFrame | Op::ContinuationOriginThreadId => {
+                self.memory = self.memory.join(MemoryEffect::ReadOnly);
+                self.no_sync = false;
+            }
         }
     }
 

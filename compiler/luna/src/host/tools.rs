@@ -30,6 +30,59 @@ pub struct Toolchain {
     pub llvm_config: PathBuf,
     pub linker: PathBuf,
     pub optimization: OptimizationLevel,
+    pub target_triple: Option<String>,
+    pub target_cpu: Option<String>,
+    pub target_attrs: Option<String>,
+}
+
+/// Parsed architecture and OS attributes derived from an LLVM target triple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TargetTripleInfo<'a> {
+    pub arch: &'a str,
+    pub is_linux: bool,
+    pub is_windows: bool,
+    pub is_64bit_arch: bool,
+}
+
+impl<'a> TargetTripleInfo<'a> {
+    pub(crate) fn parse(triple: &'a str) -> Self {
+        let mut parts = triple.split('-');
+        let arch = parts.next().unwrap_or("");
+        let rest: Vec<&str> = parts.collect();
+        let is_linux = rest
+            .iter()
+            .any(|part| *part == "linux" || part.starts_with("linux"));
+        let is_windows = rest.iter().any(|part| {
+            matches!(*part, "windows" | "mingw32" | "msvc" | "cygwin")
+                || part.starts_with("windows")
+                || part.starts_with("mingw")
+        });
+        let is_64bit_arch = matches!(
+            arch,
+            "x86_64"
+                | "amd64"
+                | "aarch64"
+                | "aarch64_be"
+                | "arm64"
+                | "arm64_32"
+                | "riscv64"
+                | "riscv64gc"
+                | "loongarch64"
+                | "powerpc64"
+                | "powerpc64le"
+                | "s390x"
+                | "mips64"
+                | "mips64el"
+                | "sparcv9"
+                | "wasm64"
+        );
+        Self {
+            arch,
+            is_linux,
+            is_windows,
+            is_64bit_arch,
+        }
+    }
 }
 
 /// Layout reported by the selected LLVM toolchain, not by the compiler process.
@@ -108,6 +161,9 @@ impl Default for Toolchain {
             linker: std::env::var_os("LUNA_CC")
                 .unwrap_or_else(|| "cc".into())
                 .into(),
+            target_triple: None,
+            target_cpu: None,
+            target_attrs: None,
         }
     }
 }
@@ -497,17 +553,49 @@ impl Toolchain {
         Ok(directory)
     }
 
+    pub fn host_target_triple(&self) -> Result<String, String> {
+        if let Some(triple) = &self.target_triple {
+            return Ok(triple.clone());
+        }
+        let triple = run(&self.llvm_config, &["--host-target".into()])?;
+        Ok(std::str::from_utf8(&triple)
+            .map_err(|_| "LLVM host target is not UTF-8")?
+            .trim()
+            .to_owned())
+    }
+
     pub fn target_layout(&self) -> Result<TargetLayout, String> {
         let directory = self.directory()?;
         self.target_layout_in(&directory)
     }
 
     fn target_layout_in(&self, directory: &std::path::Path) -> Result<TargetLayout, String> {
-        let triple = run(&self.llvm_config, &["--host-target".into()])?;
-        let triple = std::str::from_utf8(&triple)
-            .map_err(|_| "LLVM host target is not UTF-8")?
-            .trim();
-        Self::probe_layout(directory, triple)
+        let triple = self.host_target_triple()?;
+        Self::probe_layout(directory, &triple)
+    }
+
+    fn validate_tool_flag_value(value: &str, name: &str) -> Result<(), String> {
+        if value.is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.,+=".contains(&byte))
+        {
+            return Err(format!("LLVM target {name} is empty or malformed"));
+        }
+        Ok(())
+    }
+
+    fn append_target_flags(&self, args: &mut Vec<OsString>, triple: &str) -> Result<(), String> {
+        args.push(format!("-mtriple={triple}").into());
+        if let Some(cpu) = &self.target_cpu {
+            Self::validate_tool_flag_value(cpu, "CPU")?;
+            args.push(format!("-mcpu={cpu}").into());
+        }
+        if let Some(attrs) = &self.target_attrs {
+            Self::validate_tool_flag_value(attrs, "attributes")?;
+            args.push(format!("-mattr={attrs}").into());
+        }
+        Ok(())
     }
 
     fn probe_layout(directory: &std::path::Path, triple: &str) -> Result<TargetLayout, String> {
@@ -594,8 +682,9 @@ impl Toolchain {
             OptimizationLevel::O2 | OptimizationLevel::O3 => ",hotcoldsplit",
             _ => "",
         };
-        let mut args = vec![
-            format!("-mtriple={}", target.triple).into(),
+        let mut args = Vec::new();
+        self.append_target_flags(&mut args, &target.triple)?;
+        args.extend([
             format!(
                 "-passes=default<{}>,deadargelim{split}",
                 self.optimization.name()
@@ -605,12 +694,20 @@ impl Toolchain {
             source.as_os_str().to_owned(),
             "-o".into(),
             output.as_os_str().to_owned(),
-        ];
+        ]);
         if text {
             args.push("-S".into());
         }
         run(&directory.join("opt"), &args)?;
-        validate_artifact(output, "optimized LLVM")
+        validate_artifact(
+            output,
+            "optimized LLVM",
+            if text {
+                ArtifactKind::LlvmIrText
+            } else {
+                ArtifactKind::LlvmBitcode
+            },
+        )
     }
 
     pub fn optimized_ir(&self, ir: &str) -> Result<String, String> {
@@ -648,7 +745,7 @@ impl Toolchain {
                 bitcode.clone().into_os_string(),
             ],
         )?;
-        validate_artifact(&bitcode, "LLVM bitcode")?;
+        validate_artifact(&bitcode, "LLVM bitcode", ArtifactKind::LlvmBitcode)?;
         let optimized = work.0.join("optimized.bc");
         self.optimize(directory, &bitcode, &optimized, false)?;
         Ok(optimized)
@@ -668,6 +765,7 @@ impl Toolchain {
         assembly: bool,
     ) -> Result<PathBuf, String> {
         let directory = self.directory()?;
+        let target = self.target_layout_in(&directory)?;
         let optimized = self.compile_bitcode_in(&directory, ir, work)?;
         let object = work.0.join(if assembly { "module.s" } else { "module.o" });
         let mut args: Vec<OsString> = vec![
@@ -678,9 +776,10 @@ impl Toolchain {
             }
             .into(),
             "-relocation-model=pic".into(),
-            optimized.into_os_string(),
-            format!("-{}", self.optimization.name()).into(),
         ];
+        self.append_target_flags(&mut args, &target.triple)?;
+        args.push(optimized.into_os_string());
+        args.push(format!("-{}", self.optimization.name()).into());
         // LLVM's FastISel at -O0 drops unused/void calls to non-willreturn
         // readnone/readonly functions; SelectionDAG preserves non-termination.
         if self.optimization == OptimizationLevel::O0 {
@@ -695,6 +794,11 @@ impl Toolchain {
                 "native assembly"
             } else {
                 "native object"
+            },
+            if assembly {
+                ArtifactKind::NativeAssembly
+            } else {
+                ArtifactKind::NativeObject
             },
         )?;
         Ok(object)
@@ -728,15 +832,149 @@ impl Toolchain {
                 executable.clone().into_os_string(),
             ],
         )?;
-        validate_artifact(&executable, "linked executable")?;
+        validate_artifact(&executable, "linked executable", ArtifactKind::Executable)?;
         std::fs::read(executable).map_err(|e| format!("cannot read linked executable: {e}"))
     }
 }
 
-/// A successful process exit does not establish artifact delivery. Check before
-/// another tool consumes the path or the caller reads/publishes its contents.
-/// This is a delivery check, not object-format or executable-ABI validation.
-fn validate_artifact(path: &std::path::Path, description: &str) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactKind {
+    LlvmIrText,
+    LlvmBitcode,
+    NativeAssembly,
+    NativeObject,
+    Executable,
+}
+
+fn read_u16_endian(bytes: &[u8], offset: usize, little: bool) -> Option<u16> {
+    let slice: [u8; 2] = bytes.get(offset..offset + 2)?.try_into().ok()?;
+    Some(if little {
+        u16::from_le_bytes(slice)
+    } else {
+        u16::from_be_bytes(slice)
+    })
+}
+
+fn read_u32_endian(bytes: &[u8], offset: usize, little: bool) -> Option<u32> {
+    let slice: [u8; 4] = bytes.get(offset..offset + 4)?.try_into().ok()?;
+    Some(if little {
+        u32::from_le_bytes(slice)
+    } else {
+        u32::from_be_bytes(slice)
+    })
+}
+
+fn validate_elf_header(bytes: &[u8], expect_object: bool, description: &str) -> Result<(), String> {
+    if bytes.len() < 52 || !bytes.starts_with(b"\x7fELF") {
+        return Err(format!("{description} artifact has invalid ELF header"));
+    }
+    let class = bytes[4];
+    let header_len = match class {
+        1 => 52usize,
+        2 => 64usize,
+        _ => {
+            return Err(format!(
+                "{description} artifact has unknown ELF class {class}"
+            ));
+        }
+    };
+    if bytes.len() < header_len {
+        return Err(format!("{description} artifact has truncated ELF header"));
+    }
+    let little = match bytes[5] {
+        1 => true,
+        2 => false,
+        data => {
+            return Err(format!(
+                "{description} artifact has unknown ELF endianness {data}"
+            ));
+        }
+    };
+    if bytes[6] != 1 {
+        return Err(format!(
+            "{description} artifact has unsupported ELF version {}",
+            bytes[6]
+        ));
+    }
+    let e_type = read_u16_endian(bytes, 16, little)
+        .ok_or_else(|| format!("{description} artifact missing ELF e_type"))?;
+    let valid_type = if expect_object {
+        e_type == 1 // ET_REL
+    } else {
+        e_type == 2 || e_type == 3 // ET_EXEC or ET_DYN (PIE)
+    };
+    if !valid_type {
+        return Err(format!(
+            "{description} artifact has unexpected ELF type {e_type}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_binary_format(
+    bytes: &[u8],
+    expect_object: bool,
+    description: &str,
+) -> Result<(), String> {
+    if bytes.starts_with(b"\x7fELF") {
+        return validate_elf_header(bytes, expect_object, description);
+    }
+    if bytes.len() >= 28 {
+        let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let macho = matches!(magic, 0xFEED_FACE | 0xFEED_FACF | 0xCEFA_EDFE | 0xCFFA_EDFE);
+        if macho {
+            let little = matches!(magic, 0xCEFA_EDFE | 0xCFFA_EDFE);
+            let min_len = if matches!(magic, 0xFEED_FACF | 0xCFFA_EDFE) {
+                32
+            } else {
+                28
+            };
+            if bytes.len() < min_len {
+                return Err(format!(
+                    "{description} artifact has truncated Mach-O header"
+                ));
+            }
+            let filetype = read_u32_endian(bytes, 12, little)
+                .ok_or_else(|| format!("{description} artifact missing Mach-O filetype"))?;
+            let valid = if expect_object {
+                filetype == 1 // MH_OBJECT
+            } else {
+                filetype == 2 // MH_EXECUTE
+            };
+            if !valid {
+                return Err(format!(
+                    "{description} artifact has unexpected Mach-O filetype {filetype}"
+                ));
+            }
+            return Ok(());
+        }
+    }
+    if !expect_object && bytes.starts_with(b"MZ") && bytes.len() >= 0x40 {
+        let pe_off = read_u32_endian(bytes, 0x3c, true).unwrap_or(0) as usize;
+        if bytes.get(pe_off..pe_off + 4) == Some(b"PE\0\0") {
+            return Ok(());
+        }
+    }
+    if expect_object && bytes.starts_with(b"!<arch>\n") {
+        return Ok(());
+    }
+    Err(format!(
+        "{description} artifact does not have a recognized {} header",
+        if expect_object {
+            "object"
+        } else {
+            "executable"
+        }
+    ))
+}
+
+/// Verify artifact delivery and format header integrity before a downstream consumer
+/// or caller reads the output.
+fn validate_artifact(
+    path: &std::path::Path,
+    description: &str,
+    kind: ArtifactKind,
+) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("cannot inspect {description} artifact: {e}"))?;
     if !metadata.is_file() {
@@ -745,7 +983,31 @@ fn validate_artifact(path: &std::path::Path, description: &str) -> Result<(), St
     if metadata.len() == 0 {
         return Err(format!("{description} artifact is empty"));
     }
-    Ok(())
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("cannot read {description} artifact: {e}"))?;
+    match kind {
+        ArtifactKind::LlvmIrText | ArtifactKind::NativeAssembly => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| format!("{description} artifact is not valid UTF-8"))?;
+            if text.trim().is_empty() {
+                return Err(format!("{description} artifact contains only whitespace"));
+            }
+            Ok(())
+        }
+        ArtifactKind::LlvmBitcode => {
+            if bytes.len() < 4
+                || !(bytes.starts_with(b"BC\xc0\xde")
+                    || bytes.starts_with(&[0xde, 0xc0, 0x17, 0x0b]))
+            {
+                return Err(format!(
+                    "{description} artifact has invalid LLVM bitcode magic"
+                ));
+            }
+            Ok(())
+        }
+        ArtifactKind::NativeObject => validate_binary_format(&bytes, true, description),
+        ArtifactKind::Executable => validate_binary_format(&bytes, false, description),
+    }
 }
 
 struct Workspace(PathBuf);
@@ -1396,5 +1658,96 @@ entry:
         assert!(error.contains("stdout: [truncated"), "{error}");
         assert!(error.contains("stderr: [truncated"), "{error}");
         assert!(error.len() < Capture::LIMIT * 10);
+    }
+
+    #[test]
+    fn validate_artifact_verifies_headers_and_rejects_corrupt_or_mismatched_files() {
+        let work = Workspace::new().unwrap();
+
+        let empty = work.0.join("empty.o");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(
+            validate_artifact(&empty, "empty object", ArtifactKind::NativeObject)
+                .unwrap_err()
+                .contains("empty")
+        );
+
+        let bogus = work.0.join("bogus.o");
+        std::fs::write(&bogus, b"not an object file at all").unwrap();
+        assert!(
+            validate_artifact(&bogus, "bogus object", ArtifactKind::NativeObject)
+                .unwrap_err()
+                .contains("header")
+        );
+
+        let truncated_elf = work.0.join("trunc.o");
+        std::fs::write(&truncated_elf, b"\x7fELF\x02\x01\x01\x00").unwrap();
+        assert!(
+            validate_artifact(&truncated_elf, "truncated ELF", ArtifactKind::NativeObject)
+                .unwrap_err()
+                .contains("invalid ELF header")
+        );
+
+        let bad_bc = work.0.join("bad.bc");
+        std::fs::write(&bad_bc, b"NOT_BITCODE").unwrap();
+        assert!(
+            validate_artifact(&bad_bc, "bad bitcode", ArtifactKind::LlvmBitcode)
+                .unwrap_err()
+                .contains("bitcode magic")
+        );
+
+        // Compile a real object & executable and confirm cross-kind checks catch swaps.
+        let ir = "define i32 @main() { ret i32 0 }";
+        let tools = Toolchain::default();
+        let obj_bytes = tools.object(ir).unwrap();
+        let obj_path = work.0.join("real.o");
+        std::fs::write(&obj_path, &obj_bytes).unwrap();
+        validate_artifact(&obj_path, "real object", ArtifactKind::NativeObject).unwrap();
+        assert!(
+            validate_artifact(&obj_path, "object as exe", ArtifactKind::Executable)
+                .unwrap_err()
+                .contains("ELF type")
+        );
+
+        let exe_bytes = tools.compile(ir).unwrap();
+        let exe_path = work.0.join("real.exe");
+        std::fs::write(&exe_path, &exe_bytes).unwrap();
+        validate_artifact(&exe_path, "real exe", ArtifactKind::Executable).unwrap();
+        assert!(
+            validate_artifact(&exe_path, "exe as object", ArtifactKind::NativeObject)
+                .unwrap_err()
+                .contains("ELF type")
+        );
+    }
+
+    #[test]
+    fn cross_target_toolchain_passes_mtriple_mcpu_mattr_and_emits_valid_objects() {
+        let ir = "define i64 @add_one(i64 %x) { %y = add i64 %x, 1\n ret i64 %y }";
+        let aarch64 = Toolchain {
+            target_triple: Some("aarch64-unknown-linux-gnu".into()),
+            target_cpu: Some("cortex-a53".into()),
+            target_attrs: Some("+neon".into()),
+            ..Toolchain::default()
+        };
+        let layout = aarch64.target_layout().unwrap();
+        assert_eq!(layout.triple, "aarch64-unknown-linux-gnu");
+        assert_eq!(layout.pointer_bits, 64);
+        let obj = aarch64.object(ir).unwrap();
+        assert!(obj.starts_with(b"\x7fELF"), "expected ELF object");
+        assert_eq!(obj[4], 2, "expected ELFCLASS64 for aarch64");
+        // e_machine at offset 18..20 in little-endian ELF64: EM_AARCH64 = 183
+        assert_eq!(u16::from_le_bytes([obj[18], obj[19]]), 183);
+
+        let i386 = Toolchain {
+            target_triple: Some("i386-pc-linux-gnu".into()),
+            ..Toolchain::default()
+        };
+        let layout32 = i386.target_layout().unwrap();
+        assert_eq!(layout32.pointer_bits, 32);
+        let obj32 = i386.object(ir).unwrap();
+        assert!(obj32.starts_with(b"\x7fELF"), "expected ELF object");
+        assert_eq!(obj32[4], 1, "expected ELFCLASS32 for i386");
+        // EM_386 = 3
+        assert_eq!(u16::from_le_bytes([obj32[18], obj32[19]]), 3);
     }
 }

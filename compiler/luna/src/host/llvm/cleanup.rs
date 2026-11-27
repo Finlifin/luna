@@ -624,7 +624,7 @@ pub(super) fn admitted_direct_program(
                 let mut found = instance.function.preconditions.iter()
                     .any(|condition| condition.source == site.source);
                 let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, _| {
-                    found |= expr.source == site.source && matches!(expr.kind, K::Call { .. } | K::EffectRequest { .. } | K::EffectHandle { .. });
+                    found |= expr.source == site.source && matches!(expr.kind, K::Call { .. } | K::Intrinsic { .. } | K::EffectRequest { .. } | K::EffectHandle { .. });
                     found |= matches!(&expr.kind, K::RequirePredicate(condition) | K::EnsurePredicate(condition) | K::CheckPredicate(condition) if condition.source == site.source);
                     Ok(())
                 });
@@ -1487,11 +1487,10 @@ impl Emitter<'_> {
                 let args = vec![format!("ptr {}", data_ptr.text)];
                 let (_, ctrl) = self.machine_call(&drop_fn.text, &args, Ty::Unit, "");
                 if let Some(ctrl) = ctrl {
-                    self.accept_control(
-                        &ctrl,
-                        nir::program::SourceRange { start: 0, end: 0 },
-                        false,
-                    )?;
+                    // A second transfer from Drop cannot resume the interrupted cleanup.
+                    let normal =
+                        self.instruction(Ty::Bool, format!("icmp eq ptr {}, null", ctrl.text));
+                    self.guard(&normal)?;
                 }
                 self.branch(&skip_drop);
                 self.label(&skip_drop);
@@ -2852,6 +2851,7 @@ mod tests {
                 failure_result: None,
                 effects: vec![],
                 effect_resume: None,
+                capturing_resume: None,
                 native_return: None,
                 loop_destinations: Default::default(),
                 outlined_return: None,
@@ -2870,6 +2870,7 @@ mod tests {
                 prologue: String::new(),
                 body: String::new(),
                 emitted_effects: attributes::EmittedBodyEffects::default(),
+                target_triple: None,
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
                 attr_table: None,

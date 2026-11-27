@@ -8,14 +8,18 @@ impl Emitter<'_> {
         operation: nir::intrinsics::Operation,
         values: &[Value],
     ) -> Result<Value, String> {
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64"))
-            || self.graph.target.is_some_and(|t| t.pointer_bits() != 64)
-        {
-            return Err(
-                "Linux host operations currently require an x86_64 Linux host and 64-bit target"
-                    .into(),
-            );
+        if self.graph.target.is_some_and(|t| t.pointer_bits() != 64) {
+            return Err("Linux host operations require a 64-bit target layout".into());
         }
+        if let Some(triple) = self.resolved_target_triple() {
+            let info = crate::host::tools::TargetTripleInfo::parse(triple);
+            if !info.is_linux || !info.is_64bit_arch {
+                return Err(format!(
+                    "Linux host operations require a 64-bit Linux target triple, got {triple:?}"
+                ));
+            }
+        }
+        self.emitted_effects.has_external_or_indirect_call = true;
         self.declarations
             .insert("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)".into());
         self.declarations.insert(include_str!("platform.ll").into());
