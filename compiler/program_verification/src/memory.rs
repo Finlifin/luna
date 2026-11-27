@@ -1902,6 +1902,8 @@ struct Infer<'a, 'cleanup> {
     arguments: &'a [Term],
     round: &'a mut Round<'cleanup>,
     effect_row: Vec<nir::effects::Operation>,
+    has_caller_memory_or_code_inputs: bool,
+    has_caller_code_inputs: bool,
     environment: Environment,
     locals: BTreeMap<LocalId, Term>,
     // Local bindings whose storage is neither addressed nor captured.
@@ -6802,6 +6804,11 @@ impl<'a> Infer<'a, '_> {
                 }
                 self.walk(value, depth + 1)?;
             }
+            K::StaticAddress(_) => {
+                let Term::Pointer(_) = self.ty(&expr.ty)? else {
+                    return Err("static address must have pointer type".into());
+                };
+            }
             K::Intrinsic {
                 tag,
                 inputs,
@@ -7414,7 +7421,19 @@ impl<'a> Infer<'a, '_> {
                         CallableResult::Candidates(_) => {
                             return Err("empty callable candidate set".into());
                         }
-                        CallableResult::Unknown | CallableResult::Forwarded { .. } => {
+                        CallableResult::Unknown => {
+                            if self.try_local_indirect_call(
+                                expr,
+                                callee,
+                                arguments,
+                                env_arguments,
+                                depth + 1,
+                            )? {
+                                return Ok(());
+                            }
+                            return Err("dynamic call requires a richer memory contract".into());
+                        }
+                        CallableResult::Forwarded { .. } => {
                             return Err("dynamic call requires a richer memory contract".into());
                         }
                         CallableResult::NoReturn => {
@@ -8543,6 +8562,162 @@ impl<'a> Infer<'a, '_> {
             _ => return Err("operation requires a richer memory contract".into()),
         }
         Ok(())
+    }
+
+    fn try_local_indirect_call(
+        &mut self,
+        expr: &'a Expr,
+        callee: &'a Expr,
+        arguments: &'a [nir::program::CallArgument],
+        env_arguments: &'a [Expr],
+        depth: usize,
+    ) -> Result<bool, String> {
+        if self.has_caller_code_inputs
+            || !self.input_code_slots.is_empty()
+            || !self.borrowed_callable_slots.is_empty()
+            || !self.borrowed_code_pointers.is_empty()
+            || !self.effect_row.is_empty()
+            || !env_arguments.is_empty()
+            || arguments.iter().any(|arg| arg.is_default)
+            || matches!(callee.kind, K::Closure { .. })
+        {
+            return Ok(false);
+        }
+        if !arguments.is_empty()
+            && (self.has_caller_memory_or_code_inputs || !self.input_pointer_slots.is_empty())
+        {
+            return Ok(false);
+        }
+        let callee_ty = self.ty(&callee.ty)?;
+        match &callee_ty {
+            Term::ContextualClosure { .. } => return Ok(false),
+            Term::Closure { environment, .. } => {
+                for field in environment {
+                    if self.local_pointer_value(field)?
+                        || !self.pointer_input_layout(field)?.is_empty()
+                        || !self.owned_callable_paths(field, true)?.is_empty()
+                        || !effects::effect_data_layout_for(
+                            self.package,
+                            field,
+                            self.round.text_provenance,
+                            self.fuel,
+                            0,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let signature = self.ty(callee.ty.callable_signature())?;
+        if !matches!(signature, Term::Function { .. }) {
+            return Ok(false);
+        }
+        let call_ty = self.ty(&expr.ty)?;
+        if matches!(
+            &call_ty,
+            Term::Computation { effects, .. } if !effects.is_empty()
+        ) {
+            return Ok(false);
+        }
+        let result_view = self.effect_completion(&call_ty)?;
+        if self.local_pointer_value(&result_view)?
+            || !self.pointer_input_layout(&result_view)?.is_empty()
+            || !self.owned_callable_paths(&result_view, true)?.is_empty()
+            || !(matches!(
+                result_view,
+                Term::Primitive(Primitive::Void | Primitive::Never)
+            ) || effects::effect_data_layout_for(
+                self.package,
+                &result_view,
+                self.round.text_provenance,
+                self.fuel,
+                0,
+            )?)
+        {
+            return Ok(false);
+        }
+        if !arguments.is_empty() {
+            for targets in self
+                .environment
+                .pointers
+                .values()
+                .chain(self.environment.field_pointers.values())
+            {
+                if let Some(places) = targets {
+                    if places.iter().any(|p| {
+                        matches!(p.root, PointerRoot::Parameter(_) | PointerRoot::ExternalRaw)
+                    }) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        for argument in arguments {
+            self.walk(&argument.value, depth + 1)?;
+            if super::pattern_facts::cannot_complete(&argument.value, self.fuel, 0)? {
+                return Ok(true);
+            }
+            let arg_ty = self.ty(&argument.value.ty)?;
+            if !self.owned_callable_paths(&arg_ty, true)?.is_empty() {
+                return Ok(false);
+            }
+            let top_targets = if self.local_pointer_value(&arg_ty)? {
+                let Some(targets) = self.optional_target(&argument.value, depth + 1)? else {
+                    return Ok(false);
+                };
+                if targets.is_empty()
+                    || targets.iter().any(|p| {
+                        !p.through.is_empty()
+                            || !matches!(
+                                p.root,
+                                PointerRoot::Local { .. } | PointerRoot::StaticGlobal(_)
+                            )
+                    })
+                {
+                    return Ok(false);
+                }
+                Some(targets)
+            } else {
+                None
+            };
+            let leaves = self.pointer_input_layout(&arg_ty)?;
+            if !leaves.is_empty() {
+                let mut fields = self.pointer_fields_for(&argument.value)?;
+                if let Some(top) = top_targets {
+                    fields.insert(vec![], Some(top));
+                }
+                for leaf in leaves {
+                    if !effects::effect_data_layout_for(
+                        self.package,
+                        &leaf.pointee,
+                        self.round.text_provenance,
+                        self.fuel,
+                        0,
+                    )? {
+                        return Ok(false);
+                    }
+                    let Some(Some(targets)) = fields.get(&leaf.storage_fields) else {
+                        return Ok(false);
+                    };
+                    if targets.is_empty()
+                        || targets.iter().any(|p| {
+                            !p.through.is_empty()
+                                || !matches!(
+                                    p.root,
+                                    PointerRoot::Local { .. } | PointerRoot::StaticGlobal(_)
+                                )
+                        })
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        self.may_reject = true;
+        self.may_run_cleanup = true;
+        Ok(true)
     }
 }
 
@@ -11189,6 +11364,8 @@ fn infer_body(
         arguments,
         round,
         effect_row: vec![],
+        has_caller_memory_or_code_inputs: false,
+        has_caller_code_inputs: false,
         environment: Environment::default(),
         locals: BTreeMap::new(),
         private_storage_roots: BTreeSet::new(),
@@ -11217,6 +11394,9 @@ fn infer_body(
     if let Term::Computation { effects, .. } = result.as_ref() {
         infer.effect_row = effects.clone();
     }
+    infer.has_caller_memory_or_code_inputs =
+        !infer.borrowed_callable_slots.is_empty() || !infer.effect_row.is_empty();
+    infer.has_caller_code_inputs = infer.has_caller_memory_or_code_inputs;
     if !intrinsic_pointer_value(&result_view)
         && result_view != Term::Primitive(Primitive::Void)
         && !infer.local_pointer_value(&result_view)?
@@ -11308,6 +11488,52 @@ fn infer_body(
         }
     }
     infer.install_code_inputs(&function.parameters, parameters, inputs, &code_inputs)?;
+    let type_has_callable_input = |infer: &mut Infer<'_, '_>, ty: &Term| -> bool {
+        if infer
+            .owned_callable_paths(ty, true)
+            .is_ok_and(|paths| !paths.is_empty())
+        {
+            return true;
+        }
+        if infer.local_pointer_value(ty).unwrap_or(true)
+            && let Term::Pointer(pointee) = ty
+            && infer
+                .owned_callable_paths(pointee, true)
+                .is_ok_and(|paths| !paths.is_empty())
+        {
+            return true;
+        }
+        infer.pointer_input_layout(ty).is_ok_and(|leaves| {
+            leaves.iter().any(|leaf| {
+                infer
+                    .owned_callable_paths(&leaf.pointee, true)
+                    .is_ok_and(|paths| !paths.is_empty())
+            })
+        })
+    };
+    infer.has_caller_code_inputs |= !infer.input_code_slots.is_empty()
+        || parameters
+            .iter()
+            .any(|p| p.sort == nir::Sort::Runtime && type_has_callable_input(&mut infer, &p.ty))
+        || function
+            .env_parameters
+            .iter()
+            .any(|env| type_has_callable_input(&mut infer, &env.ty));
+    infer.has_caller_memory_or_code_inputs |= infer.has_caller_code_inputs
+        || !infer.input_pointer_slots.is_empty()
+        || parameters.iter().any(|parameter| {
+            parameter.sort == nir::Sort::Runtime
+                && (infer.local_pointer_value(&parameter.ty).unwrap_or(true)
+                    || infer
+                        .pointer_input_layout(&parameter.ty)
+                        .is_ok_and(|leaves| !leaves.is_empty()))
+        })
+        || function.env_parameters.iter().any(|env| {
+            infer.local_pointer_value(&env.ty).unwrap_or(true)
+                || infer
+                    .pointer_input_layout(&env.ty)
+                    .is_ok_and(|leaves| !leaves.is_empty())
+        });
     infer.record_parameter_cleanup_reads(&function.parameters, parameters, function.body.source)?;
     for predicate in &function.preconditions {
         if !nir::program::checkable_predicate(predicate, infer.fuel)? {
@@ -11611,6 +11837,8 @@ pub(crate) fn infer_argument_full_context<'a>(
         arguments: &[],
         round: &mut round,
         effect_row: vec![],
+        has_caller_memory_or_code_inputs: true,
+        has_caller_code_inputs: true,
         environment: Environment::default(),
         locals: BTreeMap::new(),
         private_storage_roots: BTreeSet::new(),
@@ -12704,6 +12932,8 @@ fn infer_closure_pass(
         arguments: specialization.1,
         round,
         effect_row: vec![],
+        has_caller_memory_or_code_inputs: true,
+        has_caller_code_inputs: true,
         environment: Environment::default(),
         locals: BTreeMap::new(),
         private_storage_roots: BTreeSet::new(),
@@ -14113,5 +14343,343 @@ mod effect_cache_tests {
         )
         .unwrap_err();
         assert!(err.contains("exhausted"), "{err}");
+    }
+
+    #[test]
+    fn local_indirect_calls_with_copy_local_pointees_infer_without_caller_inputs() {
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let void_ty = Term::Primitive(Primitive::Void);
+        let ptr_bool = Term::Pointer(Box::new(bool_ty.clone()));
+        let fn_ptr_bool = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: ptr_bool.clone(),
+            }],
+            result: Box::new(void_ty.clone()),
+        };
+        let static_decl = DeclarationId {
+            package: 0,
+            local: 99,
+        };
+        let hook_local = LocalId { owner: 1, index: 0 };
+        let data_local = LocalId { owner: 1, index: 1 };
+        let local_only_fn = Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 0,
+                    local: 1,
+                },
+                name: "local_only".into(),
+                source,
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(void_ty.clone()),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                defaults: vec![],
+            },
+            body: Expr {
+                source,
+                ty: void_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: hook_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_bool.clone(),
+                                    kind: K::ReadPointer(Box::new(Expr {
+                                        source,
+                                        ty: Term::Pointer(Box::new(fn_ptr_bool.clone())),
+                                        kind: K::StaticAddress(static_decl),
+                                    })),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: data_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: bool_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(true)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_bool.clone(),
+                                    kind: K::Local(hook_local),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![nir::program::CallArgument {
+                                    parameter: 0,
+                                    is_default: false,
+                                    passing: nir::program::ArgumentPassing::Value,
+                                    value: Expr {
+                                        source,
+                                        ty: ptr_bool.clone(),
+                                        kind: K::AddressOf(Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(data_local),
+                                        })),
+                                    },
+                                }],
+                            },
+                        },
+                    ],
+                    result: None,
+                },
+            },
+            runtime_deliveries: Default::default(),
+        };
+
+        let ptr_param = LocalId { owner: 2, index: 0 };
+        let with_ptr_param_fn = Function {
+            interface: nir::program::FunctionDeclaration {
+                declaration: DeclarationId {
+                    package: 0,
+                    local: 2,
+                },
+                name: "with_ptr_param".into(),
+                source,
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: ptr_bool.clone(),
+                    }],
+                    result: Box::new(void_ty.clone()),
+                },
+                parameters: vec![ptr_param],
+                env_parameters: vec![],
+                defaults: vec![],
+            },
+            body: local_only_fn.body.clone(),
+            runtime_deliveries: Default::default(),
+        };
+
+        let package = Package {
+            functions: vec![local_only_fn.clone(), with_ptr_param_fn.clone()],
+            ..Package::default()
+        };
+        let summary = infer_in_package(
+            &package,
+            local_only_fn.interface.declaration,
+            &[],
+            &mut 200_000,
+        )
+        .expect("local indirect fn(*bool) -> void with static hook should infer");
+        assert!(summary.accesses.is_empty());
+        assert!(summary.may_reject && summary.may_run_cleanup);
+
+        let err = infer_in_package(
+            &package,
+            with_ptr_param_fn.interface.declaration,
+            &[],
+            &mut 200_000,
+        )
+        .expect_err("caller pointer parameter must keep rejecting dynamic calls");
+        assert!(
+            err.contains("dynamic call requires a richer memory contract"),
+            "{err}"
+        );
+
+        let family_decl = DeclarationId {
+            package: 0,
+            local: 98,
+        };
+        let tag = nir::intrinsics::Tag {
+            family: family_decl,
+            variant: 0,
+        };
+        let family = nir::program::Enum {
+            is_intrinsic: true,
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: family_decl,
+            name: "MemOps".into(),
+            variants: vec![nir::program::Variant {
+                name: "RawRead".into(),
+                shape: nir::program::VariantShape::Unit,
+                fields: vec![],
+            }],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+        };
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let zero_arg_fn_sig = Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(bool_ty.clone()),
+        });
+        let empty_closure_ty = Term::Closure {
+            environment: vec![],
+            signature: zero_arg_fn_sig.clone(),
+        };
+        let ptr_capture_closure_ty = Term::Closure {
+            environment: vec![ptr_bool.clone()],
+            signature: zero_arg_fn_sig,
+        };
+        let registry = nir::intrinsics::Registry::for_family(
+            &family,
+            0,
+            nir::intrinsics::Operation::MemRawRead,
+        )
+        .unwrap();
+        let make_zero_arg_closure_fn = |id: u32, name: &str, closure_ty: Term| -> Function {
+            let param = LocalId {
+                owner: id,
+                index: 0,
+            };
+            let cb_local = LocalId {
+                owner: id,
+                index: 1,
+            };
+            let checked = registry
+                .check(tag, std::slice::from_ref(&usize_ty), &closure_ty)
+                .unwrap();
+            Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: DeclarationId {
+                        package: 0,
+                        local: id,
+                    },
+                    name: name.into(),
+                    source,
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    signature: Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: nir::Sort::Runtime,
+                            ty: ptr_bool.clone(),
+                        }],
+                        result: Box::new(bool_ty.clone()),
+                    },
+                    parameters: vec![param],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                },
+                body: Expr {
+                    source,
+                    ty: bool_ty.clone(),
+                    kind: K::Block {
+                        statements: vec![Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: cb_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: closure_ty.clone(),
+                                    kind: K::Intrinsic {
+                                        tag,
+                                        binding: Some(checked),
+                                        inputs: vec![Expr {
+                                            source,
+                                            ty: usize_ty.clone(),
+                                            kind: K::Literal(
+                                                nir::program::Literal::UnsignedInteger(0),
+                                            ),
+                                        }],
+                                    },
+                                }),
+                            },
+                        }],
+                        result: Some(Box::new(Expr {
+                            source,
+                            ty: bool_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: closure_ty,
+                                    kind: K::Local(cb_local),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![],
+                            },
+                        })),
+                    },
+                },
+                runtime_deliveries: Default::default(),
+            }
+        };
+        let zero_env_fn = make_zero_arg_closure_fn(3, "zero_env_closure", empty_closure_ty);
+        let ptr_env_fn = make_zero_arg_closure_fn(4, "ptr_env_closure", ptr_capture_closure_ty);
+        let closure_pkg = Package {
+            enums: vec![family],
+            functions: vec![zero_env_fn.clone(), ptr_env_fn.clone()],
+            ..Package::default()
+        };
+        infer_in_package(
+            &closure_pkg,
+            zero_env_fn.interface.declaration,
+            &[],
+            &mut 200_000,
+        )
+        .expect("capture-free zero-arg indirect closure with no callable inputs should infer");
+        let err = infer_in_package(
+            &closure_pkg,
+            ptr_env_fn.interface.declaration,
+            &[],
+            &mut 200_000,
+        )
+        .expect_err("pointer-capturing indirect closure must still require a memory contract");
+        assert!(
+            err.contains("dynamic call requires a richer memory contract"),
+            "{err}"
+        );
     }
 }

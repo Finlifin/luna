@@ -2171,6 +2171,7 @@ struct Flow {
     effect_mutable_roots: BTreeSet<PlaceId>,
     pointers: BTreeMap<Place, BTreeSet<Place>>,
     memory_exposed: bool,
+    local_memory_exposed: bool,
     live: bool,
 }
 
@@ -4060,7 +4061,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         origins: ValueOrigins,
         flow: &mut Flow,
     ) -> Result<(), Error> {
-        if *ty == Term::Primitive(nir::Primitive::Void) {
+        if matches!(
+            ty,
+            Term::Primitive(nir::Primitive::Void | nir::Primitive::Never)
+        ) {
             return Ok(());
         }
         let description = TemporaryCleanup {
@@ -4070,7 +4074,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             fields: fields.to_vec(),
         };
         let mut state = State::default();
-        flow.memory_exposed |= matches!(ty, Term::Pointer(_));
+        let is_pointer = matches!(ty, Term::Pointer(_));
+        flow.memory_exposed |= is_pointer;
+        flow.local_memory_exposed |= is_pointer;
         let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
         let place = Place {
             root: PlaceId {
@@ -4730,7 +4736,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         origins: ValueOrigins,
     ) -> Result<(), Error> {
         let ty = completion_type(&expr.ty);
-        if flow.live && *ty != Term::Primitive(nir::Primitive::Void) {
+        if flow.live
+            && !matches!(
+                ty,
+                Term::Primitive(nir::Primitive::Void | nir::Primitive::Never)
+            )
+        {
             self.acquire_cleanup(ty, expr.source)?;
             for (path, targets) in &origins {
                 self.fuel = self
@@ -5121,6 +5132,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source,
         )?;
         left.memory_exposed |= right.memory_exposed;
+        left.local_memory_exposed |= right.local_memory_exposed;
         for (id, before) in &right.cleanup_before {
             self.fuel = self
                 .fuel
@@ -5346,6 +5358,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             if next.state != header.state
                 || next.memory_exposed != header.memory_exposed
+                || next.local_memory_exposed != header.local_memory_exposed
                 || next.pointers != header.pointers
                 || next.enum_domains != header.enum_domains
                 || next.callable_fields != header.callable_fields
@@ -10802,7 +10815,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             self.report.pattern_orders.push((source, published));
         }
-        if *ty == Term::Primitive(nir::Primitive::Void) {
+        if matches!(
+            ty,
+            Term::Primitive(nir::Primitive::Void | nir::Primitive::Never)
+        ) {
             return Ok(());
         }
         if state
@@ -15141,6 +15157,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         depth: usize,
     ) -> Result<ValueOrigins, Error> {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.evaluate_value_origins_step(expr, flow, depth)
+        })
+    }
+
+    fn evaluate_value_origins_step(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
         // Residual method values carry selected implementation evidence just
         // like named functions. Keep interface predicate checks in selection;
         // behavior-only selection would erase invocation obligations here.
@@ -15897,6 +15924,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     }
 
     fn expr(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+            self.expr_step(expr, flow, depth)
+        })
+    }
+
+    fn expr_step(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         if flow.live && self.observation_region {
             self.check_observation_expression(expr, flow, depth)?;
         }
@@ -16382,6 +16415,67 @@ fn analyze_with_shapes<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn analyze_with_shapes_and_borrowed_code<'a>(
+    package: Option<&'a Package>,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    shape: impl FnMut(&Term) -> Result<Shape, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    plan_cleanup: bool,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    return_stack: Vec<(nir::DeclarationId, Vec<Term>)>,
+    effect_result_inputs: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
+    borrowed_code: &[BorrowedCode],
+    trivial_cleanup_types: &std::collections::HashSet<Term>,
+    declarations: Option<std::rc::Rc<super::declarations::Metadata<'a>>>,
+    text_provenance: super::memory::TextProvenance,
+    memory_summaries: Option<&'a mut super::memory::SummaryCache>,
+    declaration_source: Option<::materialization::DeclarationSource<'a>>,
+    method_callees: Option<&'a mut super::memory::MethodCallees>,
+    rejection_memo: Option<&'a mut super::rejection::Memo>,
+    global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
+    return_results: Option<&'a mut ReturnResultCache>,
+    layout_cache: Option<&'a mut super::memory::TypeLayoutCache>,
+    move_layouts: Option<&'a mut MoveLayoutCache>,
+    return_cycle_hit: Option<&mut bool>,
+) -> Result<Report, Error> {
+    stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || {
+        analyze_with_shapes_and_borrowed_code_step(
+            package,
+            function,
+            delivery,
+            shape,
+            fuel,
+            cleanup,
+            plan_cleanup,
+            borrowed_parameters,
+            callable_parameters,
+            enum_parameters,
+            return_stack,
+            effect_result_inputs,
+            borrowed_fields,
+            borrowed_code,
+            trivial_cleanup_types,
+            declarations,
+            text_provenance,
+            memory_summaries,
+            declaration_source,
+            method_callees,
+            rejection_memo,
+            global_runtime_deliveries,
+            return_results,
+            layout_cache,
+            move_layouts,
+            return_cycle_hit,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_with_shapes_and_borrowed_code_step<'a>(
     package: Option<&'a Package>,
     function: &'a Function,
     delivery: impl FnMut(&Term) -> Result<Delivery, String>,
@@ -22056,5 +22150,442 @@ mod env_parameter_frame_tests {
         let report = analyze_in_package(&package, &runner, |_| Ok(Delivery::Copy), 200_000)
             .expect("env_arguments across indirect/candidate/temporary/guard calls should pass");
         assert!(report.deferred_calls.is_empty());
+    }
+
+    #[test]
+    fn indirect_function_pointer_calls_allow_live_copy_pointees_and_preserve_exposure_soundness() {
+        struct TrivialCleanup;
+        impl CleanupPolicy for TrivialCleanup {
+            fn acquire(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<(), String> {
+                Ok(())
+            }
+            fn is_trivial(&mut self, ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                Ok(matches!(ty, Term::Primitive(_)))
+            }
+            fn is_memory_inert(&mut self, ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                Ok(matches!(ty, Term::Primitive(_)))
+            }
+            fn cleanup_reads(
+                &mut self,
+                ty: &Term,
+                _fuel: &mut usize,
+            ) -> Result<Option<Vec<super::super::memory::Access>>, String> {
+                if matches!(ty, Term::Primitive(_)) {
+                    Ok(Some(vec![]))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn may_reject(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                Ok(false)
+            }
+            fn plan(
+                &mut self,
+                _ty: &Term,
+                _state: &State,
+                place: &Place,
+                _variants: &[VariantSelection],
+                _fuel: &mut usize,
+            ) -> Result<super::super::drop::CleanupPlan, String> {
+                Ok(super::super::drop::CleanupPlan {
+                    receiver: place.clone(),
+                    initial: None,
+                    variants: vec![],
+                    steps: vec![],
+                })
+            }
+        }
+
+        let source = SourceRange { start: 0, end: 1 };
+        let bool_ty = Term::Primitive(nir::Primitive::Bool);
+        let void_ty = Term::Primitive(nir::Primitive::Void);
+        let ptr_bool = Term::Pointer(Box::new(bool_ty.clone()));
+        let ptr_ptr_bool = Term::Pointer(Box::new(ptr_bool.clone()));
+        let runtime_param = |ty| nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty,
+        };
+        let fn_ptr_bool = Term::Function {
+            parameters: vec![runtime_param(ptr_bool.clone())],
+            result: Box::new(void_ty.clone()),
+        };
+        let fn_ptr_ptr_bool = Term::Function {
+            parameters: vec![runtime_param(ptr_ptr_bool.clone())],
+            result: Box::new(void_ty.clone()),
+        };
+        let fn_ret_ptr = Term::Function {
+            parameters: vec![runtime_param(ptr_bool.clone())],
+            result: Box::new(ptr_bool.clone()),
+        };
+
+        let make_fn = |id: u32, params: Vec<(LocalId, Term)>, sig: Term, body: Expr| -> Function {
+            Function {
+                interface: nir::program::FunctionDeclaration {
+                    declaration: nir::DeclarationId {
+                        package: 0,
+                        local: id,
+                    },
+                    name: format!("test_{id}"),
+                    source,
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    signature: sig,
+                    parameters: params.into_iter().map(|(id, _)| id).collect(),
+                    env_parameters: vec![],
+                    defaults: vec![],
+                },
+                body,
+                runtime_deliveries: Default::default(),
+            }
+        };
+
+        let hook_param = LocalId { owner: 1, index: 0 };
+        let value_local = LocalId { owner: 1, index: 1 };
+        let allow_single_live_copy = make_fn(
+            1,
+            vec![(hook_param, fn_ptr_bool.clone())],
+            Term::Function {
+                parameters: vec![runtime_param(fn_ptr_bool.clone())],
+                result: Box::new(void_ty.clone()),
+            },
+            Expr {
+                source,
+                ty: void_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: value_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: bool_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(true)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_bool.clone(),
+                                    kind: K::Local(hook_param),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![nir::program::CallArgument {
+                                    parameter: 0,
+                                    is_default: false,
+                                    passing: nir::program::ArgumentPassing::Value,
+                                    value: Expr {
+                                        source,
+                                        ty: ptr_bool.clone(),
+                                        kind: K::AddressOf(Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(value_local),
+                                        })),
+                                    },
+                                }],
+                            },
+                        },
+                    ],
+                    result: None,
+                },
+            },
+        );
+
+        let second_call = make_fn(
+            2,
+            vec![(hook_param, fn_ptr_bool.clone())],
+            Term::Function {
+                parameters: vec![runtime_param(fn_ptr_bool.clone())],
+                result: Box::new(void_ty.clone()),
+            },
+            Expr {
+                source,
+                ty: void_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: value_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: bool_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(true)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_bool.clone(),
+                                    kind: K::Local(hook_param),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![nir::program::CallArgument {
+                                    parameter: 0,
+                                    is_default: false,
+                                    passing: nir::program::ArgumentPassing::Value,
+                                    value: Expr {
+                                        source,
+                                        ty: ptr_bool.clone(),
+                                        kind: K::AddressOf(Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(value_local),
+                                        })),
+                                    },
+                                }],
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_bool.clone(),
+                                    kind: K::Local(hook_param),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![nir::program::CallArgument {
+                                    parameter: 0,
+                                    is_default: false,
+                                    passing: nir::program::ArgumentPassing::Value,
+                                    value: Expr {
+                                        source,
+                                        ty: ptr_bool.clone(),
+                                        kind: K::AddressOf(Box::new(Expr {
+                                            source,
+                                            ty: bool_ty.clone(),
+                                            kind: K::Local(value_local),
+                                        })),
+                                    },
+                                }],
+                            },
+                        },
+                    ],
+                    result: None,
+                },
+            },
+        );
+
+        let ptr_local = LocalId { owner: 1, index: 2 };
+        let double_indirection = make_fn(
+            3,
+            vec![(hook_param, fn_ptr_ptr_bool.clone())],
+            Term::Function {
+                parameters: vec![runtime_param(fn_ptr_ptr_bool.clone())],
+                result: Box::new(void_ty.clone()),
+            },
+            Expr {
+                source,
+                ty: void_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: value_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: bool_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(true)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: ptr_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: ptr_bool.clone(),
+                                    kind: K::AddressOf(Box::new(Expr {
+                                        source,
+                                        ty: bool_ty.clone(),
+                                        kind: K::Local(value_local),
+                                    })),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Call {
+                                callee: Box::new(Expr {
+                                    source,
+                                    ty: fn_ptr_ptr_bool.clone(),
+                                    kind: K::Local(hook_param),
+                                }),
+                                parameter_bindings: vec![],
+                                env_arguments: vec![],
+                                arguments: vec![nir::program::CallArgument {
+                                    parameter: 0,
+                                    is_default: false,
+                                    passing: nir::program::ArgumentPassing::Value,
+                                    value: Expr {
+                                        source,
+                                        ty: ptr_ptr_bool.clone(),
+                                        kind: K::AddressOf(Box::new(Expr {
+                                            source,
+                                            ty: ptr_bool.clone(),
+                                            kind: K::Local(ptr_local),
+                                        })),
+                                    },
+                                }],
+                            },
+                        },
+                    ],
+                    result: None,
+                },
+            },
+        );
+
+        let return_pointer = make_fn(
+            4,
+            vec![(hook_param, fn_ret_ptr.clone())],
+            Term::Function {
+                parameters: vec![runtime_param(fn_ret_ptr.clone())],
+                result: Box::new(void_ty.clone()),
+            },
+            Expr {
+                source,
+                ty: void_ty.clone(),
+                kind: K::Block {
+                    statements: vec![
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Let {
+                                binding: value_local,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: bool_ty.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(true)),
+                                }),
+                            },
+                        },
+                        Expr {
+                            source,
+                            ty: void_ty.clone(),
+                            kind: K::Discard(Box::new(Expr {
+                                source,
+                                ty: ptr_bool.clone(),
+                                kind: K::Call {
+                                    callee: Box::new(Expr {
+                                        source,
+                                        ty: fn_ret_ptr,
+                                        kind: K::Local(hook_param),
+                                    }),
+                                    parameter_bindings: vec![],
+                                    env_arguments: vec![],
+                                    arguments: vec![nir::program::CallArgument {
+                                        parameter: 0,
+                                        is_default: false,
+                                        passing: nir::program::ArgumentPassing::Value,
+                                        value: Expr {
+                                            source,
+                                            ty: ptr_bool.clone(),
+                                            kind: K::AddressOf(Box::new(Expr {
+                                                source,
+                                                ty: bool_ty,
+                                                kind: K::Local(value_local),
+                                            })),
+                                        },
+                                    }],
+                                },
+                            })),
+                        },
+                    ],
+                    result: None,
+                },
+            },
+        );
+
+        let package = Package {
+            functions: vec![
+                allow_single_live_copy.clone(),
+                second_call.clone(),
+                double_indirection.clone(),
+                return_pointer.clone(),
+            ],
+            ..Package::default()
+        };
+        let mut policy = TrivialCleanup;
+        analyze_in_package_with_cleanup(
+            &package,
+            &allow_single_live_copy,
+            |_| Ok(Delivery::Copy),
+            200_000,
+            Some(&mut policy),
+        )
+        .expect("single indirect fn(*Copy) -> void call should pass");
+        assert!(
+            analyze_in_package(
+                &package,
+                &allow_single_live_copy,
+                |_| Ok(Delivery::Copy),
+                200_000
+            )
+            .is_err_and(|e| e.reason.contains("memory contract")),
+            "unproven cleanup triviality must still be rejected"
+        );
+        assert!(
+            analyze_in_package_with_cleanup(
+                &package,
+                &allow_single_live_copy,
+                |_| Ok(Delivery::Move),
+                200_000,
+                Some(&mut policy),
+            )
+            .is_err_and(|e| e.reason.contains("memory contract")),
+            "non-Copy pointee must still be rejected"
+        );
+        for rejected in [&second_call, &double_indirection] {
+            let err = analyze_in_package_with_cleanup(
+                &package,
+                rejected,
+                |_| Ok(Delivery::Copy),
+                200_000,
+                Some(&mut policy),
+            )
+            .expect_err("unsafe indirect call should require a memory contract");
+            assert!(err.reason.contains("memory contract"), "{}", err.reason);
+        }
+        let err = analyze_in_package_with_cleanup(
+            &package,
+            &return_pointer,
+            |_| Ok(Delivery::Copy),
+            200_000,
+            Some(&mut policy),
+        )
+        .expect_err("pointer-returning indirect call must be rejected");
+        assert!(err.reason.contains("memory"), "{}", err.reason);
     }
 }

@@ -294,13 +294,18 @@ impl ReadonlyStorage {
             return Err(self.message);
         };
         for (root, _) in targets {
-            let frozen = match root {
-                DescriptorRoot::Local(id) => self.frozen_locals.contains(id),
-                DescriptorRoot::Frame(id) => self.frozen_frames.contains(id),
-            };
-            if frozen {
-                return Err(self.message);
-            }
+            self.check_target_write(*root)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_target_write(&self, root: DescriptorRoot) -> Result<(), &'static str> {
+        let frozen = match root {
+            DescriptorRoot::Local(id) => self.frozen_locals.contains(&id),
+            DescriptorRoot::Frame(id) => self.frozen_frames.contains(&id),
+        };
+        if frozen {
+            return Err(self.message);
         }
         Ok(())
     }

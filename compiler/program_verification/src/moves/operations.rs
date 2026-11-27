@@ -28,6 +28,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             }
             K::AddressOf(place) => {
                 flow.memory_exposed = true;
+                flow.local_memory_exposed = true;
                 let target = expression_place(place)
                     .ok_or_else(|| error(source, "address requires a local place"))?;
                 flow.state
@@ -951,11 +952,50 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     flow.value_variants.clear();
                     return Ok(());
                 }
+                let mut checked_indirect_pointer_call = false;
+                let mut checked_indirect_zero_arg_call = false;
                 if flow.memory_exposed || pointer_arguments {
-                    return Err(error(
-                        source,
-                        "call with pointer dependencies requires a memory contract",
-                    ));
+                    let known_local_callable = matches!(
+                        &callee.kind,
+                        K::Local(binding) if flow.callables.contains_key(&root(*binding))
+                    );
+                    if !flow.memory_exposed
+                        && pointer_arguments
+                        && !known_local_callable
+                        && !self.defer_unknown_calls
+                        && !self.observation_region
+                        && self.effect_memory_inputs.is_empty()
+                        && self.package.is_some()
+                        && env_arguments.is_empty()
+                        && !arguments.iter().any(|a| a.is_default)
+                        && !matches!(callee.kind, K::Closure { .. })
+                        && !matches!(
+                            callee.ty,
+                            Term::Closure { .. } | Term::ContextualClosure { .. }
+                        )
+                        && matches!(callee.ty.callable_signature(), Term::Function { .. })
+                        && self.indirect_pointer_call_shape_safe(expr, arguments, source)?
+                    {
+                        checked_indirect_pointer_call = true;
+                    } else if !flow.local_memory_exposed
+                        && !pointer_arguments
+                        && arguments.is_empty()
+                        && env_arguments.is_empty()
+                        && !known_local_callable
+                        && !self.defer_unknown_calls
+                        && !self.observation_region
+                        && self.effect_memory_inputs.is_empty()
+                        && self.package.is_some()
+                        && !self.has_caller_code_inputs(source)?
+                        && self.indirect_zero_arg_closure_call_shape_safe(expr, callee, source)?
+                    {
+                        checked_indirect_zero_arg_call = true;
+                    } else {
+                        return Err(error(
+                            source,
+                            "call with pointer dependencies requires a memory contract",
+                        ));
+                    }
                 }
                 if let K::Local(binding) = &callee.kind {
                     if let Some(definition) = flow.callables.get(&root(*binding)).cloned() {
@@ -986,8 +1026,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         )
                     })?;
                 }
-                if matches!(callee.ty, Term::Closure { .. })
-                    || matches!(callee.kind, K::Closure { .. })
+                if (matches!(callee.ty, Term::Closure { .. })
+                    || matches!(callee.kind, K::Closure { .. }))
+                    && !checked_indirect_zero_arg_call
                 {
                     return Err(error(
                         source,
@@ -997,6 +1038,14 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 self.expr(callee, flow, depth + 1)?;
                 if !flow.live {
                     return Ok(());
+                }
+                if (checked_indirect_pointer_call && flow.memory_exposed)
+                    || (checked_indirect_zero_arg_call && flow.local_memory_exposed)
+                {
+                    return Err(error(
+                        source,
+                        "call with pointer dependencies requires a memory contract",
+                    ));
                 }
                 if arguments.iter().any(|a| a.is_default) {
                     self.prepare_defaults(
@@ -1016,12 +1065,22 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     };
                     self.pending_frame(source, |this| {
                         for argument in arguments {
+                            let arg_exposed_before = flow.memory_exposed;
                             let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
                             let origins =
                                 this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
                             let callable = flow.value_callable.clone().or(callable);
                             if !flow.live {
                                 return Ok(());
+                            }
+                            if checked_indirect_pointer_call {
+                                this.validate_indirect_pointer_argument(
+                                    argument,
+                                    &origins,
+                                    arg_exposed_before,
+                                    flow,
+                                    source,
+                                )?;
                             }
                             record_enum_parameter(
                                 &mut enums,
@@ -1084,7 +1143,11 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     let mut failed = flow.clone();
                     self.exit(&mut failed, source, CleanupReason::PredicateFailure)?;
                 }
-                if flow.live && flow.memory_exposed {
+                if flow.live
+                    && flow.memory_exposed
+                    && !checked_indirect_pointer_call
+                    && !checked_indirect_zero_arg_call
+                {
                     return Err(error(
                         source,
                         "call with pointer dependencies requires a memory contract",
@@ -1093,6 +1156,252 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 self.check_interface_result(callee, expr, flow)?;
             }
             _ => unreachable!("expr_call dispatcher"),
+        }
+        Ok(())
+    }
+
+    fn has_caller_code_inputs(&mut self, source: SourceRange) -> Result<bool, Error> {
+        let Some(function) = self.exit_contract else {
+            return Ok(true);
+        };
+        let mut param_tys = Vec::new();
+        if let Term::Function { parameters, .. } = function.interface.signature.callable_signature()
+        {
+            for parameter in parameters {
+                if parameter.sort == nir::Sort::Runtime {
+                    param_tys.push(parameter.ty.clone());
+                }
+            }
+        } else {
+            return Ok(true);
+        }
+        for env in &self.active_env_parameters {
+            param_tys.push(env.ty.clone());
+        }
+        for ty in param_tys {
+            if !self.callable_value_paths(&ty, source)?.is_empty() {
+                return Ok(true);
+            }
+            if let Some((_, pointee)) = self.pointer_representation(&ty, source)?
+                && !self.callable_value_paths(&pointee, source)?.is_empty()
+            {
+                return Ok(true);
+            }
+            for leaf in self.pointer_input_layout(&ty, source)? {
+                if !self.callable_value_paths(&leaf.pointee, source)?.is_empty() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn indirect_zero_arg_closure_call_shape_safe(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        if matches!(callee.kind, K::Closure { .. })
+            || matches!(callee.ty, Term::ContextualClosure { .. })
+        {
+            return Ok(false);
+        }
+        if let Term::Closure { environment, .. } = &callee.ty {
+            for field in environment {
+                if !self.storage_inputs_are_closed(field, source)?
+                    || contains_pointer_value(self.package, field, &mut self.fuel, source, 0)?
+                    || contains_callable_value(self.package, field, &mut self.fuel, source, 0)?
+                    || !crate::memory::effect_data_layout_for(
+                        self.package,
+                        field,
+                        self.text_provenance,
+                        &mut self.fuel,
+                        0,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        if !matches!(
+            callee.ty.callable_signature(),
+            Term::Function { parameters, .. } if parameters.is_empty()
+        ) {
+            return Ok(false);
+        }
+        if matches!(
+            &expr.ty,
+            Term::Computation { effects, .. } if !effects.is_empty()
+        ) {
+            return Ok(false);
+        }
+        let result_ty = completion_type(&expr.ty);
+        if contains_pointer_value(self.package, result_ty, &mut self.fuel, source, 0)?
+            || contains_callable_value(self.package, result_ty, &mut self.fuel, source, 0)?
+            || self.contains_return_evidence(&expr.ty, source)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Indirect function-pointer calls without a callee memory contract may
+    /// pass single-level pointers only when the return type needs no provenance
+    /// or return-tag contract and every pointee is closed, Copy, pointer-free,
+    /// callable-free, and trivially cleaned up.
+    fn indirect_pointer_call_shape_safe(
+        &mut self,
+        expr: &Expr,
+        arguments: &[nir::program::CallArgument],
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        if matches!(
+            &expr.ty,
+            Term::Computation { effects, .. } if !effects.is_empty()
+        ) {
+            return Ok(false);
+        }
+        let result_ty = completion_type(&expr.ty);
+        if contains_pointer_value(self.package, result_ty, &mut self.fuel, source, 0)?
+            || contains_callable_value(self.package, result_ty, &mut self.fuel, source, 0)?
+            || self.contains_return_evidence(&expr.ty, source)?
+        {
+            return Ok(false);
+        }
+        for argument in arguments {
+            if !self.storage_inputs_are_closed(&argument.value.ty, source)?
+                || contains_callable_value(
+                    self.package,
+                    &argument.value.ty,
+                    &mut self.fuel,
+                    source,
+                    0,
+                )?
+            {
+                return Ok(false);
+            }
+            let leaves = self.pointer_input_layout(&argument.value.ty, source)?;
+            for leaf in leaves {
+                if !self.storage_inputs_are_closed(&leaf.pointee, source)?
+                    || (self.delivery)(&leaf.pointee).map_err(|e| error(source, e))?
+                        != Delivery::Copy
+                    || !crate::memory::effect_data_layout_for(
+                        self.package,
+                        &leaf.pointee,
+                        self.text_provenance,
+                        &mut self.fuel,
+                        0,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                    || self
+                        .require_pointer_free_owned(&leaf.pointee, source)
+                        .is_err()
+                    || !self.type_cleanup_is_trivial(&leaf.pointee, source)?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn validate_indirect_pointer_argument(
+        &mut self,
+        argument: &nir::program::CallArgument,
+        origins: &ValueOrigins,
+        arg_exposed_before: bool,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let reject = || {
+            error(
+                source,
+                "call with pointer dependencies requires a memory contract",
+            )
+        };
+        let leaves = self.pointer_input_layout(&argument.value.ty, source)?;
+        if leaves.is_empty() {
+            if flow.memory_exposed != arg_exposed_before {
+                return Err(reject());
+            }
+            let package = self.package;
+            let layout_cache = &mut self.layout_cache;
+            let mut has_pointer_ops = false;
+            nir::visit::expression_in_scope(&argument.value, &mut self.fuel, |node, fuel| {
+                if matches!(
+                    node.kind,
+                    K::AddressOf(_)
+                        | K::ReadPointer(_)
+                        | K::WritePointer { .. }
+                        | K::BitWritePointer { .. }
+                ) || layout_cache
+                    .as_mut()
+                    .pointer_representation(package, &node.ty, fuel)?
+                    .is_some()
+                {
+                    has_pointer_ops = true;
+                }
+                Ok(())
+            })
+            .map_err(|reason| error(source, reason))?;
+            if has_pointer_ops {
+                return Err(reject());
+            }
+            return Ok(());
+        }
+        let mut leaf_targets = BTreeSet::new();
+        for leaf in &leaves {
+            let Some(targets) = origins.get(&leaf.storage_fields) else {
+                return Err(reject());
+            };
+            if targets.is_empty() {
+                return Err(reject());
+            }
+            for target in targets {
+                if *target == unknown_pointer_target()
+                    || target.fields.contains(&VARIANT_PATH)
+                    || flow.effect_borrows.contains(&target.root)
+                    || crate::is_const_global_place(target.root)
+                    || (!flow.roots.contains(&target.root)
+                        && !crate::is_static_global_place(target.root))
+                {
+                    return Err(reject());
+                }
+                if self
+                    .require_target_available(flow, target, true, source)?
+                    .is_err()
+                {
+                    return Err(reject());
+                }
+                leaf_targets.insert(target.clone());
+            }
+        }
+        let mut unsafe_address_pattern = false;
+        nir::visit::expression_in_scope(&argument.value, &mut self.fuel, |node, _| {
+            match &node.kind {
+                K::Call { .. }
+                | K::Intrinsic { .. }
+                | K::Closure { .. }
+                | K::EffectHandle { .. }
+                | K::EffectRun { .. }
+                | K::EffectComputation { .. }
+                | K::EffectRequest { .. }
+                | K::WritePointer { .. }
+                | K::BitWritePointer { .. }
+                | K::ReadPointer(_) => unsafe_address_pattern = true,
+                K::AddressOf(inner) => match expression_place(inner) {
+                    Some(place) if leaf_targets.contains(&place) => {}
+                    _ => unsafe_address_pattern = true,
+                },
+                _ => {}
+            }
+            Ok(())
+        })
+        .map_err(|reason| error(source, reason))?;
+        if unsafe_address_pattern {
+            return Err(reject());
         }
         Ok(())
     }

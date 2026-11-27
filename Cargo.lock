@@ -645,6 +645,7 @@ dependencies = [
  "iir",
  "materialization",
  "nir",
+ "stacker",
  "type_resolution",
  "verification_core",
 ]
