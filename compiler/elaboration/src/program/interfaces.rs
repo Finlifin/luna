@@ -2053,6 +2053,16 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn has_inherent_method(
+        &mut self,
+        subject: Term,
+        name: &str,
+        span: Span,
+    ) -> Result<bool, Error> {
+        self.selected_method_with_mode(subject, None, name, true, span)
+            .map(|selected| selected.is_some())
+    }
+
     pub(super) fn selected_method(
         &mut self,
         subject: Term,
@@ -2060,9 +2070,20 @@ impl Checker<'_, '_> {
         name: &str,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
+        self.selected_method_with_mode(subject, interface, name, false, span)
+    }
+
+    fn selected_method_with_mode(
+        &mut self,
+        subject: Term,
+        interface: Option<n::InterfaceInstance>,
+        name: &str,
+        allow_contextual: bool,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
         if self.in_required_comptime && !self.interfaces_ready {
             if interface.is_none() {
-                return self.early_inherent_method(subject, name, span);
+                return self.early_inherent_method(subject, name, allow_contextual, span);
             }
             return Err(error(
                 span,
@@ -2321,7 +2342,7 @@ impl Checker<'_, '_> {
                 .chain(interface.as_ref().unwrap().arguments.iter().cloned())
                 .collect()
         };
-        self.inherent_method_value(owner, arguments, span)
+        self.inherent_method_value(owner, arguments, allow_contextual, span)
     }
 
     pub(super) fn concrete_trait_method_body(
@@ -2366,6 +2387,7 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
         arguments: Vec<Term>,
+        allow_contextual: bool,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
         let body = declaration(self.package, &self.package_identities, owner);
@@ -2373,6 +2395,23 @@ impl Checker<'_, '_> {
             || self.is_pattern_generator(owner)
             || self.is_data_consumer(owner)
         {
+            if allow_contextual {
+                let parameters = &self.type_parameters[&owner];
+                if arguments.len() > parameters.len() {
+                    return Err(error(
+                        span,
+                        "method implementation type argument count mismatch",
+                    ));
+                }
+                if arguments.len() == parameters.len() {
+                    self.check_requirements(owner, &arguments, span)?;
+                }
+                return Ok(Some(n::Expr {
+                    ty: p(P::Void),
+                    source: source(span),
+                    kind: K::Function(body),
+                }));
+            }
             return Err(error(
                 span,
                 "code generator method invocation requires code-method dispatch, which is not yet implemented",

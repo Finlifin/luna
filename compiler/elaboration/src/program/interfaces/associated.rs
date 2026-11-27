@@ -270,11 +270,9 @@ impl Checker<'_, '_> {
             interface
         } else {
             // Inherent methods precede implicit trait discovery. This probe
-            // selects metadata only; it does not evaluate a receiver or body.
-            if self
-                .selected_method(subject.clone(), None, name, span)?
-                .is_some()
-            {
+            // checks membership only; it does not evaluate a receiver, body, or
+            // contextual dispatch contract.
+            if self.has_inherent_method(subject.clone(), name, span)? {
                 return Ok(None);
             }
             let Some(interface) = self.discovered_member_interface(&subject, name, site, span)?
@@ -1822,10 +1820,7 @@ impl Checker<'_, '_> {
             } else {
                 let expr = this.expr(initializer, Some(expected))?;
                 if *expected == p(P::Type)
-                    && matches!(
-                        &expr.kind,
-                        K::Block { result: Some(res), .. } if matches!(res.kind, K::TypeValue(_))
-                    )
+                    && !matches!(expr.kind, K::TypeValue(_))
                     && let Some(term) =
                         this.preserved_input_identity(&expr, |_, _| Ok(None), initializer.span)?
                 {

@@ -212,9 +212,14 @@ impl Checker<'_, '_> {
             return self.completed_type(value);
         }
         if let H::Projection(value, field) = &expr.kind {
-            if let Some(value) =
-                self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
-            {
+            let saved_mode = (!describe_input && !self.collecting_named_types())
+                .then(|| std::mem::replace(&mut self.in_required_comptime, true));
+            let projected =
+                self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id);
+            if let Some(saved_mode) = saved_mode {
+                self.in_required_comptime = saved_mode;
+            }
+            if let Some(value) = projected? {
                 return self.associated_type_data(value, expr);
             }
         }
@@ -242,7 +247,13 @@ impl Checker<'_, '_> {
                 }
             }
             H::Application(callee, args) => {
-                if let Some(result) = self.associated_type_call_data(expr, callee, args)? {
+                let saved_mode = (!describe_input && !self.collecting_named_types())
+                    .then(|| std::mem::replace(&mut self.in_required_comptime, true));
+                let associated = self.associated_type_call_data(expr, callee, args);
+                if let Some(saved_mode) = saved_mode {
+                    self.in_required_comptime = saved_mode;
+                }
+                if let Some(result) = associated? {
                     return Ok(result);
                 }
                 if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {

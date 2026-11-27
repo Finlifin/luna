@@ -144,12 +144,15 @@ impl Checker<'_, '_> {
         }
         let data =
             self.with_alias_arguments(owner, &parameters, &key.arguments, span, |checker| {
-                if matches!(value.kind, H::Cast(..)) {
+                let saved_mode = std::mem::replace(&mut checker.in_required_comptime, true);
+                let result = if matches!(value.kind, H::Cast(..)) {
                     let (ty, _) = checker.resolve_type_annotation_with_views(value)?;
                     Ok(CompletedType::Identity(ty))
                 } else {
                     checker.completed_type(value)
-                }
+                };
+                checker.in_required_comptime = saved_mode;
+                result
             })?;
         let cached = self.copy_completed_type(&data, span)?;
         self.completed_aliases
