@@ -15,7 +15,8 @@ use nir::{Primitive, Sort, Term};
 pub fn suspension_boundary(expr: &Expr) -> bool {
     match &expr.kind {
         K::EffectRequest {
-            abi: Abi::Direct, ..
+            abi: Abi::Direct | Abi::Capturing,
+            ..
         } => true,
         K::Call { callee, .. } => matches!(callee.ty.callable_signature(),
             Term::Function {result, ..} if matches!(result.as_ref(),
@@ -463,7 +464,10 @@ fn expression(
                 }
                 let mut installed = Vec::new();
                 for handler in handlers {
-                    if !matches!(handler.abi, Abi::Direct | Abi::DirectPassing) {
+                    if !matches!(
+                        handler.abi,
+                        Abi::Direct | Abi::DirectPassing | Abi::Capturing
+                    ) {
                         return Err("IIR non-direct effects require control ABI lowering".into());
                     }
                     operation(package, links, &handler.operation, &handler.signature, fuel)?;
@@ -485,8 +489,13 @@ fn expression(
                             return Err("IIR handler fallback selects the wrong occurrence".into());
                         }
                     }
+                    let branch_result = if handler.abi == Abi::Capturing {
+                        row_result(&expr.ty).1
+                    } else {
+                        result
+                    };
                     for arm in &handler.arms {
-                        if !compatible(&arm.body.ty, result) {
+                        if !compatible(&arm.body.ty, branch_result) {
                             return Err("IIR handler branch result mismatch".into());
                         }
                         pattern(
@@ -505,7 +514,7 @@ fn expression(
                                 links,
                                 guard,
                                 outer,
-                                Some(result),
+                                None,
                                 runtime,
                                 false,
                                 fuel,
@@ -551,7 +560,7 @@ fn expression(
                 signature,
                 arguments,
             } => {
-                if !matches!(abi, Abi::Direct | Abi::DirectPassing) {
+                if !matches!(abi, Abi::Direct | Abi::DirectPassing | Abi::Capturing) {
                     return Err("IIR non-direct effects require control ABI lowering".into());
                 }
                 operation(package, links, op, signature, fuel)?;

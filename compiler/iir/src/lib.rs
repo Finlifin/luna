@@ -1021,9 +1021,11 @@ impl Package {
         match &expr.kind {
             K::EffectHandle { handlers, .. } => {
                 for handler in handlers {
-                    if handler.abi != nir::effects::Abi::Direct
-                        && !(handler.abi == nir::effects::Abi::DirectPassing
-                            && effects::data_passing_signature(self, &handler.signature, fuel)?)
+                    if !matches!(
+                        handler.abi,
+                        nir::effects::Abi::Direct | nir::effects::Abi::Capturing
+                    ) && !(handler.abi == nir::effects::Abi::DirectPassing
+                        && effects::data_passing_signature(self, &handler.signature, fuel)?)
                     {
                         return Err(
                             "IIR effect installation requires slot/capture cleanup protocol lowering"
@@ -1040,9 +1042,11 @@ impl Package {
                 }
             }
             K::EffectRequest { abi, signature, .. }
-                if *abi != nir::effects::Abi::Direct
-                    && !(*abi == nir::effects::Abi::DirectPassing
-                        && effects::data_passing_signature(self, signature, fuel)?) =>
+                if !matches!(
+                    abi,
+                    nir::effects::Abi::Direct | nir::effects::Abi::Capturing
+                ) && !(*abi == nir::effects::Abi::DirectPassing
+                    && effects::data_passing_signature(self, signature, fuel)?) =>
             {
                 return Err(
                     "IIR effect request requires slot/capture cleanup protocol lowering".into(),
@@ -1542,7 +1546,7 @@ mod optional_construction_tests {
 mod validate_memo_tests {
     use super::*;
     use nir::program::{
-        Expr, ExprKind as K, Function, FunctionDeclaration, FunctionPhase, SourceRange,
+        Expr, ExprKind as K, Function, FunctionDeclaration, FunctionPhase, Literal, SourceRange,
     };
 
     fn make_runtime_fn(decl_local: u32, body: Expr) -> FunctionInstance {
@@ -1895,6 +1899,189 @@ mod validate_memo_tests {
                 .validate(&mut 100_000)
                 .unwrap_err()
                 .contains("missing static")
+        );
+    }
+
+    #[test]
+    fn capturing_effect_handlers_and_requests_validate_and_check_branch_results() {
+        let source = SourceRange { start: 1, end: 2 };
+        let op = nir::effects::Operation {
+            declaration: DeclarationId {
+                package: 1,
+                local: 50,
+            },
+            arguments: vec![],
+        };
+        let op_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: Term::Primitive(nir::Primitive::U32),
+            }],
+            result: Box::new(Term::Primitive(nir::Primitive::U32)),
+        };
+        let u32_expr = |val: u32| Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::U32),
+            kind: K::Literal(Literal::Integer(val.to_string())),
+        };
+        let bool_expr = |val: bool| Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Bool),
+            kind: K::Literal(Literal::Bool(val)),
+        };
+        let request_expr = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::U32),
+            kind: K::EffectRequest {
+                operation: op.clone(),
+                abi: nir::effects::Abi::Capturing,
+                allowed_index: 0,
+                signature: Box::new(op_sig.clone()),
+                arguments: vec![u32_expr(7)],
+            },
+        };
+        assert!(effects::suspension_boundary(&request_expr));
+        let comp_expr = Expr {
+            source,
+            ty: Term::Computation {
+                effects: vec![op.clone()],
+                result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+            },
+            kind: K::EffectComputation {
+                effects: vec![op.clone()],
+                body: Box::new(Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Bool),
+                    kind: K::Block {
+                        statements: vec![Expr {
+                            source,
+                            ty: Term::Primitive(nir::Primitive::Void),
+                            kind: K::Discard(Box::new(request_expr)),
+                        }],
+                        result: Some(Box::new(bool_expr(true))),
+                    },
+                }),
+            },
+        };
+        let make_arm = |arm_body: Expr| nir::program::MatchArm {
+            pattern: nir::program::Pattern::Tuple(vec![
+                nir::program::Pattern::Wild,
+                nir::program::Pattern::Wild,
+            ]),
+            guard: None,
+            body: arm_body,
+        };
+        let handle_expr = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Bool),
+            kind: K::EffectHandle {
+                computation: Box::new(comp_expr),
+                handlers: vec![nir::program::EffectHandler {
+                    operation: op.clone(),
+                    abi: nir::effects::Abi::Capturing,
+                    signature: op_sig.clone(),
+                    arms: vec![
+                        make_arm(bool_expr(false)),
+                        make_arm(Expr {
+                            source,
+                            ty: Term::Primitive(nir::Primitive::Never),
+                            kind: K::EffectResume(Box::new(u32_expr(9))),
+                        }),
+                    ],
+                    fallback: None,
+                }],
+                outer: vec![],
+            },
+        };
+        assert!(!effects::suspension_boundary(&handle_expr));
+        let valid_pkg = Package {
+            functions: vec![make_runtime_fn(
+                1,
+                Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Void),
+                    kind: K::Discard(Box::new(handle_expr)),
+                },
+            )],
+            ..Package::default()
+        };
+        valid_pkg.validate(&mut 100_000).unwrap();
+        valid_pkg.validate_cleanup_control(&mut 100_000).unwrap();
+
+        // Capturing arm returning operation result Y (u32) when handle produces B (bool) must fail.
+        let mut wrong_arm_pkg = valid_pkg.clone();
+        let K::Discard(inner) = &mut wrong_arm_pkg.functions[0].function.body.kind else {
+            unreachable!()
+        };
+        let K::EffectHandle { handlers, .. } = &mut inner.kind else {
+            unreachable!()
+        };
+        handlers[0].arms[0].body = u32_expr(1);
+        assert!(
+            wrong_arm_pkg
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("IIR handler branch result mismatch")
+        );
+
+        // EffectResume inside capturing arm must still match operation result Y (u32), not bool.
+        let mut wrong_resume_pkg = valid_pkg.clone();
+        let K::Discard(inner) = &mut wrong_resume_pkg.functions[0].function.body.kind else {
+            unreachable!()
+        };
+        let K::EffectHandle { handlers, .. } = &mut inner.kind else {
+            unreachable!()
+        };
+        handlers[0].arms[1].body = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Never),
+            kind: K::EffectResume(Box::new(bool_expr(false))),
+        };
+        assert!(
+            wrong_resume_pkg
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("IIR resume has no matching lexical branch result")
+        );
+
+        // Abi::Async remains rejected by both effect validation and cleanup control checks.
+        let mut async_pkg = valid_pkg;
+        let K::Discard(inner) = &mut async_pkg.functions[0].function.body.kind else {
+            unreachable!()
+        };
+        let K::EffectHandle {
+            computation,
+            handlers,
+            ..
+        } = &mut inner.kind
+        else {
+            unreachable!()
+        };
+        handlers[0].abi = nir::effects::Abi::Async;
+        let K::EffectComputation { body, .. } = &mut computation.kind else {
+            unreachable!()
+        };
+        let K::Block { statements, .. } = &mut body.kind else {
+            unreachable!()
+        };
+        let K::Discard(req) = &mut statements[0].kind else {
+            unreachable!()
+        };
+        let K::EffectRequest { abi, .. } = &mut req.kind else {
+            unreachable!()
+        };
+        *abi = nir::effects::Abi::Async;
+        assert!(
+            async_pkg
+                .validate(&mut 100_000)
+                .unwrap_err()
+                .contains("IIR non-direct effects require control ABI lowering")
+        );
+        assert!(
+            async_pkg
+                .validate_cleanup_control(&mut 100_000)
+                .unwrap_err()
+                .contains("slot/capture cleanup protocol lowering")
         );
     }
 }
