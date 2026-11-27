@@ -861,7 +861,7 @@ fn repr_at(
                 .iter()
                 .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
                 .collect::<Result<Vec<_>, _>>()?;
-            build_record_ty(graph, None, tys, remaining)
+            build_record_ty(graph, None, tys)
         }
         Term::Pointer(_) => {
             if !checked {
@@ -898,7 +898,8 @@ fn repr_at(
                         .declaration_align(definition.declaration);
                     if let Some(d) = decl_align {
                         let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
-                        let layout = inner.storage_layout_at(pointer_bits, 0, remaining)?;
+                        let mut layout_fuel = MAX_LAYOUT_NODES;
+                        let layout = inner.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
                         let target_align = layout.align.max(d);
                         let target_size = nir::layout::align_up(layout.size, target_align)
                             .map_err(|e| e.to_string())?;
@@ -925,7 +926,9 @@ fn repr_at(
                         .declaration_align(definition.declaration)
                     {
                         let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
-                        let layout = enum_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                        let mut layout_fuel = MAX_LAYOUT_NODES;
+                        let layout =
+                            enum_ty.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
                         let target_align = layout.align.max(d);
                         let target_size = nir::layout::align_up(layout.size, target_align)
                             .map_err(|e| e.to_string())?;
@@ -951,7 +954,7 @@ fn repr_at(
                 .collect::<Result<Vec<_>, _>>()?;
             match definition.packed {
                 nir::program::PackedMode::None => {
-                    build_record_ty(graph, Some(definition.declaration), fields, remaining)
+                    build_record_ty(graph, Some(definition.declaration), fields)
                 }
                 nir::program::PackedMode::Byte => Ok(Ty::PackedRecord(std::sync::Arc::new(fields))),
                 nir::program::PackedMode::Bit => {
@@ -1067,7 +1070,8 @@ fn repr_at(
                 nir::type_computations::charge_term(ty, remaining).map_err(|e| e.to_string())?;
                 let elem_ty = repr_at(graph, element, depth + 1, checked, remaining)?;
                 let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
-                let elem_layout = elem_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                let mut layout_fuel = MAX_LAYOUT_NODES;
+                let elem_layout = elem_ty.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
                 return Ok(Ty::Array {
                     elem: Box::new(elem_ty),
                     len,
@@ -1080,7 +1084,8 @@ fn repr_at(
             }) {
                 let inner_ty = repr_at(graph, inner, depth + 1, checked, remaining)?;
                 let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
-                let layout = inner_ty.storage_layout_at(pointer_bits, 0, remaining)?;
+                let mut layout_fuel = MAX_LAYOUT_NODES;
+                let layout = inner_ty.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
                 return Ok(Ty::RawStorage {
                     size: layout.size,
                     align: layout.align,
@@ -1103,7 +1108,6 @@ fn build_record_ty(
     graph: &iir::Package,
     declaration: Option<nir::DeclarationId>,
     fields: Vec<Ty>,
-    remaining: &mut usize,
 ) -> Result<Ty, String> {
     let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
     let decl_align = declaration.and_then(|d| graph.layout_alignments.declaration_align(d));
@@ -1117,7 +1121,8 @@ fn build_record_ty(
                 needs_aligned_record = true;
                 break;
             }
-            let layout = field.storage_layout_at(pointer_bits, 0, remaining)?;
+            let mut layout_fuel = MAX_LAYOUT_NODES;
+            let layout = field.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
             if layout.align > field.natural_llvm_align(pointer_bits) {
                 needs_aligned_record = true;
                 break;
@@ -1132,7 +1137,8 @@ fn build_record_ty(
     let mut offset = 0u64;
     let mut max_align = decl_align.unwrap_or(1);
     for (i, field) in fields.iter().enumerate() {
-        let layout = field.storage_layout_at(pointer_bits, 0, remaining)?;
+        let mut layout_fuel = MAX_LAYOUT_NODES;
+        let layout = field.storage_layout_at(pointer_bits, 0, &mut layout_fuel)?;
         let field_align = declaration
             .and_then(|d| graph.layout_alignments.field_align(d, i))
             .map_or(layout.align, |a| layout.align.max(a));
@@ -1180,7 +1186,7 @@ fn tuple_layout(
         .iter()
         .map(|ty| repr_at(graph, ty, depth + 1, checked, remaining))
         .collect::<Result<Vec<_>, _>>()?;
-    build_record_ty(graph, None, tys, remaining)
+    build_record_ty(graph, None, tys)
 }
 
 #[derive(Clone)]

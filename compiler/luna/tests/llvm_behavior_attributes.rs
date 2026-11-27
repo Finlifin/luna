@@ -218,11 +218,65 @@ fn guarded_traps_and_preconditions_forbid_memory_none_and_speculative_hoisting()
 
     let case = NativeCase::new(source);
     let ir = case.emit_llvm().unwrap();
-    for line in ir.lines().filter(|line| line.starts_with("define ")) {
-        if let Some(group) = attribute_group_for(&ir, line) {
+    let mut defines = std::collections::BTreeMap::<String, (String, String)>::new();
+    let mut current_fn: Option<(String, String, String)> = None;
+    for line in ir.lines() {
+        if line.starts_with("define ") {
+            if let Some(at_pos) = line.find('@')
+                && let Some(paren_pos) = line[at_pos + 1..].find('(')
+            {
+                let name = line[at_pos + 1..at_pos + 1 + paren_pos].to_string();
+                current_fn = Some((name, line.to_string(), String::new()));
+            }
+        } else if let Some((name, header, mut body)) = current_fn.take() {
+            if line == "}" {
+                defines.insert(name, (header, body));
+            } else {
+                body.push_str(line);
+                body.push('\n');
+                current_fn = Some((name, header, body));
+            }
+        }
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([String::from("flurry_entry")]);
+    while let Some(name) = queue.pop_front() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some((_, body)) = defines.get(&name) {
+            let mut rest = body.as_str();
+            while let Some(pos) = rest.find("@flurry_") {
+                rest = &rest[pos + 1..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                if rest[end..].starts_with('(') {
+                    queue.push_back(rest[..end].to_string());
+                }
+            }
+        }
+    }
+    let checked_flurry_fns = visited
+        .iter()
+        .filter(|name| {
+            name.starts_with("flurry_")
+                && name.as_str() != "flurry_entry"
+                && !name.starts_with("flurry_task_")
+                && !name.starts_with("flurry_output_")
+        })
+        .count();
+    assert!(
+        checked_flurry_fns >= 3,
+        "expected run -> guarded_div -> checked_div call chain in IR:\n{ir}"
+    );
+    for name in &visited {
+        if let Some((header, _)) = defines.get(name)
+            && let Some(group) = attribute_group_for(&ir, header)
+        {
             assert!(
                 !contains_any_token(group, &["memory(none)", "speculatable"]),
-                "trapping precondition call chain must not get memory(none)/speculatable on `{line}`:\n{ir}"
+                "trapping precondition call chain must not get memory(none)/speculatable on `{header}`:\n{ir}"
             );
         }
     }

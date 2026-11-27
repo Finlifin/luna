@@ -560,7 +560,6 @@ fn std_runtime_typed_continuation_abort_and_drop_execute_at_o0_and_o3() {
 }
 
 #[test]
-#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call via std.process.panic (transfers.rs:811)"]
 fn std_runtime_typed_continuation_resume_with_executes_at_o0_and_o3() {
     let source = format!(
         r#"{PREAMBLE}

@@ -2646,3 +2646,103 @@ fn deeply_nested_text_scopes_preserve_origins_and_fail_with_a_diagnostic() {
     );
     assert_eq!(infer(&package, "echo", 1_000_000).unwrap(), summary);
 }
+
+#[test]
+fn indirect_void_calls_verify_pointer_reads_and_preserve_escape_soundness() {
+    use nir::program::ExprKind as K;
+
+    let mut package = support::compile(
+        "typealias str = .str'builtin;
+        typealias Unit = .void'builtin;
+        struct Info { msg: str, line: .u32'builtin }
+        struct Holder { text: str }
+        fn notify(hook: fn(*Info) -> Unit, message: str) {
+            let info = Info { msg: message, line: 42 };
+            hook(info.ref);
+        }
+        fn escape_via_indirect(hook: fn(*Holder, str) -> Unit, local: str) -> str {
+            var holder = Holder { text: \"ok\" };
+            hook(holder.ref, local);
+            holder.text
+        }
+        fn take_default(pointer: *Holder, hook: fn(*Holder) -> Unit, value: bool) -> bool {
+            value
+        }
+        fn reject_readonly_indirect_write(hook: fn(*Holder) -> Unit) -> bool {
+            let holder = Holder { text: \"ok\" };
+            let pointer = holder.ref;
+            take_default(pointer, hook, do { hook(pointer); true })
+        }
+        fn reject_callable_arg(hook: fn(fn(str) -> Unit) -> Unit, cb: fn(str) -> Unit) {
+            hook(cb);
+        }
+        fn reject_text_return(hook: fn(str) -> str, value: str) -> str {
+            hook(value)
+        }",
+    );
+    let target = package
+        .functions
+        .iter()
+        .find(|f| f.name == "take_default")
+        .unwrap()
+        .clone();
+    for function in &mut package.functions {
+        if function.name != "reject_readonly_indirect_write" {
+            continue;
+        }
+        nir::visit::expression_mut(&mut function.body, &mut 100_000, |expr, _| {
+            let K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+                ..
+            } = &mut expr.kind
+            else {
+                return Ok(());
+            };
+            if !matches!(callee.kind, K::Function(id) if id == target.declaration) {
+                return Ok(());
+            }
+            let K::Local(pointer) = arguments[0].value.kind else {
+                panic!("local pointer")
+            };
+            let K::Local(hook) = arguments[1].value.kind else {
+                panic!("local hook")
+            };
+            *parameter_bindings = target.parameters.clone();
+            arguments[2].is_default = true;
+            nir::visit::expression_mut(&mut arguments[2].value, &mut 100_000, |value, _| {
+                if matches!(value.kind, K::Local(id) if id == pointer) {
+                    value.kind = K::Local(target.parameters[0]);
+                } else if matches!(value.kind, K::Local(id) if id == hook) {
+                    value.kind = K::Local(target.parameters[1]);
+                }
+                Ok::<_, String>(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let notify = infer(&package, "notify", 200_000).unwrap();
+    assert_eq!(notify.reads, BTreeSet::from([parameter(1, &[])]));
+    assert_eq!(notify.returned, Some(Default::default()));
+
+    let escape = infer(&package, "escape_via_indirect", 200_000).unwrap();
+    assert_eq!(
+        escape.returned.unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static, parameter(1, &[])])
+    );
+
+    assert!(
+        infer(&package, "reject_readonly_indirect_write", 200_000)
+            .unwrap_err()
+            .contains("cannot write through pointers")
+    );
+    assert!(infer(&package, "reject_callable_arg", 200_000).is_err());
+    assert!(
+        infer(&package, "reject_text_return", 200_000)
+            .unwrap_err()
+            .contains("named concrete callee")
+    );
+}

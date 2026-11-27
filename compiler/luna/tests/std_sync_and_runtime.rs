@@ -90,7 +90,6 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
-#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call (transfers.rs:811)"]
 fn std_process_panic_types_and_atomics_execute_natively() {
     let source = r#"
         use std.prelude.*;
@@ -186,7 +185,6 @@ fn std_process_panic_types_and_atomics_execute_natively() {
 }
 
 #[test]
-#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call (transfers.rs:811)"]
 fn std_sync_locks_once_barrier_and_semaphore_execute_natively() {
     let source = r#"
         use std.prelude.*;
@@ -358,7 +356,6 @@ fn std_sync_locks_once_barrier_and_semaphore_execute_natively() {
 }
 
 #[test]
-#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call (transfers.rs:811)"]
 fn std_sync_channels_with_custom_allocator_are_leak_free() {
     let source = r#"
         use std.prelude.*;
@@ -546,7 +543,6 @@ fn std_sync_channels_with_custom_allocator_are_leak_free() {
 }
 
 #[test]
-#[ignore = "blocked by program_verification text_regions indirect fn(*PanicInfo) call (transfers.rs:811)"]
 fn std_runtime_stack_pools_tasks_and_thread_execute_natively() {
     let source = r#"
         use std.prelude.*;

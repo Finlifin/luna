@@ -869,6 +869,7 @@ fn value_in<'a, 'd>(
                 || !parameters.is_empty()
                 || !captures.is_empty()
                 || !callee.ty.is_comptime_callable()
+                || claims_implicit_environment(&callee.ty, fuel)?
             {
                 return Err("invalid completed value reconstruction call".into());
             }
@@ -944,5 +945,26 @@ fn value_in<'a, 'd>(
             checked
         }
         _ => Err("associated value requires a completed constant representation".into()),
+    }
+}
+
+fn claims_implicit_environment(term: &Term, fuel: &mut usize) -> Result<bool, Error> {
+    charge(fuel, 1)?;
+    match term {
+        Term::Closure {
+            environment,
+            signature,
+        } => {
+            if !environment.is_empty() {
+                return Ok(true);
+            }
+            claims_implicit_environment(signature, fuel)
+        }
+        Term::ContextualClosure { .. } => Ok(true),
+        Term::ComptimeFunction(inner)
+        | Term::NormalFormFunction(inner, _)
+        | Term::UnsafeFunction(inner)
+        | Term::PureFunction(inner) => claims_implicit_environment(inner, fuel),
+        _ => Ok(false),
     }
 }

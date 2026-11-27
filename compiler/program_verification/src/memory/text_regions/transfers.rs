@@ -808,9 +808,18 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 next,
             );
         }
-        let resolved = self
-            .result_code(&callee_value, callee)?
-            .ok_or("text region call requires a named concrete callee or stable local callable")?;
+        let Some(resolved) = self.result_code(&callee_value, callee)? else {
+            return self.indirect_call(
+                &callee_value,
+                callee,
+                &expr.ty,
+                arguments,
+                env_arguments,
+                locals,
+                returned,
+                next,
+            );
+        };
         let code = resolved.expression.as_ref();
         if matches!(code.kind, K::Closure { .. }) {
             let id = resolved
@@ -1837,6 +1846,239 @@ impl Query<'_, '_, '_, '_, '_, '_> {
             &[VARIANT_FIELD, 1, 0],
             self.fuel,
         )?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn indirect_call(
+        &mut self,
+        callee_value: &Regions,
+        callee: &Expr,
+        result_ty: &Term,
+        arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        if self.type_may_hold_text_or_callable(result_ty)? {
+            return Err(
+                "text region call requires a named concrete callee or stable local callable".into(),
+            );
+        }
+        if arguments.iter().any(|argument| argument.is_default) {
+            return Err("text indirect call default arguments are not supported".into());
+        }
+        charge_regions(callee_value, self.fuel)?;
+        if callee_value.code.values().any(Option::is_some) {
+            return Err("text indirect call cannot capture callables".into());
+        }
+        let mut callee_env_inputs = Vec::new();
+        let mut callee_ty = strip_computation(&callee.ty);
+        loop {
+            match callee_ty {
+                Term::ComptimeFunction(inner)
+                | Term::NormalFormFunction(inner, _)
+                | Term::UnsafeFunction(inner)
+                | Term::PureFunction(inner) => callee_ty = inner.as_ref(),
+                _ => break,
+            }
+        }
+        match callee_ty {
+            Term::ContextualClosure { .. } => {
+                return Err("text indirect call cannot invoke a contextual closure".into());
+            }
+            Term::Closure { environment, .. } => {
+                for (index, field) in environment.iter().enumerate() {
+                    if !self.owned_callable_paths(field)?.is_empty() {
+                        return Err("text indirect call cannot capture callables".into());
+                    }
+                    let projected = project(callee_value.clone(), &[index], self.fuel)?;
+                    callee_env_inputs.push((projected, field.clone()));
+                }
+            }
+            _ => {}
+        }
+
+        let mut inputs =
+            Vec::with_capacity(callee_env_inputs.len() + arguments.len() + env_arguments.len());
+        inputs.extend(callee_env_inputs);
+        for argument in arguments {
+            let Some(value) = self.expr(&argument.value, locals, returned, next)? else {
+                return Ok(None);
+            };
+            charge_regions(&value, self.fuel)?;
+            if value.code.values().any(Option::is_some)
+                || !self.owned_callable_paths(&argument.value.ty)?.is_empty()
+            {
+                return Err("text indirect call cannot pass callable arguments".into());
+            }
+            inputs.push((value, argument.value.ty.clone()));
+        }
+        for env_arg in env_arguments {
+            let Some(value) = self.expr(env_arg, locals, returned, next)? else {
+                return Ok(None);
+            };
+            charge_regions(&value, self.fuel)?;
+            if value.code.values().any(Option::is_some)
+                || !self.owned_callable_paths(&env_arg.ty)?.is_empty()
+            {
+                return Err("text indirect call cannot pass callable arguments".into());
+            }
+            inputs.push((value, env_arg.ty.clone()));
+        }
+
+        let mut read_origins = BTreeSet::new();
+        read_origins.extend(callee_value.text.values().flatten().cloned());
+        let mut reachable = VecDeque::new();
+        let mut write_pointees: VecDeque<(DescriptorRoot, Vec<usize>, Term)> = VecDeque::new();
+
+        for (root, _) in callee_value.places.values().flatten().flatten() {
+            if let Some(ro) = &self.readonly_storage {
+                ro.check_target_write(*root)?;
+            }
+            reachable.push_back(*root);
+        }
+        for (value, input_ty) in &inputs {
+            read_origins.extend(value.text.values().flatten().cloned());
+            for (root, _) in value.places.values().flatten().flatten() {
+                if let Some(ro) = &self.readonly_storage {
+                    ro.check_target_write(*root)?;
+                }
+                reachable.push_back(*root);
+            }
+            for leaf in self.borrowed_input_layout(input_ty)? {
+                let BorrowedInputLeaf::Pointer(ptr_leaf) = leaf else {
+                    continue;
+                };
+                match value.places.get(&ptr_leaf.storage_fields) {
+                    Some(Some(targets)) if !targets.is_empty() => {
+                        for (root, path) in targets {
+                            if let Some(ro) = &self.readonly_storage {
+                                ro.check_target_write(*root)?;
+                            }
+                            reachable.push_back(*root);
+                            write_pointees.push_back((
+                                *root,
+                                path.clone(),
+                                ptr_leaf.pointee.clone(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        if let Some(ro) = &self.readonly_storage {
+                            return Err(ro.message.into());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut visited_roots = BTreeSet::new();
+        while let Some(source) = reachable.pop_front() {
+            charge(self.fuel, 1)?;
+            if !visited_roots.insert(source) {
+                continue;
+            }
+            if let Some(ro) = &self.readonly_storage {
+                ro.check_target_write(source)?;
+            }
+            let storage = locals
+                .get_storage(&source)
+                .ok_or("text region indirect call pointer storage is no longer live")?;
+            charge_regions(storage, self.fuel)?;
+            if storage.code.values().any(Option::is_some) {
+                return Err("text indirect call pointer storage cannot hold callables".into());
+            }
+            read_origins.extend(storage.text.values().flatten().cloned());
+            for (next_root, _) in storage.places.values().flatten().flatten() {
+                reachable.push_back(*next_root);
+            }
+        }
+
+        let mut writable_text_slots = Vec::new();
+        let mut writable_pointer_slots = Vec::new();
+        let mut visited_pointees = BTreeSet::new();
+        while let Some((target_root, target_prefix, pointee_ty)) = write_pointees.pop_front() {
+            charge(self.fuel, 1)?;
+            if !self.type_may_hold_text_or_callable(&pointee_ty)? {
+                continue;
+            }
+            if !visited_pointees.insert((target_root, target_prefix.clone())) {
+                continue;
+            }
+            if !self.owned_callable_paths(&pointee_ty)?.is_empty() {
+                return Err("text indirect call pointer target cannot hold callables".into());
+            }
+            for leaf in self.borrowed_input_layout(&pointee_ty)? {
+                match leaf {
+                    BorrowedInputLeaf::Text(text_leaf) => {
+                        let mut slot = target_prefix.clone();
+                        slot.extend(text_leaf.storage_fields);
+                        writable_text_slots.push((target_root, slot));
+                    }
+                    BorrowedInputLeaf::Pointer(inner_ptr) => {
+                        let mut slot = target_prefix.clone();
+                        slot.extend(inner_ptr.storage_fields);
+                        if self.type_may_hold_text_or_callable(&inner_ptr.pointee)? {
+                            writable_pointer_slots.push((target_root, slot.clone()));
+                        }
+                        if let Some(Some(inner_targets)) = locals
+                            .get_storage(&target_root)
+                            .and_then(|storage| storage.places.get(&slot))
+                        {
+                            for (inner_root, inner_prefix) in inner_targets {
+                                write_pointees.push_back((
+                                    *inner_root,
+                                    inner_prefix.clone(),
+                                    inner_ptr.pointee.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.record_reads(read_origins.iter().cloned())?;
+        if !writable_text_slots.is_empty() {
+            let mut propagated = read_origins;
+            propagated.insert(TextRegionOrigin::Static);
+            for (target_root, slot) in writable_text_slots {
+                charge(
+                    self.fuel,
+                    propagated
+                        .len()
+                        .saturating_add(slot.len())
+                        .saturating_add(1),
+                )?;
+                let storage = locals
+                    .get_storage_mut(&target_root)
+                    .ok_or("text region indirect call pointer storage is no longer live")?;
+                storage
+                    .text
+                    .entry(slot)
+                    .or_default()
+                    .extend(propagated.iter().cloned());
+            }
+        }
+        if !writable_pointer_slots.is_empty() {
+            for (target_root, slot) in writable_pointer_slots {
+                charge(self.fuel, slot.len().saturating_add(1))?;
+                let storage = locals
+                    .get_storage_mut(&target_root)
+                    .ok_or("text region indirect call pointer storage is no longer live")?;
+                storage.places.insert(slot, None);
+            }
+        }
+
+        if matches!(
+            strip_computation(result_ty),
+            Term::Primitive(nir::Primitive::Never)
+        ) {
+            Ok(None)
+        } else {
+            Ok(Some(Regions::default()))
+        }
     }
 }
 

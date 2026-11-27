@@ -10,3 +10,4 @@ materialization = { path = "../materialization" }
 type_resolution = { path = "../type_resolution" }
 verification_core = { path = "../verification_core" }
 comptime_runtime = { path = "../comptime_runtime" }
+stacker = "0.1.25"
