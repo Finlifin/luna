@@ -56,7 +56,7 @@ fn compiled_variants_preserve_identity_arguments_and_initialization_order() {
             "named",
             Primitive::Integer,
             3,
-            vec![integer(1), integer(12)],
+            vec![integer(21), integer(2)],
         ),
         ("early", Primitive::Bool, 0, vec![]),
     ] {

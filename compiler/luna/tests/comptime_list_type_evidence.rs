@@ -433,7 +433,7 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
         }
         comptime fn Form(types: meta.List<Type>) -> Type { Pack<.Ts = types> }
         comptime fn Spread(types: meta.List<Type>) -> Type { Pack<...types> }
-        comptime fn identity(types: meta.List<Type>) -> meta.List<Type> { types }
+        comptime fn identity_type_list_carrier(types: meta.List<Type>) -> meta.List<Type> { types }
         comptime fn source_values() -> meta.List<Type> { [bool, Byte] }",
     )
     .unwrap();
@@ -484,8 +484,11 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
         );
     }
     assert_eq!(
-        vm.invoke(support::id(&package, "identity"), vec![ordinary.clone()])
-            .unwrap(),
+        vm.invoke(
+            support::id(&package, "identity_type_list_carrier"),
+            vec![ordinary.clone()]
+        )
+        .unwrap(),
         ordinary
     );
     let mut expected = None;
@@ -505,7 +508,7 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
     for bad in [Value::Bool(true), Value::Type(nir::Term::Bool(true))] {
         let error = vm
             .invoke(
-                support::id(&package, "identity"),
+                support::id(&package, "identity_type_list_carrier"),
                 vec![Value::List {
                     ty: ty.clone(),
                     values: vec![bad].into(),
