@@ -1825,6 +1825,31 @@ mod repository_bindings_tests {
                 "{line}"
             );
         }
+        let phase2_config = SysrootBindings::parse(
+            "version = 1\n\
+             host-intrinsic.atomic_load = std.sync.atomic.AtomicOps.load\n\
+             host-intrinsic.atomic_store = std.sync.atomic.AtomicOps.store\n\
+             host-intrinsic.atomic_swap = std.sync.atomic.AtomicOps.swap\n\
+             host-intrinsic.atomic_cmpxchg = std.sync.atomic.AtomicOps.cmpxchg\n\
+             host-intrinsic.atomic_cmpxchg_weak = std.sync.atomic.AtomicOps.cmpxchg_weak\n\
+             host-intrinsic.atomic_fetch_add = std.sync.atomic.AtomicOps.fetch_add\n\
+             host-intrinsic.atomic_fetch_sub = std.sync.atomic.AtomicOps.fetch_sub\n\
+             host-intrinsic.atomic_fetch_and = std.sync.atomic.AtomicOps.fetch_and\n\
+             host-intrinsic.atomic_fetch_or = std.sync.atomic.AtomicOps.fetch_or\n\
+             host-intrinsic.atomic_fetch_xor = std.sync.atomic.AtomicOps.fetch_xor\n\
+             host-intrinsic.atomic_fetch_max = std.sync.atomic.AtomicOps.fetch_max\n\
+             host-intrinsic.atomic_fetch_min = std.sync.atomic.AtomicOps.fetch_min\n\
+             host-intrinsic.atomic_fence = std.sync.atomic.AtomicOps.fence\n\
+             host-intrinsic.atomic_compiler_fence = std.sync.atomic.AtomicOps.compiler_fence\n\
+             host-intrinsic.runtime_panic = std.process.panic.RuntimeOps.panic\n\
+             host-intrinsic.runtime_abort = std.process.panic.RuntimeOps.abort\n\
+             host-intrinsic.continuation_resume_raw = builtin.continuation.ContOps.resume_raw\n\
+             host-intrinsic.continuation_abort_raw = builtin.continuation.ContOps.abort_raw\n\
+             host-intrinsic.continuation_crosses_c_frame = builtin.continuation.ContOps.crosses_c_frame\n\
+             host-intrinsic.continuation_origin_thread_id = builtin.continuation.ContOps.origin_thread_id\n",
+        )
+        .unwrap();
+        assert_eq!(phase2_config.host_intrinsics.len(), 20);
     }
 
     #[test]
@@ -1832,6 +1857,13 @@ mod repository_bindings_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
         let bindings = SysrootBindings::load(&root).unwrap();
         for &operation in nir::intrinsics::Operation::ALL {
+            if operation.is_atomic()
+                || operation.is_control_runtime()
+                || operation.is_continuation()
+            {
+                // Phase 2B wires atomic/panic/continuation selectors into `library/language-items.conf`.
+                continue;
+            }
             let path = if operation.is_platform() {
                 format!(
                     "std.platform.linux.target.System.{}",

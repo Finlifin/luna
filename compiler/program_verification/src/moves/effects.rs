@@ -635,7 +635,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<ValueOrigins, Error> {
         if !matches!(
             abi,
-            nir::effects::Abi::Direct | nir::effects::Abi::DirectPassing
+            nir::effects::Abi::Direct
+                | nir::effects::Abi::DirectPassing
+                | nir::effects::Abi::Capturing
         ) {
             return Err(error(
                 expr.source,
@@ -908,7 +910,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.value_callables.clear();
         flow.value_variants.clear();
         let may_resume = self.restore_effect_result(expr, flow, &input_values)?;
-        if abi == nir::effects::Abi::Direct {
+        if matches!(
+            abi,
+            nir::effects::Abi::Direct | nir::effects::Abi::Capturing
+        ) {
             // Input ownership has crossed to the handler. Only surviving
             // caller positions and enclosing incomplete constructions unwind.
             self.effect_escape_checkpoint(flow, expr.source)?;
@@ -1016,14 +1021,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut installation_stable_writes = BTreeSet::new();
         for (handler_index, handler) in handlers.iter().enumerate() {
             let mut completions = vec![];
-            if handler.abi != nir::effects::Abi::Direct
-                && !(handler.abi == nir::effects::Abi::DirectPassing
-                    && super::super::memory::data_passing_signature(
-                        self.package,
-                        &handler.signature,
-                        &mut self.fuel,
-                    )
-                    .map_err(|reason| error(installation, reason))?)
+            if !matches!(
+                handler.abi,
+                nir::effects::Abi::Direct | nir::effects::Abi::Capturing
+            ) && !(handler.abi == nir::effects::Abi::DirectPassing
+                && super::super::memory::data_passing_signature(
+                    self.package,
+                    &handler.signature,
+                    &mut self.fuel,
+                )
+                .map_err(|reason| error(installation, reason))?)
             {
                 return Err(error(
                     installation,
@@ -1053,7 +1060,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             crate::associated::charge_projection_copy(result, &mut self.fuel)
                 .map_err(|reason| error(installation, reason))?;
-            let input = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
+            let mut input_fields: Vec<Term> = parameters.iter().map(|p| p.ty.clone()).collect();
+            if handler.abi == nir::effects::Abi::Capturing {
+                input_fields.push(Term::Primitive(nir::Primitive::Continuation));
+            }
+            let input = Term::Tuple(input_fields);
             let mut local_accesses = BTreeSet::new();
             let mut borrowed_result_delivery = None;
             for (arm_index, arm) in handler.arms.iter().enumerate() {
@@ -1993,7 +2004,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         let origins = this.evaluate_value_origins(&arm.body, frame, depth + 1)?;
                         if frame.live {
                             this.check_return_origins(frame, &origins, arm.body.source)?;
-                            this.capture_handler_completion(frame, &origins, arm.body.source)?;
+                            if handler.abi != nir::effects::Abi::Capturing {
+                                this.capture_handler_completion(frame, &origins, arm.body.source)?;
+                            }
                             this.exit(frame, arm.body.source, CleanupReason::HandlerEnd)?;
                         }
                         Ok(())
@@ -2132,7 +2145,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     abi: handler.abi,
                     signature: handler.signature.clone(),
                     values: completions,
-                    forwarded_parameters: {
+                    forwarded_parameters: if handler.abi == nir::effects::Abi::Capturing {
+                        None
+                    } else {
                         let local = super::super::effect_transfer::forwarded_parameters_in(
                             handler,
                             &self.effect_memory_inputs,
@@ -2417,7 +2432,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             if !matches!(
                 handler.abi,
-                nir::effects::Abi::Direct | nir::effects::Abi::DirectPassing
+                nir::effects::Abi::Direct
+                    | nir::effects::Abi::DirectPassing
+                    | nir::effects::Abi::Capturing
             ) || handler.abi == nir::effects::Abi::DirectPassing
                 && (!parameters.is_empty()
                     || !super::super::memory::effect_data_layout(
@@ -2452,7 +2469,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let data_result =
                 super::super::memory::effect_data_layout(self.package, result, &mut self.fuel, 0)
                     .map_err(|reason| error(source, reason))?;
-            if !identity_transfer && !data_result {
+            let capturing_result = handler.abi == nir::effects::Abi::Capturing
+                && (**result == Term::Primitive(nir::Primitive::Never)
+                    || **result == Term::Primitive(nir::Primitive::Continuation)
+                    || super::super::memory::effect_transfer_layout(
+                        self.package,
+                        result,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?);
+            if !identity_transfer && !data_result && !capturing_result {
                 return Ok(vec![]);
             }
             self.fuel = self
@@ -2662,6 +2688,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(values) = values else {
             return Ok(true);
         };
+        if *abi == nir::effects::Abi::Capturing {
+            let Term::Function { result, .. } = &**signature else {
+                unreachable!()
+            };
+            return Ok(**result != Term::Primitive(nir::Primitive::Never));
+        }
         if values.is_empty() {
             return Ok(false);
         }
