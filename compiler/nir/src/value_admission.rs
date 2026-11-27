@@ -178,7 +178,14 @@ fn validate_value(
         })?;
         crate::type_computations::charge_term(&signature, fuel)?;
         signature.check_scope(frames).map_err(|e| e.to_string())?;
-        return if signature.as_ref() == domain {
+        // A pure callable satisfies a matching non-pure callable domain, while
+        // pure and unsafe domains require exact qualifier parity.
+        let expected_signature = match (domain, signature.as_ref()) {
+            (Term::PureFunction(_) | Term::UnsafeFunction(_), _) => signature.as_ref(),
+            (_, Term::PureFunction(inner)) => inner.as_ref(),
+            _ => signature.as_ref(),
+        };
+        return if expected_signature == domain {
             Ok(())
         } else {
             Err("callable value signature differs from its declared domain".into())
