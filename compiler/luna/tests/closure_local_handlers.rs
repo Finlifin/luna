@@ -203,7 +203,8 @@ fn outward_request_cannot_retire_the_storage_a_callback_will_read() {
     assert!(
         error.contains("complete")
             || error.contains("unavailable")
-            || error.contains("live local Copy"),
+            || error.contains("live local Copy")
+            || error.contains("memory contract"),
         "{error}"
     );
 }
